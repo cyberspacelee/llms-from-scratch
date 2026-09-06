@@ -187,7 +187,9 @@ $$
 | 固定内容的共同平移 | $T_{i+c}^\top T_{j+c}=T_i^\top T_j$ | 只平移新 Q，不处理旧 K |
 | Full / cached | 同一可见集合下输出数值接近 | dropout、位置或频率不一致 |
 
-返回 [训练篇：从第一性原理推导位置编码](../training/position-encoding.html)。
+到这里，我们已经说明缓存为什么正确，以及位置、掩码和频率必须满足什么条件。下一步是工程问题：如何避免每步复制缓存，如何让多条请求共享有限显存，又如何决定每一步计算哪些 token？继续阅读 [推理系统篇：nano-vLLM](nano-vllm-from-zero-to-mastery.html)，从单请求计算走向分页缓存与连续批处理。
+
+回顾 [训练篇：从第一性原理推导位置编码](../training/position-encoding.html)。
 
 ### 进一步阅读
 

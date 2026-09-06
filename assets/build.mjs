@@ -44,7 +44,7 @@ ${tags}
 <script defer src="../assets/lesson.js"></script>
 </head>
 <body>
-<header><div class="switch"><a href="../training/position-encoding.html">训练 Training</a><a href="../inference/position-encoding-and-kv-cache.html">推理 Inference</a><a href="${lesson.code}">PyTorch 源码</a></div>
+<header><div class="switch"><a href="../training/position-encoding.html">01 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a><a href="${lesson.code}">PyTorch 源码</a></div>
 <p class="edition">LLMS FROM SCRATCH · ${lesson.edition}</p><h1>${lesson.title}</h1><p>${lesson.subtitle}</p></header>
 <div class="layout"><nav aria-label="章节目录"><p class="nav-label">CONTENTS / 推导路径</p><div id="contents"></div></nav>
 <main><div id="load-status" role="status"></div><article id="article"></article><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="${lesson.name}.md">Markdown 原文</a>。</noscript></main></div>

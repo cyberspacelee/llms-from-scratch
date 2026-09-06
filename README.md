@@ -18,13 +18,15 @@ inference/      推理原理、Markdown 源文、HTML、缓存验证
 assets/         共享样式、交互与 HTML 生成脚本
 ```
 
-修改 `.md` 与 `.py` 后，在项目根目录运行：
+前两篇原理讲义修改对应 `.md` 与 `.py` 后，在项目根目录运行：
 
 ```sh
 node assets/build.mjs
 ```
 
 生成脚本只使用 Node.js 标准库。Python 源码会自动嵌入讲义，避免手工维护两份代码。生成的 HTML 纳入版本控制，读者不必先构建。
+
+nano-vLLM 讲义直接维护 `inference/nano-vllm-from-zero-to-mastery.html`，正文、样式和交互均在该文件中，不经过上述生成脚本。推荐阅读顺序为：位置编码 → KV cache 正确性 → nano-vLLM 推理系统。
 
 渲染器只处理本仓库作者维护的内容，允许讲义里的受控 HTML 交互占位。它不是通用的不可信 Markdown 预览器；若后续接收外部输入，应关闭原始 HTML 或引入经过测试的清洗流程。
 

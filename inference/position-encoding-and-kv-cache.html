@@ -16,7 +16,7 @@
 <script defer src="../assets/lesson.js"></script>
 </head>
 <body>
-<header><div class="switch"><a href="../training/position-encoding.html">训练 Training</a><a href="../inference/position-encoding-and-kv-cache.html">推理 Inference</a><a href="position_encoding_cache.py">PyTorch 源码</a></div>
+<header><div class="switch"><a href="../training/position-encoding.html">01 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a><a href="position_encoding_cache.py">PyTorch 源码</a></div>
 <p class="edition">LLMS FROM SCRATCH · 02 / INFERENCE</p><h1>位置编码，走进 KV cache</h1><p>从整段因果计算，推到 prefill、逐 token 解码与长度外推。</p></header>
 <div class="layout"><nav aria-label="章节目录"><p class="nav-label">CONTENTS / 推导路径</p><div id="contents"></div></nav>
 <main><div id="load-status" role="status"></div><article id="article"></article><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding-and-kv-cache.md">Markdown 原文</a>。</noscript></main></div>
@@ -262,7 +262,9 @@ $$
 | 固定内容的共同平移 | $T_{i+c}^\top T_{j+c}=T_i^\top T_j$ | 只平移新 Q，不处理旧 K |
 | Full / cached | 同一可见集合下输出数值接近 | dropout、位置或频率不一致 |
 
-返回 [训练篇：从第一性原理推导位置编码](../training/position-encoding.html)。
+到这里，我们已经说明缓存为什么正确，以及位置、掩码和频率必须满足什么条件。下一步是工程问题：如何避免每步复制缓存，如何让多条请求共享有限显存，又如何决定每一步计算哪些 token？继续阅读 [推理系统篇：nano-vLLM](nano-vllm-from-zero-to-mastery.html)，从单请求计算走向分页缓存与连续批处理。
+
+回顾 [训练篇：从第一性原理推导位置编码](../training/position-encoding.html)。
 
 ### 进一步阅读
 

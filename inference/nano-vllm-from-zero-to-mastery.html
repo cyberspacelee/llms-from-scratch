@@ -541,6 +541,11 @@ details p { padding-left: 24px; color: #3f4a47; }
 </head>
 <body>
 <header class="masthead">
+  <nav class="topline" aria-label="系列讲义">
+    <a href="../training/position-encoding.html">01 位置编码</a>
+    <a href="position-encoding-and-kv-cache.html">02 KV cache</a>
+    <a href="nano-vllm-from-zero-to-mastery.html" aria-current="page">03 推理系统</a>
+  </nav>
   <div class="topline">
     <a class="brand" href="https://github.com/GeeeekExplorer/nano-vllm">NANO-VLLM / SOURCE FIELD GUIDE</a>
     <span class="snapshot">源码快照 bb823b3 · 2026-04-26 · 约 1,200 行 Python</span>
@@ -563,7 +568,7 @@ details p { padding-left: 24px; color: #3f4a47; }
     <p class="side-label">SOURCE ROUTE / 16 STOPS</p>
     <nav class="toc" id="toc" aria-label="章节目录"></nav>
     <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progress-bar"></div></div>
-    <p class="progress-label" id="progress-label">0 / 13</p>
+    <p class="progress-label" id="progress-label">0 / 16</p>
   </aside>
 
   <main>
@@ -677,6 +682,11 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
     <section class="chapter" id="request-life" data-title="请求生命周期">
       <p class="chapter-tag">LEVEL 2 · END TO END</p>
       <h2>一个 token 的完整往返</h2>
+      <p>前两篇解释了位置编码和缓存等价性；本篇把这些约束落实为调度、存储和计算。若还不熟悉为何只缓存 K/V，可先读 <a href="position-encoding-and-kv-cache.html">KV cache 原理篇</a>。</p>
+      <h3>先走一条请求：三个输入 token，两步计算</h3>
+      <p>设 prompt 为 [A, B, C]，位置从 0 开始，且没有前缀命中或分块。Prefill 一次输入三个 token，写入位置 0、1、2 的 K/V，并用 C 的输出采样 D。此时 D 已属于序列，但尚未写入缓存。</p>
+      <p>下一步 decode 只输入 D，位置为 3；写入它的 K/V 后，D 的查询读取 A 到 D 的四组 K/V，再采样 E。因此“序列已有多少 token”和“缓存已计算多少 token”不是同一个数。</p>
+      <p>多请求调度决定这一步执行哪些计算；分页缓存决定 K/V 写到哪里。后面的 <a href="#paged-cache">分页缓存</a>与 <a href="#prefill-decode">张量契约</a>会展开物理槽位与批次形状。</p>
       <p class="lead">每次 <code>step()</code> 严格执行“调度 → 模型 → 后处理”。prefill 完成时也会立即采样第一个 completion token；后续 decode 每条活跃序列每步再产生一个。</p>
 
       <div class="mermaid-wrap">

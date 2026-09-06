@@ -128,35 +128,9 @@ $$
 
 进一步选择保持长度，即 $A(\Delta)^\top A(\Delta)=I$，就把算子限制到了正交变换。注意：这是我们添加的设计约束，不是从“位置编码”四个字必然得到的定理。
 
-### 二维旋转为什么自然出现？
+二维旋转保持长度，而且先转两个角度等于转它们的和，正好提供了满足这些要求的候选。接下来先从单位圆构造它，再补充矩阵指数的证明。
 
-一维正交变换只有 $+1$ 和 $-1$，没有丰富的连续变化。二维中，考虑与单位矩阵连续相连、可微的一族正交变换 $R(t)$。记 $G=R'(0)$。对 $R(t)^\top R(t)=I$ 在零点求导：
-
-$$
-G^\top+G=0.
-$$
-
-二维反对称矩阵只能形如 $G=\omega J$，其中：
-
-$$
-J=\begin{bmatrix}0&-1\\1&0\end{bmatrix},\qquad J^2=-I.
-$$
-
-由合成律求导得 $R'(t)=R(t)G$，且 $R(0)=I$，因此 $R(t)=\exp(tG)$。现在展开矩阵指数，将偶次幂与奇次幂分别收集：
-
-$$
-\begin{aligned}
-e^{t\omega J}
-&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I\\
-&\quad+\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)J\\
-&=\cos(t\omega)I+\sin(t\omega)J\\
-&=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
-\end{aligned}
-$$
-
-sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长度的二维平移表示，可以通过旋转实现，而旋转矩阵指数自然包含 sin/cos。** 这是一条帮助理解的数学构造路线，不应当冒充原论文完整的历史推导，也不是证明所有位置编码只能这样设计。
-
-## 05 · 不懂矩阵指数，也能从单位圆推出来
+## 05 · 从单位圆构造旋转与 sin/cos
 
 ### 一列矩阵，就是一个基向量变换后的坐标
 
@@ -193,13 +167,43 @@ u(p+\Delta)=
 \underbrace{\begin{bmatrix}\cos(\Delta\omega)&\sin(\Delta\omega)\\-\sin(\Delta\omega)&\cos(\Delta\omega)\end{bmatrix}}_{A(\Delta)=R(-\Delta\omega)}u(p).
 $$
 
-因为坐标顺序交换了，它对应标准旋转的负角度；这不是符号错误。上节采用的是 $(\cos,\sin)$ 坐标。
+因为坐标顺序交换了，它对应标准旋转的负角度；这不是符号错误。前面的单位圆构造采用的是 $(\cos,\sin)$ 坐标。
 
 为什么不能只用 sin？如果要求 $\sin((p+\Delta)\omega)=c_\Delta\sin(p\omega)$ 对所有 $p$ 成立，取 $p=0$，右边必为 0，左边通常非零。sin 单独不对平移封闭，cos 恰好补上缺失分量。
 
 <div class="lab" id="rotation-lab"></div>
 
 实验采用标准 $(\cos,\sin)$ 坐标，固定内容 $q=k=(1,0)^\top$，并使用 $\theta=\pi/8$。保持位移不变时改变起点，两向量一起转，夹角与点积不变；这是稍后 RoPE 要利用的性质。
+
+### 进阶证明：二维旋转为什么自然出现？
+
+前面的几何构造已经足够理解后续多频率编码。下面用矩阵指数补充说明连续、可组合、保长度的约束如何导向旋转。
+
+一维正交变换只有 $+1$ 和 $-1$，没有丰富的连续变化。二维中，考虑与单位矩阵连续相连、可微的一族正交变换 $R(t)$。记 $G=R'(0)$。对 $R(t)^\top R(t)=I$ 在零点求导：
+
+$$
+G^\top+G=0.
+$$
+
+二维反对称矩阵只能形如 $G=\omega J$，其中：
+
+$$
+J=\begin{bmatrix}0&-1\\1&0\end{bmatrix},\qquad J^2=-I.
+$$
+
+由合成律求导得 $R'(t)=R(t)G$，且 $R(0)=I$，因此 $R(t)=\exp(tG)$。现在展开矩阵指数，将偶次幂与奇次幂分别收集：
+
+$$
+\begin{aligned}
+e^{t\omega J}
+&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I\\
+&\quad+\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)J\\
+&=\cos(t\omega)I+\sin(t\omega)J\\
+&=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
+\end{aligned}
+$$
+
+sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长度的二维平移表示，可以通过旋转实现，而旋转矩阵指数自然包含 sin/cos。** 这是一条帮助理解的数学构造路线，不应当冒充原论文完整的历史推导，也不是证明所有位置编码只能这样设计。
 
 ## 06 · 从一对坐标，扩展到原始位置编码
 
