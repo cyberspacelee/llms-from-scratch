@@ -1,0 +1,428 @@
+位置编码不是一张需要背下来的公式表。我们先找出模型缺少什么，再讨论可以添加什么结构，最后检验这种结构究竟保证了什么。
+
+> 推导路线：点积与排列 → 加法位置向量 → 平移的线性表示 → sin/cos → 相对关系 → 旋转 Q/K。数学上“可以证明的性质”和工程上“人为选择的设计”会分别标明。
+
+## 01 · 先把注意力拆成普通运算
+
+### 从一个查询开始，而不是直接背矩阵公式
+
+设一段序列有 $n$ 个 token。每个内容向量 $x_i\in\mathbb R^d$ 是列向量。投影矩阵 $W_Q,W_K\in\mathbb R^{d\times d_h}$ 把它变成查询和键：
+
+$$
+q_i=W_Q^\top x_i,\qquad k_j=W_K^\top x_j,\qquad
+s_{ij}=\frac{q_i^\top k_j}{\sqrt{d_h}}.
+$$
+
+点积就是对应分量相乘后求和：$q_i^\top k_j=\sum_{a=1}^{d_h}q_{i,a}k_{j,a}$。也可以写成 $\|q_i\|\|k_j\|\cos\phi$：既取决于长度，也取决于方向，不是纯粹的夹角相似度。
+
+例如 $q=(1,2)^\top$，$k_0=(2,0)^\top$，$k_1=(0,1)^\top$。两次点积都是 $2$，所以两项缩放分数相同，softmax 给出各 $1/2$ 的权重。若 $v_0=(1,0)^\top,v_1=(0,3)^\top$，输出就是 $(0.5,1.5)^\top$。
+
+$$
+\alpha_{ij}=\frac{\exp(s_{ij})}{\sum_{\ell=0}^{n-1}\exp(s_{i\ell})},\qquad
+y_i=\sum_{j=0}^{n-1}\alpha_{ij}v_j.
+$$
+
+在各分量独立、均值为零且方差为一的简化假设下，点积方差为 $d_h$；除以 $\sqrt{d_h}$ 将方差缩回 1，缓解 softmax 过早饱和。这是缩放因子的动机，不是位置编码本身。
+
+### 矩阵乘法只是把所有配对一起算
+
+将列向量转置后按行堆叠为 $X\in\mathbb R^{n\times d}$，于是 $Q=XW_Q$。$QK^\top$ 的第 $(i,j)$ 项恰好就是刚才的点积。
+
+$$
+\underbrace{Q}_{n\times d_h}\underbrace{K^\top}_{d_h\times n}
+=\underbrace{\big[q_i^\top k_j\big]_{ij}}_{n\times n},\qquad
+F(X)=\operatorname{softmax}_{\rm row}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+$$
+
+这里还没有任何一个运算使用“第几位”或“相距几位”。数组有下标，不等于模型使用了下标的数值。
+
+## 02 · 为什么它不能自行识别顺序？
+
+### 用置换矩阵证明，而不是用直觉代替
+
+令 $P$ 为重排行的置换矩阵。比如交换前两个 token：
+
+$$
+P=\begin{bmatrix}0&1&0\\1&0&0\\0&0&1\end{bmatrix},\qquad
+PX=\begin{bmatrix}x_1^\top\\x_0^\top\\x_2^\top\end{bmatrix},\qquad P^\top P=I.
+$$
+
+第一步，投影对所有行使用相同权重，因此 $Q'=PQ,K'=PK,V'=PV$。
+
+第二步，分数矩阵只会同步交换行列：
+
+$$
+S'=\frac{(PQ)(PK)^\top}{\sqrt{d_h}}
+=P\frac{QK^\top}{\sqrt{d_h}}P^\top=PSP^\top.
+$$
+
+第三步，逐行 softmax 的分母是该行所有指数的和，列重排不改变这个和；行重排则只是重排输出行。因此：
+
+$$
+\operatorname{softmax}_{\rm row}(PSP^\top)
+=P\operatorname{softmax}_{\rm row}(S)P^\top.
+$$
+
+第四步，将值向量也重排，两个中间置换抵消：
+
+$$
+F(PX)=P\operatorname{softmax}_{\rm row}(S)P^\top PV
+=PF(X).
+$$
+
+这叫**置换等变**，不是“不变”：每个 token 的输出跟着它移动，但其与其他内容的关系不因它们的新排列而改变。逐 token 的 MLP、LayerNorm 和残差连接也保留这种对称性。
+
+> 边界条件：这里讨论没有位置结构、没有 dropout 随机扰动的双向注意力。固定因果掩码会破坏任意置换对称性，不能套用上述证明声称“因果 Transformer 完全没有顺序信息”。RNN 通过递归链、CNN 通过有序卷积窗口提供了另一种顺序结构。
+
+## 03 · 最直接的修补：把位置加到内容里
+
+为每个槽位准备向量 $p_i$，然后 $z_i=x_i+p_i$。重排 token 时，槽位编码留在原地，所以一般有 $PX+E\ne P(X+E)$，上一节的对称性被打破。
+
+为什么是相加？两个向量维度相同，就能在不增加隐藏维度的情况下输入原网络。这是一种简洁选择，而非数学唯一选择；拼接内容与位置后再投影也可以，但有不同参数化。
+
+令 $M=W_QW_K^\top$。暂省略缩放因子，将分数展开：
+
+$$
+\begin{aligned}
+s_{ij}&=(x_i+p_i)^\top M(x_j+p_j)\\
+&=\underbrace{x_i^\top Mx_j}_{\text{内容与内容}}
++\underbrace{x_i^\top Mp_j}_{\text{内容与位置}}\\
+&\quad+\underbrace{p_i^\top Mx_j}_{\text{位置与内容}}
++\underbrace{p_i^\top Mp_j}_{\text{位置与位置}}.
+\end{aligned}
+$$
+
+所以“相加”并不意味着模型从此无法利用位置：后续双线性运算中会出现内容与位置的交叉项。也不能反过来说模型能从任意和向量中唯一拆回两个原向量。
+
+如果 $p_i$ 是可学习表的一行，训练可调整各位置的行为；但训练只覆盖 $0,\ldots,L-1$ 时，表外没有相应参数，额外预留却未用过的行也没有学到有效位置规律。于是出现下一个问题：能否用一个函数在任意位置生成编码？
+
+## 04 · 为什么想到 sin 和 cos？先提出要求
+
+### 尝试一：直接把位置当数值
+
+用 $p$ 或 $p\mathbf 1$ 的确能区分位置，但数值随长度增长，位置部分会改变向量尺度；单一标量也缺少多尺度特征。归一化为 $p/L$ 又引入了对所选长度 $L$ 的依赖。这些方法不是“不可能”，而是有不同的归纳偏置。
+
+我们尝试寻找这样的函数 $u(p)$：数值有界，而且固定偏移 $\Delta$ 可以通过一个不依赖起点的线性变换表示。
+
+$$
+u(p+\Delta)=A(\Delta)u(p).
+$$
+
+“不依赖起点”很重要：从 5 到 8 和从 105 到 108 都是平移 3，希望用同一个算子描述。
+
+### 尝试二：平移的合成要求什么？
+
+如果平移 $a$ 后再平移 $b$ 应与直接平移 $a+b$ 一致，我们可以主动选择满足下式的一族算子：
+
+$$
+A(0)=I,\qquad A(a+b)=A(a)A(b).
+$$
+
+这是一种“把加法表示为矩阵乘法”的结构。仅凭它还推不出三角函数：例如 $u(p)=(p,1)^\top$ 配合剪切矩阵也能表示平移，但其范数会增长。
+
+$$
+\begin{bmatrix}1&\Delta\\0&1\end{bmatrix}
+\begin{bmatrix}p\\1\end{bmatrix}
+=\begin{bmatrix}p+\Delta\\1\end{bmatrix}.
+$$
+
+进一步选择保持长度，即 $A(\Delta)^\top A(\Delta)=I$，就把算子限制到了正交变换。注意：这是我们添加的设计约束，不是从“位置编码”四个字必然得到的定理。
+
+### 二维旋转为什么自然出现？
+
+一维正交变换只有 $+1$ 和 $-1$，没有丰富的连续变化。二维中，考虑与单位矩阵连续相连、可微的一族正交变换 $R(t)$。记 $G=R'(0)$。对 $R(t)^\top R(t)=I$ 在零点求导：
+
+$$
+G^\top+G=0.
+$$
+
+二维反对称矩阵只能形如 $G=\omega J$，其中：
+
+$$
+J=\begin{bmatrix}0&-1\\1&0\end{bmatrix},\qquad J^2=-I.
+$$
+
+由合成律求导得 $R'(t)=R(t)G$，且 $R(0)=I$，因此 $R(t)=\exp(tG)$。现在展开矩阵指数，将偶次幂与奇次幂分别收集：
+
+$$
+\begin{aligned}
+e^{t\omega J}
+&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I\\
+&\quad+\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)J\\
+&=\cos(t\omega)I+\sin(t\omega)J\\
+&=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
+\end{aligned}
+$$
+
+sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长度的二维平移表示，可以通过旋转实现，而旋转矩阵指数自然包含 sin/cos。** 这是一条帮助理解的数学构造路线，不应当冒充原论文完整的历史推导，也不是证明所有位置编码只能这样设计。
+
+## 05 · 不懂矩阵指数，也能从单位圆推出来
+
+### 一列矩阵，就是一个基向量变换后的坐标
+
+标准基 $e_1=(1,0)^\top$ 逆时针转 $\phi$ 后为 $(\cos\phi,\sin\phi)^\top$；$e_2=(0,1)^\top$ 转后为 $(-\sin\phi,\cos\phi)^\top$。将这两个结果作为矩阵的两列，就得到：
+
+$$
+R(\phi)=\begin{bmatrix}\cos\phi&-\sin\phi\\\sin\phi&\cos\phi\end{bmatrix}.
+$$
+
+任意向量 $v=ae_1+be_2$ 在线性变换后是 $aR e_1+bR e_2$，所以：
+
+$$
+R(\phi)\begin{bmatrix}a\\b\end{bmatrix}
+=\begin{bmatrix}a\cos\phi-b\sin\phi\\a\sin\phi+b\cos\phi\end{bmatrix}.
+$$
+
+取 $a=1,b=0,\phi=\pi/2$，结果为 $(0,1)^\top$；取 $a=1,b=2$，结果为 $(-2,1)^\top$。前后平方长度都是 $5$。
+
+### 原论文是 sin 在前，cos 在后
+
+《Attention Is All You Need》的二维排列是 $u(p)=(\sin(p\omega),\cos(p\omega))^\top$。从加法公式出发：
+
+$$
+\begin{aligned}
+\sin((p+\Delta)\omega)&=\sin(p\omega)\cos(\Delta\omega)+\cos(p\omega)\sin(\Delta\omega),\\
+\cos((p+\Delta)\omega)&=\cos(p\omega)\cos(\Delta\omega)-\sin(p\omega)\sin(\Delta\omega).
+\end{aligned}
+$$
+
+将 $\sin(p\omega)$ 与 $\cos(p\omega)$ 的系数按行收集：
+
+$$
+u(p+\Delta)=
+\underbrace{\begin{bmatrix}\cos(\Delta\omega)&\sin(\Delta\omega)\\-\sin(\Delta\omega)&\cos(\Delta\omega)\end{bmatrix}}_{A(\Delta)=R(-\Delta\omega)}u(p).
+$$
+
+因为坐标顺序交换了，它对应标准旋转的负角度；这不是符号错误。上节采用的是 $(\cos,\sin)$ 坐标。
+
+为什么不能只用 sin？如果要求 $\sin((p+\Delta)\omega)=c_\Delta\sin(p\omega)$ 对所有 $p$ 成立，取 $p=0$，右边必为 0，左边通常非零。sin 单独不对平移封闭，cos 恰好补上缺失分量。
+
+<div class="lab" id="rotation-lab"></div>
+
+实验采用标准 $(\cos,\sin)$ 坐标，固定内容 $q=k=(1,0)^\top$，并使用 $\theta=\pi/8$。保持位移不变时改变起点，两向量一起转，夹角与点积不变；这是稍后 RoPE 要利用的性质。
+
+## 06 · 从一对坐标，扩展到原始位置编码
+
+一个圆只能提供一个频率。一个完整周期间隔会给出相同相位；对整数 token 位置，是否精确重复还取决于频率，但相近相位依然会造成分辨困难。于是使用多个二维子空间，每一对分配不同角频率。
+
+$$
+\begin{aligned}
+\mathrm{PE}(p,2m)&=\sin(p\omega_m),\\
+\mathrm{PE}(p,2m+1)&=\cos(p\omega_m),\\
+\omega_m&=10000^{-2m/d},\qquad m=0,\ldots,d/2-1.
+\end{aligned}
+$$
+
+$p$ 是位置，$m$ 是维度对编号，$d$ 是偶数隐藏维度。不能把维度对编号当成位置索引。
+
+### 为什么是几何频率，不是等差频率？
+
+希望从快变化到慢变化覆盖多个数量级，可以让对数频率等间隔：$\log\omega_m=-\frac{2m}{d}\log B$，指数化后即 $\omega_m=B^{-2m/d}$。这说明公式如何从“对数尺度均匀覆盖”的选择得到；$B=10000$ 本身是超参数，不是某个定理算出的唯一常数。
+
+| $d=8$ 的维度对 | 角频率 $\omega_m$ | 波长 $2\pi/\omega_m$，单位 token |
+|---|---|---|
+| 0、1 | 1 | 约 6.28 |
+| 2、3 | 0.1 | 约 62.83 |
+| 4、5 | 0.01 | 约 628.32 |
+| 6、7 | 0.001 | 约 6283.19 |
+
+<div class="lab" id="frequency-lab"></div>
+
+移动一步时每对的相位变化为 $\omega_m$。高频对短位移变化大；低频在长距离上变化缓慢。更精确地，每对的欧氏距离满足：
+
+$$
+\|u(p+\Delta)-u(p)\|^2=2-2\cos(\Delta\omega)
+=4\sin^2\!\left(\frac{\Delta\omega}{2}\right).
+$$
+
+当 $|\Delta\omega|\ll1$ 时，距离近似 $|\Delta\omega|$。它解释了“不同频率提供不同分辨尺度”，也说明距离并不单调增长。
+
+原论文在 token embedding 上乘 $\sqrt d$，再加位置向量并施加 dropout：
+
+$$
+z_p=\operatorname{Dropout}\left(\sqrt d\,e_{\text{token}_p}+\mathrm{PE}(p)\right).
+$$
+
+每对平方长度为 $\sin^2+\cos^2=1$，所以 $\|\mathrm{PE}(p)\|^2=d/2$，不随位置膨胀。有限维度下最大波长为 $2\pi B^{1-2/d}$，不是恰好 $2\pi B$。
+
+<div class="lab" id="encoding-matrix-lab"></div>
+
+## 07 · 相对距离藏在哪里？哪里又会失效？
+
+### 原始位置向量的点积
+
+$$
+\begin{aligned}
+u(i)^\top u(j)
+&=\sin(i\omega)\sin(j\omega)+\cos(i\omega)\cos(j\omega)\\
+&=\cos((i-j)\omega),\\
+\mathrm{PE}(i)^\top\mathrm{PE}(j)
+&=\sum_m\cos((i-j)\omega_m).
+\end{aligned}
+$$
+
+绝对位置消失，只剩差值。但 cos 是偶函数，所以**这个点积本身**不区分前后。编码并非完全丢掉方向，例如交叉组合可得到：
+
+$$
+\sin(i\omega)\cos(j\omega)-\cos(i\omega)\sin(j\omega)=\sin((i-j)\omega).
+$$
+
+### 为什么这还不等于注意力严格相对化？
+
+真实位置项是 $p_i^\top M p_j$，不一定是 $p_i^\top p_j$。取某一对 $p_i=(\sin i,\cos i)^\top$ 和 $M=\operatorname{diag}(1,0)$：
+
+$$
+p_i^\top Mp_j=\sin i\sin j
+=\tfrac12\big[\cos(i-j)-\cos(i+j)\big].
+$$
+
+出现了 $i+j$，同时移动两个位置时会改变结果。再加上内容与位置的交叉项，普通加法 PE 并未强制整个注意力满足相对位置结构。
+
+因此，原论文提出的“固定偏移可线性表示”是可利用的结构，不是模型一定学会相对关系的保证。函数在表外能求值，也不是训练长度之外性能良好的证明。原论文的学习式与正弦式位置编码对照结果接近，没有确立 sin/cos 的普遍最优性。
+
+## 08 · 直接把相对位置写进分数
+
+我们希望同一内容关系在整段文本平移后尽量保持一致。令 $\Delta=j-i$，最直接的做法是让新增项只读取 $\Delta$，而不是分别读取 $i,j$。
+
+### Shaw：让“偏移”成为一个向量
+
+给每个截断后的偏移学习一个键侧向量 $a^K_\Delta$：
+
+$$
+s_{ij}=\frac{q_i^\top(k_j+a^K_{\operatorname{clip}(j-i,-r,r)})}{\sqrt{d_h}}.
+$$
+
+展开后是原有内容分数加 $q_i^\top a^K_\Delta$。相同距离对于不同查询可以产生不同修正，因为这个修正与内容有关。截断把无限多距离压成有限参数，但所有超出窗口的同方向距离会共享编码。原方法也有值侧相对项，以上只展示分数如何改变。
+
+### T5：从内容相关向量，简化成标量偏置
+
+$$
+s_{ij}^{(h)}=\frac{q_i^\top k_j}{\sqrt{d_h}}+b_h(\operatorname{bucket}(j-i)).
+$$
+
+不再与查询做点积，而是每个头、每个距离桶一个标量。近处可以分得细，远处分得粗。代价是桶内距离不能通过这项区分，偏置本身也不依赖查询内容。
+
+### ALiBi：把距离先验变成指数权重
+
+对因果注意力 $j\le i$，固定每个头的正斜率 $m_h$：
+
+$$
+s_{ij}^{(h)}=c_{ij}^{(h)}-m_h(i-j),\qquad
+\alpha_{ij}^{(h)}=
+\frac{e^{c_{ij}^{(h)}}e^{-m_h(i-j)}}{\sum_{\ell\le i}e^{c_{i\ell}^{(h)}}e^{-m_h(i-\ell)}}.
+$$
+
+这不是“因为距离远所以直接置零”，而是给未归一化内容权重乘上指数距离因子。若两个候选的内容分数相同，距离分别为 2 和 6，斜率为 $1/2$，其权重比为 $e^2$。内容分数足够大仍可克服距离惩罚。
+
+## 09 · RoPE：从目标条件反推旋转
+
+### 目标不是“用旋转很漂亮”，而是消去共同起点
+
+先得到内容 $q_i,k_j$，再施加与位置相关的线性变换 $T_i,T_j$。希望对任意内容向量，分数的位置部分仅依赖差值：
+
+$$
+(T_iq_i)^\top(T_jk_j)=q_i^\top\underbrace{T_i^\top T_j}_{H(j-i)}k_j.
+$$
+
+若再选择 $H(0)=I$，同一位置变换不改变任意两个向量的点积，因此 $T_i^\top T_i=I$。选择满足合成律的正交表示 $T_i=R(i\theta)$，正好有：
+
+$$
+R(i\theta)^\top R(j\theta)=R(-i\theta)R(j\theta)=R((j-i)\theta).
+$$
+
+上面的充分构造不意味着不存在其他方案。现在把此前学过的性质串起来，就得到 RoPE 的核心等式：
+
+$$
+\begin{aligned}
+\widetilde q_i&=R(i\theta)q_i,\quad \widetilde k_j=R(j\theta)k_j,\\
+\widetilde q_i^\top\widetilde k_j
+&=q_i^\top R(i\theta)^\top R(j\theta)k_j\\
+&=q_i^\top R((j-i)\theta)k_j.
+\end{aligned}
+$$
+
+### 展开每个乘法，看看内容去了哪里
+
+令 $q=(a,b)^\top,k=(c,d)^\top$，$\phi=(j-i)\theta$，则：
+
+$$
+\begin{aligned}
+q^\top R(\phi)k
+&=a(c\cos\phi-d\sin\phi)+b(c\sin\phi+d\cos\phi)\\
+&=(ac+bd)\cos\phi+(bc-ad)\sin\phi.
+\end{aligned}
+$$
+
+第一项是原内容点积乘余弦，第二项是有方向的交叉项乘正弦。所以 RoPE 分数并非“只取决于距离”：它仍取决于内容，只是**显式位置依赖**仅剩相对差值。
+
+例如 $q=(1,2)^\top,k=(3,4)^\top$，则结果是 $11\cos\phi+2\sin\phi$。$\phi=0$ 得 11，$\phi=\pi/2$ 得 2，$\phi=-\pi/2$ 得 -2。方向可以改变分数。
+
+### 复数是同一个运算的另一套记号
+
+将 $(a,b)$ 记为 $z=a+\mathrm{i}b$，将 $(c,d)$ 记为 $w=c+\mathrm{i}d$，其中 $\mathrm{i}^2=-1$。由欧拉公式：
+
+$$
+ze^{\mathrm{i}\phi}=(a\cos\phi-b\sin\phi)+\mathrm{i}(a\sin\phi+b\cos\phi).
+$$
+
+这恰好等于旋转后的两个坐标。实向量点积是 $\operatorname{Re}(\bar z w)$，所以旋转后：
+
+$$
+\operatorname{Re}\left(\overline{ze^{\mathrm{i}i\theta}}\,we^{\mathrm{i}j\theta}\right)
+=\operatorname{Re}\left(\bar z w e^{\mathrm{i}(j-i)\theta}\right).
+$$
+
+共轭让查询的角度变号，乘法让角度相加，于是留下位置差。它与转置、逆矩阵的推导完全一致。
+
+### 实际头维度：许多独立二维旋转
+
+$$
+T_p=\operatorname{diag}\big(R(p\theta_0),R(p\theta_1),\ldots,R(p\theta_{d_h/2-1})\big).
+$$
+
+块对角矩阵意味着每对坐标独立旋转，不需要构造一个稠密大矩阵。代码直接计算 $a\cos-b\sin$ 和 $a\sin+b\cos$，时间与存储都是线性于头维度。
+
+标准用法在 Q/K 投影后旋转，通常不旋转 V。若先旋转再乘任意学习矩阵，该矩阵一般不与旋转交换，上一节的反例问题可能再次出现。不同模型的相邻配对、前后半维配对必须与权重约定一致，不能随意混用。
+
+## 10 · 训练时哪些东西被学习？
+
+固定 sin/cos 和标准 RoPE 的位置函数不需要梯度更新；学习的是内容嵌入、Q/K/V 等权重。给定位置时 $\widetilde q=Rq$，若损失对旋转结果的梯度是 $g$，链式法则给出：
+
+$$
+\frac{\partial\mathcal L}{\partial q}=R^\top g,\qquad
+\|R^\top g\|=\|g\|.
+$$
+
+旋转这一步本身不放大或缩小梯度范数；但整个网络还包含 softmax、投影等运算，不能据此保证整体训练没有梯度问题。
+
+| 路线 | 添加位置的地方 | 参数与结构 | 不应声称的保证 |
+|---|---|---|---|
+| 可学习绝对位置 | 输入表示 | 每个槽位学习向量 | 表外位置自动可用 |
+| 2017 sin/cos | 输入表示 | 固定多频率函数 | 任意投影后严格相对化 |
+| 2018 Shaw / 2020 T5 | 注意力关系 | 相对向量或桶偏置 | 所有远距离都可区分 |
+| 2021 ALiBi | 注意力分数 | 固定线性距离惩罚 | 所有任务都优于 RoPE |
+| 2021 RoPE 及扩展 | 投影后的 Q/K | 多频率正交旋转 | 点积随距离单调下降 |
+
+当代模型中常见 RoPE 与长度扩展变体，但位置编码并没有收敛为唯一方案。这里按代表性论文组织，不把表格当作对所有最新模型的普查。
+
+## 11 · PyTorch：把等式变成可验证的程序
+
+下面是同目录 `position_encoding.py` 的完整实现。`sinusoidal_pe` 生成 `[T,d]`；`apply_rope` 接收 `[B,H,T,D]`，角度 `[T,D/2]` 自动广播到 batch 和 head。位置计算至少使用 FP32，FP64 输入保留 FP64，最终恢复内容 dtype。示例限定偶数维、无 padding，避免用隐含约定遮住推导。
+
+<!-- python-source -->
+
+执行 `python training/position_encoding.py`。验证项包括置换等变、sin/cos 的平移公式、相对位置核、范数、RoPE 的共同平移不变性和反向传播。断言验证有限数值案例；普遍成立的理由是前面的证明，而非“测试通过”四个字。
+
+## 12 · 接下来：推理不是另一套位置公式
+
+训练往往并行处理整段序列；生成时不断追加 token。位置编码规则不因此改变，改变的是张量形状、索引和哪些中间结果可以复用。继续阅读 [推理篇：位置编码与 KV cache](../inference/position-encoding-and-kv-cache.html)。
+
+### 原始资料
+
+- [Attention Is All You Need，§3.5](https://arxiv.org/abs/1706.03762)：原始位置编码及设计动机。
+- [Self-Attention with Relative Position Representations](https://arxiv.org/abs/1803.02155)：Shaw 相对位置。
+- [Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer](https://arxiv.org/abs/1910.10683)：T5。
+- [RoFormer](https://arxiv.org/abs/2104.09864)：旋转位置编码。
+- [Train Short, Test Long](https://arxiv.org/abs/2108.12409)：ALiBi。
+
+矩阵指数、反例和小维度算例是为讲解补充的数学推导，不声称是论文作者当时的设计过程。
