@@ -1,0 +1,48 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 440" role="img" aria-labelledby="title desc">
+
+
+  <title id="title">07 / 矩阵指数把微小旋转连续合成</title>
+  <desc id="desc">圆上向量v的瞬时运动方向Jv垂直于v；矩阵J平方为负单位阵，指数偶次项构成cos，奇次项构成sin。</desc>
+
+
+  <defs>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#087c70"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#c54834"/>
+    </marker>
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#245fb0"/>
+    </marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#172521"/>
+    </marker>
+  </defs>
+  <rect width="640" height="440" fill="#ffffff"/>
+
+
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="22" fill="#172521" text-anchor="start">07 / 矩阵指数把微小旋转连续合成</text>
+    <line x1="61" y1="235" x2="271" y2="235" stroke="#d5ddd7" stroke-width="1"/>
+    <line x1="166" y1="130" x2="166" y2="340" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="263" y="258" font-size="16" fill="#58635e" text-anchor="start">x</text>
+    <text x="146" y="140" font-size="16" fill="#58635e" text-anchor="start">y</text>
+    <text x="147" y="257" font-size="15" fill="#58635e" text-anchor="start">0</text>
+    <circle cx="166" cy="235" r="84" fill="none" stroke="#d5ddd7"/>
+    <line x1="166" y1="235" x2="238.74613391789285" y2="193.0" stroke="#087c70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="246.74613391789285" y="183.0" font-size="18" fill="#087c70" text-anchor="start">v</text>
+    <line x1="238.74613391789285" y1="193" x2="196.74613391789285" y2="120.25386608210715" stroke="#c54834" stroke-width="3" marker-end="url(#red)"/>
+    <text x="166.74613391789285" y="112.25386608210715" font-size="18" fill="#c54834" text-anchor="start">Jv</text>
+    <text x="55" y="366" font-size="17" fill="#58635e" text-anchor="start">Jv 与 v 垂直：沿切线瞬时运动</text>
+    <rect x="338" y="103" width="270" height="245" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="356" y="139" font-size="21" fill="#172521" text-anchor="start">生成元：J² = −I</text>
+    <text x="356" y="183" font-size="20" fill="#087c70" text-anchor="start">偶次幂 → cos φ · I</text>
+    <text x="356" y="225" font-size="20" fill="#c54834" text-anchor="start">奇次幂 → sin φ · J</text>
+    <line x1="357" y1="247" x2="586" y2="247" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="356" y="282" font-size="19" fill="#172521" text-anchor="start">eᵠᴶ = cos φ I + sin φ J</text>
+    <text x="356" y="320" font-size="17" fill="#58635e" text-anchor="start">连续合成 → 有限角度旋转</text>
+    <text x="28" y="409" font-size="18" fill="#172521" text-anchor="start">瞬时变化垂直于当前位置，因此长度的一阶变化为零。</text>
+  </g>
+</svg>

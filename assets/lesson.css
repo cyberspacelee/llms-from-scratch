@@ -124,6 +124,83 @@ h3 {
   line-height: 1.5;
 }
 
+h4 {
+  margin: 28px 0 10px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.math-outline {
+  margin: 28px 0;
+  padding: 18px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.math-outline > p {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.math-outline > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 24px;
+  font-size: 14px;
+}
+
+.math-figure {
+  margin: 28px 0;
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.math-figure-scroll {
+  overflow-x: auto;
+  background: var(--surface);
+}
+
+.math-figure img {
+  display: block;
+  width: 100%;
+  min-width: 560px;
+  max-width: 760px;
+  height: auto;
+  margin: auto;
+}
+
+.math-figure figcaption {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+@media print {
+  .math-figure { break-inside: avoid; }
+  .math-figure-scroll { overflow: visible; }
+  .math-figure img { min-width: 0; }
+}
+
+.lab-reset {
+  margin-top: 18px;
+  padding: 7px 14px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--green);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.lab-reset:hover {
+  border-color: var(--green);
+  background: var(--soft);
+}
+
 p {
   margin: 15px 0;
 }
@@ -485,6 +562,10 @@ summary {
   .lab-controls {
     grid-template-columns: 1fr;
     gap: 12px;
+  }
+
+  .math-outline > div {
+    grid-template-columns: 1fr;
   }
 
   .readout {

@@ -1,46 +1,69 @@
 # LLMs From Scratch
 
-以问题、数学推导、小维度算例和 PyTorch 数值验证组织的中文讲义。当前以桌面端阅读为主。
+一组理解大语言模型原理与推理实现的中文讲义，通过数学推导、小维度算例、交互图示和 PyTorch 数值验证串起概念与代码。
 
-## 讲义
+当前内容围绕一条主线展开：**数学基础 → 位置编码 → KV cache 正确性 → 推理引擎实现**。适合具备 Python 和基础深度学习知识的读者；数学篇从二维向量开始补齐所需工具。
 
-- [训练：从第一性原理推导位置编码](training/position-encoding.html)
-- [推理：位置编码与 KV cache](inference/position-encoding-and-kv-cache.html)
-- [推理系统：nano-vLLM 从入门到精通](inference/nano-vllm-from-zero-to-mastery.html)
+## 阅读路线
 
-HTML 可直接用浏览器打开，无需启动服务器。Markdown 讲义的正文已嵌入 HTML，不使用 `fetch` 读取本地文件；KaTeX、markdown-it、数学插件和 highlight.js 通过固定版本 CDN 加载，nano-vLLM 讲义的 Mermaid 图也使用固定版本 CDN，因此完整渲染需要联网。原理讲义的脚本和样式使用 SRI 校验，CDN 失败时显示原始 Markdown，不会伪装成渲染成功。
+| 顺序 | 讲义 | 核心问题 |
+| --- | --- | --- |
+| 00 | [数学基础：从向量到旋转](foundations/mathematics.html) | 向量、范数、点积、矩阵与欧拉公式如何串成 RoPE？九章分别配有 SVG 图解。 |
+| 01 | [位置编码：从第一性原理推导](training/position-encoding.html) | 注意力如何表示顺序？sin/cos 和 RoPE 如何引入位置关系？ |
+| 02 | [位置编码与 KV cache](inference/position-encoding-and-kv-cache.html) | 为什么历史 K/V 可以复用？位置、掩码和缓存如何保持一致？ |
+| 03 | [nano-vLLM：从一条请求到一个推理引擎](inference/nano-vllm-from-zero-to-mastery.html) | 调度、分页缓存、张量并行与 CUDA Graph 如何协作？ |
 
-## 结构与更新
+数学篇提供独立的分章推导和图解；位置编码与 KV cache 篇从原理推到数值验证；推理系统篇沿源码调用链展开，并提供调度与缓存交互实验。nano-vLLM 讲义基于固定源码快照，具体版本见页面标注。
+
+## 打开讲义
+
+下载或克隆仓库后，直接用浏览器打开上表中的 HTML 文件，无需构建或启动服务器。页面支持桌面和手机阅读，公式、代码高亮及 Mermaid 图的完整渲染需要联网加载 CDN 资源。
+
+在 GitHub 上阅读时，可直接查看 Markdown 原文：[数学基础](foundations/mathematics.md)、[位置编码](training/position-encoding.md)、[KV cache](inference/position-encoding-and-kv-cache.md)。HTML 中的交互需在浏览器打开本地文件后使用。
+
+## 运行数值验证
+
+需要 Python 和 PyTorch，CPU 即可运行。在仓库根目录执行：
+
+```sh
+python "training/position_encoding.py"
+python "inference/position_encoding_cache.py"
+```
+
+- **位置编码验证**：置换等变、sin/cos 平移、相对位置核、RoPE 范数与梯度。
+- **缓存验证**：比较整段、逐 token、prefill 后解码和分块计算，并用错误位置编号作负面对照。
+
+这些脚本验证教学算例与单层注意力性质，不包含完整模型训练或端到端生成。运行 nano-vLLM 本身所需的 GPU、模型权重和依赖，见第三篇的“最小入口”。
+
+## 内容维护
 
 ```text
-training/       训练原理、Markdown 源文、HTML、PyTorch 实现
-inference/      推理原理、Markdown 源文、HTML、缓存验证
-assets/         共享样式、交互与 HTML 生成脚本
+foundations/    数学基础讲义
+training/       位置编码讲义与 PyTorch 实现
+inference/      KV cache 讲义、验证代码与 nano-vLLM 专题
+assets/         页面样式、交互脚本、数学 SVG 图解与讲义生成器
 ```
 
-前两篇原理讲义修改对应 `.md` 与 `.py` 后，在项目根目录运行：
+### 原理讲义
+
+编辑对应的 `.md` 正文和 `.py` 示例，然后在仓库根目录重新生成 HTML：
 
 ```sh
-node assets/build.mjs
+node "assets/build.mjs"
 ```
 
-生成脚本只使用 Node.js 标准库。Python 源码会自动嵌入讲义，避免手工维护两份代码。生成的 HTML 纳入版本控制，读者不必先构建。
+生成器仅依赖 Node.js 标准库，会将三篇原理讲义的正文及其适用的 Python 源码嵌入 HTML。数学篇不嵌入 Python，逐章图解位于 `assets/math/`。不要直接编辑生成的 HTML；更新时将源文件与生成结果一并提交。
 
-nano-vLLM 讲义直接维护 `inference/nano-vllm-from-zero-to-mastery.html`，正文、专用样式和交互在该文件中，不经过上述生成脚本。三篇共用 `assets/theme.css` 统一阅读样式与系列导航。推荐阅读顺序为：位置编码 → KV cache 正确性 → nano-vLLM 推理系统。
+### nano-vLLM 专题与样式
 
-渲染器只处理本仓库作者维护的内容，允许讲义里的受控 HTML 交互占位。它不是通用的不可信 Markdown 预览器；若后续接收外部输入，应关闭原始 HTML 或引入经过测试的清洗流程。
+直接编辑 `inference/nano-vllm-from-zero-to-mastery.html`，该页面不经过生成器。
 
-## 数值验证
+| 修改内容 | 文件入口 |
+| --- | --- |
+| 四篇共享的配色、排版与导航样式 | `assets/theme.css` |
+| 三篇原理讲义的样式与交互 | `assets/lesson.css`、`assets/lesson.js` |
+| 三篇原理讲义的页面模板与导航链接 | `assets/build.mjs` |
+| 数学基础的逐章 SVG 图解 | `assets/math/` |
+| nano-vLLM 正文、导航与专用交互 | `inference/nano-vllm-from-zero-to-mastery.html` |
 
-环境需要 Python 和 PyTorch。当前代码已在 Python 3.13 / PyTorch 2.14.0 CPU 上验证，不需要 NumPy。
-
-```sh
-python training/position_encoding.py
-python inference/position_encoding_cache.py
-```
-
-第一项验证置换等变、sin/cos 平移、相对点积核与 RoPE 梯度；第二项比较整段、逐 token、prefill 后解码及分块缓存计算，并包含错误位置的负面对照。它们是教学用单层验证，不是完整模型的训练或生成程序。
-
-## Git
-
-仓库已初始化，未提交或推送。`.agents/`、系统文件、Python 缓存、虚拟环境和 Node 依赖被忽略；`skills-lock.json` 保留，不会随技能目录一起删除。
+修改正文后检查公式与链接；修改样式或交互后检查桌面和手机布局；修改 Python 示例后运行对应数值验证。

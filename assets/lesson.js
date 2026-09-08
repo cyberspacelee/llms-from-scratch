@@ -35,6 +35,18 @@
       link.textContent = section.textContent;
       document.getElementById('contents').append(link);
     });
+    article.querySelectorAll('[data-chapter-outline]').forEach(outline => {
+      const links = document.createElement('div');
+      const label = document.createElement('p');
+      label.textContent = '九章阅读导航 · 每章配有 SVG 图解，窄屏可横向滑动图解';
+      outline.append(label, links);
+      article.querySelectorAll('h2').forEach(section => {
+        const link = document.createElement('a');
+        link.href = '#' + section.id;
+        link.textContent = section.textContent;
+        links.append(link);
+      });
+    });
     document.documentElement.dataset.rendered = 'true';
   } catch (error) {
     status.className = 'warning';
@@ -51,7 +63,92 @@
   };
   const heading = (title, kicker) =>
     '<div class="lab-heading"><p class="lab-title">' + title +
-    '</p><span class="lab-kicker">' + kicker + '</span></div>';
+      '</p><span class="lab-kicker">' + kicker + '</span></div>';
+
+  function initDotProductLab() {
+    const lab = document.getElementById('dot-product-lab');
+    if (!lab) return;
+    const controls = [
+      {id: 'norm-a', label: 'a 的长度', min: 0.5, max: 4, step: 0.1, value: 2, unit: ''},
+      {id: 'norm-b', label: 'b 的长度', min: 0.5, max: 4, step: 0.1, value: 3, unit: ''},
+      {id: 'phase', label: '内容相位差 δ', min: -180, max: 180, step: 1, value: 60, unit: '°'},
+      {id: 'common', label: '共同旋转 γ', min: -180, max: 180, step: 1, value: 0, unit: '°'},
+      {id: 'relative', label: 'b 的额外旋转 φ', min: -180, max: 180, step: 1, value: 0, unit: '°'},
+    ];
+    lab.innerHTML = heading('长度、夹角与点积', 'geometry · dot product') +
+      '<p class="legend">a 的相位为 γ，b 的相位为 γ + δ + φ。共同旋转会抵消，额外旋转会改变相位差。控件用角度制，计算时转为弧度。</p>' +
+      '<div class="lab-controls">' + controls.map(control =>
+        '<label for="dot-' + control.id + '">' + control.label +
+        '<output id="dot-' + control.id + '-value"></output>' +
+        '<input id="dot-' + control.id + '" type="range" min="' + control.min +
+        '" max="' + control.max + '" step="' + control.step + '" value="' + control.value + '"></label>'
+      ).join('') + '</div>' +
+      '<button type="button" class="lab-reset">恢复初始值</button>' +
+      '<svg class="lab-svg" role="img" aria-labelledby="dot-title dot-desc"></svg>' +
+      '<div class="readout" aria-live="polite" aria-atomic="true"></div>';
+    const svg = lab.querySelector('svg');
+    const inputs = controls.map(control => lab.querySelector('#dot-' + control.id));
+    let renderedWidth = 0;
+
+    function draw() {
+      const [ra, rb, phase, common, relative] = inputs.map(input => Number(input.value));
+      const rad = Math.PI / 180;
+      const angleA = common * rad;
+      const delta = (phase + relative) * rad;
+      const cosine = Math.cos(delta);
+      const theta = Math.acos(Math.max(-1, Math.min(1, cosine)));
+      const score = ra * rb * cosine;
+      const width = Math.max(240, Math.round(svg.clientWidth));
+      renderedWidth = width;
+      const cx = width / 2;
+      const cy = 175;
+      const scale = Math.min(32, (width - 62) / 8);
+      const extent = 4 * scale;
+      const point = (r, angle) => ({x: cx + scale * r * Math.cos(angle), y: cy - scale * r * Math.sin(angle)});
+      const a = point(ra, angleA);
+      const b = point(rb, angleA + delta);
+      const projection = point(rb * cosine, angleA);
+      const labelX = x => Math.max(16, Math.min(width - 16, x));
+      svg.setAttribute('viewBox', '0 0 ' + width + ' 355');
+      svg.innerHTML =
+        '<title id="dot-title">向量长度、共同旋转与相对旋转实验</title>' +
+        '<desc id="dot-desc">a 长度 ' + format(ra) + '，b 长度 ' + format(rb) +
+        '，夹角 ' + format(theta / rad, 1) + ' 度，点积 ' + format(score) + '。蓝色虚线标出 b 在 a 方向的投影。</desc>' +
+        '<defs><marker id="dot-arrow-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--green)"/></marker>' +
+        '<marker id="dot-arrow-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="var(--red)"/></marker></defs>' +
+        '<circle cx="' + cx + '" cy="' + cy + '" r="' + ra * scale + '" class="axis"/>' +
+        '<circle cx="' + cx + '" cy="' + cy + '" r="' + rb * scale + '" class="axis"/>' +
+        '<line x1="' + (cx - extent - 8) + '" y1="' + cy + '" x2="' + (cx + extent + 8) + '" y2="' + cy + '" class="axis"/>' +
+        '<line x1="' + cx + '" y1="' + (cy - extent - 8) + '" x2="' + cx + '" y2="' + (cy + extent + 8) + '" class="axis"/>' +
+        '<line x1="' + b.x + '" y1="' + b.y + '" x2="' + projection.x + '" y2="' + projection.y + '" class="position-guide"/>' +
+        '<line x1="' + cx + '" y1="' + cy + '" x2="' + projection.x + '" y2="' + projection.y + '" class="position-guide"/>' +
+        '<line x1="' + cx + '" y1="' + cy + '" x2="' + a.x + '" y2="' + a.y + '" class="vector-q" marker-end="url(#dot-arrow-a)"/>' +
+        '<line x1="' + cx + '" y1="' + cy + '" x2="' + b.x + '" y2="' + b.y + '" class="vector-k" marker-end="url(#dot-arrow-b)"/>' +
+        '<circle cx="' + projection.x + '" cy="' + projection.y + '" r="4" fill="var(--blue)"/>' +
+        '<text x="' + labelX(a.x) + '" y="' + (a.y - 12) + '" text-anchor="middle" style="fill:var(--green)">a</text>' +
+        '<text x="' + labelX(b.x) + '" y="' + (b.y + 22) + '" text-anchor="middle" style="fill:var(--red)">b</text>' +
+        '<text x="' + cx + '" y="340" text-anchor="middle" class="muted">圆的半径表示长度；共同旋转不改变相对方向</text>';
+      controls.forEach((control, index) => {
+        lab.querySelector('#dot-' + control.id + '-value').value = inputs[index].value + control.unit;
+      });
+      lab.querySelector('.readout').textContent =
+        '长度 a = ' + format(ra, 1) + '，b = ' + format(rb, 1) +
+        ' · 相位差 δ + φ = ' + (phase + relative) + '°' +
+        ' · 几何夹角 θ = ' + format(theta / rad, 1) + '°（' + format(theta) + ' rad）' +
+        ' · 有符号投影 = ' + format(rb * cosine) +
+        ' · aᵀb = ' + format(ra, 1) + ' × ' + format(rb, 1) + ' × ' + format(cosine) + ' = ' + format(score) +
+        ' · 仅由内容决定的原点积 = ' + format(ra * rb * Math.cos(phase * rad));
+    }
+    inputs.forEach(input => input.addEventListener('input', draw));
+    lab.querySelector('button').addEventListener('click', () => {
+      controls.forEach((control, index) => { inputs[index].value = control.value; });
+      draw();
+    });
+    new ResizeObserver(() => {
+      if (Math.max(240, Math.round(svg.clientWidth)) !== renderedWidth) draw();
+    }).observe(svg);
+    draw();
+  }
 
   function initRotationLab() {
     const lab = document.getElementById('rotation-lab');
@@ -491,6 +588,7 @@
     draw();
   }
 
+  initDotProductLab();
   initRotationLab();
   initFrequencyLab();
   initEncodingMatrixLab();

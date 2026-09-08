@@ -1,0 +1,48 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 440" role="img" aria-labelledby="title desc">
+
+
+  <title id="title">08 / 高维旋转由多个二维旋转拼成</title>
+  <desc id="desc">四维向量1、2、3、4分为两对，第一对转90度变为负2、1，第二对转180度变为负3、负4，两对平方范数仍为5和25。</desc>
+
+
+  <defs>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#087c70"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#c54834"/>
+    </marker>
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#245fb0"/>
+    </marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#172521"/>
+    </marker>
+  </defs>
+  <rect width="640" height="440" fill="#ffffff"/>
+
+
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="22" fill="#172521" text-anchor="start">08 / 高维旋转由多个二维旋转拼成</text>
+    <text x="28" y="86" font-size="19" fill="#172521" text-anchor="start">输入按两维分组</text>
+    <text x="425" y="86" font-size="19" fill="#172521" text-anchor="start">每对独立旋转</text>
+    <rect x="28" y="110" width="160" height="63" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="108" y="149" font-size="24" fill="#087c70" text-anchor="middle">(1, 2)</text>
+    <rect x="28" y="203" width="160" height="63" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="108" y="242" font-size="24" fill="#c54834" text-anchor="middle">(3, 4)</text>
+    <line x1="202" y1="141" x2="282" y2="141" stroke="#087c70" stroke-width="2" marker-end="url(#green)"/>
+    <text x="211" y="123" font-size="18" fill="#087c70" text-anchor="start">π/2</text>
+    <line x1="202" y1="234" x2="282" y2="234" stroke="#c54834" stroke-width="2" marker-end="url(#red)"/>
+    <text x="215" y="216" font-size="18" fill="#c54834" text-anchor="start">π</text>
+    <rect x="298" y="110" width="148" height="63" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="372" y="149" font-size="24" fill="#087c70" text-anchor="middle">(−2, 1)</text>
+    <rect x="298" y="203" width="148" height="63" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="372" y="242" font-size="24" fill="#c54834" text-anchor="middle">(−3, −4)</text>
+    <text x="465" y="149" font-size="18" fill="#087c70" text-anchor="start">范数² = 5</text>
+    <text x="465" y="242" font-size="18" fill="#c54834" text-anchor="start">范数² = 25</text>
+    <rect x="28" y="305" width="584" height="65" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="320" y="345" font-size="22" fill="#172521" text-anchor="middle">总范数²：5 + 25 = 30，旋转前后相同</text>
+    <text x="320" y="411" font-size="19" fill="#58635e" text-anchor="middle">位置 p → 每对转 pωₘ → 拼回向量 → 各对点积求和</text>
+  </g>
+</svg>

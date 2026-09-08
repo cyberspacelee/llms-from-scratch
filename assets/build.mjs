@@ -17,6 +17,9 @@ const tags = dependencies.map(([type, url, hash]) => type === 'css'
   : `<script defer src="${url}" integrity="sha384-${hash}" crossorigin="anonymous"></script>`).join('\n');
 
 const lessons = [
+  {directory: 'foundations', name: 'mathematics',
+    title: '数学基础，理解旋转', edition: '00 / FOUNDATIONS',
+    subtitle: '九章图解：向量、范数、点积、矩阵、极坐标、复数与高维旋转。'},
   {directory: 'training', name: 'position-encoding', code: 'position_encoding.py',
     title: '位置编码，从第一性原理推导', edition: '01 / TRAINING',
     subtitle: '从注意力的对称性，到三角函数、矩阵指数与旋转。'},
@@ -28,9 +31,18 @@ const lessons = [
 for (const lesson of lessons) {
   const folder = path.join(root, lesson.directory);
   const markdown = await readFile(path.join(folder, `${lesson.name}.md`), 'utf8');
-  const code = await readFile(path.join(folder, lesson.code), 'utf8');
-  if (markdown.split('<!-- python-source -->').length !== 2) throw new Error('Expected one source marker');
-  const source = markdown.replace('<!-- python-source -->', () => `\`\`\`python\n${code}\`\`\``);
+  let source = markdown;
+  if (lesson.code) {
+    const code = await readFile(path.join(folder, lesson.code), 'utf8');
+    if (markdown.split('<!-- python-source -->').length !== 2) throw new Error('Expected one source marker');
+    source = markdown.replace('<!-- python-source -->', () => `\`\`\`python\n${code}\`\`\``);
+  }
+  const navigation = [
+    ['foundations/mathematics', '00 数学基础'],
+    ['training/position-encoding', '01 位置编码'],
+    ['inference/position-encoding-and-kv-cache', '02 KV cache'],
+    ['inference/nano-vllm-from-zero-to-mastery', '03 推理系统'],
+  ].map(([target, label]) => `<a href="../${target}.html"${target === `${lesson.directory}/${lesson.name}` ? ' aria-current="page"' : ''}>${label}</a>`).join('');
   if (/<\/script/i.test(source)) throw new Error('Embedded source contains an HTML script terminator');
   const html = `<!doctype html>
 <html lang="zh-CN">
@@ -45,7 +57,7 @@ ${tags}
 <script defer src="../assets/lesson.js"></script>
 </head>
 <body>
-<header><div class="switch" role="navigation" aria-label="系列讲义"><a href="../training/position-encoding.html"${lesson.directory === 'training' ? ' aria-current="page"' : ''}>01 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html"${lesson.directory === 'inference' ? ' aria-current="page"' : ''}>02 KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a><a href="${lesson.code}">PyTorch 源码</a></div>
+<header><div class="switch" role="navigation" aria-label="系列讲义">${navigation}<a href="${lesson.code || '../training/position_encoding.py'}">PyTorch 源码</a></div>
 <p class="edition">LLMS FROM SCRATCH · ${lesson.edition}</p><h1>${lesson.title}</h1><p>${lesson.subtitle}</p></header>
 <div class="layout"><nav aria-label="章节目录"><p class="nav-label">CONTENTS / 推导路径</p><div id="contents"></div></nav>
 <main><div id="load-status" role="status"></div><article id="article"></article><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="${lesson.name}.md">Markdown 原文</a>。</noscript></main></div>
