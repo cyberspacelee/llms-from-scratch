@@ -10,14 +10,14 @@ description: 向量、范数、点积、矩阵、极坐标、复数与高维旋�
 
 > 阅读路线：向量与坐标 → 范数与归一化 → 点积与投影 → 矩阵与正交性 → 极坐标 → 欧拉公式 → 矩阵指数 → 高维分块 → RoPE。
 
-前六章是核心基础，第七章是进阶推导，第八、九章把平面几何接到实际注意力头。读完后继续 [01 位置编码](/lessons/position-encoding)。
+前六章是核心基础，第七章是进阶推导，第八、九章把平面几何接到实际注意力头。读完后继续 [01 位置编码](../../lessons/position-encoding)。
 
 <div class="math-outline" data-chapter-outline></div>
 
 ## 01 · 向量与坐标：用一组数描述方向
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="坐标是沿基方向的步数，可横向滚动"><img src="/assets/math/01-vectors.svg" alt="坐标是沿基方向的步数" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="坐标是沿基方向的步数，可横向滚动"><img src="../../assets/math/01-vectors.svg" alt="坐标是沿基方向的步数" width="640" height="440" /></div>
 <figcaption>从原点沿横轴走 3 个单位、纵轴走 4 个单位，就得到向量 (3, 4)。图中绿色箭头是合成结果，红、蓝箭头是两个标准基。</figcaption>
 </figure>
 
@@ -54,7 +54,7 @@ $$
 ## 02 · 范数与归一化：分清长度、距离和方向
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="范数、距离与归一化，可横向滚动"><img src="/assets/math/02-norm.svg" alt="范数、距离与归一化" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="范数、距离与归一化，可横向滚动"><img src="../../assets/math/02-norm.svg" alt="范数、距离与归一化" width="640" height="440" /></div>
 <figcaption>左图两支箭头长度均为 5，但终点相距 6；右图将 (3, 4) 缩短到原来的五分之一，得到同方向的单位向量。</figcaption>
 </figure>
 
@@ -113,7 +113,7 @@ $$
 ## 03 · 点积与投影：长度和夹角如何决定分数
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="向量点积与有符号投影，可横向滚动"><img src="/assets/math/03-dot-product.svg" alt="向量点积与有符号投影" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="向量点积与有符号投影，可横向滚动"><img src="../../assets/math/03-dot-product.svg" alt="向量点积与有符号投影" width="640" height="440" /></div>
 <figcaption>先把 b 投影到 a 的方向，得到有符号长度，再乘 a 的长度。图中的蓝色虚线表示投影过程；本章下方还有可调长度与角度的交互 SVG。</figcaption>
 </figure>
 
@@ -165,7 +165,7 @@ $$
 ## 04 · 矩阵与正交变换：旋转为什么保长
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="正交旋转保持基向量的长度和夹角，可横向滚动"><img src="/assets/math/04-matrix.svg" alt="正交旋转保持基向量的长度和夹角" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="正交旋转保持基向量的长度和夹角，可横向滚动"><img src="../../assets/math/04-matrix.svg" alt="正交旋转保持基向量的长度和夹角" width="640" height="440" /></div>
 <figcaption>两支单位基向量一起转过 90°，长度仍为 1，彼此仍然垂直。矩阵的列记录它们的新坐标，正交性把这个几何事实写成 RᵀR = I。</figcaption>
 </figure>
 
@@ -237,7 +237,7 @@ $$
 ## 05 · 极坐标与三角函数：把旋转变成相位相加
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="从直角坐标转换到极坐标，可横向滚动"><img src="/assets/math/05-polar.svg" alt="从直角坐标转换到极坐标" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="从直角坐标转换到极坐标，可横向滚动"><img src="../../assets/math/05-polar.svg" alt="从直角坐标转换到极坐标" width="640" height="440" /></div>
 <figcaption>横纵坐标由半径 r 和相位 α 决定。旋转时半径不变，只把相位从 α 改成 α + φ；展开三角加法公式即可得到旋转后的两个坐标。</figcaption>
 </figure>
 
@@ -279,7 +279,7 @@ $$
 ## 06 · 复数与欧拉公式：用乘法完成旋转
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="复数乘虚数单位对应四分之一圈旋转，可横向滚动"><img src="/assets/math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="复数乘虚数单位对应四分之一圈旋转，可横向滚动"><img src="../../assets/math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转" width="640" height="440" /></div>
 <figcaption>从 z = 1 + i 出发，反复乘 i，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 e^(iφ) 表示。</figcaption>
 </figure>
 
@@ -345,7 +345,7 @@ $$
 ## 07 · 矩阵指数：连续旋转从哪里来？
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="用生成元和矩阵指数描述连续旋转，可横向滚动"><img src="/assets/math/07-exponential.svg" alt="用生成元和矩阵指数描述连续旋转" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="用生成元和矩阵指数描述连续旋转，可横向滚动"><img src="../../assets/math/07-exponential.svg" alt="用生成元和矩阵指数描述连续旋转" width="640" height="440" /></div>
 <figcaption>绿色 v 从原点指向圆周，红色 Jv 从终点沿切线指向瞬时运动方向。把这样的无穷小变化连续合成，得到保持长度的有限旋转。</figcaption>
 </figure>
 
@@ -388,7 +388,7 @@ sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长�
 ## 08 · 分块矩阵与多频率：从二维走到高维
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="四维向量分成两个独立旋转平面，可横向滚动"><img src="/assets/math/08-blocks.svg" alt="四维向量分成两个独立旋转平面" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="四维向量分成两个独立旋转平面，可横向滚动"><img src="../../assets/math/08-blocks.svg" alt="四维向量分成两个独立旋转平面" width="640" height="440" /></div>
 <figcaption>第一对旋转 π/2，第二对旋转 π。每对的平方范数分别保持为 5 和 25，总平方范数因此保持为 30；多频率 RoPE 为各对分配不同旋转速度。</figcaption>
 </figure>
 
@@ -451,7 +451,7 @@ $$
 ## 09 · 从数学回到 RoPE：对照、串联与自检
 
 <figure class="math-figure">
-<div class="math-figure-scroll" tabindex="0" role="region" aria-label="共同旋转和相对旋转对点积的不同影响，可横向滚动"><img src="/assets/math/09-rope.svg" alt="共同旋转和相对旋转对点积的不同影响" width="640" height="440" /></div>
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="共同旋转和相对旋转对点积的不同影响，可横向滚动"><img src="../../assets/math/09-rope.svg" alt="共同旋转和相对旋转对点积的不同影响" width="640" height="440" /></div>
 <figcaption>三组向量的长度都为 1。共同旋转后夹角仍为 30°，点积不变；只让 k 额外转 60°，夹角变为 90°，点积变为零。</figcaption>
 </figure>
 
@@ -518,4 +518,4 @@ $$
 - [MIT：极坐标与复数](https://ocw.mit.edu/courses/res-18-001-calculus-fall-2023/resources/mitres_18_001_f17_ch09_pdf/)：极坐标、复数和欧拉公式。
 - [RoFormer，§3](https://arxiv.org/html/2104.09864v5#S3)：二维旋转、多频率分块及相对位置结构。
 
-本篇的图解、手算例和教学路线是为讲解组织的内容。接下来阅读 [01 位置编码](/lessons/position-encoding)，看模型为什么需要这些数学结构，以及怎样把它们应用到 Q/K。
+本篇的图解、手算例和教学路线是为讲解组织的内容。接下来阅读 [01 位置编码](../../lessons/position-encoding)，看模型为什么需要这些数学结构，以及怎样把它们应用到 Q/K。

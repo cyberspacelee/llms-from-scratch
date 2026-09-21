@@ -1,14 +1,27 @@
----
-title: 位置编码，走进 KV cache
-section: 推理原理
-chapter: 2
-order: 2
-description: 从整段因果计算，推到 prefill、逐 token 解码与长度外推。
----
-
-import CacheLab from "../../components/DiagramPlaceholder"
-
-训练和推理使用同一组模型权重、同一套位置约定。KV cache 的目标是复用因果模型中不会再变化的历史结果，而不是近似替换位置编码。
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="从整段因果计算，推到 prefill、逐 token 解码与长度外推。">
+<title>位置编码，走进 KV cache</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.css" integrity="sha384-M59ezskvvpvT+a+C1x088YJ3DVmK+wZdX0UkVKalOI4Qi5Nwv0WrvpqHcfa2HQqB" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.min.css" integrity="sha384-UttgWGqUmSzrxetIBqxigLodBLOt0G9HCTlG9hKEmS9H5A5T3PGyDhPv0G8/C1EE" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" integrity="sha384-wLhprpjsmjc/XYIcF+LpMxd8yS1gss6jhevOp6F6zhiIoFK6AmHtm4bGKtehTani" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.js" integrity="sha384-7jGyG5zFwmEamqNWdCbpsPn+GTWEis3lnV7X/jXHyhFpJG7ExABLyMapabg8F4+p" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js" integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/theme.css">
+<script defer src="../assets/lesson.js"></script>
+</head>
+<body>
+<header><div class="switch" role="navigation" aria-label="系列讲义"><a href="../foundations/mathematics.html">00 数学基础</a><a href="../training/position-encoding.html">01 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html" aria-current="page">02 KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a><a href="position_encoding_cache.py">PyTorch 源码</a></div>
+<p class="edition">LLMS FROM SCRATCH · 02 / INFERENCE</p><h1>位置编码，走进 KV cache</h1><p>从整段因果计算，推到 prefill、逐 token 解码与长度外推。</p></header>
+<div class="layout"><nav aria-label="章节目录"><p class="nav-label">CONTENTS / 推导路径</p><div id="contents"></div></nav>
+<main><div id="load-status" role="status"></div><article id="article"></article><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding-and-kv-cache.md">Markdown 原文</a>。</noscript></main></div>
+<script type="text/plain" id="lesson-source">训练和推理使用同一组模型权重、同一套位置约定。KV cache 的目标是复用因果模型中不会再变化的历史结果，而不是近似替换位置编码。
 
 > 本篇从单层注意力推到多层缓存。先假设没有 padding、没有滑动窗口、固定 RoPE 频率，处于 eval 模式。每次放宽假设时，都明确指出新增条件。
 
@@ -50,7 +63,7 @@ $$
 
 这里为简化令 $d_v=D=d_h$，Q/K/V 头数相同；GQA/MQA 的 KV 头数更少，但位置逻辑相同。
 
-<CacheLab title="KV cache 索引实验" client:visible />
+<div class="lab" id="cache-lab"></div>
 
 ## 03 · 为什么新位置不能从 0 重新编号？
 
@@ -178,7 +191,6 @@ def verify():
 
 if __name__ == "__main__":
     verify()
-
 ```
 
 执行 `python inference/position_encoding_cache.py`。它比较 4 种分块方式，并增加错误对照：故意将新查询位置重置为零，确认输出确实发生变化。
@@ -253,7 +265,7 @@ $$
 
 到这里，我们已经说明缓存为什么正确，以及位置、掩码和频率必须满足什么条件。下一步是工程问题：如何避免每步复制缓存，如何让多条请求共享有限显存，又如何决定每一步计算哪些 token？继续阅读 [推理系统篇：nano-vLLM](nano-vllm-from-zero-to-mastery.html)，从单请求计算走向分页缓存与连续批处理。
 
-回顾 [训练篇：从第一性原理推导位置编码](../../lessons/position-encoding)。
+回顾 [训练篇：从第一性原理推导位置编码](../training/position-encoding.html)。
 
 ### 进一步阅读
 
@@ -262,3 +274,5 @@ $$
 - [YaRN](https://arxiv.org/abs/2309.00071)：长上下文扩展。
 
 缓存等价性证明、矩形掩码算例与错误对照是本讲义的解释性推导；不依赖某个框架隐藏的缓存接口。
+</script>
+</body></html>

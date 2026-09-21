@@ -6,7 +6,8 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 
 export default defineConfig({
-  site: 'https://example.invalid',
+  site: 'https://cyberspacelee.github.io',
+  base: '/llms-from-scratch',
   integrations: [
     react(),
     mdx(),

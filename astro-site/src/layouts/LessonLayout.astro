@@ -4,6 +4,7 @@ import '../styles/lesson.css'
 type Heading = { depth: number; slug: string; text: string }
 const { title, description } = Astro.props
 const headings = (Astro.props.headings ?? []) as Heading[]
+const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
 ---
 <!doctype html>
 <html lang="zh-CN">
@@ -16,12 +17,12 @@ const headings = (Astro.props.headings ?? []) as Heading[]
   </head>
   <body>
     <header class="lesson-hero"><div class="hero-inner"><nav class="switch" aria-label="系列讲义">
-      <a href="/lessons/mathematics" class={Astro.url.pathname.includes('mathematics') ? 'active' : ''}>00 数学基础</a>
-      <a href="/lessons/position-encoding" class={Astro.url.pathname.includes('position-encoding') ? 'active' : ''}>01 位置编码</a>
-      <a href="/lessons/kv-cache" class={Astro.url.pathname.includes('kv-cache') ? 'active' : ''}>02 KV cache</a>
-      <a href="/inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a>
+      <a href={`${base}lessons/mathematics`} class={Astro.url.pathname.includes('mathematics') ? 'active' : ''}>00 数学基础</a>
+      <a href={`${base}lessons/position-encoding`} class={Astro.url.pathname.includes('position-encoding') ? 'active' : ''}>01 位置编码</a>
+      <a href={`${base}lessons/kv-cache`} class={Astro.url.pathname.includes('kv-cache') ? 'active' : ''}>02 KV cache</a>
+      <a href={`${base}inference/nano-vllm-from-zero-to-mastery.html`}>03 推理系统</a>
     </nav><p class="edition">LLMS FROM SCRATCH <span>·</span> READING NOTES</p><h1>{title}</h1><p class="hero-description">{description}</p></div></header>
-    <div class="layout"><aside class="sidebar" aria-label="章节目录"><div class="sidebar-title">学习路线</div><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('mathematics') }]} href="/lessons/mathematics">00 · 数学基础</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('position-encoding') }]} href="/lessons/position-encoding">01 · 位置编码</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('kv-cache') }]} href="/lessons/kv-cache">02 · KV cache</a><div class="sidebar-title sidebar-chapter-title">本章目录</div>{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</aside>
+    <div class="layout"><aside class="sidebar" aria-label="章节目录"><div class="sidebar-title">学习路线</div><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a><div class="sidebar-title sidebar-chapter-title">本章目录</div>{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</aside>
       <details class="mobile-toc"><summary>本章目录</summary><div class="mobile-toc-list">{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</div></details>
       <main><slot /></main>
     </div>

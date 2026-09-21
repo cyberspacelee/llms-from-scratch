@@ -14,7 +14,7 @@ import FrequencyLab from "../../components/DiagramPlaceholder"
 
 > 推导路线：点积与排列 → 加法位置向量 → 平移的线性表示 → sin/cos → 相对关系 → 旋转 Q/K。数学上“可以证明的性质”和工程上“人为选择的设计”会分别标明。
 
-数学准备已独立为 [00 数学基础](/lessons/mathematics)。如果对点积、范数或欧拉公式不熟悉，可以先阅读对应章节；本篇从注意力的计算与顺序问题开始。
+数学准备已独立为 [00 数学基础](../../lessons/mathematics)。如果对点积、范数或欧拉公式不熟悉，可以先阅读对应章节；本篇从注意力的计算与顺序问题开始。
 
 <DotProductExplorer client:visible />
 
@@ -193,7 +193,7 @@ $$
 
 ### 进阶阅读：为什么连续、保长的变换导向旋转？
 
-完整的生成元与矩阵指数推导已独立到 [数学基础 · 第 07 章](/lessons/mathematics#section-7)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
+完整的生成元与矩阵指数推导已独立到 [数学基础 · 第 07 章](../../lessons/mathematics#section-7)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
 
 ## 06 · 从一对坐标，扩展到原始位置编码
 
@@ -312,7 +312,7 @@ $$
 
 ### 从点积的几何表示得到两点洞察
 
-回到 [数学基础 · 点积与投影](/lessons/mathematics#section-3) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
+回到 [数学基础 · 点积与投影](../../lessons/mathematics#section-3) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
 
 $$
 \widetilde q_i^\top\widetilde k_j
@@ -591,7 +591,7 @@ if __name__ == "__main__":
 
 ## 12 · 接下来：推理不是另一套位置公式
 
-训练往往并行处理整段序列；生成时不断追加 token。位置编码规则不因此改变，改变的是张量形状、索引和哪些中间结果可以复用。继续阅读 [推理篇：位置编码与 KV cache](/lessons/kv-cache)。
+训练往往并行处理整段序列；生成时不断追加 token。位置编码规则不因此改变，改变的是张量形状、索引和哪些中间结果可以复用。继续阅读 [推理篇：位置编码与 KV cache](../../lessons/kv-cache)。
 
 ### 原始资料
 
