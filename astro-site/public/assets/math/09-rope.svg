@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 440" role="img" aria-labelledby="title desc">
+
+
+  <title id="title">09 / 保留长度，用相对旋转改变匹配</title>
+  <desc id="desc">三组单位向量，原夹角30度，共同旋转60度后夹角仍30度，只让键额外转60度后夹角变90度且点积为零。</desc>
+
+
+  <defs>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#087c70"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#c54834"/>
+    </marker>
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#245fb0"/>
+    </marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#172521"/>
+    </marker>
+  </defs>
+  <rect width="640" height="440" fill="#ffffff"/>
+
+
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="22" fill="#172521" text-anchor="start">09 / 保留长度，用相对旋转改变匹配</text>
+    <text x="110" y="95" font-size="18" fill="#172521" text-anchor="middle">原内容</text>
+    <circle cx="110" cy="210" r="66" fill="none" stroke="#d5ddd7"/>
+    <line x1="110" y1="210" x2="176.0" y2="210.0" stroke="#087c70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="180.0" y="227.0" font-size="18" fill="#087c70" text-anchor="start">q</text>
+    <line x1="110" y1="210" x2="167.15767664977295" y2="177.0" stroke="#c54834" stroke-width="3" marker-end="url(#red)"/>
+    <text x="171.15767664977295" y="170.0" font-size="18" fill="#c54834" text-anchor="start">k</text>
+    <text x="110" y="323" font-size="20" fill="#172521" text-anchor="middle">cos 30°</text>
+    <text x="320" y="95" font-size="18" fill="#172521" text-anchor="middle">共同转 60°</text>
+    <circle cx="320" cy="210" r="66" fill="none" stroke="#d5ddd7"/>
+    <line x1="320" y1="210" x2="353.0" y2="152.84232335022705" stroke="#087c70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="357.0" y="169.84232335022705" font-size="18" fill="#087c70" text-anchor="start">q</text>
+    <line x1="320" y1="210" x2="320.0" y2="144.0" stroke="#c54834" stroke-width="3" marker-end="url(#red)"/>
+    <text x="324.0" y="137.0" font-size="18" fill="#c54834" text-anchor="start">k</text>
+    <text x="320" y="323" font-size="20" fill="#172521" text-anchor="middle">cos 30°</text>
+    <text x="530" y="95" font-size="18" fill="#172521" text-anchor="middle">只让 k 多转 60°</text>
+    <circle cx="530" cy="210" r="66" fill="none" stroke="#d5ddd7"/>
+    <line x1="530" y1="210" x2="596.0" y2="210.0" stroke="#087c70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="600.0" y="227.0" font-size="18" fill="#087c70" text-anchor="start">q</text>
+    <line x1="530" y1="210" x2="530.0" y2="144.0" stroke="#c54834" stroke-width="3" marker-end="url(#red)"/>
+    <text x="534.0" y="137.0" font-size="18" fill="#c54834" text-anchor="start">k</text>
+    <text x="530" y="323" font-size="20" fill="#172521" text-anchor="middle">cos 90° = 0</text>
+    <line x1="209" y1="115" x2="209" y2="332" stroke="#d5ddd7" stroke-width="1"/>
+    <line x1="426" y1="115" x2="426" y2="332" stroke="#d5ddd7" stroke-width="1"/>
+    <rect x="28" y="360" width="584" height="59" rx="4" fill="#f0f3f1" stroke="none"/>
+    <text x="320" y="396" font-size="20" fill="#172521" text-anchor="middle">单位长度固定；分数由相位差决定，共同转角抵消。</text>
+  </g>
+</svg>

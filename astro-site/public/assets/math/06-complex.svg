@@ -1,0 +1,46 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 440" role="img" aria-labelledby="title desc">
+
+
+  <title id="title">06 / 复数乘法可以表示平面旋转</title>
+  <desc id="desc">从1加i开始，每次乘虚数单位i逆时针转90度，四次后回到原来的向量；乘单位复数保模。</desc>
+
+
+  <defs>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#087c70"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#c54834"/>
+    </marker>
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#245fb0"/>
+    </marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#172521"/>
+    </marker>
+  </defs>
+  <rect width="640" height="440" fill="#ffffff"/>
+
+
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="22" fill="#172521" text-anchor="start">06 / 复数乘法可以表示平面旋转</text>
+    <line x1="187" y1="225" x2="453" y2="225" stroke="#d5ddd7" stroke-width="1"/>
+    <line x1="320" y1="92" x2="320" y2="358" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="302" y="247" font-size="15" fill="#58635e" text-anchor="start">0</text>
+    <circle cx="320" cy="225" r="106" fill="none" stroke="#d5ddd7"/>
+    <line x1="320" y1="225" x2="394.9533188057741" y2="150.04668119422598" stroke="#087c70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="401.9533188057741" y="141.04668119422598" font-size="18" fill="#087c70" text-anchor="start">z = 1 + i</text>
+    <line x1="320" y1="225" x2="245.04668119422598" y2="150.04668119422595" stroke="#c54834" stroke-width="3" marker-end="url(#red)"/>
+    <text x="135.04668119422598" y="141.04668119422595" font-size="18" fill="#c54834" text-anchor="start">iz = −1 + i</text>
+    <line x1="320" y1="225" x2="245.04668119422593" y2="299.953318805774" stroke="#245fb0" stroke-width="3" marker-end="url(#blue)"/>
+    <text x="134.04668119422593" y="324.953318805774" font-size="18" fill="#245fb0" text-anchor="start">−z = −1 − i</text>
+    <line x1="320" y1="225" x2="394.953318805774" y2="299.9533188057741" stroke="#172521" stroke-width="3" marker-end="url(#ink)"/>
+    <text x="401.953318805774" y="324.9533188057741" font-size="18" fill="#172521" text-anchor="start">−iz = 1 − i</text>
+    <path d="M382 116 A125 125 0 0 0 258 116" fill="none" stroke="#c54834" stroke-width="2" marker-end="url(#red)"/>
+    <text x="320" y="88" font-size="19" fill="#c54834" text-anchor="middle">× i：逆时针转 90°</text>
+    <text x="479" y="217" font-size="16" fill="#58635e" text-anchor="start">实轴</text>
+    <text x="330" y="161" font-size="16" fill="#58635e" text-anchor="start">虚轴</text>
+    <text x="320" y="402" font-size="21" fill="#172521" text-anchor="middle">一般旋转：z × eⁱᵠ，单位复数的模为 1</text>
+  </g>
+</svg>
