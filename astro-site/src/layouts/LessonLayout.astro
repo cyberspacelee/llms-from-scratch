@@ -14,6 +14,7 @@ const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL :
     <meta name="description" content={description} />
     <title>{title} · LLMs From Scratch</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous" />
+    <script type="module">import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs'; mermaid.initialize({ startOnLoad: true, securityLevel: 'strict', theme: 'neutral' });</script>
   </head>
   <body>
     <header class="lesson-hero"><div class="hero-inner"><nav class="switch" aria-label="系列讲义">
@@ -21,8 +22,9 @@ const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL :
       <a href={`${base}lessons/position-encoding`} class={Astro.url.pathname.includes('position-encoding') ? 'active' : ''}>01 位置编码</a>
       <a href={`${base}lessons/kv-cache`} class={Astro.url.pathname.includes('kv-cache') ? 'active' : ''}>02 KV cache</a>
       <a href={`${base}inference/nano-vllm-from-zero-to-mastery.html`}>03 推理系统</a>
+      <a href={`${base}lessons/ai-infra-01`} class={Astro.url.pathname.includes('ai-infra') ? 'active' : ''}>AI Infra</a>
     </nav><p class="edition">LLMS FROM SCRATCH <span>·</span> READING NOTES</p><h1>{title}</h1><p class="hero-description">{description}</p></div></header>
-    <div class="layout"><aside class="sidebar" aria-label="章节目录"><div class="sidebar-title">学习路线</div><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a><div class="sidebar-title sidebar-chapter-title">本章目录</div>{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</aside>
+    <div class="layout"><aside class="sidebar" aria-label="章节目录"><div class="sidebar-title">学习路线</div><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a><a class:list={['sidebar-series', { active: Astro.url.pathname.includes('ai-infra') }]} href={`${base}lessons/ai-infra-01`}>AI Infra · 01–04</a><div class="sidebar-title sidebar-chapter-title">本章目录</div>{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</aside>
       <details class="mobile-toc"><summary>本章目录</summary><div class="mobile-toc-list">{headings.filter((heading) => heading.depth === 2).map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</div></details>
       <main><slot /></main>
     </div>

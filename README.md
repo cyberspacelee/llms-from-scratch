@@ -2,7 +2,7 @@
 
 一组理解大语言模型原理与推理实现的中文讲义，通过数学推导、小维度算例、交互图示和 PyTorch 数值验证串起概念与代码。
 
-当前内容围绕一条主线展开：**数学基础 → 位置编码 → KV cache 正确性 → 推理引擎实现**。适合具备 Python 和基础深度学习知识的读者；数学篇从二维向量开始补齐所需工具。
+当前内容围绕两条相连主线展开：**数学基础 → 位置编码 → KV cache 正确性 → 推理引擎实现**，以及 **AI Infra 入门 → GPU/kernel → 推理系统 → 分布式生产**。适合具备 Python 和基础深度学习知识的读者；数学篇从二维向量开始补齐所需工具。
 
 ## 阅读路线
 
@@ -12,6 +12,10 @@
 | 01 | [位置编码：从第一性原理推导](training/position-encoding.html) | 注意力如何表示顺序？sin/cos 和 RoPE 如何引入位置关系？ |
 | 02 | [位置编码与 KV cache](inference/position-encoding-and-kv-cache.html) | 为什么历史 K/V 可以复用？位置、掩码和缓存如何保持一致？ |
 | 03 | [nano-vLLM：从一条请求到一个推理引擎](inference/nano-vllm-from-zero-to-mastery.html) | 调度、分页缓存、张量并行与 CUDA Graph 如何协作？ |
+| AI Infra 01 | [从一次请求开始](astro-site/src/content/lessons/ai-infra-01.mdx) | prefill/decode、KV 容量和数据搬移如何构成系统地图？ |
+| AI Infra 02 | [GPU、Kernel 与性能模型](astro-site/src/content/lessons/ai-infra-02.mdx) | 线程、内存层级、矩阵乘和 profiling 如何闭环？ |
+| AI Infra 03 | [推理引擎如何把请求变快](astro-site/src/content/lessons/ai-infra-03.mdx) | 连续批处理、分页 KV、量化和 SLO 怎么权衡？ |
+| AI Infra 04 | [分布式系统与生产边界](astro-site/src/content/lessons/ai-infra-04.mdx) | 并行、通信拓扑、解耦和生产指标如何连接？ |
 
 数学篇提供独立的分章推导和图解；位置编码与 KV cache 篇从原理推到数值验证；推理系统篇沿源码调用链展开，并提供调度与缓存交互实验。nano-vLLM 讲义基于固定源码快照，具体版本见页面标注。
 

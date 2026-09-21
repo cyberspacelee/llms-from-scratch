@@ -110,6 +110,16 @@ main {
   padding: 15px 0 80px;
 }
 
+.mermaid, .infra-svg {
+  display: block;
+  width: 100%;
+  max-width: 820px;
+  margin: 28px auto;
+  overflow-x: auto;
+}
+
+.infra-svg { height: auto; }
+
 h2 {
   margin: 55px 0 23px;
   padding-top: 28px;

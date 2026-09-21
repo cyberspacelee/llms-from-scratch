@@ -1,0 +1,65 @@
+---
+title: AI Infra 01，从一次请求开始
+section: AI Infra
+chapter: 1
+order: 10
+description: 用时间、容量和数据搬移建立 AI Infra 的第一张地图。
+---
+
+AI Infra 不是“把模型放到 GPU 上”。它是一条从请求到结果的资源链：模型参数、激活、KV cache 在不同层级的存储之间移动，计算单元在等待数据时就会浪费预算。
+
+本系列参考 [AI Infra Book](https://bojieli.github.io/ai-infra-book/index.html) 的十二章路线，并把 [GPU Performance Engineering Resources](https://github.com/wafer-ai/gpu-perf-engineering-resources) 的资源按入门顺序重排。下面的解释是重新组织后的教学内容，不复制原文；外部资料只作为定义、规范或进一步阅读。
+
+## 01 · 先画出请求的生命周期
+
+```mermaid
+flowchart LR
+  A[请求] --> B[Tokenizer]
+  B --> C[Prefill\n读完整提示]
+  C --> D[KV cache]
+  D --> E[Decode\n每步生成一个 token]
+  E --> F[采样与输出]
+  E --> D
+```
+
+Prefill 的主要工作是并行处理提示，通常受矩阵乘和显存带宽影响；Decode 每步只有一个新 token，却要读取越来越长的 KV cache，常见瓶颈从算力转向内存和调度。先分清这两个阶段，后面才知道为什么要连续批处理、分页 KV 和 prefill/decode 解耦。
+
+## 02 · 四个量足够开始估算
+
+对一个 decoder-only 模型，先记录：
+
+| 量 | 估算问题 | 影响 |
+| --- | --- | --- |
+| 权重 bytes | 参数量 × 每参数字节数 | 能否放进显存，启动时要搬多少数据 |
+| 激活 bytes | batch、序列长、层宽和中间张量 | prefill 峰值显存 |
+| KV bytes | 层数 × KV 头数 × head_dim × token 数 × dtype | decode 随上下文增长的容量压力 |
+| 时间 | TTFT、TPOT、端到端延迟 | 用户体验与吞吐 SLO |
+
+KV cache 的单 token 近似大小为
+
+$$2\times L\times H_{kv}\times D\times b,$$
+
+其中 2 是 K 和 V，$L$ 是层数，$H_{kv}$ 是 KV 头数，$D$ 是 head dimension，$b$ 是每元素字节数。GQA/MQA 通过减少 $H_{kv}$ 直接节省缓存；这也是模型架构会反过来影响系统成本的例子。
+
+## 03 · 数据搬移比峰值 FLOPs 更值得先问
+
+<svg class="infra-svg" viewBox="0 0 720 180" role="img" aria-labelledby="infra01-title infra01-desc" xmlns="http://www.w3.org/2000/svg">
+  <title id="infra01-title">AI 推理中的存储层级</title><desc id="infra01-desc">参数从主机存储进入显存，再由片上缓存喂给计算单元。</desc>
+  <rect width="720" height="180" fill="#f0f3f1"/>
+  <g font-family="sans-serif" text-anchor="middle"><rect x="28" y="58" width="130" height="64" rx="6" fill="#fff" stroke="#087c70"/><text x="93" y="86">磁盘 / 网络</text><text x="93" y="106" font-size="12">慢，容量大</text><rect x="210" y="58" width="130" height="64" rx="6" fill="#fff" stroke="#245fb0"/><text x="275" y="86">主机内存</text><text x="275" y="106" font-size="12">中等带宽</text><rect x="392" y="58" width="130" height="64" rx="6" fill="#fff" stroke="#c54834"/><text x="457" y="86">GPU HBM</text><text x="457" y="106" font-size="12">高带宽</text><rect x="574" y="58" width="118" height="64" rx="6" fill="#fff" stroke="#172521"/><text x="633" y="86">片上存储</text><text x="633" y="106" font-size="12">最快，最小</text></g>
+  <g stroke="#172521" stroke-width="2" marker-end="url(#arrow)"><path d="M160 90h45"/><path d="M342 90h45"/><path d="M524 90h45"/></g><defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0l8 4-8 4z" fill="#172521"/></marker></defs>
+</svg>
+
+这张图不是硬件规格表，而是排查性能的顺序：数据在哪里、要搬几次、每次搬多少、搬运能否与计算重叠。Roofline 模型把算术强度与计算/带宽上限联系起来，适合在优化前建立可证伪的假设（见 [Roofline](https://users.cs.duke.edu/~rogers/roofline.pdf)；课程资源中的原始链接见 [Wafer 列表](https://github.com/wafer-ai/gpu-perf-engineering-resources#start-here-the-minimum-mental-model)）。
+
+## 04 · 学习顺序与最小练习
+
+1. 先读本仓库的 [KV cache](./kv-cache)，用 CPU 验证 prefill/decode 等价。
+2. 用一个小矩阵记录参数 bytes、KV bytes、TTFT 和 TPOT，不追求“跑满 GPU”。
+3. 再进入 [AI Infra 02](./ai-infra-02)，学习线程、内存层级和 kernel。
+
+### 引用与边界
+
+- 路线依据：[AI Infra Book 首页](https://bojieli.github.io/ai-infra-book/index.html)。
+- 资源分类依据：[Wafer GPU performance engineering resources](https://github.com/wafer-ai/gpu-perf-engineering-resources)，尤其是 Start here、Inference engines 与 Source policy。
+- 本页的公式是教学用容量估算；真实实现还需计入 padding、对齐、临时 buffer 和 allocator 碎片。
