@@ -1,59 +1,99 @@
 ---
-import '../styles/theme.css'
-import '../styles/lesson.css'
-import { aiInfraChapters } from '../data/ai-infra'
+import '../styles/site.css'
+import SeriesLinks from '../components/SeriesLinks.astro'
+import { findSeries, series, topNav } from '../data/series'
+
 type Heading = { depth: number; slug: string; text: string }
-const { title, description, rail, kicker = '讲义' } = Astro.props
-const headings = (Astro.props.headings ?? []) as Heading[]
+const {
+  title,
+  description,
+  rail,
+  kicker,
+  slug,
+  progress = true,
+} = Astro.props
+const headings = ((Astro.props.headings ?? []) as Heading[]).filter((heading) => heading.depth === 2)
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
-const path = Astro.url.pathname
-const onInfra = path.includes('/ai-infra')
-const infraCurrent = (slug: string) => path.endsWith(`/lessons/${slug}`) || path.endsWith(`/lessons/${slug}/`)
-const toc = headings.filter((heading) => heading.depth === 2)
-const showRail = rail ?? (onInfra || toc.length > 0)
+const current = findSeries(slug)
+const index = current ? series.findIndex((item) => item.id === current.id) : -1
+const prev = index > 0 ? series[index - 1] : undefined
+const next = index >= 0 && index < series.length - 1 ? series[index + 1] : undefined
+const onInfra = current?.group === 'infra'
+const showRail = rail ?? Boolean(current)
+const edition = kicker ?? current?.kicker ?? '讲义'
+const href = (path: string) => `${base}${path}`
+const topOn = (id: string) => {
+  if (!current) return false
+  if (id === 'ai-infra') return current.group === 'infra'
+  return current.id === id
+}
 ---
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-progress={progress ? undefined : 'off'}>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
     <meta name="description" content={description} />
     <title>{title} · LLMs From Scratch</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous" />
+    <script is:inline>
+      (function () {
+        try {
+          var stored = localStorage.getItem('theme');
+          var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+          var root = document.documentElement;
+          root.classList.toggle('dark', dark);
+          root.dataset.theme = stored || 'system';
+          root.style.colorScheme = dark ? 'dark' : 'light';
+        } catch (error) {}
+      })();
+    </script>
   </head>
   <body>
-    <header class="lesson-hero">
-      <div class="hero-inner">
-        <div class="hero-bar">
+    <a class="skip-link" href="#content">跳到正文</a>
+    <header class="site-header">
+      <div class="header-bar">
+        <div class="bar-inner">
           <a class="brand" href={base}>LLMs From Scratch</a>
           <nav class="switch" aria-label="系列讲义">
-            <a href={`${base}lessons/mathematics`} class={path.includes('mathematics') ? 'active' : ''}>数学</a>
-            <a href={`${base}lessons/position-encoding`} class={path.includes('position-encoding') ? 'active' : ''}>位置编码</a>
-            <a href={`${base}lessons/kv-cache`} class={path.includes('kv-cache') ? 'active' : ''}>KV cache</a>
-            <a href={`${base}inference/nano-vllm-from-zero-to-mastery.html`}>推理系统</a>
-            <a href={`${base}lessons/ai-infra`} class={onInfra ? 'active' : ''}>AI Infra</a>
+            {topNav.map((item) => (
+              <a href={href(item.href)} aria-current={topOn(item.id) ? 'page' : undefined}>{item.label}</a>
+            ))}
           </nav>
+          <p class="read-label" id="read-label"></p>
+          <button class="theme-toggle" type="button">系统</button>
         </div>
-        <p class="edition">{kicker}</p>
+        <div class="read-progress" aria-hidden="true"><div id="read-bar"></div></div>
+      </div>
+      <div class="hero-inner">
+        <p class="edition">{edition}</p>
         <h1>{title}</h1>
         {description && <p class="hero-description">{description}</p>}
       </div>
     </header>
     <div class:list={['layout', { 'layout-single': !showRail }]}>
-      {showRail && <aside class="sidebar" aria-label="章节目录">
-        <div class="sidebar-title">学习路线</div>
-        <a class:list={['sidebar-series', { active: path.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a>
-        <a class:list={['sidebar-series', { active: path.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a>
-        <a class:list={['sidebar-series', { active: path.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a>
-        <a class:list={['sidebar-series', { active: onInfra }]} href={`${base}lessons/ai-infra`}>AI Infra</a>
-        {onInfra && aiInfraChapters.map((chapter) => <a class:list={['sidebar-sub', { active: infraCurrent(chapter.slug) }]} href={`${base}lessons/${chapter.slug}`}>{chapter.nav}</a>)}
-        {toc.length > 0 && <div class="sidebar-title sidebar-chapter-title">本章目录</div>}
-        {toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}
-      </aside>}
-      {onInfra && <details class="mobile-toc"><summary>AI Infra 章节</summary><div class="mobile-toc-list">{aiInfraChapters.map((chapter) => <a class:list={[{ active: infraCurrent(chapter.slug) }]} href={`${base}lessons/${chapter.slug}`}>{chapter.nav} · {chapter.title}</a>)}</div></details>}
-      {toc.length > 0 && <details class="mobile-toc"><summary>本章目录</summary><div class="mobile-toc-list">{toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</div></details>}
-      <main><slot /></main>
+      {showRail && (
+        <aside class="sidebar">
+          <SeriesLinks base={base} currentId={current?.id} onInfra={onInfra} headings={headings} />
+        </aside>
+      )}
+      <details class="mobile-toc">
+        <summary>目录</summary>
+        <div class="mobile-toc-list">
+          <SeriesLinks base={base} currentId={current?.id} onInfra={onInfra} headings={headings} />
+        </div>
+      </details>
+      <main id="content">
+        <slot />
+        {(prev || next) && (
+          <nav class="series-footer" aria-label="前后篇">
+            {prev && <a class="prev" href={href(prev.href)} rel="prev">上一篇 · {prev.nav}</a>}
+            {next && <a class="next" href={href(next.href)} rel="next">下一篇 · {next.nav}</a>}
+          </nav>
+        )}
+      </main>
     </div>
+    <script src={`${base}assets/reader.js`} defer></script>
     <script is:inline>
       document.querySelectorAll('[data-chapter-outline]').forEach((outline) => {
         const heads = [...document.querySelectorAll('#lesson-content h2')].filter((heading) => heading.id)
@@ -85,7 +125,7 @@ const showRail = rail ?? (onInfra || toc.length > 0)
           startOnLoad: false,
           securityLevel: 'loose',
           theme: 'base',
-          fontFamily: 'Avenir Next, PingFang SC, Microsoft YaHei, sans-serif',
+          fontFamily: 'PingFang SC, Noto Sans SC, Microsoft YaHei, sans-serif',
           themeVariables: {
             primaryColor: '#e7f2ef',
             primaryTextColor: '#1c2926',

@@ -72,8 +72,8 @@ node "assets/build.mjs"
 
 | 修改内容 | 文件入口 |
 | --- | --- |
-| 四篇共享的配色、排版与导航样式 | `assets/theme.css` |
-| 三篇原理讲义的样式与交互 | `assets/lesson.css`、`assets/lesson.js` |
+| 全站配色、排版与页壳 | `astro-site/src/styles/site.css`。改完后在 `astro-site` 执行 `pnpm css`，生成 `assets/site.css` |
+| 三篇原理讲义的交互 | `assets/lesson.js`、`assets/reader.js` |
 | 三篇原理讲义的页面模板与导航链接 | `assets/build.mjs` |
 | 数学基础的逐章 SVG 图解 | `assets/math/` |
 | nano-vLLM 正文、导航与专用交互 | `inference/nano-vllm-from-zero-to-mastery.html` |

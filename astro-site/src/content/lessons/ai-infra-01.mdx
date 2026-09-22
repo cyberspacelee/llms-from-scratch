@@ -6,8 +6,6 @@ order: 10
 description: 用一个能手算的小模型和 Llama 3 8B 的公开宽度，记下时间、容量和数据搬移。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 一次生成同时记三本账：花了多少时间，占了多少字节，这些字节在存储层级之间搬了几次。权重、激活和 KV cache 是这三本账里反复出现的三项。
 
 ```mermaid
@@ -118,4 +116,3 @@ $$
 
 省略了激活峰值、allocator 碎片、对齐填充和 RoPE 表。这些项在具体实现里会把账单改掉几个百分点到几倍，第 02 章会先补上最容易被漏掉的一块：注意力分数矩阵。
 
-<SeriesNav current="ai-infra-01" />

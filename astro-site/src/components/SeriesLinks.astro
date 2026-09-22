@@ -1,0 +1,26 @@
+---
+import { infraItems, principleItems, type SeriesItem } from '../data/series'
+
+type Heading = { depth: number; slug: string; text: string }
+interface Props {
+  base: string
+  currentId?: string
+  onInfra: boolean
+  headings: Heading[]
+}
+const { base, currentId, onInfra, headings } = Astro.props
+const href = (item: SeriesItem) => `${base}${item.href}`
+const page = (id: string) => currentId === id
+---
+<nav class="route-links" aria-label="学习路线">
+  <div class="sidebar-title">学习路线</div>
+  {principleItems.map((item) => (
+    <a href={href(item)} aria-current={page(item.id) ? 'page' : undefined}>{item.sidebar}</a>
+  ))}
+  <a href={`${base}lessons/ai-infra`} aria-current={onInfra && currentId === 'ai-infra' ? 'page' : undefined}>AI Infra</a>
+  {onInfra && infraItems.filter((item) => item.id !== 'ai-infra').map((item) => (
+    <a class="sub" href={href(item)} aria-current={page(item.id) ? 'page' : undefined}>{item.sidebar}</a>
+  ))}
+  {headings.length > 0 && <div class="sidebar-title">本章目录</div>}
+  {headings.map((heading) => <a class="toc-link" href={`#${heading.slug}`}>{heading.text}</a>)}
+</nav>

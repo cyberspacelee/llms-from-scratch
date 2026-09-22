@@ -6,8 +6,6 @@ order: 16
 description: 连续批处理、分页 KV、量化和投机解码各自改的是等待、碎片、字节或步数。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 单卡的屋顶线和 kernel 决定一步计算能有多快。推理引擎决定这一步算哪些请求、KV 放在哪、权重用多少字节，以及一步验证能产出几个 token。模型权重可以不变，这四件事仍会改掉第 01 章的三本账。
 
 ## 静态 batch 在等最长的那条
@@ -74,4 +72,3 @@ $\alpha = 0$ 时这个和是 1，相当于没有草稿。$\alpha$ 接近 1 时�
 
 本页没有实现调度器。块表和 CUDA Graph 的代码路径在 nano-vLLM 那一篇里。
 
-<SeriesNav current="ai-infra-07" />

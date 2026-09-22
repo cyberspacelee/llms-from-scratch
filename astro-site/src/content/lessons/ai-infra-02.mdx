@@ -6,8 +6,6 @@ order: 11
 description: GQA、注意力分数矩阵和专家结构各自改写容量或计算，而不改记账的方法。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 第 01 章的公式里，KV 字节正比于 KV 头数，注意力的计算量正比于 token 数的平方。换一种架构，就是改这两个因子，或者让一部分参数在某一步根本不参与计算。
 
 ```mermaid
@@ -62,4 +60,3 @@ FlashAttention 的做法是按 tile 计算分数、在线归一化、只把输�
 
 本页没有比较这些架构的模型质量，也没有给出某种头数配置的推荐值。质量要在对应的训练配方里测；系统侧能先确定的是容量和 IO。
 
-<SeriesNav current="ai-infra-02" />

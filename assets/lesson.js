@@ -28,17 +28,22 @@
     });
     article.innerHTML = md.render(source);
     article.querySelectorAll('pre code').forEach(code => code.classList.add('hljs'));
+    const contents = document.getElementById('contents');
+    const mobileChapters = document.getElementById('mobile-chapters');
     article.querySelectorAll('h2').forEach((section, index) => {
       section.id = 'section-' + (index + 1);
+      section.tabIndex = -1;
       const link = document.createElement('a');
       link.href = '#' + section.id;
+      link.className = 'toc-link';
       link.textContent = section.textContent;
-      document.getElementById('contents').append(link);
+      contents?.append(link);
+      mobileChapters?.append(link.cloneNode(true));
     });
     article.querySelectorAll('[data-chapter-outline]').forEach(outline => {
       const links = document.createElement('div');
       const label = document.createElement('p');
-      label.textContent = '九章阅读导航 · 每章配有 SVG 图解，窄屏可横向滑动图解';
+      label.textContent = '本章各节';
       outline.append(label, links);
       article.querySelectorAll('h2').forEach(section => {
         const link = document.createElement('a');
@@ -48,6 +53,7 @@
       });
     });
     document.documentElement.dataset.rendered = 'true';
+    document.dispatchEvent(new Event('lesson-ready'));
   } catch (error) {
     status.className = 'warning';
     status.textContent = '渲染失败：' + error.message;

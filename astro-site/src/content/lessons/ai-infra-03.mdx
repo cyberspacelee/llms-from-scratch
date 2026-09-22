@@ -6,8 +6,6 @@ order: 12
 description: Prefill、decode 和训练访问同一套权重的方式不同，算术强度和常驻字节也不同。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 第 01 章把权重和 KV 的字节算了出来。同样这些字节，在 prefill、decode 和训练里被读的次数、旁边还要留下的张量，都不一样。
 
 ```mermaid
@@ -72,4 +70,3 @@ Prefill 的线性层则是 $2NS$。$S = 8192$ 时约 $1.32 \times 10^{14}$ 次�
 
 强度公式忽略了 kernel 启动、采样和临时缓冲。它用来比较两种负载，不用来预测某次运行的毫秒数。
 
-<SeriesNav current="ai-infra-03" />

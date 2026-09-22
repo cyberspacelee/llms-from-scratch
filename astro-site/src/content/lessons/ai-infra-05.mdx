@@ -6,8 +6,6 @@ order: 14
 description: 分块矩阵乘、融合和 Tensor Core 都是在减少往返 HBM 的次数。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 第 04 章的下界假设数据按必要的次数流过 HBM。朴素 kernel 做不到这一点：它把同一行、同一列读了很多遍。Kernel 优化的第一件事，是让一次读入服务更多乘加。
 
 ```mermaid
@@ -67,4 +65,3 @@ Tensor Core 在一条 warp 指令里完成一块小矩阵乘加，输入类型�
 
 图和伪代码省略了边界、异步拷贝和双缓冲。它们决定生产 kernel 能不能把计算和搬运重叠起来，测量方法在下一章。
 
-<SeriesNav current="ai-infra-05" />

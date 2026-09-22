@@ -6,8 +6,6 @@ order: 13
 description: 用 H100 SXM 的产品页数字画出屋顶线，并把第 03 章的强度放上去。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 第 03 章得到两个强度：单请求线性层约 1 FLOP/byte，长上下文的 decode 注意力约 4 FLOP/byte。它们快还是慢，要看这张卡每秒能搬多少字节、每秒能做多少乘加。容量、带宽和延迟是三件不同的事：放得下，不等于搬得及；搬得及，不等于一次随机访问的等待可以忽略。
 
 ```mermaid
@@ -73,4 +71,3 @@ $$
 
 屋顶线假设这次计算能碰到峰值。真实 kernel 还受 tile 形状、占用率和启动开销限制，所以测出来的点通常在线的下方。第 06 章讲怎么把那个点测出来。
 
-<SeriesNav current="ai-infra-04" />

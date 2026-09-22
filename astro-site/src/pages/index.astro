@@ -1,15 +1,23 @@
 ---
 import LessonLayout from '../layouts/LessonLayout.astro'
-import { aiInfraChapters } from '../data/ai-infra'
+import { infraItems, principleItems } from '../data/series'
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
 ---
-<LessonLayout rail={false} kicker="目录" title="LLMs From Scratch" description="用数学推导、SVG 图解与 PyTorch 验证理解大语言模型，再沿一次请求的账单进入 AI Infra。">
-  <section class="lesson-index">
+<LessonLayout
+  rail={false}
+  progress={false}
+  kicker="目录"
+  title="阅读路线"
+  description="用数学推导、SVG 图解与 PyTorch 验证理解大语言模型，再沿一次请求的账单进入 AI Infra。"
+>
+  <section class="route-index">
     <h2>模型原理</h2>
-    <a href={`${base}lessons/mathematics`}><strong>00 · 数学基础</strong><span>从向量、范数、点积到旋转</span></a>
-    <a href={`${base}lessons/position-encoding`}><strong>01 · 位置编码</strong><span>sin/cos、相对位置与 RoPE</span></a>
-    <a href={`${base}lessons/kv-cache`}><strong>02 · KV cache</strong><span>从整段注意力到逐 token 解码</span></a>
+    {principleItems.map((item) => (
+      <a href={`${base}${item.href}`}><strong>{item.sidebar}</strong><span>{item.question}</span></a>
+    ))}
     <h2>AI Infra</h2>
-    {aiInfraChapters.map((chapter) => <a href={`${base}lessons/${chapter.slug}`}><strong>{chapter.nav}</strong><span>{chapter.question}</span></a>)}
+    {infraItems.map((item) => (
+      <a href={`${base}${item.href}`}><strong>{item.sidebar}</strong><span>{item.question}</span></a>
+    ))}
   </section>
 </LessonLayout>

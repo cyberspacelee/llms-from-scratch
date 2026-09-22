@@ -5,22 +5,53 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="从整段因果计算，推到 prefill、逐 token 解码与长度外推。">
 <title>位置编码，走进 KV cache</title>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('theme');
+    var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    var root = document.documentElement;
+    root.classList.toggle('dark', dark);
+    root.dataset.theme = stored || 'system';
+    root.style.colorScheme = dark ? 'dark' : 'light';
+  } catch (error) {}
+})();
+</script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.css" integrity="sha384-M59ezskvvpvT+a+C1x088YJ3DVmK+wZdX0UkVKalOI4Qi5Nwv0WrvpqHcfa2HQqB" crossorigin="anonymous">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.min.css" integrity="sha384-UttgWGqUmSzrxetIBqxigLodBLOt0G9HCTlG9hKEmS9H5A5T3PGyDhPv0G8/C1EE" crossorigin="anonymous">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github.min.css" integrity="sha384-eFTL69TLRZTkNfYZOLM+G04821K1qZao/4QLJbet1pP4tcF+fdXq/9CdqAbWRl/L" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
 <script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" integrity="sha384-wLhprpjsmjc/XYIcF+LpMxd8yS1gss6jhevOp6F6zhiIoFK6AmHtm4bGKtehTani" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.js" integrity="sha384-7jGyG5zFwmEamqNWdCbpsPn+GTWEis3lnV7X/jXHyhFpJG7ExABLyMapabg8F4+p" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
 <script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js" integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU" crossorigin="anonymous"></script>
-<link rel="stylesheet" href="../assets/lesson.css">
-<link rel="stylesheet" href="../assets/theme.css">
+<link rel="stylesheet" href="../assets/site.css">
 <script defer src="../assets/lesson.js"></script>
+<script defer src="../assets/reader.js"></script>
 </head>
 <body>
-<header><div class="switch" role="navigation" aria-label="系列讲义"><a href="../foundations/mathematics.html">00 数学基础</a><a href="../training/position-encoding.html">01 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html" aria-current="page">02 KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 推理系统</a><a href="position_encoding_cache.py">PyTorch 源码</a></div>
-<p class="edition">LLMS FROM SCRATCH · 02 / INFERENCE</p><h1>位置编码，走进 KV cache</h1><p>从整段因果计算，推到 prefill、逐 token 解码与长度外推。</p></header>
-<div class="layout"><nav aria-label="章节目录"><p class="nav-label">CONTENTS / 推导路径</p><div id="contents"></div></nav>
-<main><div id="load-status" role="status"></div><article id="article"></article><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding-and-kv-cache.md">Markdown 原文</a>。</noscript></main></div>
+<a class="skip-link" href="#content">跳到正文</a>
+<header class="site-header">
+<div class="header-bar">
+<div class="bar-inner">
+<a class="brand" href="../foundations/mathematics.html">LLMs From Scratch</a>
+<nav class="switch" aria-label="系列讲义"><a href="../foundations/mathematics.html">数学</a><a href="../training/position-encoding.html">位置编码</a><a href="../inference/position-encoding-and-kv-cache.html" aria-current="page">KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a></nav>
+<p class="read-label" id="read-label"></p>
+<button class="theme-toggle" type="button">系统</button>
+</div>
+<div class="read-progress" aria-hidden="true"><div id="read-bar"></div></div>
+</div>
+<div class="hero-inner">
+<p class="edition">02 · KV cache</p>
+<h1>位置编码，走进 KV cache</h1>
+<p class="hero-description">从整段因果计算，推到 prefill、逐 token 解码与长度外推。</p>
+<p class="source-row"><a href="position_encoding_cache.py">PyTorch 源码</a></p>
+</div>
+</header>
+<div class="layout">
+<aside class="sidebar"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html" aria-current="page">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="contents"></div></nav></aside>
+<details class="mobile-toc"><summary>目录</summary><div class="mobile-toc-list"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html" aria-current="page">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="mobile-chapters"></div></nav></div></details>
+<main id="content"><div id="load-status" role="status"></div><article id="article"></article><nav class="series-footer" aria-label="前后篇"><a class="prev" href="../training/position-encoding.html" rel="prev">上一篇 · 位置编码</a><a class="next" href="../inference/nano-vllm-from-zero-to-mastery.html" rel="next">下一篇 · 推理系统</a></nav><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding-and-kv-cache.md">Markdown 原文</a>。</noscript></main>
+</div>
 <script type="text/plain" id="lesson-source">训练和推理使用同一组模型权重、同一套位置约定。KV cache 的目标是复用因果模型中不会再变化的历史结果，而不是近似替换位置编码。
 
 > 本篇从单层注意力推到多层缓存。先假设没有 padding、没有滑动窗口、固定 RoPE 频率，处于 eval 模式。每次放宽假设时，都明确指出新增条件。

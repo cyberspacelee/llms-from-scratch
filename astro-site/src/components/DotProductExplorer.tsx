@@ -13,7 +13,7 @@ export default function DotProductExplorer() {
   const projection = point(bNorm * Math.cos(angle * Math.PI / 180), 0)
   const fmt = (n: number) => n.toFixed(3)
   return <section className="astro-lab" aria-label="点积交互实验">
-    <div className="astro-lab-head"><strong>长度、夹角与点积</strong><span>MDX + React island</span></div>
+    <div className="astro-lab-head"><strong>长度、夹角与点积</strong><span>拖动长度和夹角</span></div>
     <div className="astro-controls">
       <label>a 的长度 <output>{aNorm.toFixed(1)}</output><input type="range" min="0.5" max="3" step="0.1" value={aNorm} onChange={e => setANorm(Number(e.target.value))} /></label>
       <label>b 的长度 <output>{bNorm.toFixed(1)}</output><input type="range" min="0.5" max="3" step="0.1" value={bNorm} onChange={e => setBNorm(Number(e.target.value))} /></label>

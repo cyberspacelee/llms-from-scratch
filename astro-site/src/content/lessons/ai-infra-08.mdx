@@ -6,8 +6,6 @@ order: 17
 description: 并行切的是哪一维，通信走的是哪条线，训练和端边云把状态放在哪。
 ---
 
-import SeriesNav from '../../components/SeriesNav.astro'
-
 一张卡的字节和脊点已经确定之后，多出来的卡只能做一件事：用通信换容量或换吞吐。先决定切哪一维，再问这些字节要穿过哪条线。
 
 ```mermaid
@@ -62,4 +60,3 @@ NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果
 
 本页不给出某一代 GPU 的推荐拓扑或并行组合。那种组合依赖模型形状、长度分布和这台集群的线，要用第 06 章的记录方法在目标机器上测。
 
-<SeriesNav current="ai-infra-08" />

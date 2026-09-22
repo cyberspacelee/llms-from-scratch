@@ -3,6 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('theme');
+    var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    var root = document.documentElement;
+    root.classList.toggle('dark', dark);
+    root.dataset.theme = stored || 'system';
+    root.style.colorScheme = dark ? 'dark' : 'light';
+  } catch (error) {}
+})();
+</script>
 <meta name="description" content="沿 nano-vLLM 的真实源码调用链，学习调度、Paged KV Cache、FlashAttention、Tensor Parallel 与 CUDA Graph。">
 <title>nano-vLLM：从一条请求到一个推理引擎</title>
 <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
@@ -538,31 +550,39 @@ details p { padding-left: 24px; color: #3f4a47; }
   .chapter:first-child { break-before: auto; }
 }
 </style>
-<link rel="stylesheet" href="../assets/theme.css">
+<link rel="stylesheet" href="../assets/site.css">
+<script defer src="../assets/reader.js"></script>
 </head>
 <body>
-<header class="masthead">
-  <nav class="series-nav" aria-label="系列讲义">
-    <a href="../foundations/mathematics.html">00 数学基础</a>
-    <a href="../training/position-encoding.html">01 位置编码</a>
-    <a href="position-encoding-and-kv-cache.html">02 KV cache</a>
-    <a href="nano-vllm-from-zero-to-mastery.html" aria-current="page">03 推理系统</a>
-  </nav>
-  <div class="topline">
-    <a class="brand" href="https://github.com/GeeeekExplorer/nano-vllm">NANO-VLLM / SOURCE FIELD GUIDE</a>
-    <span class="snapshot">源码快照 bb823b3 · 2026-04-26 · 约 1,200 行 Python</span>
+<a class="skip-link" href="#content">跳到正文</a>
+<header class="site-header">
+  <div class="header-bar">
+    <div class="bar-inner">
+      <a class="brand" href="../foundations/mathematics.html">LLMs From Scratch</a>
+      <nav class="switch" aria-label="系列讲义">
+        <a href="../foundations/mathematics.html">数学</a>
+        <a href="../training/position-encoding.html">位置编码</a>
+        <a href="position-encoding-and-kv-cache.html">KV cache</a>
+        <a href="nano-vllm-from-zero-to-mastery.html" aria-current="page">推理系统</a>
+        <a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a>
+      </nav>
+      <p class="read-label" id="read-label"></p>
+      <button class="theme-toggle" type="button">系统</button>
+    </div>
+    <div class="read-progress" aria-hidden="true"><div id="read-bar"></div></div>
   </div>
-  <div class="hero">
-    <p class="eyebrow">LLMs from scratch · inference systems</p>
+  <div class="hero-inner">
+    <p class="edition">03 · 推理系统</p>
     <h1>nano-vLLM：从一条请求到一个推理引擎</h1>
-    <p class="hero-lede">沿真实调用链拆开连续批处理、Paged KV Cache、前缀缓存、FlashAttention、张量并行与 CUDA Graph。目标不是记住类名，而是能独立解释一次 token 如何被调度、计算、缓存并采样。</p>
+    <p class="hero-description">沿真实调用链拆开连续批处理、Paged KV Cache、前缀缓存、FlashAttention、张量并行与 CUDA Graph。目标不是记住类名，而是能独立解释一次 token 如何被调度、计算、缓存并采样。</p>
+    <p class="snapshot">源码快照 bb823b3 · 2026-04-26 · 约 1,200 行 Python · <a href="https://github.com/GeeeekExplorer/nano-vllm">上游仓库</a></p>
+    <nav class="hero-path" aria-label="学习阶段">
+      <a href="#mental-model"><strong>01 入门</strong><span>先建立运行时地图</span></a>
+      <a href="#scheduler"><strong>02 核心</strong><span>推演调度与缓存</span></a>
+      <a href="#model"><strong>03 进阶</strong><span>追踪 kernel 与并行</span></a>
+      <a href="#mastery"><strong>04 精通</strong><span>用不变量审查实现</span></a>
+    </nav>
   </div>
-  <nav class="hero-path" aria-label="学习阶段">
-    <a href="#mental-model"><strong>01 入门</strong><span>先建立运行时地图</span></a>
-    <a href="#scheduler"><strong>02 核心</strong><span>推演调度与缓存</span></a>
-    <a href="#model"><strong>03 进阶</strong><span>追踪 kernel 与并行</span></a>
-    <a href="#mastery"><strong>04 精通</strong><span>用不变量审查实现</span></a>
-  </nav>
 </header>
 
 <div class="shell">
@@ -573,7 +593,7 @@ details p { padding-left: 24px; color: #3f4a47; }
     <p class="progress-label" id="progress-label">0 / 16</p>
   </aside>
 
-  <main>
+  <main id="content">
     <section class="chapter" id="mental-model" data-title="心智模型">
       <p class="chapter-tag">LEVEL 0 · ORIENTATION</p>
       <h2>先把它看成两台协作的机器</h2>
@@ -1067,11 +1087,15 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
 
       <p class="source-note">上游仓库：<a href="https://github.com/GeeeekExplorer/nano-vllm">GeeeekExplorer/nano-vllm</a>。本讲义基于提交 <a href="https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8">bb823b3e</a>；后续源码变化应先核对调度器与 ModelRunner 再阅读本页。</p>
     </section>
+    <nav class="series-footer" aria-label="前后篇">
+      <a class="prev" href="position-encoding-and-kv-cache.html" rel="prev">上一篇 · KV cache</a>
+      <a class="next" href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/" rel="next">下一篇 · 导读</a>
+    </nav>
   </main>
 </div>
 
 <footer class="footer">
-  <strong>nano-vLLM source field guide</strong> · 生成于 llms-from-scratch / inference · <a href="../inference/position-encoding-and-kv-cache.html">补充：位置编码与 KV Cache</a>
+  <strong>nano-vLLM source field guide</strong> · 源码快照 bb823b3 · <a href="https://github.com/GeeeekExplorer/nano-vllm">上游仓库</a>
 </footer>
 
 <script>
@@ -1096,7 +1120,12 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
     chapters.forEach((chapter, index) => {
       if (chapter.offsetTop <= marker) active = index;
     });
-    tocLinks.forEach((link, index) => link.classList.toggle('active', index === active));
+    tocLinks.forEach((link, index) => {
+      const on = index === active;
+      link.classList.toggle('active', on);
+      if (on) link.setAttribute('aria-current', 'location');
+      else link.removeAttribute('aria-current');
+    });
     const percent = ((active + 1) / chapters.length) * 100;
     progressBar.style.width = `${percent}%`;
     progressLabel.textContent = `${active + 1} / ${chapters.length}`;
