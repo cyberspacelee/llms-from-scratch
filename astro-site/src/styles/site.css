@@ -299,9 +299,11 @@ h1, h2, h3, h4 {
   position: sticky;
   top: calc(var(--header) + 0.75rem);
   align-self: start;
+  min-height: 0;
   max-height: calc(100vh - var(--header) - 1.5rem);
   padding: 0.4rem 0 1.5rem;
   overflow: auto;
+  overscroll-behavior: contain;
   border: 0;
 }
 
@@ -796,6 +798,7 @@ output,
   padding-top: 1.4rem;
   border: 0;
   border-top: 1px solid var(--line);
+  scroll-margin-top: calc(var(--header) + 0.8rem);
 }
 
 .shell main > .chapter:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
@@ -1013,23 +1016,6 @@ output,
   .sidebar { display: none; }
 
   .mobile-toc { display: block; margin: 0 0 0.8rem; }
-
-  .side {
-    display: block;
-    position: sticky;
-    top: var(--header);
-    z-index: 20;
-    max-height: none;
-    margin: 0 0 0.6rem;
-    padding: 0.35rem 0;
-    border-bottom: 1px solid var(--line);
-    background: color-mix(in oklch, var(--paper) 94%, transparent);
-  }
-
-  .side .toc { display: flex; gap: 0.2rem; overflow-x: auto; }
-  .side .toc a { flex: none; border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
-  .side .toc a[aria-current="location"],
-  .side .toc a.active { border-bottom-color: var(--green); }
 
   .site-header .hero-path { grid-template-columns: 1fr 1fr; }
   main { padding-left: 0; }

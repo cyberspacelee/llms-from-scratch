@@ -54,10 +54,33 @@
 </header>
 
 <div class="shell">
-  <aside class="side">
-    <p class="side-label">本章目录</p>
-    <nav class="toc" id="toc" aria-label="章节目录"></nav>
+  <aside class="sidebar">
+    <nav class="route-links" aria-label="学习路线">
+      <div class="sidebar-title">学习路线</div>
+      <a href="../lessons/mathematics/">00 · 数学基础</a>
+      <a href="../lessons/position-encoding/">01 · 位置编码</a>
+      <a href="../lessons/kv-cache/">02 · KV cache</a>
+      <a href="nano-vllm-from-zero-to-mastery.html" aria-current="page">03 · 推理系统</a>
+      <a href="../lessons/ai-infra/">AI Infra</a>
+      <div class="sidebar-title">本章目录</div>
+      <div id="contents"></div>
+    </nav>
   </aside>
+  <details class="mobile-toc">
+    <summary>目录</summary>
+    <div class="mobile-toc-list">
+      <nav class="route-links" aria-label="学习路线">
+        <div class="sidebar-title">学习路线</div>
+        <a href="../lessons/mathematics/">00 · 数学基础</a>
+        <a href="../lessons/position-encoding/">01 · 位置编码</a>
+        <a href="../lessons/kv-cache/">02 · KV cache</a>
+        <a href="nano-vllm-from-zero-to-mastery.html" aria-current="page">03 · 推理系统</a>
+        <a href="../lessons/ai-infra/">AI Infra</a>
+        <div class="sidebar-title">本章目录</div>
+        <div id="mobile-chapters"></div>
+      </nav>
+    </div>
+  </details>
 
   <main id="content">
     <section class="chapter" id="mental-model" data-title="心智模型">
@@ -567,37 +590,17 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
 <script>
 (() => {
   const chapters = [...document.querySelectorAll('.chapter')];
-  const toc = document.getElementById('toc');
-  const progressBar = document.getElementById('progress-bar');
-  const progressLabel = document.getElementById('progress-label');
-
-  chapters.forEach((chapter, index) => {
-    const link = document.createElement('a');
-    link.href = `#${chapter.id}`;
-    link.dataset.index = String(index + 1).padStart(2, '0');
-    link.textContent = chapter.dataset.title;
-    toc.append(link);
+  const lists = [document.getElementById('contents'), document.getElementById('mobile-chapters')].filter(Boolean);
+  chapters.forEach((chapter) => {
+    const heading = chapter.querySelector('h2');
+    lists.forEach((list) => {
+      const link = document.createElement('a');
+      link.href = `#${chapter.id}`;
+      link.className = 'toc-link';
+      link.textContent = heading ? heading.textContent : chapter.dataset.title;
+      list.append(link);
+    });
   });
-
-  const tocLinks = [...toc.querySelectorAll('a')];
-  const updateProgress = () => {
-    const marker = window.scrollY + Math.min(window.innerHeight * .36, 280);
-    let active = 0;
-    chapters.forEach((chapter, index) => {
-      if (chapter.offsetTop <= marker) active = index;
-    });
-    tocLinks.forEach((link, index) => {
-      const on = index === active;
-      link.classList.toggle('active', on);
-      if (on) link.setAttribute('aria-current', 'location');
-      else link.removeAttribute('aria-current');
-    });
-    if (progressBar) progressBar.style.width = `${((active + 1) / chapters.length) * 100}%`;
-    if (progressLabel) progressLabel.textContent = `${active + 1} / ${chapters.length}`;
-  };
-  window.addEventListener('scroll', updateProgress, {passive: true});
-  window.addEventListener('resize', updateProgress);
-  updateProgress();
 
   window.addEventListener('load', async () => {
     if (!window.mermaid) {

@@ -47,42 +47,70 @@
 
   let spyReady = false;
 
+  const chapterLinks = () => [...document.querySelectorAll('a.toc-link')];
+
+  const sections = () => {
+    const seen = new Set();
+    const found = [];
+    chapterLinks().forEach((link) => {
+      const id = (link.getAttribute('href') || '').slice(1);
+      if (!id || seen.has(id)) return;
+      const section = document.getElementById(id);
+      if (!section) return;
+      seen.add(id);
+      found.push(section);
+    });
+    return found;
+  };
+
+  const reveal = (id) => {
+    const escaped = window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"');
+    document.querySelectorAll('.sidebar, .mobile-toc-list').forEach((scroller) => {
+      const link = scroller.querySelector(`a.toc-link[href="#${escaped}"]`);
+      if (!link) return;
+      const linkBox = link.getBoundingClientRect();
+      const view = scroller.getBoundingClientRect();
+      if (linkBox.top < view.top) scroller.scrollTop += linkBox.top - view.top;
+      else if (linkBox.bottom > view.bottom) scroller.scrollTop += linkBox.bottom - view.bottom;
+    });
+  };
+
   const boot = () => {
     wrapTables();
     if (spyReady || root.dataset.progress === 'off') return;
-    const article = document.querySelector('#lesson-content, #article');
-    const sections = article
-      ? [...article.querySelectorAll('h2')]
-      : [...document.querySelectorAll('main .chapter')];
-    if (!sections.length) return;
+    const found = sections();
+    if (!found.length) return;
     spyReady = true;
-    sections.forEach((section) => {
+    found.forEach((section) => {
       if (!section.hasAttribute('tabindex')) section.tabIndex = -1;
     });
     const bar = document.getElementById('read-bar');
     const label = document.getElementById('read-label');
-    const links = () => [...document.querySelectorAll('a.toc-link, #toc a')];
-    const mark = (index) => {
-      const current = sections[index];
-      links().forEach((link) => {
-        const on = current && link.getAttribute('href') === `#${current.id}`;
+    let currentId = '';
+    const mark = (id) => {
+      if (!id || id === currentId) return;
+      currentId = id;
+      const index = found.findIndex((section) => section.id === id);
+      chapterLinks().forEach((link) => {
+        const on = link.getAttribute('href') === `#${id}`;
         if (on) link.setAttribute('aria-current', 'location');
         else link.removeAttribute('aria-current');
       });
-      if (label) label.textContent = `${index + 1} / ${sections.length}`;
-      if (bar) bar.style.width = `${((index + 1) / sections.length) * 100}%`;
+      if (index >= 0 && label) label.textContent = `${index + 1} / ${found.length}`;
+      if (index >= 0 && bar) bar.style.width = `${((index + 1) / found.length) * 100}%`;
+      reveal(id);
     };
     const update = () => {
       const line = window.scrollY + Math.min(window.innerHeight * 0.28, 220);
-      let active = 0;
-      sections.forEach((section, index) => {
+      let active = found[0];
+      found.forEach((section) => {
         const top = section.getBoundingClientRect().top + window.scrollY;
-        if (top <= line) active = index;
+        if (top <= line) active = section;
       });
-      mark(active);
+      if (active) mark(active.id);
     };
     document.addEventListener('click', (event) => {
-      const link = event.target instanceof Element ? event.target.closest('a.toc-link, #toc a') : null;
+      const link = event.target instanceof Element ? event.target.closest('a.toc-link') : null;
       if (!link) return;
       const id = (link.getAttribute('href') || '').slice(1);
       const target = document.getElementById(id);
