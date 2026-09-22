@@ -3,13 +3,14 @@ import '../styles/theme.css'
 import '../styles/lesson.css'
 import { aiInfraChapters } from '../data/ai-infra'
 type Heading = { depth: number; slug: string; text: string }
-const { title, description } = Astro.props
+const { title, description, rail, kicker = '讲义' } = Astro.props
 const headings = (Astro.props.headings ?? []) as Heading[]
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
 const path = Astro.url.pathname
 const onInfra = path.includes('/ai-infra')
 const infraCurrent = (slug: string) => path.endsWith(`/lessons/${slug}`) || path.endsWith(`/lessons/${slug}/`)
 const toc = headings.filter((heading) => heading.depth === 2)
+const showRail = rail ?? (onInfra || toc.length > 0)
 ---
 <!doctype html>
 <html lang="zh-CN">
@@ -21,28 +22,53 @@ const toc = headings.filter((heading) => heading.depth === 2)
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" crossorigin="anonymous" />
   </head>
   <body>
-    <header class="lesson-hero"><div class="hero-inner"><nav class="switch" aria-label="系列讲义">
-      <a href={`${base}lessons/mathematics`} class={path.includes('mathematics') ? 'active' : ''}>00 数学基础</a>
-      <a href={`${base}lessons/position-encoding`} class={path.includes('position-encoding') ? 'active' : ''}>01 位置编码</a>
-      <a href={`${base}lessons/kv-cache`} class={path.includes('kv-cache') ? 'active' : ''}>02 KV cache</a>
-      <a href={`${base}inference/nano-vllm-from-zero-to-mastery.html`}>03 推理系统</a>
-      <a href={`${base}lessons/ai-infra`} class={onInfra ? 'active' : ''}>AI Infra</a>
-    </nav><p class="edition">LLMS FROM SCRATCH <span>·</span> READING NOTES</p><h1>{title}</h1><p class="hero-description">{description}</p></div></header>
-    <div class="layout"><aside class="sidebar" aria-label="章节目录">
-      <div class="sidebar-title">学习路线</div>
-      <a class:list={['sidebar-series', { active: path.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a>
-      <a class:list={['sidebar-series', { active: path.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a>
-      <a class:list={['sidebar-series', { active: path.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a>
-      <a class:list={['sidebar-series', { active: onInfra }]} href={`${base}lessons/ai-infra`}>AI Infra</a>
-      {onInfra && aiInfraChapters.map((chapter) => <a class:list={['sidebar-sub', { active: infraCurrent(chapter.slug) }]} href={`${base}lessons/${chapter.slug}`}>{chapter.nav}</a>)}
-      <div class="sidebar-title sidebar-chapter-title">本章目录</div>
-      {toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}
-    </aside>
+    <header class="lesson-hero">
+      <div class="hero-inner">
+        <div class="hero-bar">
+          <a class="brand" href={base}>LLMs From Scratch</a>
+          <nav class="switch" aria-label="系列讲义">
+            <a href={`${base}lessons/mathematics`} class={path.includes('mathematics') ? 'active' : ''}>数学</a>
+            <a href={`${base}lessons/position-encoding`} class={path.includes('position-encoding') ? 'active' : ''}>位置编码</a>
+            <a href={`${base}lessons/kv-cache`} class={path.includes('kv-cache') ? 'active' : ''}>KV cache</a>
+            <a href={`${base}inference/nano-vllm-from-zero-to-mastery.html`}>推理系统</a>
+            <a href={`${base}lessons/ai-infra`} class={onInfra ? 'active' : ''}>AI Infra</a>
+          </nav>
+        </div>
+        <p class="edition">{kicker}</p>
+        <h1>{title}</h1>
+        {description && <p class="hero-description">{description}</p>}
+      </div>
+    </header>
+    <div class:list={['layout', { 'layout-single': !showRail }]}>
+      {showRail && <aside class="sidebar" aria-label="章节目录">
+        <div class="sidebar-title">学习路线</div>
+        <a class:list={['sidebar-series', { active: path.includes('mathematics') }]} href={`${base}lessons/mathematics`}>00 · 数学基础</a>
+        <a class:list={['sidebar-series', { active: path.includes('position-encoding') }]} href={`${base}lessons/position-encoding`}>01 · 位置编码</a>
+        <a class:list={['sidebar-series', { active: path.includes('kv-cache') }]} href={`${base}lessons/kv-cache`}>02 · KV cache</a>
+        <a class:list={['sidebar-series', { active: onInfra }]} href={`${base}lessons/ai-infra`}>AI Infra</a>
+        {onInfra && aiInfraChapters.map((chapter) => <a class:list={['sidebar-sub', { active: infraCurrent(chapter.slug) }]} href={`${base}lessons/${chapter.slug}`}>{chapter.nav}</a>)}
+        {toc.length > 0 && <div class="sidebar-title sidebar-chapter-title">本章目录</div>}
+        {toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}
+      </aside>}
       {onInfra && <details class="mobile-toc"><summary>AI Infra 章节</summary><div class="mobile-toc-list">{aiInfraChapters.map((chapter) => <a class:list={[{ active: infraCurrent(chapter.slug) }]} href={`${base}lessons/${chapter.slug}`}>{chapter.nav} · {chapter.title}</a>)}</div></details>}
-      <details class="mobile-toc"><summary>本章目录</summary><div class="mobile-toc-list">{toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</div></details>
+      {toc.length > 0 && <details class="mobile-toc"><summary>本章目录</summary><div class="mobile-toc-list">{toc.map((heading) => <a class="toc-depth-2" href={`#${heading.slug}`}>{heading.text}</a>)}</div></details>}
       <main><slot /></main>
     </div>
     <script is:inline>
+      document.querySelectorAll('[data-chapter-outline]').forEach((outline) => {
+        const heads = [...document.querySelectorAll('#lesson-content h2')].filter((heading) => heading.id)
+        if (!heads.length) return
+        const label = document.createElement('p')
+        label.textContent = '本章各节'
+        const links = document.createElement('div')
+        for (const heading of heads) {
+          const link = document.createElement('a')
+          link.href = '#' + heading.id
+          link.textContent = heading.textContent
+          links.append(link)
+        }
+        outline.replaceChildren(label, links)
+      })
       ;(async () => {
         const highlighted = document.querySelectorAll('pre[data-language="mermaid"]')
         for (const pre of highlighted) {
@@ -58,7 +84,18 @@ const toc = headings.filter((heading) => heading.depth === 2)
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: 'loose',
-          theme: 'neutral',
+          theme: 'base',
+          fontFamily: 'Avenir Next, PingFang SC, Microsoft YaHei, sans-serif',
+          themeVariables: {
+            primaryColor: '#e7f2ef',
+            primaryTextColor: '#1c2926',
+            primaryBorderColor: '#087f70',
+            secondaryColor: '#f4f7f5',
+            tertiaryColor: '#fffefa',
+            lineColor: '#68726d',
+            textColor: '#1c2926',
+            fontSize: '15px',
+          },
           flowchart: { htmlLabels: true, useMaxWidth: true },
           sequence: { useMaxWidth: true },
         })

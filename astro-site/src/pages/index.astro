@@ -3,7 +3,7 @@ import LessonLayout from '../layouts/LessonLayout.astro'
 import { aiInfraChapters } from '../data/ai-infra'
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
 ---
-<LessonLayout title="LLMs From Scratch" description="用数学推导、SVG 图解与 PyTorch 验证理解大语言模型，再沿一次请求的账单进入 AI Infra。">
+<LessonLayout rail={false} kicker="目录" title="LLMs From Scratch" description="用数学推导、SVG 图解与 PyTorch 验证理解大语言模型，再沿一次请求的账单进入 AI Infra。">
   <section class="lesson-index">
     <h2>模型原理</h2>
     <a href={`${base}lessons/mathematics`}><strong>00 · 数学基础</strong><span>从向量、范数、点积到旋转</span></a>
