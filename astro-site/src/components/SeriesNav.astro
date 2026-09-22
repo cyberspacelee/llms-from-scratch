@@ -1,0 +1,12 @@
+---
+import { aiInfraChapters } from '../data/ai-infra'
+const { current } = Astro.props
+const index = aiInfraChapters.findIndex((chapter) => chapter.slug === current)
+const prev = index > 0 ? aiInfraChapters[index - 1] : undefined
+const next = index >= 0 && index < aiInfraChapters.length - 1 ? aiInfraChapters[index + 1] : undefined
+const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
+---
+<nav class="series-footer" aria-label="AI Infra 章节">
+  {prev ? <a href={`${base}lessons/${prev.slug}`}>上一章 · {prev.nav}</a> : <span></span>}
+  {next ? <a href={`${base}lessons/${next.slug}`}>下一章 · {next.nav}</a> : <span></span>}
+</nav>

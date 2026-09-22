@@ -1,0 +1,64 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 460" role="img" aria-labelledby="title desc">
+  <title id="title">逻辑 token 连续，物理 KV block 可以分开存放</title>
+  <desc id="desc">请求 A 的 10 个 token 按每块 4 个映射到物理块 2、5、1。请求 B 占用另外几块。空闲块可以留给下一条请求。</desc>
+  <rect width="720" height="460" fill="#fffefa"/>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="20" fill="#1c2926">分页保存的是映射，不是一块越来越大的数组</text>
+    <text x="28" y="62" font-size="14" fill="#68726d">教学用的块大小是 4。生产系统常用更大的块，映射方式相同。</text>
+
+    <text x="28" y="104" font-size="14" fill="#1c2926">请求 A 的逻辑 token</text>
+    <g font-size="13" text-anchor="middle">
+      <rect x="28" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="68" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="108" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="148" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="196" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="236" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="276" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="316" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="364" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="404" y="118" width="36" height="32" fill="#087f70"/>
+      <rect x="444" y="118" width="36" height="32" fill="#f7f8f6" stroke="#d9e0da"/>
+      <rect x="484" y="118" width="36" height="32" fill="#f7f8f6" stroke="#d9e0da"/>
+      <g fill="#fffefa">
+        <text x="46" y="139">0</text><text x="86" y="139">1</text><text x="126" y="139">2</text><text x="166" y="139">3</text>
+        <text x="214" y="139">4</text><text x="254" y="139">5</text><text x="294" y="139">6</text><text x="334" y="139">7</text>
+        <text x="382" y="139">8</text><text x="422" y="139">9</text>
+      </g>
+      <text x="462" y="139" fill="#68726d">空</text>
+      <text x="502" y="139" fill="#68726d">空</text>
+    </g>
+    <text x="28" y="174" font-size="13" fill="#68726d">三组逻辑块。最后一组还有两个空位，结束前不必腾给别人。</text>
+
+    <text x="28" y="220" font-size="14" fill="#1c2926">块表：逻辑块 → 物理块</text>
+    <rect x="28" y="234" width="180" height="36" rx="4" fill="#e7f3f1" stroke="#087f70"/>
+    <text x="40" y="257" font-size="14" fill="#1c2926">0 → 物理 2</text>
+    <rect x="220" y="234" width="180" height="36" rx="4" fill="#e7f3f1" stroke="#087f70"/>
+    <text x="232" y="257" font-size="14" fill="#1c2926">1 → 物理 5</text>
+    <rect x="412" y="234" width="180" height="36" rx="4" fill="#e7f3f1" stroke="#087f70"/>
+    <text x="424" y="257" font-size="14" fill="#1c2926">2 → 物理 1</text>
+
+    <text x="28" y="310" font-size="14" fill="#1c2926">物理 KV 池</text>
+    <g font-size="13" text-anchor="middle" fill="#fffefa">
+      <rect x="28" y="324" width="70" height="40" fill="#245fb0"/>
+      <rect x="106" y="324" width="70" height="40" fill="#087f70"/>
+      <rect x="184" y="324" width="70" height="40" fill="#087f70"/>
+      <rect x="262" y="324" width="70" height="40" fill="#d9e0da"/>
+      <rect x="340" y="324" width="70" height="40" fill="#245fb0"/>
+      <rect x="418" y="324" width="70" height="40" fill="#087f70"/>
+      <rect x="496" y="324" width="70" height="40" fill="#245fb0"/>
+      <rect x="574" y="324" width="70" height="40" fill="#d9e0da"/>
+      <text x="63" y="349">B</text>
+      <text x="141" y="349">A·2</text>
+      <text x="219" y="349">A·0</text>
+      <text x="297" y="349" fill="#68726d">空闲</text>
+      <text x="375" y="349">B</text>
+      <text x="453" y="349">A·1</text>
+      <text x="531" y="349">B</text>
+      <text x="609" y="349" fill="#68726d">空闲</text>
+    </g>
+    <text x="28" y="400" font-size="15" fill="#1c2926">A 在逻辑上连续，在池子里占的是 1、2、5 三块。B 结束后，蓝块回到空闲列表。</text>
+    <text x="28" y="428" font-size="14" fill="#68726d">共享前缀时，只读块可以被多条请求指到同一物理块，写之前再复制。</text>
+  </g>
+</svg>

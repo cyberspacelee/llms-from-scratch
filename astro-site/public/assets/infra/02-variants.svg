@@ -1,0 +1,71 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 460" role="img" aria-labelledby="title desc">
+  <title id="title">Query 头可以很多，KV 头决定缓存</title>
+  <desc id="desc">示意图用 8 个 query 头。MHA 为每个 query 头保存一对 KV，GQA 让 4 个 query 头共享一对，MQA 全部共享一对。</desc>
+  <rect width="720" height="460" fill="#fffefa"/>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    <text x="28" y="36" font-size="20" fill="#1c2926">缓存跟着 KV 头走，不跟着 query 头走</text>
+    <text x="28" y="62" font-size="14" fill="#68726d">图里把 query 头画成 8 个，方便看见分组。绿色是 query，蓝色是要写入缓存的 K/V。</text>
+
+    <g>
+      <text x="48" y="104" font-size="16" fill="#1c2926">MHA</text>
+      <text x="48" y="126" font-size="13" fill="#68726d">8 对 KV</text>
+      <g fill="#087f70">
+        <rect x="48" y="148" width="22" height="22" rx="3"/>
+        <rect x="48" y="178" width="22" height="22" rx="3"/>
+        <rect x="48" y="208" width="22" height="22" rx="3"/>
+        <rect x="48" y="238" width="22" height="22" rx="3"/>
+        <rect x="48" y="268" width="22" height="22" rx="3"/>
+        <rect x="48" y="298" width="22" height="22" rx="3"/>
+        <rect x="48" y="328" width="22" height="22" rx="3"/>
+        <rect x="48" y="358" width="22" height="22" rx="3"/>
+      </g>
+      <g fill="#245fb0">
+        <rect x="86" y="148" width="22" height="22" rx="3"/>
+        <rect x="86" y="178" width="22" height="22" rx="3"/>
+        <rect x="86" y="208" width="22" height="22" rx="3"/>
+        <rect x="86" y="238" width="22" height="22" rx="3"/>
+        <rect x="86" y="268" width="22" height="22" rx="3"/>
+        <rect x="86" y="298" width="22" height="22" rx="3"/>
+        <rect x="86" y="328" width="22" height="22" rx="3"/>
+        <rect x="86" y="358" width="22" height="22" rx="3"/>
+      </g>
+    </g>
+
+    <g>
+      <text x="250" y="104" font-size="16" fill="#1c2926">GQA</text>
+      <text x="250" y="126" font-size="13" fill="#68726d">2 对 KV</text>
+      <g fill="#087f70">
+        <rect x="250" y="148" width="22" height="22" rx="3"/>
+        <rect x="250" y="178" width="22" height="22" rx="3"/>
+        <rect x="250" y="208" width="22" height="22" rx="3"/>
+        <rect x="250" y="238" width="22" height="22" rx="3"/>
+        <rect x="250" y="268" width="22" height="22" rx="3"/>
+        <rect x="250" y="298" width="22" height="22" rx="3"/>
+        <rect x="250" y="328" width="22" height="22" rx="3"/>
+        <rect x="250" y="358" width="22" height="22" rx="3"/>
+      </g>
+      <rect x="288" y="148" width="28" height="112" rx="4" fill="#245fb0"/>
+      <rect x="288" y="268" width="28" height="112" rx="4" fill="#245fb0"/>
+      <text x="326" y="210" font-size="13" fill="#245fb0">4 个 query 共享</text>
+      <text x="326" y="330" font-size="13" fill="#245fb0">另外 4 个共享</text>
+    </g>
+
+    <g>
+      <text x="500" y="104" font-size="16" fill="#1c2926">MQA</text>
+      <text x="500" y="126" font-size="13" fill="#68726d">1 对 KV</text>
+      <g fill="#087f70">
+        <rect x="500" y="148" width="22" height="22" rx="3"/>
+        <rect x="500" y="178" width="22" height="22" rx="3"/>
+        <rect x="500" y="208" width="22" height="22" rx="3"/>
+        <rect x="500" y="238" width="22" height="22" rx="3"/>
+        <rect x="500" y="268" width="22" height="22" rx="3"/>
+        <rect x="500" y="298" width="22" height="22" rx="3"/>
+        <rect x="500" y="328" width="22" height="22" rx="3"/>
+        <rect x="500" y="358" width="22" height="22" rx="3"/>
+      </g>
+      <rect x="538" y="148" width="28" height="232" rx="4" fill="#245fb0"/>
+      <text x="576" y="268" font-size="13" fill="#245fb0">全体共享</text>
+    </g>
+  </g>
+</svg>

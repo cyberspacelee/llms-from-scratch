@@ -1,68 +1,65 @@
 ---
-title: AI Infra 02，GPU、Kernel 与性能模型
+title: AI Infra 02，架构改写哪一笔账
 section: AI Infra
 chapter: 2
 order: 11
-description: 从线程块和内存合并访问，到矩阵乘、Tensor Core 与 profiling。
+description: GQA、注意力分数矩阵和专家结构各自改写容量或计算，而不改记账的方法。
 ---
 
-这一章只做一件事：把“GPU 很快”拆成可测量的 kernel 行为。先掌握 CUDA 的执行模型，再谈 Triton、CUTLASS 或特定 GPU 架构。
+import SeriesNav from '../../components/SeriesNav.astro'
 
-## 01 · 一个 kernel 的最小心智模型
+第 01 章的公式里，KV 字节正比于 KV 头数，注意力的计算量正比于 token 数的平方。换一种架构，就是改这两个因子，或者让一部分参数在某一步根本不参与计算。
 
 ```mermaid
-flowchart TB
-  G[Grid] --> B1[Block 0]
-  G --> B2[Block 1]
-  B1 --> W[Warps]
-  W --> T[Threads]
-  T --> R[Registers]
-  W --> S[Shared memory]
-  B1 --> H[Global memory / HBM]
+flowchart LR
+  heads[KV 头数] --> bytes[KV 字节]
+  score[分数矩阵是否写回] --> act[激活字节]
+  experts[被选中的专家] --> flops[这一步的乘加]
 ```
 
-线程执行同一程序，block 是协作和共享内存的边界，warp 是硬件调度的基本组。访问相邻地址、减少分支发散、让数据在寄存器/共享内存复用，通常比盲目增加线程更重要。
+## 因果掩码决定谁能并行
 
-权威定义以 [CUDA Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) 和 [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/) 为准；本页只抽取足够开始实验的部分。
+Decoder 在位置 $t$ 只能看见 $1 \ldots t$。Prefill 仍然可以把整段提示放进同一次矩阵乘，因为每个位置需要的历史都已经在输入里，掩码只是把未来的分数盖住。Decode 则没有这种自由：位置 $t+1$ 的查询依赖位置 $t$ 刚采样出来的 token。所以 KV 可以复用，生成本身仍是串行的。位置如何进入 Q 和 K，见 [位置编码](../../lessons/position-encoding)；复用后数值是否不变，见 [KV cache](../../lessons/kv-cache)。
 
-## 02 · 从朴素矩阵乘开始
+## KV 头数直接乘在缓存上
 
-矩阵乘 $C=AB$ 的朴素实现让每个线程计算一个 $C_{ij}$，反复从全局内存读取 $A$ 的行和 $B$ 的列。分块后，一个 tile 由 block 搬进 shared memory，多线程复用，减少 HBM 访问。
+多头注意力为每个 query 头保存一对 K、V。分组查询让若干 query 头共用一对。多查询注意力让所有 query 头共用一对。图里把 query 头画成 8 个，是为了看清分组；Llama 3 8B 是 32 个 query 头共用 8 对 KV。
 
-```text
-for each C tile:
-    load A tile and B tile cooperatively
-    synchronize block
-    accumulate tile products in registers
-    repeat over K
-    store C tile
-```
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="MHA、GQA 与 MQA 的 KV 头数量，可横向滚动"><img src="../../assets/infra/02-variants.svg" alt="MHA 每个 query 头一对 KV，GQA 分组共享，MQA 全体共享" width="720" height="460" /></div>
+<figcaption>绿色是 query，蓝色是要写入缓存的 K/V。缓存的宽度跟着蓝色走。</figcaption>
+</figure>
 
-正确性先用小矩阵与 `torch.testing.assert_close` 对照；性能再用固定形状、预热、同步后的计时。不要把一次冷启动时间称为 kernel 性能。
+第 01 章的 8B 形状在 8192 token 上是 1 GiB KV。若 KV 头从 8 改成 32，其他宽度不动，缓存变为 4 GiB。GQA 的定义和从多头检查点压缩出分组头的做法，见 [Ainslie 等人](https://arxiv.org/abs/2305.13245)。只留一对 KV 的做法见 [Shazeer 的多查询注意力](https://arxiv.org/abs/1911.02150)。
 
-## 03 · 何时用 Triton，何时看 PTX
+头数变少之后，每个 query 头在解码时仍要扫过它所共享的那一对 K、V。计算量按 query 头计，容量按 KV 头计。两本账因此可以分开移动。
 
-Triton 让你以块为单位表达 kernel，适合快速验证布局、融合和内存访问；CUDA C++/CUTLASS 提供更细的控制，适合成熟算子和硬件特性。编译链中 CUDA C++ 会经过 PTX 再到目标机器码，可用 `nvcc`、`cuobjdump` 与 `nvdisasm` 检查产物。
+## 分数矩阵不一定要落在显存里
 
-- [Triton Programming Guide](https://triton-lang.org/main/getting-started/tutorials/)
-- [CUTLASS documentation](https://docs.nvidia.com/cutlass/latest/)
-- [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/)
+一层、一条序列、fp16，若把注意力分数完整存下来：
 
-选择标准很简单：先用能表达问题的最高层抽象；只有 profile 证明瓶颈在它覆盖不到的地方，才下沉一层。
+$$
+n_q \times S \times S \times 2.
+$$
 
-## 04 · Profile 的最小闭环
+$S = 8192$、$n_q = 32$ 时，这是 $32 \times 8192^2 \times 2 = 4$ GiB，而且只是一层、一条请求。实现如果按层循环，不会把 32 层的分数同时留下，但单层 4 GiB 已经比这一层的 KV 大。
 
-1. 先记录输入形状、dtype、硬件、软件版本和正确性结果。
-2. 用 Nsight Systems 看 CPU、GPU、通信和空洞的时间线。
-3. 用 Nsight Compute 看单 kernel 的带宽、占用率、内存访问和 roofline。
-4. 一次只改一个变量，再复测端到端指标。
+FlashAttention 的做法是按 tile 计算分数、在线归一化、只把输出写回，从而不必物化整块 $S \times S$。算法和 IO 复杂度见 [Dao 等人](https://arxiv.org/abs/2205.14135)。这里要记住的系统后果是：激活账单取决于实现是否把中间矩阵写回显存，不能只按数学定义里出现过的张量去加。
 
-对应工具：[Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/)、[Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/) 与 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)。指标名称会随 GPU 和工具版本变化，报告时保留原始导出文件。
+## 专家：参数可以常驻，计算可以缺席
 
-### 小练习
+稠密层每个 token 都经过同一套前馈权重。混合专家层先为 token 选择少数专家，再只计算那几个前馈。参数总量按全部专家计，一次前向的乘加按被选中的专家计。容量规划因此有两个数：卡上要放得下所有专家，算力只覆盖活跃的那一部分。
 
-用 Python/NumPy 写一个 64×64 的朴素 matmul，手算一个元素并与库结果比较；随后阅读一个 Triton matmul tutorial，标出“加载、同步、复用、写回”四个阶段。没有 GPU 也能完成前半部分。
+专家若分放在不同设备上，token 要被送到它选中的设备，通信形态是 all-to-all。设备上的专家放置见 [GShard](https://arxiv.org/abs/2006.16668)，稀疏门控的大规模训练见 [Switch Transformer](https://arxiv.org/abs/2101.03961)。一个具体的稀疏模型形状可以对照 [Mixtral](https://arxiv.org/abs/2401.04088)。第 08 章再把这种通信放进集群账单；这一章只把「总参数」和「活跃参数」拆成两个量。
 
-### 引用与边界
+## 引用与边界
 
-本页的线程层级与编译链来自 NVIDIA 官方文档；性能工程资源的章节顺序参考 [Wafer 的 GPU fundamentals、kernel optimization、profiling](https://github.com/wafer-ai/gpu-perf-engineering-resources)。示例伪代码刻意省略边界处理、向量化和异步拷贝，进入生产 kernel 前必须补齐这些条件。
+| 用到的内容 | 出处 | 本页的处理 |
+| --- | --- | --- |
+| 架构怎样改变系统需求 | [AI Infra Book，模型架构](https://bojieli.github.io/ai-infra-book/manuscripts/02-%E6%A8%A1%E5%9E%8B%E6%9E%B6%E6%9E%84.html) | 借用问题，例子换成第 01 章的 8B 手算 |
+| 注意力 kernel 的阅读入口 | [Wafer 清单，Attention](https://github.com/wafer-ai/gpu-perf-engineering-resources#attention) | 索引，不展开 kernel 实现 |
+| GQA、MQA、FlashAttention、MoE | 上表各论文 | 只保留会改写字节或乘加的那一条机制 |
+
+本页没有比较这些架构的模型质量，也没有给出某种头数配置的推荐值。质量要在对应的训练配方里测；系统侧能先确定的是容量和 IO。
+
+<SeriesNav current="ai-infra-02" />

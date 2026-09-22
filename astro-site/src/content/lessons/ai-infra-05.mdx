@@ -1,0 +1,70 @@
+---
+title: AI Infra 05，让读进来的数据被复用
+section: AI Infra
+chapter: 5
+order: 14
+description: 分块矩阵乘、融合和 Tensor Core 都是在减少往返 HBM 的次数。
+---
+
+import SeriesNav from '../../components/SeriesNav.astro'
+
+第 04 章的下界假设数据按必要的次数流过 HBM。朴素 kernel 做不到这一点：它把同一行、同一列读了很多遍。Kernel 优化的第一件事，是让一次读入服务更多乘加。
+
+```mermaid
+flowchart LR
+  load[从 HBM 装入 tile] --> share[留在 shared memory]
+  share --> acc[在寄存器里累加]
+  acc --> store[K 维走完再写回]
+```
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="朴素矩阵乘与分块复用，可横向滚动"><img src="../../assets/infra/05-tiling.svg" alt="朴素实现反复读取一行和一列，分块实现把 tile 留在 shared memory" width="720" height="440" /></div>
+<figcaption>左边每个输出元素都沿 K 维重新读 A 的一行和 B 的一列。右边一个 block 把两块 tile 放进 shared memory，tile 里的乘加共用这次装载，累加完成后再写回 C。</figcaption>
+</figure>
+
+## 朴素矩阵乘的重复读取
+
+$C = AB$，每个线程算一个 $C_{ij}$，沿 K 维循环。A 的第 $i$ 行会被这一行上的每个输出重新读取，B 的第 $j$ 列同理。正确性很容易检查：用一个 4×4 的整数矩阵，手算一个元素，再和 NumPy 比较。
+
+```python
+import numpy as np
+
+a = np.arange(16, dtype=np.float64).reshape(4, 4)
+b = np.arange(16, 0, -1, dtype=np.float64).reshape(4, 4)
+c = np.zeros((4, 4))
+for i in range(4):
+    for j in range(4):
+        for k in range(4):
+            c[i, j] += a[i, k] * b[k, j]
+assert np.allclose(c, a @ b)
+```
+
+这段代码在 CPU 上就能说明访问次数。它不代表 GPU 上的耗时。
+
+## 分块把复用留在片上
+
+一个 block 负责 C 的一块 tile。每走一步 K，线程合作把 A、B 的对应 tile 读进 shared memory，同步一次，然后每个线程用寄存器把这块乘积累加到自己的输出上。K 维走完，再把 C tile 写回 HBM。读入的字节大约按 tile 的边长算，乘加次数按 tile 的面积乘 K 算，所以强度随 tile 变大而上升，直到片上放不下，或者已经碰到第 04 章的脊点。
+
+同步是 block 内的：先写完 shared memory，再允许别的线程去读。省略这次同步，复用就会读到没写完的数据。Bank conflict、边界和向量化会决定能不能靠近屋顶线，它们是实现条件，不改变「复用」这个目的。系统的展开见 Hwu、Kirk 与 El Hajj 的 *Programming Massively Parallel Processors*，以及 [Wafer 清单里的矩阵乘一节](https://github.com/wafer-ai/gpu-perf-engineering-resources#matrix-multiplication)。
+
+## 融合是少写回一次
+
+两个 kernel 前后执行时，中间张量往往先写回 HBM，再被下一个 kernel 读出来。融合把它们放进同一次启动，中间结果留在寄存器或 shared memory。第 02 章的 FlashAttention 就是这种思路用在分数矩阵上：不把 $S \times S$ 写回去。融合的收益取决于中间张量有多大；已经很小的张量，融合省下的字节可能还抵不过 kernel 变复杂之后的损失。
+
+## Tensor Core 吃特定的形状和类型
+
+Tensor Core 在一条 warp 指令里完成一块小矩阵乘加，输入类型和碎片形状由架构决定。PTX 里的 warp 级矩阵指令列出了这些形状，见 [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions)。对不上的尺寸会被补齐，或者退回普通 CUDA core。第 04 章引用的 989.5 TFLOPS 是这类指令的稠密 FP16 峰值，不是任意一个 fp16 kernel 的速度。
+
+写 kernel 的层级可以按问题来选。Triton 以 block 为单位描述装载和计算，适合先验证布局和融合，教程在 [Triton](https://triton-lang.org/main/index.html)。CUTLASS 把 tile、流水和集体操作收成可组合的 GEMM，文档在 [CUTLASS](https://docs.nvidia.com/cutlass/latest/)。手写 CUDA 则在前两者表达不了实测瓶颈时才需要。这个顺序也是 [Wafer 清单](https://github.com/wafer-ai/gpu-perf-engineering-resources#3-programming-models-and-profiling) 把 Triton 放在 CUTLASS 前面的原因：先用能说清问题的那一层。
+
+## 引用与边界
+
+| 用到的内容 | 出处 | 本页的处理 |
+| --- | --- | --- |
+| 融合、复用和更少的执行开销 | [AI Infra Book，算子与运行时](https://bojieli.github.io/ai-infra-book/manuscripts/05-%E7%AE%97%E5%AD%90%E4%B8%8E%E8%BF%90%E8%A1%8C%E6%97%B6.html) | 收成「少读、少写回」两件事 |
+| 矩阵乘、Tensor Core、Triton、CUTLASS | [Wafer 的 kernel 与编程模型两节](https://github.com/wafer-ai/gpu-perf-engineering-resources#2-kernel-optimization) | 保留选择标准，不贴一份 kernel 源码 |
+| 不物化分数矩阵 | [FlashAttention](https://arxiv.org/abs/2205.14135) | 作为融合的例子 |
+
+图和伪代码省略了边界、异步拷贝和双缓冲。它们决定生产 kernel 能不能把计算和搬运重叠起来，测量方法在下一章。
+
+<SeriesNav current="ai-infra-05" />
