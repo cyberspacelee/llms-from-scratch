@@ -18,538 +18,6 @@
 <meta name="description" content="沿 nano-vLLM 的真实源码调用链，学习调度、Paged KV Cache、FlashAttention、Tensor Parallel 与 CUDA Graph。">
 <title>nano-vLLM：从一条请求到一个推理引擎</title>
 <script defer src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
-<style>
-:root {
-  color-scheme: light;
-  --paper: #f4f1e9;
-  --surface: #fffdf8;
-  --ink: #17201e;
-  --muted: #68706d;
-  --line: #cbc8bf;
-  --blue: #1c58a7;
-  --red: #d1492e;
-  --green: #147d68;
-  --yellow: #e5b63f;
-  --code: #17201e;
-  --code-ink: #edf5f1;
-  --sidebar: 248px;
-  --max: 1260px;
-}
-
-* { box-sizing: border-box; }
-html { scroll-behavior: smooth; scroll-padding-top: 24px; }
-body {
-  margin: 0;
-  min-width: 320px;
-  background:
-    linear-gradient(rgba(23,32,30,.035) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(23,32,30,.035) 1px, transparent 1px),
-    var(--paper);
-  background-size: 24px 24px;
-  color: var(--ink);
-  font-family: "Avenir Next", "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: 16px;
-  line-height: 1.72;
-  letter-spacing: 0;
-}
-
-a { color: var(--blue); text-underline-offset: 4px; }
-a:hover { color: var(--red); }
-button, input { font: inherit; letter-spacing: 0; }
-button:focus-visible, input:focus-visible, a:focus-visible, summary:focus-visible {
-  outline: 3px solid color-mix(in srgb, var(--yellow), white 20%);
-  outline-offset: 3px;
-}
-
-.masthead {
-  min-height: min(720px, 86vh);
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  padding: 28px max(24px, calc((100% - var(--max)) / 2));
-  color: #f7f3ea;
-  background: var(--ink);
-  border-bottom: 8px solid var(--red);
-  overflow: hidden;
-  position: relative;
-}
-.masthead::after {
-  content: "";
-  position: absolute;
-  inset: auto -6vw -48px auto;
-  width: 54vw;
-  height: 56%;
-  opacity: .22;
-  background:
-    linear-gradient(90deg, transparent 49%, #f7f3ea 50%, transparent 51%),
-    linear-gradient(transparent 49%, #f7f3ea 50%, transparent 51%);
-  background-size: 48px 48px;
-  transform: skewY(-8deg);
-  pointer-events: none;
-}
-.topline {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 24px;
-  padding-bottom: 18px;
-  border-bottom: 1px solid rgba(255,255,255,.22);
-  font-family: "SFMono-Regular", Consolas, monospace;
-  font-size: 12px;
-}
-.brand { color: #fff; text-decoration: none; font-weight: 700; }
-.snapshot { color: #b9c4c0; text-align: right; }
-.hero {
-  position: relative;
-  z-index: 1;
-  align-self: center;
-  max-width: 980px;
-  padding: 52px 0 46px;
-}
-.eyebrow {
-  margin: 0 0 20px;
-  color: #8bd8c2;
-  font: 700 13px/1.4 "SFMono-Regular", Consolas, monospace;
-  text-transform: uppercase;
-}
-h1 {
-  max-width: 900px;
-  margin: 0;
-  font-family: "Iowan Old Style", "Songti SC", serif;
-  font-size: 64px;
-  line-height: 1.08;
-  font-weight: 700;
-  letter-spacing: 0;
-}
-.hero-lede {
-  max-width: 760px;
-  margin: 28px 0 0;
-  color: #ccd4d1;
-  font-size: 20px;
-  line-height: 1.7;
-}
-.hero-path {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 1px;
-  background: rgba(255,255,255,.2);
-  border: 1px solid rgba(255,255,255,.2);
-}
-.hero-path a {
-  min-width: 0;
-  padding: 15px 17px;
-  background: var(--ink);
-  color: #f7f3ea;
-  text-decoration: none;
-  font-size: 13px;
-}
-.hero-path strong { display: block; margin-bottom: 3px; color: #f5bd4f; }
-.hero-path span { color: #aebbb7; }
-
-.shell {
-  display: grid;
-  grid-template-columns: var(--sidebar) minmax(0, 1fr);
-  max-width: var(--max);
-  margin: 0 auto;
-  padding: 0 24px 100px;
-}
-.side {
-  position: sticky;
-  top: 0;
-  align-self: start;
-  height: 100vh;
-  padding: 30px 28px 30px 0;
-  border-right: 1px solid var(--line);
-  overflow: auto;
-}
-.side-label {
-  margin: 0 0 14px;
-  color: var(--red);
-  font: 700 11px/1.4 "SFMono-Regular", Consolas, monospace;
-}
-.toc { display: grid; gap: 2px; }
-.toc a {
-  display: grid;
-  grid-template-columns: 26px 1fr;
-  gap: 7px;
-  padding: 7px 9px;
-  border-left: 2px solid transparent;
-  color: var(--muted);
-  text-decoration: none;
-  font-size: 13px;
-  line-height: 1.35;
-}
-.toc a::before { content: attr(data-index); font-family: monospace; color: #999b96; }
-.toc a.active { color: var(--ink); border-left-color: var(--red); background: rgba(255,255,255,.56); }
-.progress-track { height: 3px; margin: 24px 0 8px; background: var(--line); }
-.progress-bar { width: 0; height: 100%; background: var(--green); transition: width .2s ease; }
-.progress-label { margin: 0; color: var(--muted); font: 11px/1.5 monospace; }
-
-main { min-width: 0; padding-left: 64px; }
-.chapter {
-  max-width: 900px;
-  padding: 72px 0 54px;
-  border-bottom: 1px solid var(--line);
-}
-.chapter:last-child { border-bottom: 0; }
-.chapter-tag {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 0 12px;
-  color: var(--red);
-  font: 700 11px/1.4 "SFMono-Regular", Consolas, monospace;
-}
-.chapter-tag::before { content: ""; width: 32px; height: 2px; background: currentColor; }
-h2 {
-  margin: 0 0 26px;
-  font-family: "Iowan Old Style", "Songti SC", serif;
-  font-size: 38px;
-  line-height: 1.24;
-  letter-spacing: 0;
-}
-h3 { margin: 35px 0 12px; font-size: 21px; line-height: 1.45; }
-p { margin: 14px 0; }
-.lead { max-width: 780px; color: #394441; font-size: 18px; }
-.muted, .caption { color: var(--muted); }
-.caption { margin: 10px 0 0; font-size: 13px; }
-
-.thesis {
-  margin: 30px 0;
-  padding: 21px 24px;
-  border-left: 5px solid var(--green);
-  background: #e7f0eb;
-  font-size: 18px;
-}
-.warning {
-  margin: 28px 0;
-  padding: 18px 22px;
-  border-left: 5px solid var(--red);
-  background: #f8e8df;
-}
-.source-note {
-  padding: 13px 0;
-  border-top: 1px dashed var(--line);
-  color: var(--muted);
-  font-size: 13px;
-}
-.source-note code { color: var(--ink); }
-
-.statline {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  margin: 34px 0;
-  border: 1px solid var(--ink);
-  background: var(--surface);
-}
-.statline > div { min-width: 0; padding: 18px; border-right: 1px solid var(--ink); }
-.statline > div:last-child { border-right: 0; }
-.statline strong { display: block; font: 700 22px/1.2 "SFMono-Regular", Consolas, monospace; color: var(--blue); }
-.statline span { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
-
-.flow-strip {
-  display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
-  margin: 30px 0;
-  border: 1px solid var(--ink);
-  background: var(--surface);
-}
-.flow-node {
-  min-width: 0;
-  min-height: 98px;
-  padding: 14px 10px;
-  border-right: 1px solid var(--ink);
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-}
-.flow-node:last-child { border-right: 0; }
-.flow-node b { font-size: 13px; overflow-wrap: anywhere; }
-.flow-node code { color: var(--green); font-size: 11px; }
-.flow-node small { color: var(--muted); }
-
-.compare, .two-col, .three-col { display: grid; gap: 24px; margin: 28px 0; }
-.compare, .two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.three-col { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.plain-panel {
-  min-width: 0;
-  padding: 22px;
-  border-top: 4px solid var(--blue);
-  background: rgba(255,255,255,.58);
-}
-.plain-panel.red { border-top-color: var(--red); }
-.plain-panel.green { border-top-color: var(--green); }
-.plain-panel.yellow { border-top-color: var(--yellow); }
-.plain-panel h3 { margin: 0 0 10px; font-size: 18px; }
-.plain-panel p:last-child { margin-bottom: 0; }
-
-table { width: 100%; margin: 28px 0; border-collapse: collapse; background: rgba(255,255,255,.52); font-size: 14px; }
-th, td { padding: 13px 14px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
-th { border-top: 2px solid var(--ink); background: #e6e3dc; }
-tr:last-child td { border-bottom: 2px solid var(--ink); }
-
-code { font-family: "SFMono-Regular", Consolas, monospace; font-size: .9em; }
-.codebox {
-  margin: 25px 0;
-  border-left: 5px solid var(--yellow);
-  background: var(--code);
-  color: var(--code-ink);
-  overflow: auto;
-}
-.codebox .code-title {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 11px 16px;
-  border-bottom: 1px solid #45514d;
-  color: #aab9b4;
-  font: 12px/1.4 monospace;
-}
-pre { margin: 0; padding: 20px; font: 13px/1.65 "SFMono-Regular", Consolas, monospace; white-space: pre; }
-.kw { color: #ffb257; }.fn { color: #76d8bf; }.cm { color: #8ea19b; }.st { color: #f3d77d; }
-
-.mermaid-wrap {
-  margin: 28px 0;
-  padding: 24px;
-  border: 1px solid var(--line);
-  background: var(--surface);
-  overflow-x: auto;
-}
-.mermaid { min-width: 620px; text-align: center; }
-.mermaid-error { color: var(--red); white-space: pre-wrap; font: 13px/1.5 monospace; }
-
-.system-svg { width: 100%; height: auto; display: block; margin: 28px 0; background: var(--surface); border: 1px solid var(--line); }
-.system-svg text { font-family: "Avenir Next", "PingFang SC", sans-serif; fill: var(--ink); letter-spacing: 0; }
-.system-svg .mono { font-family: "SFMono-Regular", Consolas, monospace; }
-
-.lab {
-  margin: 34px 0;
-  border: 1px solid var(--ink);
-  border-radius: 4px;
-  background: var(--surface);
-}
-.lab-head {
-  display: flex;
-  align-items: start;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 18px 22px;
-  border-bottom: 1px solid var(--ink);
-  background: #ece8df;
-}
-.lab-head h3 { margin: 0; font-size: 18px; }
-.lab-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px; }
-.lab-body { padding: 22px; }
-.controls { display: flex; align-items: end; flex-wrap: wrap; gap: 18px 24px; margin-bottom: 24px; }
-.control { flex: 1 1 190px; min-width: 0; }
-.control label { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; font-weight: 700; }
-.control output { color: var(--red); font-family: monospace; }
-input[type="range"] { width: 100%; accent-color: var(--green); }
-.icon-button {
-  flex: 0 0 auto;
-  width: 42px;
-  height: 42px;
-  border: 1px solid var(--ink);
-  border-radius: 3px;
-  background: var(--ink);
-  color: #fff;
-  cursor: pointer;
-  font-size: 18px;
-}
-.icon-button.secondary { background: transparent; color: var(--ink); }
-.icon-button:hover { background: var(--red); color: #fff; border-color: var(--red); }
-.queue-board { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
-.queue-column { min-width: 0; }
-.queue-column h4 { margin: 0 0 10px; font: 700 12px/1.4 monospace; color: var(--muted); }
-.seq-row {
-  display: grid;
-  grid-template-columns: 42px 1fr auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 52px;
-  padding: 9px 0;
-  border-top: 1px solid var(--line);
-}
-.seq-id { font: 700 14px monospace; color: var(--blue); }
-.token-track { height: 12px; border: 1px solid var(--ink); display: flex; }
-.token-track span { height: 100%; }
-.token-cached { background: var(--green); }
-.token-scheduled { background: var(--yellow); }
-.token-remaining { background: #e8e5de; }
-.token-completion { background: var(--red); }
-.seq-meta { max-width: 160px; color: var(--muted); font: 11px/1.35 monospace; text-align: right; }
-.empty-state { margin: 0; padding: 12px 0; color: var(--muted); border-top: 1px solid var(--line); }
-.trace {
-  min-height: 84px;
-  margin-top: 22px;
-  padding: 14px 16px;
-  background: var(--code);
-  color: #dce8e3;
-  font: 12px/1.55 monospace;
-  white-space: pre-wrap;
-}
-
-.kv-stage { min-height: 350px; }
-#kv-svg { display: block; width: 100%; height: auto; min-height: 330px; }
-.kv-readout {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  border-top: 1px solid var(--line);
-}
-.kv-readout div { min-width: 0; padding: 13px 16px; border-right: 1px solid var(--line); }
-.kv-readout div:last-child { border-right: 0; }
-.kv-readout strong { display: block; font: 700 13px monospace; overflow-wrap: anywhere; }
-.kv-readout span { color: var(--muted); font-size: 12px; }
-
-.formula {
-  margin: 26px 0;
-  padding: 20px;
-  border: 1px solid var(--ink);
-  background: #fffaf0;
-  text-align: center;
-  font: 16px/1.65 "SFMono-Regular", Consolas, monospace;
-  overflow-x: auto;
-}
-.formula b { color: var(--red); }
-
-.tensor-stack { margin: 28px 0; border-top: 1px solid var(--ink); }
-.tensor-row {
-  display: grid;
-  grid-template-columns: 130px 1fr 1fr;
-  gap: 20px;
-  padding: 15px 0;
-  border-bottom: 1px solid var(--line);
-  align-items: center;
-}
-.tensor-row strong { color: var(--red); font-family: monospace; }
-.shape { padding: 8px 10px; background: #e6efea; font: 12px/1.4 monospace; overflow-wrap: anywhere; }
-
-.timeline { display: grid; gap: 10px; margin: 28px 0; }
-.timeline-row { display: grid; grid-template-columns: 120px 1fr; gap: 16px; align-items: center; }
-.timeline-row > b { font: 13px monospace; }
-.ticks { display: grid; grid-template-columns: repeat(8, 1fr); min-height: 34px; }
-.tick { border-right: 2px solid var(--paper); background: var(--red); }
-.tick.compute { background: var(--blue); }
-.tick.graph { background: var(--green); }
-.tick.idle { background: #d8d5cd; }
-
-.checklist { display: grid; gap: 0; margin: 26px 0; border-top: 2px solid var(--ink); }
-.check {
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: start;
-  gap: 12px;
-  padding: 15px 8px;
-  border-bottom: 1px solid var(--line);
-}
-.check input { width: 18px; height: 18px; accent-color: var(--green); }
-.check label { cursor: pointer; }
-.check small { color: var(--muted); font-family: monospace; }
-
-.quiz { margin: 26px 0; border-top: 2px solid var(--ink); }
-details { padding: 17px 4px; border-bottom: 1px solid var(--line); }
-summary { cursor: pointer; font-weight: 700; }
-details p { padding-left: 24px; color: #3f4a47; }
-
-.file-tree {
-  margin: 28px 0;
-  padding: 22px;
-  background: var(--code);
-  color: #dce8e3;
-  overflow-x: auto;
-  font: 13px/1.75 "SFMono-Regular", Consolas, monospace;
-  white-space: pre;
-}
-.file-tree a { color: #81dec6; }
-
-.footer {
-  padding: 34px max(24px, calc((100% - var(--max)) / 2));
-  color: #b8c2be;
-  background: var(--ink);
-  font-size: 13px;
-}
-.footer strong { color: #fff; }
-.footer a { color: #83d9c2; }
-
-@media (max-width: 900px) {
-  .masthead { min-height: 720px; padding: 22px; }
-  h1 { font-size: 46px; }
-  .hero-lede { font-size: 18px; }
-  .hero-path { grid-template-columns: 1fr 1fr; }
-  .shell { display: block; padding: 0 20px 80px; }
-  .side {
-    z-index: 10;
-    top: 0;
-    height: auto;
-    margin: 0 -20px;
-    padding: 10px 20px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
-    background: rgba(244,241,233,.96);
-  }
-  .side-label, .progress-track, .progress-label { display: none; }
-  .toc { display: flex; overflow-x: auto; scrollbar-width: thin; }
-  .toc a { flex: 0 0 auto; display: block; border-left: 0; border-bottom: 2px solid transparent; white-space: nowrap; }
-  .toc a::before { content: attr(data-index) " "; }
-  .toc a.active { border-bottom-color: var(--red); }
-  main { padding-left: 0; }
-  .chapter { padding-top: 58px; }
-  .statline { grid-template-columns: 1fr 1fr; }
-  .statline > div:nth-child(2) { border-right: 0; }
-  .statline > div:nth-child(-n+2) { border-bottom: 1px solid var(--ink); }
-  .flow-strip { grid-template-columns: 1fr 1fr; }
-  .flow-node { border-bottom: 1px solid var(--ink); }
-  .flow-node:nth-child(2n) { border-right: 0; }
-  .flow-node:last-child { grid-column: 1 / -1; border-bottom: 0; }
-  .three-col { grid-template-columns: 1fr; }
-}
-
-@media (max-width: 620px) {
-  .topline { align-items: start; flex-direction: column; gap: 6px; }
-  .snapshot { text-align: left; }
-  .masthead { min-height: min(620px, 88svh); }
-  h1 { font-size: 38px; }
-  h2 { font-size: 31px; }
-  .hero { padding: 24px 0; }
-  .hero-path { grid-template-columns: 1fr 1fr; }
-  .hero-path span { display: none; }
-  .compare, .two-col, .queue-board { grid-template-columns: 1fr; }
-  .statline { grid-template-columns: 1fr; }
-  .statline > div { border-right: 0; border-bottom: 1px solid var(--ink); }
-  .statline > div:last-child { border-bottom: 0; }
-  .flow-strip { grid-template-columns: 1fr; }
-  .flow-node { border-right: 0; }
-  .flow-node:last-child { grid-column: auto; }
-  .tensor-row { grid-template-columns: 1fr; gap: 7px; }
-  .timeline-row { grid-template-columns: 82px 1fr; }
-  .kv-readout { grid-template-columns: 1fr; }
-  .kv-readout div { border-right: 0; border-bottom: 1px solid var(--line); }
-  .kv-readout div:last-child { border-bottom: 0; }
-  .check { grid-template-columns: 28px 1fr; }
-  .check small { grid-column: 2; }
-  .mermaid-wrap { padding: 12px; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  html { scroll-behavior: auto; }
-  *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; }
-}
-
-@media print {
-  body { background: white; }
-  .masthead { min-height: auto; color: var(--ink); background: white; border-bottom: 2px solid var(--ink); }
-  .masthead::after, .side, .controls, .footer { display: none; }
-  .topline, .hero-lede { color: var(--ink); }
-  .hero-path { display: none; }
-  .shell { display: block; max-width: none; padding: 0; }
-  main { padding: 0; }
-  .chapter { max-width: none; break-before: page; }
-  .chapter:first-child { break-before: auto; }
-}
-</style>
 <link rel="stylesheet" href="../assets/site.css">
 <script defer src="../assets/reader.js"></script>
 </head>
@@ -587,10 +55,8 @@ details p { padding-left: 24px; color: #3f4a47; }
 
 <div class="shell">
   <aside class="side">
-    <p class="side-label">SOURCE ROUTE / 16 STOPS</p>
+    <p class="side-label">本章目录</p>
     <nav class="toc" id="toc" aria-label="章节目录"></nav>
-    <div class="progress-track" aria-hidden="true"><div class="progress-bar" id="progress-bar"></div></div>
-    <p class="progress-label" id="progress-label">0 / 16</p>
   </aside>
 
   <main id="content">
@@ -605,30 +71,30 @@ details p { padding-left: 24px; color: #3f4a47; }
         <title id="overview-title">nano-vLLM 的系统边界</title>
         <desc id="overview-desc">用户请求经过引擎、调度器和模型执行器，模型执行器读写分页 KV Cache，并返回采样 token。</desc>
         <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#17201e"/></marker>
-          <pattern id="memory-grid" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M 22 0 L 0 0 0 22" fill="none" stroke="#147d68" stroke-width="1" opacity=".35"/></pattern>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="var(--card-ink)"/></marker>
+          <pattern id="memory-grid" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M 22 0 L 0 0 0 22" fill="none" stroke="var(--green)" stroke-width="1" opacity=".35"/></pattern>
         </defs>
-        <rect x="24" y="32" width="852" height="346" fill="#fffdf8" stroke="#17201e"/>
-        <text x="52" y="68" font-size="12" class="mono" fill="#d1492e">CONTROL PLANE / CPU</text>
-        <rect x="52" y="96" width="150" height="74" fill="#f8e8df" stroke="#17201e"/>
+        <rect x="24" y="32" width="852" height="346" fill="var(--card)" stroke="var(--card-ink)"/>
+        <text x="52" y="68" font-size="12" class="mono" fill="var(--cinnabar)">CONTROL PLANE / CPU</text>
+        <rect x="52" y="96" width="150" height="74" fill="var(--warn)" stroke="var(--card-ink)"/>
         <text x="127" y="126" text-anchor="middle" font-weight="700">LLMEngine</text><text x="127" y="149" text-anchor="middle" font-size="12" class="mono">generate / step</text>
-        <rect x="284" y="96" width="170" height="74" fill="#e7f0eb" stroke="#17201e"/>
+        <rect x="284" y="96" width="170" height="74" fill="var(--note)" stroke="var(--card-ink)"/>
         <text x="369" y="126" text-anchor="middle" font-weight="700">Scheduler</text><text x="369" y="149" text-anchor="middle" font-size="12" class="mono">waiting / running</text>
-        <rect x="536" y="96" width="164" height="74" fill="#fff2c8" stroke="#17201e"/>
+        <rect x="536" y="96" width="164" height="74" fill="var(--soft)" stroke="var(--card-ink)"/>
         <text x="618" y="126" text-anchor="middle" font-weight="700">BlockManager</text><text x="618" y="149" text-anchor="middle" font-size="12" class="mono">block_table</text>
-        <line x1="202" y1="133" x2="276" y2="133" stroke="#17201e" stroke-width="2" marker-end="url(#arrow)"/>
-        <line x1="454" y1="133" x2="528" y2="133" stroke="#17201e" stroke-width="2" marker-end="url(#arrow)"/>
-        <text x="52" y="230" font-size="12" class="mono" fill="#1c58a7">DATA PLANE / GPU × TP RANKS</text>
-        <rect x="52" y="256" width="202" height="78" fill="#dfe9f6" stroke="#17201e"/>
+        <line x1="202" y1="133" x2="276" y2="133" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="454" y1="133" x2="528" y2="133" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#arrow)"/>
+        <text x="52" y="230" font-size="12" class="mono" fill="var(--focus)">DATA PLANE / GPU × TP RANKS</text>
+        <rect x="52" y="256" width="202" height="78" fill="var(--soft)" stroke="var(--card-ink)"/>
         <text x="153" y="286" text-anchor="middle" font-weight="700">ModelRunner</text><text x="153" y="309" text-anchor="middle" font-size="12" class="mono">prepare → run → sample</text>
-        <rect x="350" y="256" width="198" height="78" fill="#e8e5de" stroke="#17201e"/>
+        <rect x="350" y="256" width="198" height="78" fill="var(--soft)" stroke="var(--card-ink)"/>
         <text x="449" y="286" text-anchor="middle" font-weight="700">Qwen3</text><text x="449" y="309" text-anchor="middle" font-size="12" class="mono">RoPE · GQA · MLP</text>
-        <rect x="646" y="230" width="178" height="128" fill="url(#memory-grid)" stroke="#147d68" stroke-width="2"/>
+        <rect x="646" y="230" width="178" height="128" fill="url(#memory-grid)" stroke="var(--green)" stroke-width="2"/>
         <text x="735" y="278" text-anchor="middle" font-weight="700">Paged KV Cache</text><text x="735" y="301" text-anchor="middle" font-size="12" class="mono">[2,L,B,S,H,D]</text><text x="735" y="324" text-anchor="middle" font-size="12">非连续物理块</text>
-        <path d="M 369 170 C 369 216, 153 203, 153 248" fill="none" stroke="#17201e" stroke-width="2" marker-end="url(#arrow)"/>
-        <line x1="254" y1="295" x2="342" y2="295" stroke="#17201e" stroke-width="2" marker-end="url(#arrow)"/>
-        <line x1="548" y1="282" x2="638" y2="282" stroke="#147d68" stroke-width="2" marker-end="url(#arrow)"/>
-        <path d="M 646 326 C 588 367, 288 368, 214 333" fill="none" stroke="#147d68" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
+        <path d="M 369 170 C 369 216, 153 203, 153 248" fill="none" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="254" y1="295" x2="342" y2="295" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="548" y1="282" x2="638" y2="282" stroke="var(--green)" stroke-width="2" marker-end="url(#arrow)"/>
+        <path d="M 646 326 C 588 367, 288 368, 214 333" fill="none" stroke="var(--green)" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#arrow)"/>
         <text x="436" y="386" text-anchor="middle" font-size="12" class="mono">sampled token → Sequence.append_token → next step</text>
       </svg>
 
@@ -895,18 +361,18 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
       <svg class="system-svg" viewBox="0 0 900 390" role="img" aria-labelledby="qwen-title qwen-desc">
         <title id="qwen-title">Qwen3 decoder layer 数据通路</title>
         <desc id="qwen-desc">输入经过 RMSNorm、自注意力、残差、RMSNorm、门控 MLP 与第二次残差。</desc>
-        <defs><marker id="q-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#17201e"/></marker></defs>
-        <rect x="20" y="28" width="860" height="334" fill="#fffdf8" stroke="#17201e"/>
-        <text x="54" y="66" class="mono" font-size="12" fill="#d1492e">Qwen3DecoderLayer × N</text>
+        <defs><marker id="q-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--card-ink)"/></marker></defs>
+        <rect x="20" y="28" width="860" height="334" fill="var(--card)" stroke="var(--card-ink)"/>
+        <text x="54" y="66" class="mono" font-size="12" fill="var(--cinnabar)">Qwen3DecoderLayer × N</text>
         <g>
-          <rect x="54" y="126" width="104" height="58" fill="#e6e3dc" stroke="#17201e"/><text x="106" y="150" text-anchor="middle" font-weight="700">RMSNorm</text><text x="106" y="170" text-anchor="middle" class="mono" font-size="11">fused add</text>
-          <rect x="222" y="104" width="144" height="102" fill="#dfe9f6" stroke="#17201e"/><text x="294" y="132" text-anchor="middle" font-weight="700">Self Attention</text><text x="294" y="155" text-anchor="middle" class="mono" font-size="11">QKV → Q/K norm</text><text x="294" y="174" text-anchor="middle" class="mono" font-size="11">RoPE → KV cache</text><text x="294" y="193" text-anchor="middle" class="mono" font-size="11">FlashAttention</text>
-          <rect x="430" y="126" width="104" height="58" fill="#e6e3dc" stroke="#17201e"/><text x="482" y="150" text-anchor="middle" font-weight="700">RMSNorm</text><text x="482" y="170" text-anchor="middle" class="mono" font-size="11">fused add</text>
-          <rect x="598" y="104" width="144" height="102" fill="#e7f0eb" stroke="#17201e"/><text x="670" y="132" text-anchor="middle" font-weight="700">Gated MLP</text><text x="670" y="157" text-anchor="middle" class="mono" font-size="11">gate_up_proj</text><text x="670" y="176" text-anchor="middle" class="mono" font-size="11">SiLU(gate) × up</text><text x="670" y="195" text-anchor="middle" class="mono" font-size="11">down_proj</text>
-          <rect x="806" y="126" width="42" height="58" fill="#fff2c8" stroke="#17201e"/><text x="827" y="161" text-anchor="middle" font-size="22">+</text>
-          <line x1="158" y1="155" x2="214" y2="155" stroke="#17201e" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="366" y1="155" x2="422" y2="155" stroke="#17201e" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="534" y1="155" x2="590" y2="155" stroke="#17201e" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="742" y1="155" x2="798" y2="155" stroke="#17201e" stroke-width="2" marker-end="url(#q-arrow)"/>
-          <path d="M 54 155 H 34 V 284 H 827 V 192" fill="none" stroke="#d1492e" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#q-arrow)"/>
-          <text x="420" y="310" text-anchor="middle" class="mono" font-size="12" fill="#d1492e">residual 以高效 fused add + RMSNorm 形式贯穿</text>
+          <rect x="54" y="126" width="104" height="58" fill="var(--soft)" stroke="var(--card-ink)"/><text x="106" y="150" text-anchor="middle" font-weight="700">RMSNorm</text><text x="106" y="170" text-anchor="middle" class="mono" font-size="11">fused add</text>
+          <rect x="222" y="104" width="144" height="102" fill="var(--soft)" stroke="var(--card-ink)"/><text x="294" y="132" text-anchor="middle" font-weight="700">Self Attention</text><text x="294" y="155" text-anchor="middle" class="mono" font-size="11">QKV → Q/K norm</text><text x="294" y="174" text-anchor="middle" class="mono" font-size="11">RoPE → KV cache</text><text x="294" y="193" text-anchor="middle" class="mono" font-size="11">FlashAttention</text>
+          <rect x="430" y="126" width="104" height="58" fill="var(--soft)" stroke="var(--card-ink)"/><text x="482" y="150" text-anchor="middle" font-weight="700">RMSNorm</text><text x="482" y="170" text-anchor="middle" class="mono" font-size="11">fused add</text>
+          <rect x="598" y="104" width="144" height="102" fill="var(--note)" stroke="var(--card-ink)"/><text x="670" y="132" text-anchor="middle" font-weight="700">Gated MLP</text><text x="670" y="157" text-anchor="middle" class="mono" font-size="11">gate_up_proj</text><text x="670" y="176" text-anchor="middle" class="mono" font-size="11">SiLU(gate) × up</text><text x="670" y="195" text-anchor="middle" class="mono" font-size="11">down_proj</text>
+          <rect x="806" y="126" width="42" height="58" fill="var(--soft)" stroke="var(--card-ink)"/><text x="827" y="161" text-anchor="middle" font-size="22">+</text>
+          <line x1="158" y1="155" x2="214" y2="155" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="366" y1="155" x2="422" y2="155" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="534" y1="155" x2="590" y2="155" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#q-arrow)"/><line x1="742" y1="155" x2="798" y2="155" stroke="var(--card-ink)" stroke-width="2" marker-end="url(#q-arrow)"/>
+          <path d="M 54 155 H 34 V 284 H 827 V 192" fill="none" stroke="var(--cinnabar)" stroke-width="2" stroke-dasharray="7 5" marker-end="url(#q-arrow)"/>
+          <text x="420" y="310" text-anchor="middle" class="mono" font-size="12" fill="var(--cinnabar)">residual 以高效 fused add + RMSNorm 形式贯穿</text>
         </g>
       </svg>
 
@@ -1095,7 +561,7 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
 </div>
 
 <footer class="footer">
-  <strong>nano-vLLM source field guide</strong> · 源码快照 bb823b3 · <a href="https://github.com/GeeeekExplorer/nano-vllm">上游仓库</a>
+  <strong>nano-vLLM</strong> · 源码快照 bb823b3 · <a href="https://github.com/GeeeekExplorer/nano-vllm">上游仓库</a>
 </footer>
 
 <script>
@@ -1126,9 +592,8 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
       if (on) link.setAttribute('aria-current', 'location');
       else link.removeAttribute('aria-current');
     });
-    const percent = ((active + 1) / chapters.length) * 100;
-    progressBar.style.width = `${percent}%`;
-    progressLabel.textContent = `${active + 1} / ${chapters.length}`;
+    if (progressBar) progressBar.style.width = `${((active + 1) / chapters.length) * 100}%`;
+    if (progressLabel) progressLabel.textContent = `${active + 1} / ${chapters.length}`;
   };
   window.addEventListener('scroll', updateProgress, {passive: true});
   window.addEventListener('resize', updateProgress);
@@ -1144,11 +609,11 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
         startOnLoad: false,
         securityLevel: 'strict',
         theme: 'base',
-        fontFamily: 'Avenir Next, PingFang SC, sans-serif',
+        fontFamily: 'PingFang SC, Noto Sans SC, Microsoft YaHei, sans-serif',
         themeVariables: {
-          background: '#fffdf8', primaryColor: '#e7f0eb', primaryTextColor: '#17201e',
-          primaryBorderColor: '#17201e', lineColor: '#1c58a7', secondaryColor: '#f8e8df',
-          tertiaryColor: '#fff2c8', fontSize: '14px'
+          primaryColor: '#e7f2ef', primaryTextColor: '#1c2926', primaryBorderColor: '#087f70',
+          secondaryColor: '#f4f7f5', tertiaryColor: '#fffefa', lineColor: '#68726d',
+          textColor: '#1c2926', fontSize: '15px'
         },
         flowchart: {curve: 'linear'},
         sequence: {useMaxWidth: true}
@@ -1284,22 +749,22 @@ result = llm.<span class="fn">generate</span>([<span class="st">"解释 PagedAtt
         const position = blockIndex * blockSize + offset;
         const isNext = position === length;
         const filled = position < length;
-        const fill = isNext ? '#d1492e' : filled ? (blockIndex < prefixBlocks ? '#147d68' : '#e5b63f') : '#e8e5de';
-        const textFill = (isNext || (filled && blockIndex < prefixBlocks)) ? '#ffffff' : '#17201e';
-        return `<rect x="${x + offset * 36}" y="72" width="31" height="36" fill="${fill}" stroke="#17201e"/><text x="${x + offset * 36 + 15.5}" y="95" text-anchor="middle" font-size="11" fill="${textFill}" class="mono">${isNext ? 'NEXT' : filled ? position : '·'}</text>`;
+        const fill = isNext ? 'var(--cinnabar)' : filled ? (blockIndex < prefixBlocks ? 'var(--green)' : 'var(--focus)') : 'var(--soft)';
+        const textFill = (isNext || (filled && blockIndex < prefixBlocks)) ? 'var(--card)' : 'var(--card-ink)';
+        return `<rect x="${x + offset * 36}" y="72" width="31" height="36" fill="${fill}" stroke="var(--card-ink)"/><text x="${x + offset * 36 + 15.5}" y="95" text-anchor="middle" font-size="11" fill="${textFill}" class="mono">${isNext ? 'NEXT' : filled ? position : '·'}</text>`;
       }).join('');
       const targetX = 34 + blockIndex * 188;
-      return `<text x="${x}" y="54" font-size="11" class="mono">logical block ${blockIndex}</text>${tokens}<path d="M ${x + 58} 112 C ${x + 58} 152, ${targetX + 58} 164, ${targetX + 58} 198" fill="none" stroke="#1c58a7" stroke-width="2" marker-end="url(#kv-arrow)"/>`;
+      return `<text x="${x}" y="54" font-size="11" class="mono">logical block ${blockIndex}</text>${tokens}<path d="M ${x + 58} 112 C ${x + 58} 152, ${targetX + 58} 164, ${targetX + 58} 198" fill="none" stroke="var(--focus)" stroke-width="2" marker-end="url(#kv-arrow)"/>`;
     }).join('');
 
     const physicalBlocks = table.map((id, blockIndex) => {
       const x = 34 + blockIndex * 188;
       const shared = blockIndex < prefixBlocks;
-      const cells = Array.from({length: blockSize}, (_, offset) => `<rect x="${x + offset * 36}" y="210" width="31" height="36" fill="${shared ? '#dcefe8' : '#dfe9f6'}" stroke="#17201e"/><text x="${x + offset * 36 + 15.5}" y="233" text-anchor="middle" font-size="11" class="mono">${id * blockSize + offset}</text>`).join('');
+      const cells = Array.from({length: blockSize}, (_, offset) => `<rect x="${x + offset * 36}" y="210" width="31" height="36" fill="${shared ? 'var(--note)' : 'var(--soft)'}" stroke="var(--card-ink)"/><text x="${x + offset * 36 + 15.5}" y="233" text-anchor="middle" font-size="11" class="mono">${id * blockSize + offset}</text>`).join('');
       return `<text x="${x}" y="192" font-size="11" class="mono">physical block ${id}${shared ? ' · ref=2' : ''}</text>${cells}`;
     }).join('');
 
-    kvSvg.innerHTML = `<defs><marker id="kv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="#1c58a7"/></marker></defs><text x="34" y="26" font-size="12" font-weight="700">LOGICAL SEQUENCE</text>${logicalBlocks}<text x="34" y="286" font-size="12" font-weight="700">PHYSICAL KV POOL</text>${physicalBlocks}<text x="34" y="324" font-size="11" fill="#68706d">格内数字：上方为 token position，下方为扁平 physical slot；块大小 = 4。</text>`;
+    kvSvg.innerHTML = `<defs><marker id="kv-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="var(--focus)"/></marker></defs><text x="34" y="26" font-size="12" font-weight="700">LOGICAL SEQUENCE</text>${logicalBlocks}<text x="34" y="286" font-size="12" font-weight="700">PHYSICAL KV POOL</text>${physicalBlocks}<text x="34" y="324" font-size="11" fill="var(--muted)">格内数字：上方为 token position，下方为扁平 physical slot；块大小 = 4。</text>`;
   };
   lengthInput.addEventListener('input', drawKv);
   prefixInput.addEventListener('input', drawKv);
