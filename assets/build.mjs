@@ -1,4 +1,4 @@
-import {readFile, writeFile} from 'node:fs/promises';
+import {readFile, writeFile, readdir, copyFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import path from 'node:path';
 
@@ -16,10 +16,39 @@ const tags = dependencies.map(([type, url, hash]) => type === 'css'
   ? `<link rel="stylesheet" href="${url}" integrity="sha384-${hash}" crossorigin="anonymous">`
   : `<script defer src="${url}" integrity="sha384-${hash}" crossorigin="anonymous"></script>`).join('\n');
 
+// 数学 MDX 是唯一正文来源；同时生成便于 GitHub 阅读的 Markdown 和本地 HTML。
+const mathNames = ['mathematics', ...Array.from({length: 8}, (_, i) => `math-${String(i + 1).padStart(2, '0')}`)];
+const staticLinks = {
+  'position-encoding': '../training/position-encoding.html',
+  'kv-cache': '../inference/position-encoding-and-kv-cache.html',
+};
+const mathLessons = [];
+for (const name of mathNames) {
+  const raw = await readFile(path.join(root, 'astro-site/src/content/lessons', `${name}.mdx`), 'utf8');
+  const match = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+  if (!match) throw new Error(`Missing frontmatter: ${name}`);
+  const field = (key) => {
+    const value = match[1].match(new RegExp(`^${key}: (.+)$`, 'm'))?.[1];
+    if (!value) throw new Error(`Missing ${key}: ${name}`);
+    return value;
+  };
+  const markdown = match[2].trimStart()
+    .replaceAll('../../assets/math/', '../assets/math/')
+    .replace(/\.\.\/\.\.\/lessons\/([a-z0-9-]+)\/?/g, (_, slug) => {
+      if (mathNames.includes(slug)) return `${slug}.html`;
+      return staticLinks[slug] ?? `https://cyberspacelee.github.io/llms-from-scratch/lessons/${slug}/`;
+    });
+  await writeFile(path.join(root, 'foundations', `${name}.md`), markdown);
+  mathLessons.push({directory: 'foundations', name, title: field('title'),
+    edition: name === 'mathematics' ? '数学 · 导读' : `数学 · ${name.slice(-2)}`,
+    subtitle: field('description')});
+}
+for (const file of await readdir(path.join(root, 'astro-site/public/assets/math'))) {
+  if (file.endsWith('.svg')) await copyFile(path.join(root, 'astro-site/public/assets/math', file), path.join(root, 'assets/math', file));
+}
+
 const lessons = [
-  {directory: 'foundations', name: 'mathematics',
-    title: '数学基础，理解旋转', edition: '00 · 数学基础',
-    subtitle: '九章图解：向量、范数、点积、矩阵、极坐标、复数与高维旋转。'},
+  ...mathLessons,
   {directory: 'training', name: 'position-encoding', code: 'position_encoding.py',
     title: '位置编码，从第一性原理推导', edition: '01 · 位置编码',
     subtitle: '从注意力的对称性，到三角函数、矩阵指数与旋转。'},
@@ -39,13 +68,17 @@ for (const lesson of lessons) {
   }
   const shelf = [
     ['foundations/mathematics.html', '数学', '00 · 数学基础'],
+    ...mathLessons.slice(1).map((item) => [`foundations/${item.name}.html`, item.title.replace(/^数学 \d+，/, ''), `${item.edition.slice(-2)} · ${item.title.replace(/^数学 \d+，/, '')}`]),
     ['training/position-encoding.html', '位置编码', '01 · 位置编码'],
     ['inference/position-encoding-and-kv-cache.html', 'KV cache', '02 · KV cache'],
     ['inference/nano-vllm-from-zero-to-mastery.html', '推理系统', '03 · 推理系统'],
   ];
   const here = `${lesson.directory}/${lesson.name}.html`;
   const link = ([file, label]) => `<a href="../${file}"${file === here ? ' aria-current="page"' : ''}>${label}</a>`;
-  const navigation = shelf.map(([file, label]) => link([file, label])).join('')
+  const navigation = shelf.filter(([file]) => !/\/math-\d+\.html$/.test(file)).map(([file, label]) => {
+    const active = file === here || (file === 'foundations/mathematics.html' && lesson.directory === 'foundations');
+    return `<a href="../${file}"${active ? ' aria-current="page"' : ''}>${label}</a>`;
+  }).join('')
     + '<a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a>';
   const route = shelf.map(([file, , label]) => link([file, label])).join('')
     + '<a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a>';
@@ -96,7 +129,7 @@ ${tags}
 <p class="edition">${lesson.edition}</p>
 <h1>${lesson.title}</h1>
 <p class="hero-description">${lesson.subtitle}</p>
-<p class="source-row"><a href="${lesson.code || '../training/position_encoding.py'}">PyTorch 源码</a></p>
+<p class="source-row"><a href="${lesson.code || `${lesson.name}.md`}">${lesson.code ? 'PyTorch 源码' : 'Markdown 原文'}</a></p>
 </div>
 </header>
 <div class="layout">

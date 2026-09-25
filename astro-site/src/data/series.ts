@@ -1,6 +1,6 @@
 import { aiInfraChapters } from './ai-infra'
 
-export type SeriesGroup = 'principle' | 'infra'
+export type SeriesGroup = 'principle' | 'math' | 'infra'
 
 export type SeriesItem = {
   id: string
@@ -17,8 +17,8 @@ const principle: SeriesItem[] = [
   {
     id: 'mathematics',
     nav: '数学',
-    title: '数学基础，理解旋转',
-    question: '从向量、范数、点积到旋转',
+    title: '深度学习数学，从统计到反向传播',
+    question: '八章：概率、矩阵、微积分、神经网络与旋转',
     href: 'lessons/mathematics',
     kicker: '00 · 数学基础',
     sidebar: '00 · 数学基础',
@@ -67,7 +67,26 @@ const infra: SeriesItem[] = aiInfraChapters.map((chapter) => ({
   group: 'infra' as const,
 }))
 
-export const series: SeriesItem[] = [...principle, ...infra]
+export const mathItems: SeriesItem[] = [
+  ['概率与统计', '均值、期望、方差与批量统计'],
+  ['分布与信息量', '正态分布、似然、交叉熵与 KL'],
+  ['向量与矩阵', '形状、点积、矩阵乘法与转置'],
+  ['微积分与梯度', '导数、偏导、积分与优化步长'],
+  ['矩阵求导', '从分量到批量线性层的梯度'],
+  ['链式法则与反向传播', '计算图怎样累加梯度'],
+  ['神经网络训练', '两层网络的前向、反向与参数更新'],
+  ['旋转与位置编码', '正交变换、复数与 RoPE'],
+].map(([title, question], index) => {
+  const number = String(index + 1).padStart(2, '0')
+  return {
+    id: `math-${number}`, nav: title, title, question,
+    href: `lessons/math-${number}`,
+    kicker: `数学 · ${number}`, sidebar: `${number} · ${title}`,
+    group: 'math',
+  }
+})
+
+export const series: SeriesItem[] = [principle[0], ...mathItems, ...principle.slice(1), ...infra]
 export const principleItems = principle
 export const infraItems = infra
 

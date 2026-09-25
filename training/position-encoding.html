@@ -48,9 +48,9 @@
 </div>
 </header>
 <div class="layout">
-<aside class="sidebar"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../training/position-encoding.html" aria-current="page">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="contents"></div></nav></aside>
-<details class="mobile-toc"><summary>目录</summary><div class="mobile-toc-list"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../training/position-encoding.html" aria-current="page">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="mobile-chapters"></div></nav></div></details>
-<main id="content"><div id="load-status" role="status"></div><article id="article"></article><nav class="series-footer" aria-label="前后篇"><a class="prev" href="../foundations/mathematics.html" rel="prev">上一篇 · 数学</a><a class="next" href="../inference/position-encoding-and-kv-cache.html" rel="next">下一篇 · KV cache</a></nav><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding.md">Markdown 原文</a>。</noscript></main>
+<aside class="sidebar"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html" aria-current="page">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="contents"></div></nav></aside>
+<details class="mobile-toc"><summary>目录</summary><div class="mobile-toc-list"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html" aria-current="page">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="mobile-chapters"></div></nav></div></details>
+<main id="content"><div id="load-status" role="status"></div><article id="article"></article><nav class="series-footer" aria-label="前后篇"><a class="prev" href="../foundations/math-08.html" rel="prev">上一篇 · 旋转与位置编码：从保长变换到相对位置</a><a class="next" href="../inference/position-encoding-and-kv-cache.html" rel="next">下一篇 · KV cache</a></nav><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="position-encoding.md">Markdown 原文</a>。</noscript></main>
 </div>
 <script type="text/plain" id="lesson-source">位置编码不是一张需要背下来的公式表。我们先找出模型缺少什么，再讨论可以添加什么结构，最后检验这种结构究竟保证了什么。
 
@@ -233,7 +233,7 @@ $$
 
 ### 进阶阅读：为什么连续、保长的变换导向旋转？
 
-完整的生成元与矩阵指数推导已独立到 [数学基础 · 第 07 章](../foundations/mathematics.html#section-7)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
+完整的生成元与矩阵指数推导已独立到 [数学 08 · 矩阵指数](../foundations/math-08.html#section-4)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
 
 ## 06 · 从一对坐标，扩展到原始位置编码
 
@@ -352,7 +352,7 @@ $$
 
 ### 从点积的几何表示得到两点洞察
 
-回到 [数学基础 · 点积与投影](../foundations/mathematics.html#section-3) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
+回到 [数学基础 · 点积与投影](../foundations/math-03.html#section-2) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
 
 $$
 \widetilde q_i^\top\widetilde k_j

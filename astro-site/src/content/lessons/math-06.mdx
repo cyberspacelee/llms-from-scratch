@@ -1,0 +1,302 @@
+---
+title: 数学 06，链式法则与反向传播：梯度怎样穿过计算图
+section: 数学基础
+chapter: 6
+order: 0.6
+description: 从共享节点到两层网络手算，逐分量推导雅可比转置，厘清自动微分、广播、梯度累积与计算图边界。
+---
+
+一个预测值可能经过数十层运算才得到损失。如果每修改一个参数都重新运行模型，再比较损失变化，数百万个参数会带来巨大的成本。反向传播利用计算图共享中间结果，只需沿局部求导规则把损失的影响传回去。
+
+本章接续 [微积分与梯度](../../lessons/math-04) 与 [矩阵求导](../../lessons/math-05)。我们先手算只有几个节点的图，再算两个连续线性层，最后对照 PyTorch 的自动微分（automatic differentiation）。重点不是背 API，而是能解释每个梯度从哪条路径来、具有何种形状、何时应该累加。
+
+## 01 · 标量链式法则：局部变化为何沿路径相乘
+
+设 $a=3x+1$、$\ell=a^2$。想知道 $x$ 变化一点时最终损失如何变化，必须同时考虑 $x$ 对 $a$ 的影响以及 $a$ 对损失的影响。若相关函数可导，链式法则写成：
+
+$$
+\frac{d\ell}{dx}=\frac{d\ell}{da}\frac{da}{dx}.
+$$
+
+在 $x=2$，前向先得到 $a=7$，再得到 $\ell=49$。反向先求外层导数 $d\ell/da=2a=14$，再乘内层导数 $da/dx=3$，所以 $d\ell/dx=42$。
+
+这不是分数字母的形式消去，而是小变化的连续传递：$\Delta a\approx3\Delta x$，$\Delta\ell\approx14\Delta a$，所以 $\Delta\ell\approx42\Delta x$。忽略内层导数会错误地把输入变化当成中间值的变化。
+
+反向从 $d\ell/d\ell=1$ 开始，这个数称为梯度种子：损失对自身每变化一单位，变化率就是一。如果目标改成 $2\ell$，种子或最终损失系数变成二，所有上游梯度也相应加倍。
+
+## 02 · 共享节点与逆序计算：为何先等下游完成
+
+现在令 $a=x^2$，$b=3a$，$\ell=a+b$。同一个 $a$ 被使用两次：一条路径直接到损失，另一条先经过乘三。对 $a$ 的微小变化，两条路径都造成影响，因此应该相加：
+
+$$
+\frac{d\ell}{da}=\underbrace{1}_{\text{直接路径}}+
+\underbrace{1\cdot3}_{\text{经过 }b}=4,
+\qquad \frac{d\ell}{dx}=4\cdot2x.
+$$
+
+在 $x=2$，前向为 $a=4,b=12,\ell=16$，反向为 $d\ell/dx=16$。仅取其中一条路径会得到错误的 $4$ 或 $12$。残差连接、共享权重以及多个损失项都有同样的结构。
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="共享分支计算图，a 经两条路径影响损失，反向贡献在 a 处相加后再传给 x，可横向滚动"><img src="../../assets/math/calculus-backprop.svg" alt="共享分支计算图，a 经两条路径影响损失，反向贡献在 a 处相加后再传给 x" width="860" height="350" /></div>
+<figcaption>实线沿前向方向传递数值，虚线沿反向方向传递梯度。共享节点 a 收集贡献 1 与 3，再将总和乘以平方运算的局部导数。</figcaption>
+</figure>
+
+读图时先看依赖：只有知道 $a$，才能计算 $b$；只有知道 $a,b$，才能计算损失。这种满足“输入先于使用者”的次序称为拓扑顺序。反向需要相反次序：必须先计算 $\ell$ 对 $b$ 的梯度，才能知道经 $b$ 返回 $a$ 的贡献。如果在这条贡献抵达前就把 $a$ 的梯度传给 $x$，就会漏项。
+
+更一般地，节点 $a$ 被后继节点 $v_k$ 使用时：
+
+$$
+\frac{\partial\ell}{\partial a}
+=\sum_k\frac{\partial\ell}{\partial v_k}\frac{\partial v_k}{\partial a}.
+$$
+
+反向传播按相反依赖顺序组织这些乘法与加法，复用前向保存的必要中间值。它不是逐参数做有限差分；训练需要保存激活等中间数据，也因此通常比仅做前向推理占用更多内存。
+
+### 共享节点和相同数值不是一回事
+
+两个张量数值相同，并不意味着它们在图中是同一个节点。真正影响反向的是计算依赖：同一个参数被两处使用，就有两条返回它的路径；两个独立参数即使初值相同，也分别拥有自己的梯度。权重共享的模型正是让不同位置引用同一组参数，再把各位置的贡献加到同一个存储位置。
+
+前向保存什么也由局部规则决定。平方的反向需要输入值，乘法对一个输入的导数需要另一个输入值；有些操作可以用输出值计算导数。自动微分系统不必保存人类手写推导中的每一步符号，但必须能够获得局部反向所需的信息。随意原地修改这些值，可能触发版本检查报错，或者在不恰当的手动实现中导致错误梯度。
+
+## 03 · 向量链式法则：逐分量推出雅可比转置
+
+当一个节点输出向量 $z=f(x)$，输入 $x\in\mathbb R^d$，输出 $z\in\mathbb R^m$，为什么传回来的不是简单乘一个数？因为每个输入坐标都可能影响多个输出坐标。
+
+固定输入下标 $j$，从 $x_j$ 到标量损失的路径经过每个 $z_i$。将这些贡献相加：
+
+$$
+\frac{\partial\ell}{\partial x_j}
+=\sum_{i=1}^m\frac{\partial\ell}{\partial z_i}
+\frac{\partial z_i}{\partial x_j}.
+$$
+
+定义 $g_i=\partial\ell/\partial z_i$，以及雅可比矩阵 $J_{ij}=\partial z_i/\partial x_j$。$J$ 有 $m$ 行、$d$ 列，列梯度 $g$ 有 $m$ 个元素；上式恰好是 $J^\top g$ 的第 $j$ 个元素，所以：
+
+$$
+\nabla_x\ell=J^\top g\in\mathbb R^d.
+$$
+
+前向扰动是 $\Delta z\approx J\Delta x$，反向梯度却是 $J^\top g$，二者传播对象不同。实现通常直接计算这个乘积，而不显式构造整个雅可比矩阵。向量–雅可比积（VJP）常以行向量 $g^\top J$ 表达；本讲义采用列梯度，写成等价的转置形式。
+
+### 向量输出为什么需要指定种子
+
+取 $z=(x_1^2,3x_2)^\top$，则 $J=\operatorname{diag}(2x_1,3)$。如果仅说“对 $z$ 反向”，还没指定两个输出的重要性。传入种子 $g=(1,2)^\top$，相当于对 $z_1+2z_2$ 求导。在 $x=(2,1)^\top$，结果为 $(4,6)^\top$。
+
+```python
+import torch
+
+torch.manual_seed(42)
+x = torch.tensor([2.0, 1.0], dtype=torch.float64, requires_grad=True)
+z = torch.stack([x[0] ** 2, 3 * x[1]])
+seed = torch.tensor([1.0, 2.0], dtype=torch.float64)
+z.backward(seed)
+torch.testing.assert_close(x.grad, torch.tensor([4.0, 6.0], dtype=torch.float64))
+print(x.grad)
+```
+
+输出为 `[4., 6.]`。把种子换成全一向量得到的是输出求和的梯度，不能把它误认为完整雅可比矩阵。标量损失 `.backward()` 可省略种子，是因为框架采用标量一。
+
+### 为什么标量损失适合反向模式
+
+当模型有许多输入参数、最终只有一个标量目标时，从损失出发可以在一次反向遍历中求出所有参数方向的导数。若反过来为每个参数分别追踪它对所有中间结果的影响，就需要维护大量不同的扰动方向。这是深度学习常用反向模式的结构原因，而不是因为“反向”比“正向”在任何问题上都更快。
+
+如果输入很少、输出很多，或只关心沿某个输入方向的变化，前向模式的雅可比–向量积可能更合适。这里无需先掌握其实现，但应知道两种模式都应用链式法则，选择取决于要计算的导数对象。完整雅可比、某个方向的变化和某个标量损失的梯度，是三种不同需求。
+
+## 04 · 两个连续层：从最终误差手算到第一层权重
+
+考虑没有激活函数的两层网络，刻意简化以便逐项检查：
+
+$$
+h=W_1x+b_1,\qquad \hat y=W_2h+b_2,\qquad
+\ell=\frac12(\hat y-y)^2.
+$$
+
+取 $x=(1,-2)^\top$，$W_1=\begin{bmatrix}2&1\\-1&3\end{bmatrix}$，$b_1=(0.5,-0.5)^\top$；第二层 $W_2=\begin{bmatrix}1&-2\end{bmatrix}$，$b_2=0.5$，目标 $y=1$。这里第一层输出为二维，第二层输出为标量。
+
+前向先得到 $h=(0.5,-7.5)^\top$，接着 $\hat y=0.5+15+0.5=16$，所以误差为 $15$，损失为 $112.5$。先求输出梯度 $g_2=\hat y-y=15$，再反传第二层：
+
+$$
+\nabla_{W_2}\ell=g_2h^\top=\begin{bmatrix}7.5&-112.5\end{bmatrix},
+\quad \nabla_{b_2}\ell=15,
+\quad g_1=\nabla_h\ell=W_2^\top g_2=\begin{bmatrix}15\\-30\end{bmatrix}.
+$$
+
+为何第二个隐藏坐标的梯度为负？它对预测的系数是 $-2$；增加它会降低当前过高的预测，因此降低损失。再把 $g_1$ 作为第一层的上游梯度：
+
+$$
+\nabla_{W_1}\ell=g_1x^\top=
+\begin{bmatrix}15&-30\\-30&60\end{bmatrix},\quad
+\nabla_{b_1}\ell=g_1,\quad
+\nabla_x\ell=W_1^\top g_1=\begin{bmatrix}60\\-75\end{bmatrix}.
+$$
+
+每个权重梯度与权重同形状；外积保留了“输出坐标收到的梯度”与“输入坐标的值”两种信息。若中间加入激活函数，还必须先乘激活的局部导数，不能把第二层梯度直接套给第一层的线性输出。
+
+```python
+import torch
+
+torch.manual_seed(42)
+torch.set_default_dtype(torch.float64)
+x = torch.tensor([1.0, -2.0], requires_grad=True)
+W1 = torch.tensor([[2.0, 1.0], [-1.0, 3.0]], requires_grad=True)
+b1 = torch.tensor([0.5, -0.5], requires_grad=True)
+W2 = torch.tensor([[1.0, -2.0]], requires_grad=True)
+b2 = torch.tensor([0.5], requires_grad=True)
+h = W1 @ x + b1
+h.retain_grad()
+prediction = W2 @ h + b2
+ell = 0.5 * ((prediction - 1.0) ** 2).sum()
+ell.backward()
+torch.testing.assert_close(ell.detach(), torch.tensor(112.5))
+torch.testing.assert_close(h.grad, torch.tensor([15.0, -30.0]))
+torch.testing.assert_close(W1.grad, torch.tensor([[15.0, -30.0], [-30.0, 60.0]]))
+torch.testing.assert_close(W2.grad, torch.tensor([[7.5, -112.5]]))
+torch.testing.assert_close(b1.grad, torch.tensor([15.0, -30.0]))
+torch.testing.assert_close(b2.grad, torch.tensor([15.0]))
+torch.testing.assert_close(x.grad, torch.tensor([60.0, -75.0]))
+print(ell.item(), W1.grad, x.grad)
+```
+
+输出应与上述损失、第一层权重梯度和输入梯度一致。`h` 是中间张量，其梯度参与反向计算，但默认不保存在 `h.grad`；调用 `retain_grad()` 是为了观察。用户直接创建的可求导叶子张量则默认保存 `.grad`。
+
+### 插入 ReLU 后哪一步会改变
+
+假设第一层线性输出仍为 $(0.5,-7.5)^\top$，但送入第二层之前先经过 ReLU，那么隐藏激活变成 $(0.5,0)^\top$。第二层预测随之变成一，恰好等于这里的目标，整个网络的损失和梯度都为零。不能在改变前向后，继续沿用前面误差为十五的反向数字。
+
+若将目标改成零，输出误差为一，第二层传回激活的梯度为 $(1,-2)^\top$；再经过 ReLU 的局部反向掩码 $(1,0)^\top$，第一层线性输出实际收到的是 $(1,0)^\top$。第二个隐藏单元被截断，其对应第一层权重行和偏置此时没有来自该样本的梯度。这个算例同时说明：先重新确定前向值，再按反向顺序乘局部导数，不能只在旧梯度上随意追加一个激活项。
+
+## 05 · 广播与批平均：哪些轴必须求和
+
+单样本偏置 $b_j$ 加到输出坐标上一次；小批量（mini-batch）中，同一个偏置被每个样本共享。设批大小（batch size）为 $B$，批输入 $X\in\mathbb R^{B\times d}$，$Z=XW^\top+b$，$b\in\mathbb R^m$ 沿批维广播。逐项写出 $Z_{ij}=\sum_kX_{ik}W_{jk}+b_j$，可见每个 $Z_{ij}$ 对同一个 $b_j$ 的导数都是一。
+
+因此，若 $G=\partial L/\partial Z\in\mathbb R^{B\times m}$，反向规则为：
+
+$$
+\nabla_bL=\sum_{i=1}^BG_{i,:},\qquad
+\nabla_WL=G^\top X,\qquad \nabla_XL=GW.
+$$
+
+偏置梯度必须消去被广播扩展的批维，回到原始形状。其他广播也是同样原则：正向重复使用某个量，反向汇总所有使用位置的贡献。如果 $G$ 已由批平均损失计算而含有 $1/B$，就不应再次除以 $B$。
+
+例如两条样本各给同一权重贡献 $2$ 和 $6$：求和损失给梯度 $8$，平均损失给梯度 $4$。这并非两种自动微分算法，而是优化目标的缩放不同。
+
+### 广播不是把参数复制成独立参数
+
+假设一个标量偏置被加到三条样本的预测中，三处对它的局部导数都为一，损失传回的贡献分别为二、负一和四。最终偏置梯度为五，而不是保存一个长度为三的参数梯度。前向广播可以避免实际分配重复数据；数学上关键的是这三处使用仍指向同一个自由变量。
+
+也要区分样本平均与输出坐标平均。若每个样本有多个输出，$\ell_i=\tfrac12\sum_j(z_{ij}-y_{ij})^2$ 是先对输出坐标求和，再对样本平均。直接对整个误差张量调用 `.mean()` 则会同时除以样本数和输出维数。两者都可以是合法目标，但对全部误差元素直接取平方后求平均，还去掉了这里的 $1/2$，损失和梯度会成为本章定义的 $2/m$ 倍，其中 $m$ 为输出维数。核对手算时必须同时核对归约轴和系数。
+
+## 06 · 梯度累积与微批：怎样与整批训练保持一致
+
+图内分支累加是链式法则；多次调用 `.backward()` 时 PyTorch 还会累加已有 `.grad`。例如同一参数的两次反向各给出 $16$，若不清零，就得到 $32$。通常在新训练步之前使用 `optimizer.zero_grad(set_to_none=True)`，然后前向、反向，最后 `optimizer.step()`。反向只计算梯度，优化器才更新参数。
+
+有意累积时，最容易犯的错是把大小不同的微批平均损失直接相加。假设整批有 $N$ 个样本，第 $k$ 个微批有 $n_k$ 个样本，微批平均为 $L_k$，则：
+
+$$
+L=\frac1N\sum_i\ell_i=\sum_k\frac{n_k}{N}L_k.
+$$
+
+因而每个微批平均损失应乘 $n_k/N$ 再反向。下面把三条样本切成大小为二和一的两段，验证加权累积与整批完全一致。
+
+```python
+import torch
+
+torch.manual_seed(42)
+torch.set_default_dtype(torch.float64)
+x = torch.tensor([1.0, 2.0, 3.0])
+y = torch.tensor([0.0, 1.0, 1.0])
+w = torch.tensor(0.5, requires_grad=True)
+full_loss = 0.5 * ((w * x - y) ** 2).mean()
+full_loss.backward()
+reference = w.grad.clone()
+w.grad = None
+for indices in [slice(0, 2), slice(2, 3)]:
+    xb, yb = x[indices], y[indices]
+    micro_loss = 0.5 * ((w * xb - yb) ** 2).mean()
+    (micro_loss * (len(xb) / len(x))).backward()
+torch.testing.assert_close(w.grad, reference)
+torch.testing.assert_close(w.grad, torch.tensor(2.0 / 3.0))
+print(reference.item(), w.grad.item())
+```
+
+两次输出都约为 $0.666667$。累积期间没有更新参数，每次重新建立前向图；因此不需要 `retain_graph=True`。若每个微批之后更新权重，后续梯度就在不同参数点计算，已不等价于整批一步。批归一化等跨样本运算也可能让微批前向本身与整批不同；上述等价结论针对逐样本损失可分解且前向行为一致的情形。
+
+## 07 · 求导边界：requires_grad、no_grad 与 detach
+
+`requires_grad=True` 表示这个张量需要参与梯度追踪；`.grad` 是反向结果的存储位置，两者不同。`.grad is None` 可能表示尚未反向、梯度被清空或没有相应路径，不能直接解释为数学梯度为零。
+
+`torch.no_grad()` 是一个上下文，让其中通常的运算不被记录到反向图，常用于参数更新与推理。它不会自动清空参数已有的梯度，也不等价于模型的评估模式。`detach()` 则返回从当前计算图分离出来的张量，可用于将某个结果视为常量；它与原张量共享存储，不应把它当成独立副本再随意原地修改。
+
+```python
+import torch
+
+torch.manual_seed(42)
+x = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+a = x ** 2
+with torch.no_grad():
+    frozen = x ** 2
+assert a.requires_grad and not frozen.requires_grad
+loss = a + a.detach()  # 两项数值都是4，只有第一项有返回x的路径
+loss.backward()
+torch.testing.assert_close(loss.detach(), torch.tensor(8.0, dtype=torch.float64))
+torch.testing.assert_close(x.grad, torch.tensor(4.0, dtype=torch.float64))
+print(loss.item(), x.grad.item())
+```
+
+输出是损失 $8$、梯度 $4$，而不是把两项都当作 $x^2$ 后得到的 $8$。这说明改变求导边界可能保持前向值，却改变优化行为。不要为了消除报错而随意 `detach()`。
+
+ReLU 是负值截为零、正值保持原值的激活函数。非零点反向为 $\nabla_z\ell=\nabla_h\ell\odot\mathbf1_{z>0}$；零点不存在经典导数，PyTorch 采用零作为该点反向值。跨折点的中心差分可能给出 $0.5$，不能据此断言框架求导错误。自动微分执行解析局部规则，但仍受浮点误差和数值稳定性影响。
+
+### 保存梯度、释放图与记录图是三个问题
+
+保留中间张量的梯度用 `retain_grad()`，它让你能在反向后读到该节点的 `.grad`。保留已使用计算图的中间资源用 `retain_graph=True`，是为了在确实需要时再次沿同一张图反向。两者名称相似，却分别管理结果存储与反向资源的生命周期。
+
+不记录未来运算则是 `no_grad()` 的职责。它不会倒退修改此前已经构建的图，也不会把现有参数的 `requires_grad` 永久设为假。实际训练通常每一步重新前向建立新图，再反向释放该步中间资源，不需要让所有历史图一直存在。把含图的损失张量不断追加到长期列表中也可能无意延长资源存活；仅记录数值时可取 `.item()`，但不能在仍需反向的主路径上把张量替换成普通数值。
+
+在排查梯度问题时，可以依次检查前向数值是否有限、目标的归约方式是否符合推导、参数是否仍连接到损失，以及是否发生了非预期累积。先用这样的小型双精度算例核对，再扩展到真实网络，通常比直接在大模型里观察梯度范数更容易定位问题。数值一致性只能支持被验证的路径，不能代替对其余分支和数据形状的分析。
+
+## 08 · 常见误区
+
+1. **反向传播就是梯度下降。** 前者计算梯度；后者是一种更新规则，Adam 等优化器同样使用反向得到的梯度。
+2. **保留计算图能解决梯度忘记清零。** `retain_graph=True` 保留反向所需数据，不会重置 `.grad`，而且会增加内存占用。
+3. **损失很大必然有大梯度。** 梯度取决于计算路径的局部变化；饱和激活或断开的路径可以使梯度很小甚至不存在。
+4. **输出求和后反向得到完整雅可比。** 它只得到全一种子对应的乘积；需要区分单次向量–雅可比积与所有输出的逐项导数。
+
+## 09 · 练习与核对
+
+<details>
+<summary>1. ℓ=(2x−1)³ 在 x=1 的导数是多少？</summary>
+
+外层立方导数为 $3(2x-1)^2$，还要乘内层导数 $2$，得到 $6$。若只算外层，则漏掉输入到中间值的缩放。
+
+</details>
+
+<details>
+<summary>2. a=x²，ℓ=a+a，在 x=3 处反向为何要累加？</summary>
+
+$a$ 被两条加法输入共享，每路贡献为一，总上游梯度为二。再乘平方的局部导数 $2x=6$，得到 $12$。
+
+</details>
+
+<details>
+<summary>3. 雅可比为 5×3，上游列梯度为 5×1，输入梯度是什么形状？</summary>
+
+转置雅可比为 $3\times5$，乘上游梯度得到 $3\times1$，与三维输入一致。未转置直接相乘在形状上就不成立。
+
+</details>
+
+<details>
+<summary>4. 微批大小分别为 4 和 1，其平均损失该如何加权？</summary>
+
+整批平均为 $\tfrac45L_1+\tfrac15L_2$，因为每条样本都应获得 $1/5$ 的权重。对两个微批平均再取平均，会让最后一条样本权重过大。
+
+</details>
+
+<details>
+<summary>5. 为什么 backward 后参数还没有变化？</summary>
+
+反向只向 `.grad` 写入导数，没有规定学习率和更新策略。调用优化器更新后参数才改变；也可在不记录梯度的上下文中执行明确的手动更新。
+
+</details>
+
+配套数值核对位于 `foundations/calculus.py`。下一章 [神经网络训练](../../lessons/math-07) 会把线性层、激活、损失、反向和优化器组成可独立运行的完整训练循环。

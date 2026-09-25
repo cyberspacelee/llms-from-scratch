@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="从范数和点积理解表示，再用形状推导矩阵乘法、广播、线性层与低秩分解。">
+<title>数学 03，向量与矩阵：用形状组织计算</title>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('theme');
+    var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    var root = document.documentElement;
+    root.classList.toggle('dark', dark);
+    root.dataset.theme = stored || 'system';
+    root.style.colorScheme = dark ? 'dark' : 'light';
+  } catch (error) {}
+})();
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.css" integrity="sha384-M59ezskvvpvT+a+C1x088YJ3DVmK+wZdX0UkVKalOI4Qi5Nwv0WrvpqHcfa2HQqB" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.min.css" integrity="sha384-UttgWGqUmSzrxetIBqxigLodBLOt0G9HCTlG9hKEmS9H5A5T3PGyDhPv0G8/C1EE" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" integrity="sha384-wLhprpjsmjc/XYIcF+LpMxd8yS1gss6jhevOp6F6zhiIoFK6AmHtm4bGKtehTani" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.js" integrity="sha384-7jGyG5zFwmEamqNWdCbpsPn+GTWEis3lnV7X/jXHyhFpJG7ExABLyMapabg8F4+p" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js" integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="../assets/site.css">
+<script defer src="../assets/lesson.js"></script>
+<script defer src="../assets/reader.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#content">跳到正文</a>
+<header class="site-header">
+<div class="header-bar">
+<div class="bar-inner">
+<a class="brand" href="../foundations/mathematics.html">LLMs From Scratch</a>
+<nav class="switch" aria-label="系列讲义"><a href="../foundations/mathematics.html" aria-current="page">数学</a><a href="../training/position-encoding.html">位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a></nav>
+<p class="read-label" id="read-label"></p>
+<button class="theme-toggle" type="button">系统</button>
+</div>
+<div class="read-progress" aria-hidden="true"><div id="read-bar"></div></div>
+</div>
+<div class="hero-inner">
+<p class="edition">数学 · 03</p>
+<h1>数学 03，向量与矩阵：用形状组织计算</h1>
+<p class="hero-description">从范数和点积理解表示，再用形状推导矩阵乘法、广播、线性层与低秩分解。</p>
+<p class="source-row"><a href="math-03.md">Markdown 原文</a></p>
+</div>
+</header>
+<div class="layout">
+<aside class="sidebar"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html" aria-current="page">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="contents"></div></nav></aside>
+<details class="mobile-toc"><summary>目录</summary><div class="mobile-toc-list"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html" aria-current="page">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="mobile-chapters"></div></nav></div></details>
+<main id="content"><div id="load-status" role="status"></div><article id="article"></article><nav class="series-footer" aria-label="前后篇"><a class="prev" href="../foundations/math-02.html" rel="prev">上一篇 · 分布与信息量：损失函数为什么这样定义</a><a class="next" href="../foundations/math-04.html" rel="next">下一篇 · 微积分与梯度：损失如何随参数变化</a></nav><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="math-03.md">Markdown 原文</a>。</noscript></main>
+</div>
+<script type="text/plain" id="lesson-source">一个线性层可以把每个词的 5 个特征变成 3 个新特征；当一次处理 8 个词时，怎样保证每个词都使用同一套参数，而不会把词和特征混到一起？这个问题既需要理解向量代表什么，也需要知道矩阵乘法沿哪个轴求和。
+
+本章从二维箭头出发，把坐标、点积和线性组合连起来，最后写出与 `torch.nn.Linear` 相同的计算。读者只需掌握实数运算；读完应能手算一层输出，并解释每个数组的形状。[统一记号见数学导读](mathematics.html)。
+
+## 01 · 向量、矩阵与张量：先标注形状
+
+标量是一个数；向量是一组有序坐标；矩阵把数排成两个轴；深度学习中的张量通常指有任意个轴的多维数组。这里采用数值计算语境，不讨论几何学中的张量变换定义。
+
+单样本写成列向量 $x\in\mathbb R^d$，小批量（mini-batch）输入写成 $X\in\mathbb R^{B\times d}$，每行是一个样本的转置。$B$ 是批大小（batch size），即本次一起计算的样本数，$d$ 是输入特征数；例如三个样本、每个两个特征：
+
+$$
+X=\begin{bmatrix}1&2\\3&4\\-1&0\end{bmatrix},\qquad X\in\mathbb R^{3\times2}.
+$$
+
+第一个样本是 $x_1=(1,2)^\top$。NumPy 的 `(d,)` 数组没有行列方向，`.T` 不会把它变成 `(d,1)`；需要 `x[:, None]` 显式添加轴。数学上的列向量与程序中的一维数组可以方便地对应，但不能混用形状规则。
+
+词嵌入的形状可能是 `(B, T, d)`：批、序列、特征。向量的坐标是学习到的特征，并不保证某一维有独立的人类语义。矩阵的每个轴也必须通过上下文解释，不能只凭大小猜测。
+
+### 坐标为什么依赖一组基
+
+在二维平面选定 $e_1=(1,0)^\top,e_2=(0,1)^\top$，那么 $x=(3,4)^\top$ 就表示 $x=3e_1+4e_2$：沿第一条基方向走 3 个单位，再沿第二条走 4 个单位。这种“若干向量分别乘一个数，再相加”的表达叫线性组合。基需要既能表示空间中的所有向量，又没有多余方向；二维中两支不共线的向量即可构成一组基。
+
+基不必是水平和竖直方向。例如令 $f_1=(1,1)^\top,f_2=(1,-1)^\top$，寻找 $x=af_1+cf_2$，逐坐标比较得到 $a+c=3,a-c=4$，所以 $a=3.5,c=-0.5$。同一支箭头在新基下的坐标是 $(3.5,-0.5)^\top$，箭头本身没有变化。
+
+深度学习里的嵌入向量也依赖模型选定的坐标表示。因此“第一个坐标变大”本身不等于某个语义概念增强；更稳妥的研究对象是模型如何组合这些坐标，以及向量之间的关系。后文矩阵的列，就是把这些线性组合写得更紧凑的方法。
+
+## 02 · 长度与方向：范数、点积和投影
+
+向量的 $L_1$ 范数与 $L_2$ 范数分别是
+
+$$
+\|x\|_1=\sum_{j=1}^d|x_j|,\qquad
+\|x\|_2=\sqrt{\sum_{j=1}^d x_j^2}.
+$$
+
+对于 $x=(3,4)^\top$，它们是 7 和 5。两个向量间的欧氏距离是 $\|x-y\|_2$，而不是两个范数之差。矩阵的 Frobenius 范数 $\|W\|_F=\sqrt{\sum_{k,j}W_{kj}^2}$ 是所有元素平方和的平方根；这与矩阵谱范数不是一回事。
+
+### 长度、距离与单位化如何区分
+
+令 $y=(-3,4)^\top$。它与 $x=(3,4)^\top$ 的长度都为 5，但差向量 $x-y=(6,0)^\top$ 的长度为 6。这说明“表示的强度相同”不意味着表示相同；比较两个表示需要差向量或夹角，而不能只比较各自长度。
+
+非零向量的单位化是 $\widehat x=x/\|x\|_2$。例子中 $\widehat x=(0.6,0.8)^\top$，平方和 $0.36+0.64=1$。单位化去掉了整体尺度，但保持方向；若原向量乘了正数，单位化后不变，乘负数则方向反转。应用到一批向量时，必须沿每个样本的特征轴求范数，否则会把整个小批量压成一个共同尺度。
+
+### 点积为何与夹角有关
+
+点积把两个同维向量变成标量：
+
+$$
+x^\top y=\sum_j x_jy_j=\|x\|_2\|y\|_2\cos\theta.
+$$
+
+最后一个表达式用到向量间夹角，要求两者非零。令 $x=(3,4)^\top,y=(2,0)^\top$，点积为 6，余弦相似度为 $6/(5\cdot2)=0.6$。若把 $y$ 放大十倍，点积也放大十倍，但余弦相似度不变。因此注意力中的原始点积同时受长度与方向影响。
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="点积与投影示意图，可横向滚动"><img src="../assets/math/03-dot-product.svg" alt="向量 b 在 a 方向上的投影及点积与夹角余弦的关系" width="640" height="440" /></div>
+<figcaption>几何图使用 a、b 表示两个向量。点积等于一个向量的长度乘另一个向量在该方向上的有符号投影长度。</figcaption>
+</figure>
+
+图中先把一个向量垂直投到另一个向量的方向上，再看投影落在箭头的同向还是反向。同向贡献为正、反向贡献为负；互相垂直时点积为零。代数上，$\|x-y\|_2^2=\|x\|_2^2+\|y\|_2^2-2x^\top y$，而几何中的余弦定理把最后一项写成 $-2\|x\|_2\|y\|_2\cos\theta$；比较二者就得到点积与夹角的关系。
+
+投影公式也可以从一个约束推出。沿 $y$ 的任意向量都能写成 $cy$，垂直投影要求剩余部分 $x-cy$ 与 $y$ 正交，即 $y^\top(x-cy)=0$。展开成 $y^\top x-cy^\top y=0$，解出 $c$，于是
+
+沿非零向量 $y$ 的投影为
+
+$$
+\operatorname{proj}_y(x)=\frac{y^\top x}{y^\top y}y.
+$$
+
+上述算例得到 $(3,0)^\top$，剩余分量 $(0,4)^\top$ 与 $y$ 垂直。零向量没有确定方向，因此不能拿它作投影方向，也不能直接计算余弦相似度。给分母设下界是避免除零的数值约定，不会让零向量获得几何方向。
+
+下面直接验证“保留方向”和“残差正交”。`axis=1` 表示沿每一行的特征计算，`keepdims=True` 保留长度为 1 的轴，使除法明确地按行广播。预期两行单位化后都为 `(0.6, 0.8)`，投影为 `(3, 0)`。
+
+```python
+import numpy as np
+
+X = np.array([[3., 4.], [6., 8.]], dtype=np.float64)
+lengths = np.linalg.norm(X, axis=1, keepdims=True)
+unit = X / lengths  # 本例两行都非零
+np.testing.assert_allclose(lengths, [[5.], [10.]])
+np.testing.assert_allclose(unit, [[.6, .8], [.6, .8]])
+x = X[0]
+y = np.array([2., 0.], dtype=np.float64)
+projection = (y @ x) / (y @ y) * y
+np.testing.assert_allclose(projection, [3., 0.])
+np.testing.assert_allclose((x - projection) @ y, 0.)
+print(unit, projection)
+```
+
+在训练中，范数用于量化梯度大小、实施梯度裁剪、构造权重的 $L_2$ 正则项。将向量除以其范数叫单位化；LayerNorm 则沿指定轴减均值并按方差缩放，两者不是同一运算。
+
+如果把一组检索向量先单位化，再比较它们的点积，结果就等于余弦相似度；这时整体长度不再影响排序。但是否应该去掉长度取决于任务，因为模型可能用长度表达有用的信息。注意力通常直接使用查询与键的点积并按特征维数缩放，并没有自动把二者都变成单位向量，因此不能照搬单位化检索的解释。
+
+还要区分“向量之间正交”与“一个坐标恰好是零”。例如 $(1,1)^\top$ 与 $(1,-1)^\top$ 的每个坐标都非零，但点积 $1-1=0$，它们仍正交。正交描述整体向量的关系，不依赖某个坐标是否缺失；这正是处理高维表示时，点积比逐个观察坐标更有用的原因。
+
+## 03 · 矩阵乘法：把线性组合组织起来
+
+若 $A\in\mathbb R^{p\times q}$、$C\in\mathbb R^{q\times r}$，则
+
+$$
+(AC)_{ij}=\sum_{k=1}^{q}A_{ik}C_{kj},\qquad AC\in\mathbb R^{p\times r}.
+$$
+
+内侧轴 $q$ 相同，才能逐项相乘后求和；外侧轴决定结果形状。例如
+
+$$
+\begin{bmatrix}1&2\\3&4\end{bmatrix}
+\begin{bmatrix}2&0\\-1&1\end{bmatrix}
+=\begin{bmatrix}0&2\\2&4\end{bmatrix}.
+$$
+
+左上角来自 $1\cdot2+2\cdot(-1)=0$。矩阵乘法一般不满足交换律；交换这两个矩阵得到的左上角是 2。逐元素乘法则不求和，记作 $A\odot C$，这里得到 $\left[\begin{smallmatrix}2&0\\-3&4\end{smallmatrix}\right]$。NumPy 和 PyTorch 中 `@` 是矩阵乘法，`*` 是逐元素乘法。
+
+### 同一个乘积的两种读法
+
+令 $A$ 的列向量为 $a_1,a_2$。对输入 $(u,v)^\top$，有 $A(u,v)^\top=ua_1+va_2$：矩阵的列决定输入基方向被送到哪里。也可以逐行读：每个输出都是一行权重与输入的点积。前一种读法解释几何变换，后一种读法解释特征提取。
+
+上例中 $C$ 的第一列为 $(2,-1)^\top$，所以 $AC$ 的第一列就是 $2a_1-a_2=(0,2)^\top$；第二列是 $(0,1)^\top$，所以输出为 $a_2=(2,4)^\top$。这也解释矩阵复合：$ACx$ 先让 $C$ 作用于 $x$，再让 $A$ 作用于结果，顺序一旦交换，经过的中间表示便改变了。
+
+转置交换行列，$(A^\top)_{ij}=A_{ji}$，并且
+
+$$
+(AC)^\top=C^\top A^\top.
+$$
+
+转置乘积的第 $(i,j)$ 项可以逐步写成
+
+$$
+\big((AC)^\top\big)_{ij}=(AC)_{ji}
+=\sum_k A_{jk}C_{ki}
+=\sum_k(C^\top)_{ik}(A^\top)_{kj}.
+$$
+
+右端正是 $C^\top A^\top$ 的第 $(i,j)$ 项。顺序反转来自行列互换，并非人为规定。比如 $A$ 为 $(2,3)$、$C$ 为 $(3,4)$，转置后的结果应为 $(4,2)$；$C^\top A^\top$ 的形状符合，而 $A^\top C^\top$ 甚至不能相乘。
+
+乘积转置后顺序反转，可以从形状看出必要性，也可以按分量验证。对高阶张量，用 `swapaxes(-1, -2)`（NumPy）或 `transpose(-1, -2)`（PyTorch）明确交换最后两轴；NumPy 的 `.T` 会反转所有轴。
+
+## 04 · 线性层：让所有样本共享一套参数
+
+设输出特征数为 $m$，权重 $W\in\mathbb R^{m\times d}$，偏置 $b\in\mathbb R^m$。单样本计算为
+
+$$
+z=Wx+b,\qquad z_k=\sum_jW_{kj}x_j+b_k.
+$$
+
+每行权重都是一个特征检测方向；与输入点积后加上偏置。带偏置时严格说是仿射变换，框架仍称为线性层。批处理把单样本结果转成行再堆叠，因此
+
+$$
+Z=XW^\top+\mathbf1_Bb^\top\in\mathbb R^{B\times m}.
+$$
+
+代码常省略全一列向量 $\mathbf1_B$，写作 `X @ W.T + b`。广播将同一个偏置应用到每个样本，并不表示每个样本学习独立偏置。
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="线性层形状流，可横向滚动"><img src="../assets/math/linear-shapes.svg" alt="批输入 B×d 乘权重转置 d×m 得到 B×m，再沿批轴广播偏置 m" width="760" height="220" /></div>
+<figcaption>先写轴含义，再检查两个 d 是否匹配。权重本身存成 m×d，与 torch.nn.Linear 一致。</figcaption>
+</figure>
+
+对本章的 $X$，取 $W=\left[\begin{smallmatrix}1&-1\\2&0\end{smallmatrix}\right]$、$b=(0.5,-1)^\top$，得到
+
+$$
+Z=\begin{bmatrix}-0.5&1\\-0.5&5\\-0.5&-3\end{bmatrix}.
+$$
+
+广播从最右侧比较轴：维度相同或其中之一为 1 才兼容。例如 `(B,m)+(m,)` 正确；`(B,1)+(B,)` 却会得到 `(B,B)`。后者在单输出回归中易把损失悄悄算错，应显式断言预测和目标形状相同。
+
+把例子的第一行单独拿出来：第一输出是 $1\cdot1+(-1)\cdot2+0.5=-0.5$，第二输出是 $2\cdot1+0\cdot2-1=1$。第二个样本换成 $(3,4)$，同样的两行权重仍在使用。这才是小批量矩阵乘法的意义：把独立样本的重复计算打包，并没有令一个样本读取另一个样本的特征。
+
+图中的 $d$ 是输入特征轴，在矩阵乘法中被求和消去；$B$ 与 $m$ 则保留。偏置每个输出一个值，所以应有 $m$ 个元素。如果输入扩展为 $(B,T,d)$，相同的权重还可以应用到每个序列位置，结果为 $(B,T,m)$；这里仍未混合位置，混合位置需要其他明确的运算。
+
+广播陷阱可以用两个预测值说明。若预测形状为 `(2,1)`，数值是 `[[1],[2]]`，目标是形状 `(2,)` 的 `[1,2]`，相减得到 `[[0,-1],[1,0]]`，比较了所有交叉配对。正确做法是让目标也为 `(2,1)`，或者把两者都变为 `(2,)`；不能仅因程序没报错就认为形状正确。
+
+### 高阶数组中，最后两个轴承担什么
+
+把注意力中的查询写成 $Q\in\mathbb R^{B\times T\times d}$，键写成 $K\in\mathbb R^{B\times T\times d}$，希望每个样本内部的每个查询与每个键做点积。需要把 $K$ 的最后两个轴交换成 $(B,d,T)$，再做矩阵乘法，输出才是 $(B,T,T)$。输出两个位置轴分别对应查询位置与键位置，中间被求和的仍是特征轴 $d$。
+
+这与把 `(B,T,d)` 全部轴反转成 `(d,T,B)` 完全不同。后者改变了批轴的角色，即使某些维度恰好相等、程序还能运行，语义也已经错误。因此调试时除了断言大小，还应使用各轴大小不同的小例子，像本章的“样本数 3、特征数 2”一样，使错误更容易暴露。
+
+## 05 · 秩与正交：哪些信息被保留
+
+矩阵的秩是其列空间的维数，也等于最大线性无关列数。若二维矩阵的两列成比例，它把平面压到一条直线上，无法从输出唯一恢复任意输入。对于 $W\in\mathbb R^{m\times d}$，秩不超过 $\min(m,d)$。
+
+具体看 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$。第二列是第一列的两倍，任意输入 $(u,v)^\top$ 都被映射成 $(u+2v)(1,2)^\top$，输出只能落在一条直线上，所以秩为 1。输入 $(2,-1)^\top$ 被映成零，与零输入无法区分；一旦这个方向的信息被压掉，后续层仅凭输出就无法恢复它。
+
+相对地，单位矩阵的两列独立，秩为 2，它完整保留平面中的两个自由方向。低秩本身不是错误：模型可能只需要少数方向就足以完成任务；关键在于受限的表示能力是否符合数据和目标。
+
+低秩分解写作 $W=UV$，其中 $U\in\mathbb R^{m\times r},V\in\mathbb R^{r\times d}$，于是秩至多为 $r$。先经 $V$ 映射到 $r$ 维，再由 $U$ 映射到输出；参数数目从 $md$ 变成 $r(m+d)$，只有后者更小时才节省参数。对于一般矩阵，小 $r$ 通常只能近似它；低秩适配使用类似结构表达权重更新。
+
+对于刚才的秩一矩阵，分解可以明确写成
+
+$$
+\begin{bmatrix}1&2\\2&4\end{bmatrix}
+=\begin{bmatrix}1\\2\end{bmatrix}\begin{bmatrix}1&2\end{bmatrix}.
+$$
+
+右边先把输入压成标量 $u+2v$，左边再把这个标量复制成固定比例的两个输出。输出虽然有两维，但独立可变的量只有一个。要判断表示容量，不能只数数组列数，还需要看它们能否独立变化。这也是“隐藏层宽度”与“实际学到的有效方向数”不一定相同的原因。
+
+方阵 $Q\in\mathbb R^{d\times d}$ 满足 $Q^\top Q=I$ 时称为正交矩阵，它满足
+
+$$
+\|Qx\|_2^2=x^\top Q^\top Qx=\|x\|_2^2,\qquad
+(Qx)^\top(Qy)=x^\top y.
+$$
+
+正交变换保持长度和点积，可以是旋转，也可以包含反射。RoPE 使用旋转这一特殊情形，[08 · 旋转与位置编码](math-08.html) 会展开。一般线性层不保证正交，也不保证保留距离。
+
+正交性还能解释一个简单的数值现象：令 $Q=\left[\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\right]$，它把 $(3,4)^\top$ 变成 $(-4,3)^\top$，长度仍为 5。若改成对角矩阵 $D=\left[\begin{smallmatrix}10&0\\0&0.1\end{smallmatrix}\right]$，同一输入变成 $(30,0.4)^\top$，不同方向的尺度被明显改变。
+
+多层线性变换连用时，这种放大或缩小会累积；反向传播也包含转置矩阵的连乘，因此方向上的尺度关系会影响梯度传播。这里还不能仅凭一个矩阵就判断整个网络是否训练稳定，因为激活函数、归一化和损失也参与其中，但已经能看出为什么保长变换与任意线性层的行为不同。
+
+## 06 · 数值验证：从单样本对照小批量
+
+下面只需要 NumPy，数组使用 `float64`，同时验证几何、小批量计算和广播。`single` 明确逐样本使用同一个权重，`Z` 一次计算所有样本；两者相等说明矩阵写法保留了原来的逐样本语义。最后检查旋转前后的长度与点积，全部通过后打印“向量、线性层和正交性验证通过”。
+
+这里没有用运行速度作为正确性的依据。先在小数组上写出容易理解的参考计算，再与向量化实现逐项核对，是优化数值代码时很有用的习惯：快的程序必须先算对。
+
+```python
+import numpy as np
+
+x = np.array([3., 4.], dtype=np.float64)
+y = np.array([2., 0.], dtype=np.float64)
+projection = (y @ x) / (y @ y) * y
+assert np.isclose(np.linalg.norm(x), 5.)
+assert np.isclose(x @ y, 6.)
+assert np.allclose(projection, [3., 0.])
+assert np.isclose((x - projection) @ y, 0.)
+
+X = np.array([[1., 2.], [3., 4.], [-1., 0.]])
+W = np.array([[1., -1.], [2., 0.]])
+b = np.array([0.5, -1.])
+Z = X @ W.T + b
+single = np.stack([W @ row + b for row in X])
+assert Z.shape == (3, 2)
+assert np.allclose(Z, single)
+assert np.allclose(Z, [[-.5, 1.], [-.5, 5.], [-.5, -3.]])
+assert (np.zeros((3, 1)) + np.zeros(3)).shape == (3, 3)
+
+Q = np.array([[0., -1.], [1., 0.]])  # 逆时针 90 度
+assert np.allclose(Q.T @ Q, np.eye(2))
+assert np.isclose(np.linalg.norm(Q @ x), np.linalg.norm(x))
+assert np.isclose((Q @ x) @ (Q @ y), x @ y)
+print("向量、线性层和正交性验证通过")
+```
+
+完整梯度验证脚本位于仓库 `foundations/linear_algebra.py`，第 05 章会推导它使用的矩阵梯度公式。
+
+## 07 · 常见误区：数值相同不代表语义相同
+
+- 同样含 $d$ 个元素，不代表 `(d,)`、`(d,1)`、`(1,d)` 在广播和矩阵乘法中等价。
+- 矩阵乘法的条件是收缩轴相等，不是两个矩阵形状完全相同。
+- 点积大可以来自较大的范数，不能仅据此断言方向更接近。
+- 转置不是求逆；只有正交方阵才有 $Q^{-1}=Q^\top$。
+
+## 08 · 练习与核对：沿形状追踪每一步
+
+<details>
+<summary>1. 输入形状为 (8,5)，要输出 3 个特征，权重、偏置和结果分别是什么形状？</summary>
+
+输入一行是 5 个特征，每个输出需要 5 个权重，共 3 行，因此 $W\in\mathbb R^{3\times5}$。转置后与 $X$ 相乘，$(8,5)(5,3)$ 得到 $(8,3)$；偏置有 3 个元素，沿样本轴重复相加。权重的第一个轴不是批大小，它属于参数，和一次处理几个样本无关。
+
+</details>
+
+<details>
+<summary>2. 将 (1,2) 投到 (1,1) 的方向上，怎样检查结果确实是垂直投影？</summary>
+
+先算系数 $c=(1+2)/(1+1)=3/2$，投影为 $(1.5,1.5)^\top$。它是 $(1,1)^\top$ 的倍数，满足方向条件；残差为 $(-0.5,0.5)^\top$，与投影方向的点积为 0，满足垂直条件。只检查方向还不够，任意倍数都在那条直线上。
+
+</details>
+
+<details>
+<summary>3. (6,4) 矩阵分解为 (6,2) 与 (2,4) 的乘积，会限制什么？</summary>
+
+中间表示只有两个坐标，所以所有输出都位于左矩阵两列张成的空间内，秩至多为 2。参数从 24 个变为 $6\cdot2+2\cdot4=20$ 个，代价是无法精确表示秩为 3 或 4 的矩阵。节省参数与表示能力限制来自同一个低维中间空间。
+
+</details>
+
+下一章 [微积分与梯度](math-04.html) 将讨论输入或参数改变一点时，输出如何变化；之后 [矩阵求导](math-05.html) 会用本章的形状规则组织所有偏导数。
+</script>
+</body></html>

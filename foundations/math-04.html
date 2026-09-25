@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="从割线逼近切线，推导常见导数、积分、方向导数与 Taylor 展开，解释梯度下降的方向与步长。">
+<title>数学 04，微积分与梯度：损失如何随参数变化</title>
+<script>
+(function () {
+  try {
+    var stored = localStorage.getItem('theme');
+    var dark = stored === 'dark' || (stored !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+    var root = document.documentElement;
+    root.classList.toggle('dark', dark);
+    root.dataset.theme = stored || 'system';
+    root.style.colorScheme = dark ? 'dark' : 'light';
+  } catch (error) {}
+})();
+</script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.css" integrity="sha384-M59ezskvvpvT+a+C1x088YJ3DVmK+wZdX0UkVKalOI4Qi5Nwv0WrvpqHcfa2HQqB" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/css/texmath.min.css" integrity="sha384-UttgWGqUmSzrxetIBqxigLodBLOt0G9HCTlG9hKEmS9H5A5T3PGyDhPv0G8/C1EE" crossorigin="anonymous">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/styles/github-dark.min.css" integrity="sha384-wH75j6z1lH97ZOpMOInqhgKzFkAInZPPSPlZpYKYTOqsaizPvhQZmAtLcPKXpLyH" crossorigin="anonymous">
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it@14.1.0/dist/markdown-it.min.js" integrity="sha384-wLhprpjsmjc/XYIcF+LpMxd8yS1gss6jhevOp6F6zhiIoFK6AmHtm4bGKtehTani" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.18.6/dist/katex.min.js" integrity="sha384-7jGyG5zFwmEamqNWdCbpsPn+GTWEis3lnV7X/jXHyhFpJG7ExABLyMapabg8F4+p" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/markdown-it-texmath@1.0.0/texmath.min.js" integrity="sha384-IJTt8+6hpcfxunTzDwSuS8o8lsOFjDwoUddKsTvs+x8oa9muA1PbBBcXaz8D6yR0" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.11.1/build/highlight.min.js" integrity="sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="../assets/site.css">
+<script defer src="../assets/lesson.js"></script>
+<script defer src="../assets/reader.js"></script>
+</head>
+<body>
+<a class="skip-link" href="#content">跳到正文</a>
+<header class="site-header">
+<div class="header-bar">
+<div class="bar-inner">
+<a class="brand" href="../foundations/mathematics.html">LLMs From Scratch</a>
+<nav class="switch" aria-label="系列讲义"><a href="../foundations/mathematics.html" aria-current="page">数学</a><a href="../training/position-encoding.html">位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a></nav>
+<p class="read-label" id="read-label"></p>
+<button class="theme-toggle" type="button">系统</button>
+</div>
+<div class="read-progress" aria-hidden="true"><div id="read-bar"></div></div>
+</div>
+<div class="hero-inner">
+<p class="edition">数学 · 04</p>
+<h1>数学 04，微积分与梯度：损失如何随参数变化</h1>
+<p class="hero-description">从割线逼近切线，推导常见导数、积分、方向导数与 Taylor 展开，解释梯度下降的方向与步长。</p>
+<p class="source-row"><a href="math-04.md">Markdown 原文</a></p>
+</div>
+</header>
+<div class="layout">
+<aside class="sidebar"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html" aria-current="page">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="contents"></div></nav></aside>
+<details class="mobile-toc"><summary>目录</summary><div class="mobile-toc-list"><nav class="route-links" aria-label="学习路线"><div class="sidebar-title">学习路线</div><a href="../foundations/mathematics.html">00 · 数学基础</a><a href="../foundations/math-01.html">01 · 概率与统计：怎样从一批数据估计整体规律</a><a href="../foundations/math-02.html">02 · 分布与信息量：损失函数为什么这样定义</a><a href="../foundations/math-03.html">03 · 向量与矩阵：用形状组织计算</a><a href="../foundations/math-04.html" aria-current="page">04 · 微积分与梯度：损失如何随参数变化</a><a href="../foundations/math-05.html">05 · 矩阵求导：把梯度写成同形状的数组</a><a href="../foundations/math-06.html">06 · 链式法则与反向传播：梯度怎样穿过计算图</a><a href="../foundations/math-07.html">07 · 神经网络训练：从预测到参数更新</a><a href="../foundations/math-08.html">08 · 旋转与位置编码：从保长变换到相对位置</a><a href="../training/position-encoding.html">01 · 位置编码</a><a href="../inference/position-encoding-and-kv-cache.html">02 · KV cache</a><a href="../inference/nano-vllm-from-zero-to-mastery.html">03 · 推理系统</a><a href="https://cyberspacelee.github.io/llms-from-scratch/lessons/ai-infra/">AI Infra</a><div class="sidebar-title">本章目录</div><div id="mobile-chapters"></div></nav></div></details>
+<main id="content"><div id="load-status" role="status"></div><article id="article"></article><nav class="series-footer" aria-label="前后篇"><a class="prev" href="../foundations/math-03.html" rel="prev">上一篇 · 向量与矩阵：用形状组织计算</a><a class="next" href="../foundations/math-05.html" rel="next">下一篇 · 矩阵求导：把梯度写成同形状的数组</a></nav><noscript>此讲义需要 JavaScript 渲染。可阅读同目录的 <a href="math-04.md">Markdown 原文</a>。</noscript></main>
+</div>
+<script type="text/plain" id="lesson-source">假设模型只有一个参数 $x$，损失是 $f(x)=x^2$。现在参数等于 $1$，你准备将它增加 $0.01$：损失大约会增加多少？如果参数有一千个，怎样知道该修改哪一个、往哪个方向修改？微积分把这些问题转化为可计算的局部变化率。
+
+本章先从两个点间的平均变化出发，再推广到多个参数共同变化。先修只需函数、代数运算和 [向量与矩阵](math-03.html)；读完后，你应能手算简单函数的梯度、解释学习率的作用，并用数值实验核对结论。
+
+## 01 · 从割线到切线：如何衡量一个很小的变化
+
+在 $x=1$ 附近，把输入增加非零的 $h$。连接 $(1,f(1))$ 与 $(1+h,f(1+h))$ 的直线称为割线，其斜率是两点的纵向变化除以横向变化：
+
+$$
+\frac{f(1+h)-f(1)}h=\frac{(1+h)^2-1}h=2+h.
+$$
+
+| 输入变化 $h$ | 函数变化 $f(1+h)-f(1)$ | 割线斜率 |
+| --- | --- | --- |
+| $0.1$ | $0.21$ | $2.1$ |
+| $0.01$ | $0.0201$ | $2.01$ |
+| $0.001$ | $0.002001$ | $2.001$ |
+| $-0.01$ | $-0.0199$ | $1.99$ |
+
+从左右两侧靠近时，斜率都趋近 $2$。这个共同趋势就是极限；它不是把 $h=0$ 代入一个分母为零的式子。一般地，如果有限极限存在，就定义导数：
+
+$$
+f\prime(x)=\lim_{h\to0}\frac{f(x+h)-f(x)}h.
+$$
+
+导数给出切线斜率，也给出局部线性预测 $f(x+\Delta x)\approx f(x)+f\prime(x)\Delta x$。对平方函数，先展开 $(x+h)^2$、消去 $x^2$，再除以 $h$，得到 $2x+h$，最后取极限，所以 $f\prime(x)=2x$。
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="平方函数及其在横坐标 1 处的切线，切线在附近逼近函数，可横向滚动"><img src="../assets/math/calculus-tangent.svg" alt="平方函数及其在横坐标 1 处的切线，切线在附近逼近函数" width="800" height="460" /></div>
+<figcaption>横轴为输入，纵轴为函数值。绿色曲线表示平方函数，橙色虚线表示在 x=1 处斜率为 2 的切线。</figcaption>
+</figure>
+
+沿图中切线走到 $x=1.01$，预测为 $1.02$；曲线实际值为 $1.0201$。误差是 $0.01^2$，说明“一阶近似”舍弃了二阶变化。训练中根据梯度调整参数也是这种局部预测，因此不能仅凭当前导数判断任意远处的函数值。
+
+连续不等于可导。例如 $|x|$ 在零点没有跳跃，但左右斜率分别是 $-1$ 与 $1$，没有共同极限。神经网络激活函数的折点也必须区分经典导数和软件采用的反向规则。
+
+### 导数的单位也能帮助检查公式
+
+假如输入单位是秒、输出单位是米，导数单位就是米每秒；若输入是模型权重，输出是损失，导数表示每单位权重变化造成的损失变化。导数的大小依赖坐标尺度：把同一长度从米改为厘米，数值导数就会改变。因此，不能脱离特征尺度直接比较两个参数的梯度绝对值，更不能仅凭它们判断哪个特征“更重要”。
+
+数值验证也需要先明确比较对象。前向差分只使用当前位置与右侧位置，中心差分使用左右两侧。在足够光滑的函数上，中心差分的主要截断误差通常是步长的平方阶，而前向差分通常是步长的一次阶；但两者最终都会遇到浮点精度限制。本章使用简单函数与双精度，是为了让公式检查容易复现，不代表真实训练应逐个参数这样求导。
+
+## 02 · 常见导数：指数、对数与激活为何这样求导
+
+复杂损失由简单函数复合而成。先记住基本规则，再理解指数与对数的来源，比只背最终梯度更容易检查错误。常数 $c$ 的导数是零；求和可逐项求导；乘积规则为 $(fg)\prime=f\prime g+fg\prime$。如果 $a=g(x)$、$f$ 可导，则复合函数的导数是 $f\prime(a)g\prime(x)$，第 06 章会解释它如何沿整张计算图传递。
+
+### 为什么自然指数的导数仍然是自身
+
+自然指数满足 $e^{x+h}=e^xe^h$。将它代入导数定义：
+
+$$
+\frac{e^{x+h}-e^x}{h}=e^x\frac{e^h-1}h.
+$$
+
+这里 $x$ 固定，随 $h$ 变化的是第二个因子。自然底数 $e$ 对应基本极限 $\lim_{h\to0}(e^h-1)/h=1$，因此 $(e^x)\prime=e^x$。例如在零点，函数值和斜率都为 $1$；在 $x=2$，两者都约为 $7.389$。softmax 中的指数会放大较大的分数，因此实现还必须处理溢出风险，导数公式本身不保证数值稳定。
+
+### 为什么对数导数是倒数
+
+令 $a=\ln x$，定义域为 $x>0$，则 $e^a=x$。两边对 $x$ 求导，注意 $a$ 本身随 $x$ 变化：
+
+$$
+e^a\frac{da}{dx}=1,\qquad \frac{d\ln x}{dx}=\frac1{e^a}=\frac1x.
+$$
+
+在 $x=0.1$ 时斜率为 $10$，在 $x=10$ 时只有 $0.1$。这解释了负对数损失 $-\ln p$ 对很小的真实类别概率为何敏感：对概率本身的导数是 $-1/p$。继续对产生概率的模型参数求导时，还要乘后续链式因子，不能把 $-1/p$ 直接当成参数梯度。
+
+### sigmoid 的导数为何由输出值决定
+
+sigmoid 是把实数压到 $(0,1)$ 的 S 形函数，统一记作 $s(x)=(1+e^{-x})^{-1}$。先对最外层的倒数求导，再对指数求导：
+
+$$
+s\prime(x)=-(1+e^{-x})^{-2}(-e^{-x})
+=\frac1{1+e^{-x}}\frac{e^{-x}}{1+e^{-x}}
+=s(x)[1-s(x)].
+$$
+
+在 $x=0$，$s=1/2$，导数为 $1/4$；在 $x=5$，输出约为 $0.9933$，导数约为 $0.00665$。越靠近两端，输入变化越难传到输出，这叫饱和，也是深层链路梯度衰减的一个来源。
+
+| 函数 | 导数 | 条件 |
+| --- | --- | --- |
+| $x^n$ | $nx^{n-1}$ | 此处 $n$ 为正整数 |
+| $\sin x$、$\cos x$ | $\cos x$、$-\sin x$ | 角度用弧度 |
+| $\tanh x$ | $1-\tanh^2x$ | 实数输入 |
+| $\max(0,x)$ | 负半轴为 $0$，正半轴为 $1$ | 零点无经典导数 |
+
+下面用中心差分核对三种导数。它用左右两侧的割线近似切线，步长取 $10^{-5}$；过小的步长反而可能放大浮点减法误差。
+
+```python
+import numpy as np
+
+np.random.seed(42)
+x = np.array([0.2, 1.0, 2.0], dtype=np.float64)
+eps = 1e-5
+sigmoid = lambda t: 1.0 / (1.0 + np.exp(-t))
+for f, derivative in [
+    (np.exp, np.exp),
+    (np.log, lambda t: 1.0 / t),
+    (sigmoid, lambda t: sigmoid(t) * (1.0 - sigmoid(t))),
+]:
+    numeric = (f(x + eps) - f(x - eps)) / (2 * eps)
+    expected = derivative(x)
+    np.testing.assert_allclose(numeric, expected, rtol=1e-8, atol=1e-9)
+    print(np.round(expected, 6))
+```
+
+输出三行分别是指数、对数与 sigmoid 的导数；对数一行应为 `[5., 1., 0.5]`。断言验证的是公式与数值近似一致，不是用有限差分代替训练时的自动微分。
+
+### 平方损失中的二分之一在做什么
+
+预测值记作 $\hat y$，目标 $y$ 固定。对 $\ell=\tfrac12(\hat y-y)^2$ 求导，最外层平方产生 $2(\hat y-y)$，内层差的导数为一，乘上前面的二分之一后得到 $\partial\ell/\partial\hat y=\hat y-y$。若省略二分之一，导数只是整体扩大两倍；最小值位置没有因此改变，但使用同一学习率时更新大小会不同。
+
+例如预测为三、目标为一，损失是二，对预测的导数也是二。预测增加一个很小的正数会让损失增加，沿负导数方向移动则会让它接近目标。这里求导的变量是预测值，并非某个权重；如果预测本身是权重的函数，还必须继续应用链式法则。这一层区分在看交叉熵、激活函数或多个模型模块组合时同样重要。
+
+## 03 · 积分：如何把局部数量累积为总量
+
+如果已知每个时刻的速度，怎样算一段时间内的位移？把时间分成很多小段，每段用“速度乘时间”估计位移，再相加。对于一般函数，等宽分割给出：
+
+$$
+\int_a^b f(x)\,dx=\lim_{n\to\infty}\sum_{k=1}^n f(\xi_k)\Delta x,
+\qquad \Delta x=\frac{b-a}{n}.
+$$
+
+$\xi_k$ 是第 $k$ 个小区间内的取值点；这里假设函数满足相应可积条件。积分是带符号的累积，函数为负时贡献也为负。若 $f$ 连续，累积函数 $F(x)=\int_a^x f(t)\,dt$ 满足 $F\prime(x)=f(x)$；若 $G\prime=f$，则积分等于 $G(b)-G(a)$。
+
+概率提供了一个直接算例：若随机变量 $U$ 在 $[0,1]$ 上均匀分布，密度为 $1$，则：
+
+$$
+\mathbb E[U]=\int_0^1u\,du=\left[\frac{u^2}{2}\right]_0^1=\frac12,
+\quad \mathbb E[U^2]=\frac13,
+\quad \operatorname{Var}(U)=\frac13-\frac14=\frac1{12}.
+$$
+
+把积分换成离散矩形和，也能看见这个结果逐渐逼近：
+
+```python
+import numpy as np
+
+np.random.seed(42)
+for n in [10, 100, 1000]:
+    u = (np.arange(n, dtype=np.float64) + 0.5) / n
+    mean = np.sum(u) / n
+    second_moment = np.sum(u ** 2) / n
+    variance = second_moment - mean ** 2
+    np.testing.assert_allclose(mean, 0.5)
+    np.testing.assert_allclose(variance, 1 / 12 - 1 / (12 * n ** 2))
+    print(n, round(mean, 6), round(variance, 8))
+```
+
+每个矩形宽度是 $1/n$，因此求和后除以 $n$。方差依次约为 $0.0825$、$0.083325$、$0.08333325$；这里是确定性积分近似，不是随机抽样。深度学习中的总体目标 $\mathbb E[\ell_\theta(U)]$ 也是加权积分，数据平均损失则以样本估计期望。交换求导和积分需要可微、可积控制等条件；有限批求和的求导不涉及同样的无限极限交换问题。
+
+### 积分权重和样本权重怎样对应
+
+对一般连续分布，期望是 $\int f(u)p(u)\,du$。在规则网格上做数值积分，近似项是 $f(u_k)p(u_k)\Delta u$；密度和区间宽度共同决定每项权重。若样本本身已经从这个分布抽取，蒙特卡洛估计通常直接取 $f(u_i)$ 的平均，不再额外乘一次密度。两种方法的权重来源不同，混在一起可能重复加权。
+
+训练数据平均损失依靠后一种思想：常见目标是让模型在数据分布下的预期表现更好，而不只是让某个规则网格上的函数面积更小。有限训练集仍可能与真实部署分布不同，所以算出精确训练集梯度，也不意味着已经得到真实总体目标的精确梯度。这个误差来自数据抽样与分布差异，和自动微分的计算精度是两类问题。
+
+## 04 · 偏导数与方向导数：多个参数怎样共同影响损失
+
+考虑两个参数的损失 $L(x_1,x_2)=\tfrac12(x_1^2+4x_2^2)$。如果只改变第一个参数，把 $x_2$ 固定为常量，$4x_2^2/2$ 的导数就是零，所以 $\partial L/\partial x_1=x_1$。反过来固定 $x_1$，得到 $\partial L/\partial x_2=4x_2$。将偏导数组合起来，得到列梯度：
+
+$$
+\nabla_xL=\begin{bmatrix}x_1\\4x_2\end{bmatrix}\in\mathbb R^2.
+$$
+
+在 $x=(2,1)^\top$，损失为 $4$，梯度为 $(2,4)^\top$。梯度不是把偏导相加成 $6$：每个坐标对应不同参数，必须保留它们各自的变化率。
+
+如果同时移动两个坐标呢？在函数可微的条件下，一阶变化称为全微分：
+
+$$
+dL=\frac{\partial L}{\partial x_1}dx_1+\frac{\partial L}{\partial x_2}dx_2
+=\nabla L^\top dx.
+$$
+
+取 $\Delta x=(0.01,-0.02)^\top$，预测变化为 $2(0.01)+4(-0.02)=-0.06$。实际损失是 $3.94085$，变化为 $-0.05915$；两者相差 $0.00085$，后面会用二阶项精确解释。
+
+令 $v$ 为欧氏长度等于 $1$ 的方向向量，沿它移动 $h$，就有 $\Delta x=hv$。除以 $h$ 并取极限，得到方向导数：
+
+$$
+D_vL(x)=\nabla L(x)^\top v.
+$$
+
+取 $v=(3/5,4/5)^\top$，方向导数为 $22/5=4.4$。固定单位步长时，由柯西–施瓦茨不等式，负梯度方向给出最小的一阶变化。这里限定了欧氏距离与局部近似；它并不声称负梯度方向上的任意远点都更好。
+
+### 固定其他变量不等于切断真实计算依赖
+
+偏导数的“固定”针对函数选定的独立输入坐标。若损失写成 $L(x_1,x_2)$，对第一个坐标求偏导时固定第二个坐标；但如果另有关系 $x_2=x_1^2$，沿这条约束曲线移动时，第二个坐标也会变化，此时应计算复合函数的总变化，不能只拿第一项偏导当答案。
+
+例如对 $F(u,v)=u+v$，偏导 $\partial F/\partial u=1$；代入 $v=u^2$ 后，复合函数变成 $u+u^2$，对 $u$ 的导数是 $1+2u$。神经网络的中间节点经常共同依赖同一个参数，第 06 章的分支梯度累加正是在系统地处理这种依赖。明确“谁是独立变量、谁是计算结果”，往往比记住公式更能避免错误。
+
+## 05 · Taylor 展开与海森矩阵：局部预测误差从何而来
+
+一阶导数描述斜率，斜率本身的变化由二阶导数描述。对多个变量，把所有二阶偏导排成海森矩阵（Hessian matrix）：
+
+$$
+\mathcal H_{jk}=\frac{\partial^2L}{\partial x_j\partial x_k},\qquad
+\mathcal H\in\mathbb R^{d\times d}.
+$$
+
+本例先对 $x_1$ 求导得到 $x_1$，再对 $x_1$ 求导为 $1$，对 $x_2$ 求导为零；同理第二行得到 $0,4$。所以 $\mathcal H=\operatorname{diag}(1,4)$。第二坐标方向的曲率更大，图中等高线因此是椭圆而非圆。
+
+若函数在邻域内二阶连续可微，Taylor 展开为：
+
+$$
+L(x+\Delta x)=L(x)+\nabla L(x)^\top\Delta x
++\frac12\Delta x^\top\mathcal H(x)\Delta x+o(\|\Delta x\|_2^2).
+$$
+
+本例是二次函数，更高阶余项为零。上一节移动量的二阶项恰好为 $\tfrac12[0.01^2+4(-0.02)^2]=0.00085$，补上它就得到实际损失。若有交叉项，例如 $q=x_1^2+x_1x_2+2x_2^2$，则梯度是 $(2x_1+x_2,x_1+4x_2)^\top$，海森矩阵为 $\begin{bmatrix}2&1\\1&4\end{bmatrix}$；非零的非对角项记录坐标之间的相互影响。
+
+在梯度为零的驻点，海森矩阵正定可推出严格局部极小值，有正负特征值则是鞍点；存在零特征值时可能不能据此判断。例如 $x^4$ 在零点二阶导数为零，却仍有极小值。大模型显式保存 $d\times d$ 的海森矩阵通常过于昂贵，这也是一阶方法常用的原因。
+
+## 06 · 梯度下降：步长为何决定收敛或发散
+
+使用学习率 $\eta>0$ 更新 $x_{t+1}=x_t-\eta\nabla L(x_t)$。把这个变化代入一阶项，预测损失变化为 $-\eta\|\nabla L\|_2^2$，因此非零梯度时小步长有下降趋势。但当步长太大，二阶影响不能忽略。
+
+对本例，不需要近似就能逐坐标写出更新：
+
+$$
+x_{1,t+1}=(1-\eta)x_{1,t},\qquad
+x_{2,t+1}=(1-4\eta)x_{2,t}.
+$$
+
+一个数反复乘同一系数，要收敛到零，该系数的绝对值应小于 $1$。两坐标共同要求 $|1-\eta|<1$、$|1-4\eta|<1$，合起来是 $0<\eta<1/2$。取 $0.2$ 时两系数都是正数；取 $0.45$ 时第二系数是 $-0.8$，会变号振荡；取 $0.6$ 时第二系数是 $-1.4$，初始第二坐标非零就会发散。这个阈值只属于本例，不能直接用于其他模型。
+
+<figure class="math-figure">
+<div class="math-figure-scroll" tabindex="0" role="region" aria-label="椭圆等高线上从相同起点出发的两条真实梯度下降轨迹，较大学习率出现振荡，可横向滚动"><img src="../assets/math/calculus-descent.svg" alt="椭圆等高线上从相同起点出发的两条真实梯度下降轨迹，较大学习率出现振荡" width="800" height="540" /></div>
+<figcaption>横纵轴分别是两个参数，曲线标记相同损失的点。两条轨迹从 (2,1) 出发，展示学习率 0.2 与 0.45 的 12 次真实更新。</figcaption>
+</figure>
+
+图中橙色轨迹反复越过谷底，却越来越接近原点；振荡不等于发散。下面直接核对梯度并运行较小步长的更新：
+
+```python
+import numpy as np
+
+np.random.seed(42)
+x = np.array([2.0, 1.0], dtype=np.float64)
+def loss(v):
+    return 0.5 * (v[0] ** 2 + 4 * v[1] ** 2)
+
+eps = 1e-5
+numeric = np.array([
+    (loss(x + eps * e) - loss(x - eps * e)) / (2 * eps)
+    for e in np.eye(2)
+])
+np.testing.assert_allclose(numeric, [2.0, 4.0], rtol=1e-9)
+for _ in range(30):
+    before = loss(x)
+    x -= 0.2 * np.array([x[0], 4 * x[1]])
+    assert loss(x) < before
+assert loss(x) < 1e-5
+print(x, loss(x))
+```
+
+最终第一坐标约为 $0.002476$，第二坐标已很接近零，损失约为 $3.065\times10^{-6}$。第二坐标收敛更快，是因为这个学习率下它每步乘 $0.2$，而第一坐标每步乘 $0.8$。配套验证脚本为 `foundations/calculus.py`。
+
+### 从二次函数看曲率与学习率的关系
+
+对更一般的严格凸二次函数 $L(x)=\tfrac12x^\top A x$，若 $A$ 对称正定，则梯度是 $Ax$。在它的各个单位特征向量方向上，更新等价于把坐标乘 $1-\eta\lambda$，其中 $\lambda$ 是对应特征值。为了所有方向都缩小，学习率须满足 $0<\eta<2/\lambda_{\max}$。本章最大特征值为四，因此重新得到二分之一的上界。
+
+这个推导也解释了狭长谷地的困难：陡峭方向要求小步长，平缓方向却可能因此移动很慢。真实网络通常并非固定曲率的凸二次函数，但局部近似仍能帮助理解振荡、特征缩放和优化器设计。不能由这个局部模型推出网络必然收敛，更不能把它当成所有学习率选择的公式。
+
+在随机小批量训练中，还需要区分当前批损失与总体目标。当前批梯度指向这个批次的局部下降方向；更新之后，另一个批次的损失可能升高，完整训练集的损失也不必每一步严格下降。因此，本章代码中的单步下降断言适用于所选确定性二次函数，不能直接作为所有神经网络训练循环的通用断言。观察多个训练步的统计趋势，并结合验证集表现，才能判断学习是否有效。
+
+## 07 · 常见误区
+
+1. **梯度为零就已经全局最优。** 还可能是鞍点、极大值或平坦区域，需要结合函数结构判断。
+2. **偏导数存在就意味着整体可微。** 多元函数的各偏导存在不自动保证可微；方向导数公式和 Taylor 展开都有成立条件。
+3. **学习率越小一定越好。** 太小可能下降极慢；应结合曲率、噪声和训练预算选择，而非只避免发散。
+4. **密度值就是单点概率。** 连续分布的区间概率由积分给出；密度可以大于一，但单点概率仍为零。
+
+## 08 · 练习与核对
+
+<details>
+<summary>1. f(x)=3x²+2x 在 x=1 的导数是多少？</summary>
+
+逐项求导得到 $6x+2$，代入 $1$ 为 $8$。因此小变化 $h$ 的一阶函数变化为 $8h$，并非函数值乘 $h$。
+
+</details>
+
+<details>
+<summary>2. L=x₁x₂+x₂² 在 (2,3) 的梯度与海森矩阵是什么？</summary>
+
+固定 $x_2$ 对 $x_1$ 求导得到 $x_2$；固定 $x_1$ 对 $x_2$ 求导得到 $x_1+2x_2$。梯度为 $(3,8)^\top$，再次求导得到 $\mathcal H=\begin{bmatrix}0&1\\1&2\end{bmatrix}$。
+
+</details>
+
+<details>
+<summary>3. 本章二次损失从 (2,1) 以学习率 0.2 更新一步，会到哪里？</summary>
+
+梯度为 $(2,4)^\top$，减去其 $0.2$ 倍后得到 $(1.6,0.2)^\top$，新损失为 $\tfrac12(1.6^2+4\cdot0.2^2)=1.36$。
+
+</details>
+
+<details>
+<summary>4. 学习率正好为 0.5，能保证收敛吗？</summary>
+
+不能。第二坐标每步乘 $-1$，初始值非零时只会变号，幅度不会减小；这说明收敛区间的严格不等号不能忽略。
+
+</details>
+
+下一章可把这些标量与向量的变化率组织成 [矩阵求导](math-05.html)；随后用 [链式法则与反向传播](math-06.html) 将局部导数传回整个网络的参数。
+</script>
+</body></html>

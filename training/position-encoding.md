@@ -179,7 +179,7 @@ $$
 
 ### 进阶阅读：为什么连续、保长的变换导向旋转？
 
-完整的生成元与矩阵指数推导已独立到 [数学基础 · 第 07 章](../foundations/mathematics.html#section-7)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
+完整的生成元与矩阵指数推导已独立到 [数学 08 · 矩阵指数](../foundations/math-08.html#section-4)。这里使用其结论：二维旋转可写成 $R(\phi)=e^{\phi J}=\cos\phi I+\sin\phi J$，其中 $J^2=-I$。
 
 ## 06 · 从一对坐标，扩展到原始位置编码
 
@@ -298,7 +298,7 @@ $$
 
 ### 从点积的几何表示得到两点洞察
 
-回到 [数学基础 · 点积与投影](../foundations/mathematics.html#section-3) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
+回到 [数学基础 · 点积与投影](../foundations/math-03.html#section-2) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点洞察是：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
 
 $$
 \widetilde q_i^\top\widetilde k_j

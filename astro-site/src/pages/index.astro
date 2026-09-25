@@ -1,6 +1,6 @@
 ---
 import LessonLayout from '../layouts/LessonLayout.astro'
-import { infraItems, principleItems } from '../data/series'
+import { infraItems, mathItems, principleItems } from '../data/series'
 const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
 ---
 <LessonLayout
@@ -11,8 +11,13 @@ const base = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL :
   description="用数学推导、SVG 图解与 PyTorch 验证理解大语言模型，再沿一次请求的账单进入 AI Infra。"
 >
   <section class="route-index">
+    <h2>深度学习数学</h2>
+    <a href={`${base}lessons/mathematics`}><strong>导读 · 术语与记号</strong><span>统一形状、公式与代码约定</span></a>
+    {mathItems.map((item) => (
+      <a href={`${base}${item.href}`}><strong>{item.sidebar}</strong><span>{item.question}</span></a>
+    ))}
     <h2>模型原理</h2>
-    {principleItems.map((item) => (
+    {principleItems.filter((item) => item.id !== 'mathematics').map((item) => (
       <a href={`${base}${item.href}`}><strong>{item.sidebar}</strong><span>{item.question}</span></a>
     ))}
     <h2>AI Infra</h2>

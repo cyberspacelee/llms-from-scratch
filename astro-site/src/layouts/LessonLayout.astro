@@ -25,6 +25,7 @@ const href = (path: string) => `${base}${path}`
 const topOn = (id: string) => {
   if (!current) return false
   if (id === 'ai-infra') return current.group === 'infra'
+  if (id === 'mathematics') return current.id === 'mathematics' || current.group === 'math'
   return current.id === id
 }
 ---
@@ -32,6 +33,7 @@ const topOn = (id: string) => {
 <html lang="zh-CN" data-progress={progress ? undefined : 'off'}>
   <head>
     <meta charset="UTF-8" />
+    <base href={slug ? `${base}lessons/${slug}/` : base} />
     <meta name="viewport" content="width=device-width" />
     <meta name="description" content={description} />
     <title>{title} · LLMs From Scratch</title>
