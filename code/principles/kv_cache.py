@@ -1,12 +1,9 @@
 """Compare full causal attention with prefill and cached decoding."""
 
-import sys
-from pathlib import Path
-
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from training.position_encoding import apply_rope, attention
+# Python puts this file's directory on sys.path, so the sibling module imports directly.
+from position_encoding import apply_rope, attention
 
 
 @torch.no_grad()

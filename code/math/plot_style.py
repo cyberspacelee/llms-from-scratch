@@ -6,7 +6,7 @@ matplotlib.use("Agg")
 from matplotlib import font_manager
 import matplotlib.pyplot as plt
 
-OUTPUT = Path(__file__).resolve().parents[1] / "astro-site/public/assets/math"
+OUTPUT = Path(__file__).resolve().parents[2] / "site/src/assets/figures/math"
 GREEN, ORANGE, BLUE = "#087f70", "#c16b36", "#3176b5"
 INK, MUTED, PAPER = "#263a34", "#68726d", "#fffefa"
 

@@ -1,4 +1,4 @@
-"""数学 01/02 的独立数值验证：uv run --with numpy python foundations/probability.py。"""
+"""数学 01/02 的独立数值验证：uv run --with numpy python code/math/probability.py。"""
 import numpy as np
 
 

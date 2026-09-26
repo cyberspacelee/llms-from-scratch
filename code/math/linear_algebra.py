@@ -1,6 +1,6 @@
 """数学 03/05：形状、几何、手工梯度、autograd 和中心差分验证。
 
-运行：.venv/bin/python foundations/linear_algebra.py
+运行：.venv/bin/python code/math/linear_algebra.py
 依赖：numpy、torch。固定种子，CPU，float64。
 """
 
