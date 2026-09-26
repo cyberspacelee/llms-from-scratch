@@ -1,0 +1,48 @@
+---
+import FigureShell from '../FigureShell.astro'
+
+/** nano-vLLM as two cooperating loops: a CPU control plane and a GPU data plane sharing the paged KV cache. */
+const box = 'fill-sunken stroke-rule-strong'
+---
+<FigureShell label="nano-vLLM 系统边界图">
+    <svg viewBox="0 0 900 390" role="img" aria-label="请求经过引擎、调度器和块管理器；模型执行器调用 Qwen3，读写分页 KV cache，并把采样 token 交回序列" class="block h-auto w-full min-w-xl font-sans text-[14px] [&_text]:fill-ink">
+      <defs>
+        <marker id="nano-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" class="fill-muted" /></marker>
+        <marker id="nano-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" class="fill-accent" /></marker>
+        <pattern id="nano-grid" width="20" height="20" patternUnits="userSpaceOnUse"><path d="M20 0H0V20" class="fill-none stroke-accent opacity-40" /></pattern>
+      </defs>
+      <text x="40" y="40" class="font-mono text-[12px] fill-accent2!">控制面 · CPU</text>
+      <rect x="40" y="56" width="170" height="74" rx="6" class="fill-accent2-soft stroke-accent2" />
+      <text x="125" y="88" text-anchor="middle" class="font-semibold">LLMEngine</text>
+      <text x="125" y="110" text-anchor="middle" class="font-mono text-[12px] fill-muted!">generate / step</text>
+      <rect x="290" y="56" width="170" height="74" rx="6" class="fill-accent-soft stroke-accent" />
+      <text x="375" y="88" text-anchor="middle" class="font-semibold">Scheduler</text>
+      <text x="375" y="110" text-anchor="middle" class="font-mono text-[12px] fill-muted!">waiting / running</text>
+      <rect x="540" y="56" width="170" height="74" rx="6" class={box} />
+      <text x="625" y="88" text-anchor="middle" class="font-semibold">BlockManager</text>
+      <text x="625" y="110" text-anchor="middle" class="font-mono text-[12px] fill-muted!">block_table</text>
+      <path d="M210 93H282" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
+      <path d="M460 93H532" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
+
+      <text x="40" y="196" class="font-mono text-[12px] fill-info!">数据面 · GPU × TP ranks</text>
+      <rect x="40" y="212" width="200" height="78" rx="6" class={box} />
+      <text x="140" y="246" text-anchor="middle" class="font-semibold">ModelRunner</text>
+      <text x="140" y="268" text-anchor="middle" class="font-mono text-[12px] fill-muted!">prepare → run → sample</text>
+      <rect x="330" y="212" width="200" height="78" rx="6" class={box} />
+      <text x="430" y="246" text-anchor="middle" class="font-semibold">Qwen3</text>
+      <text x="430" y="268" text-anchor="middle" class="font-mono text-[12px] fill-muted!">RoPE · GQA · MLP</text>
+      <rect x="630" y="190" width="200" height="124" rx="6" fill="url(#nano-grid)" class="stroke-accent stroke-2" />
+      <text x="730" y="238" text-anchor="middle" class="font-semibold">Paged KV Cache</text>
+      <text x="730" y="262" text-anchor="middle" class="font-mono text-[12px] fill-muted!">[2, L, blocks, S, H, D]</text>
+      <text x="730" y="284" text-anchor="middle" class="text-[12px] fill-muted!">物理块不必连续</text>
+
+      <path d="M375 130C375 176 140 164 140 204" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
+      <path d="M240 251H322" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
+      <path d="M530 240H622" class="fill-none stroke-accent stroke-[1.5]" marker-end="url(#nano-arrow-accent)" />
+      <path d="M630 296C570 344 280 346 206 294" class="fill-none stroke-accent stroke-[1.5] [stroke-dasharray:6_5]" marker-end="url(#nano-arrow-accent)" />
+      <text x="430" y="370" text-anchor="middle" class="font-mono text-[12px] fill-muted!">采样出的 token → Sequence.append_token → 下一步</text>
+    </svg>
+  <Fragment slot="caption">
+    上排三个对象在 CPU 上决定这一步算谁、写到哪里；下排在 GPU 上完成计算。绿色网格是两者共享的分页 KV cache，虚线是采样结果回到序列、进入下一步。
+  </Fragment>
+</FigureShell>

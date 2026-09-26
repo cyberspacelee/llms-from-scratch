@@ -1,0 +1,364 @@
+---
+title: 相对位置与 RoPE
+question: 怎样让注意力分数只通过位置差依赖位置
+description: 从 Shaw、T5 与 ALiBi 的相对位置设计出发，用复数和分块旋转推出 RoPE，检查它保证了什么、没有保证什么，并用 PyTorch 验证。
+order: 3
+code:
+  - code/principles/position_encoding.py
+---
+
+[P2](/principles/sinusoidal/) 的加法编码把位置放进输入，投影之后又会出现绝对位置项。本章换一个思路：直接修改注意力分数，让新增的位置依赖只读取位置差。先看三种代表性做法，再用复数这一工具把 [P2](/principles/sinusoidal/) 的旋转施加到查询和键上，得到 RoPE。
+
+## 直接把相对位置写进分数
+
+我们希望同一内容关系在整段文本平移后尽量保持一致。令 $\Delta=j-i$，最直接的做法是让新增项只读取 $\Delta$，而不是分别读取 $i,j$。
+
+### Shaw：让“偏移”成为一个向量
+
+给每个截断后的偏移学习一个键侧向量 $a^K_\Delta$：
+
+$$
+s_{ij}=\frac{q_i^\top(k_j+a^K_{\operatorname{clip}(j-i,-r,r)})}{\sqrt{d_h}}.
+$$
+
+展开后是原有内容分数加 $q_i^\top a^K_\Delta$。相同距离对于不同查询可以产生不同修正，因为这个修正与内容有关。截断把无限多距离压成有限参数，但所有超出窗口的同方向距离会共享编码。原方法也有值侧相对项，以上只展示分数如何改变。
+
+### T5：从内容相关向量，简化成标量偏置
+
+$$
+s_{ij}^{(h)}=\frac{q_i^\top k_j}{\sqrt{d_h}}+b_h(\operatorname{bucket}(j-i)).
+$$
+
+不再与查询做点积，而是每个头、每个距离桶一个标量。近处可以分得细，远处分得粗。代价是桶内距离不能通过这项区分，偏置本身也不依赖查询内容。
+
+### ALiBi：把距离先验变成指数权重
+
+对因果注意力 $j\le i$，固定每个头的正斜率 $m_h$：
+
+$$
+s_{ij}^{(h)}=c_{ij}^{(h)}-m_h(i-j),\qquad
+\alpha_{ij}^{(h)}=
+\frac{e^{c_{ij}^{(h)}}e^{-m_h(i-j)}}{\sum_{\ell\le i}e^{c_{i\ell}^{(h)}}e^{-m_h(i-\ell)}}.
+$$
+
+这不是“因为距离远所以直接置零”，而是给未归一化内容权重乘上指数距离因子。若两个候选的内容分数相同，距离分别为 2 和 6，斜率为 $1/2$，其权重比为 $e^2$。内容分数足够大仍可克服距离惩罚。
+
+## 复数：用一次乘法完成旋转
+
+<Figure src="math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转">从 z = 1 + i 出发，反复乘 i，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 e^(iφ) 表示。</Figure>
+
+RoPE 论文用复数书写旋转，推导也更短。将 $(x,y)^\top$ 对应到复数 $z=x+\mathrm{i}y$，其中 $\mathrm{i}^2=-1$；不要将虚数单位 $\mathrm{i}$ 与位置下标 $i$ 混淆。复数的模 $|z|=\sqrt{x^2+y^2}$ 对应向量范数。欧拉公式把 [P2](/principles/sinusoidal/) 的极坐标和指数连接起来：
+
+$$
+e^{\mathrm{i}\alpha}=\cos\alpha+\mathrm{i}\sin\alpha,
+\qquad z=r e^{\mathrm{i}\alpha}.
+$$
+
+可从指数的幂级数验证：利用 $\mathrm{i}^2=-1$，把偶次项与奇次项分别收集，得到
+
+$$
+e^{\mathrm{i}\alpha}
+=\left(1-\frac{\alpha^2}{2!}+\frac{\alpha^4}{4!}-\cdots\right)
++\mathrm{i}\left(\alpha-\frac{\alpha^3}{3!}+\frac{\alpha^5}{5!}-\cdots\right)
+=\cos\alpha+\mathrm{i}\sin\alpha.
+$$
+
+这与 [P2 选读](/principles/sinusoidal/) 中矩阵指数的展开是同一个计算：$\mathrm i$ 扮演了 $S$ 的角色，两者平方都是 $-1$。
+
+### 乘单位复数就是旋转
+
+一般复数乘法为 $(x+\mathrm{i}y)(u+\mathrm{i}v)=(xu-yv)+\mathrm{i}(xv+yu)$。取 $u=\cos\phi,v=\sin\phi$，上式立即变成旋转坐标公式。在极坐标下，$ze^{\mathrm{i}\phi}=r e^{\mathrm{i}(\alpha+\phi)}$：模不变，相位加 $\phi$。特别地，$\mathrm{i}(x+\mathrm{i}y)=-y+\mathrm{i}x$，坐标从 $(x,y)$ 变成 $(-y,x)$，正好逆时针四分之一圈。
+
+“把实向量写成复数”本身没有改变数据；复数乘法只是恰好同时完成了两个坐标的交叉组合。一般复数乘法 $(r e^{\mathrm{i}\alpha})(s e^{\mathrm{i}\beta})=rs e^{\mathrm{i}(\alpha+\beta)}$ 既缩放又旋转；RoPE 乘的是模为 1 的 $e^{\mathrm{i}p\omega}$，才只旋转、不缩放。
+
+### 共轭把实点积变成复数乘法
+
+$$
+\bar z w=(x-\mathrm{i}y)(u+\mathrm{i}v)
+=(xu+yv)+\mathrm{i}(xv-yu),\qquad
+\operatorname{Re}(\bar z w)=xu+yv.
+$$
+
+若漏掉共轭，$\operatorname{Re}(zw)=xu-yv$，就不是原来的实点积。取 $z=3+4\mathrm{i},w=4$，$\bar z w=12-16\mathrm{i}$，实部 12 等于 $(3,4)^\top$ 与 $(4,0)^\top$ 的点积。结合极坐标，$\operatorname{Re}(\bar z w)=|z||w|\cos(\beta-\alpha)$。
+
+同一个运算的三种写法：
+
+| 操作 | 实向量／矩阵 | 极坐标 | 复数 |
+|---|---|---|---|
+| 表示一个二维向量 | $(x,y)^\top$ | $(r,\alpha)$ | $x+\mathrm{i}y=r e^{\mathrm{i}\alpha}$ |
+| 长度 | $\sqrt{x^2+y^2}$ | $r$ | $\lvert z\rvert$ |
+| 旋转 $\phi$ | $R(\phi)a$ | $(r,\alpha+\phi)$ | $ze^{\mathrm{i}\phi}$ |
+| 撤销旋转 | $R(\phi)^\top$ | 相位减去 $\phi$ | 乘 $e^{-\mathrm{i}\phi}$ |
+| 两向量点积 | $a^\top b$ | $rs\cos(\beta-\alpha)$ | $\operatorname{Re}(\bar z w)$ |
+
+## RoPE：从目标条件反推旋转
+
+### 目标是消去共同起点
+
+先得到内容 $q_i,k_j$，再施加与位置相关的线性变换 $T_i,T_j$。希望对任意内容向量，分数的位置部分仅依赖差值：
+
+$$
+(T_iq_i)^\top(T_jk_j)=q_i^\top\underbrace{T_i^\top T_j}_{H(j-i)}k_j.
+$$
+
+若再选择 $H(0)=I$，同一位置变换不改变任意两个向量的点积，因此 $T_i^\top T_i=I$。选择满足合成律的正交表示 $T_i=R(i\theta)$，由 [P2](/principles/sinusoidal/) 的相对转角公式正好有 $R(i\theta)^\top R(j\theta)=R((j-i)\theta)$。这是一个充分构造，不意味着不存在其他方案。把这些性质串起来，就得到 RoPE 的核心等式：
+
+<KeyEq label="RoPE 的相对位置性质">
+
+$$
+\widetilde q_i=R(i\theta)q_i,\quad \widetilde k_j=R(j\theta)k_j,\qquad
+\widetilde q_i^\top\widetilde k_j
+=q_i^\top R(i\theta)^\top R(j\theta)k_j
+=q_i^\top R((j-i)\theta)k_j.
+$$
+
+</KeyEq>
+
+用复数写，同一件事是
+
+$$
+\operatorname{Re}\left(\overline{ze^{\mathrm{i}i\theta}}\,we^{\mathrm{i}j\theta}\right)
+=\operatorname{Re}\left(\bar z w e^{\mathrm{i}(j-i)\theta}\right).
+$$
+
+矩阵表示中，转置把查询旋转变为逆旋转；复数表示中，共轭把查询相位变为负相位。两种推导的减号来自同一件事。
+
+### 展开每个乘法，看看内容去了哪里
+
+令 $q=(a,b)^\top,k=(c,d)^\top$，$\phi=(j-i)\theta$，则：
+
+$$
+\begin{aligned}
+q^\top R(\phi)k
+&=a(c\cos\phi-d\sin\phi)+b(c\sin\phi+d\cos\phi)\\
+&=(ac+bd)\cos\phi+(bc-ad)\sin\phi.
+\end{aligned}
+$$
+
+第一项是原内容点积乘余弦，第二项是有方向的交叉项乘正弦。所以 RoPE 分数并非“只取决于距离”：它仍取决于内容，只是**显式位置依赖**仅剩相对差值。例如 $q=(1,2)^\top,k=(3,4)^\top$，结果是 $11\cos\phi+2\sin\phi$。$\phi=0$ 得 11，$\phi=\pi/2$ 得 2，$\phi=-\pi/2$ 得 $-2$，前后方向可以给出不同分数。
+
+<Figure src="math/09-rope.svg" alt="共同旋转和相对旋转对点积的不同影响">三组向量的长度都为 1。共同旋转后夹角仍为 30°，点积不变；只让 k 额外转 60°，夹角变为 90°，点积变为零。</Figure>
+
+沿一条计算链核对一次：给定 $q=(1,0)^\top,k=(\sqrt3/2,1/2)^\top$，两者长度都为 1，内容相位分别为 0 与 $\pi/6$，原分数 $\cos(\pi/6)$。给两个向量分别加上位置转角 $i\omega,j\omega$，长度不变，新的分数为 $\cos(\pi/6+(j-i)\omega)$。取 $\omega=\pi/6,i=0,j=2$，新相位差是 $\pi/2$，点积降为零；把两个位置同时加 10，新增的共同角度抵消，结果仍为零。
+
+## 几何视角：长度不变，分数随相位差变化
+
+回到 [M3](/math/linear-algebra/) 中的 $q^\top k=\|q\|\|k\|\cos\theta$。第一点：**固定长度，通过改变 Q/K 的夹角就能调节点积。** 在一个二维子空间中，设内容向量的相位分别为 $\alpha,\beta$，角频率为 $\omega$。位置 $i,j$ 分别添加相位 $i\omega,j\omega$，于是：
+
+$$
+\widetilde q_i^\top\widetilde k_j
+=\|q_i\|\|k_j\|
+\cos\big(\beta-\alpha+(j-i)\omega\big).
+$$
+
+原有内容相位差与相对位置相位差共同决定分数。固定其他候选的 logit 时，提高这一项会提高对应 softmax 权重；若多项同时变化，则需比较整行分数。相位具有周期性，所以距离增加不保证点积单调下降。
+
+第二点：**标准 RoPE 的旋转严格保持 Q/K 范数，因此不会在这一步抹去长度中可能已有的信息。** 这里的“可能”很关键，后面单独讨论。
+
+### 一个完整算例：长度不变，分数从正变负
+
+只考虑一个二维子空间，令 $q=(2,0)^\top$、$k=(\sqrt3,1)^\top$。两者范数都为 2，内容相位分别为 0 与 $\pi/6$，原点积为 $4\cos(\pi/6)=2\sqrt3$。选取讲解用的角频率 $\omega=\pi/6$（不是标准频率表的数值）。
+
+将查询放在 $i=1$，键放在 $j=3$。查询转 $\pi/6$，键转 $\pi/2$：
+
+$$
+\widetilde q_1=\begin{bmatrix}\sqrt3\\1\end{bmatrix},\qquad
+\widetilde k_3=\begin{bmatrix}-1\\\sqrt3\end{bmatrix},\qquad
+\widetilde q_1^\top\widetilde k_3=-\sqrt3+\sqrt3=0.
+$$
+
+用相位法重算：新相位差为 $\pi/6+(3-1)\pi/6=\pi/2$，所以点积为 $4\cos(\pi/2)=0$。两个范数仍然都是 2，分数变化全部来自相对方向。继续固定这两个内容向量，只改变位移 $\Delta=j-i$：
+
+| 位移 $\Delta$ | 新相位差 $\pi/6+\Delta\pi/6$ | 旋转后点积 | 现象 |
+|---|---|---|---|
+| 0 | $\pi/6$ | $2\sqrt3$ | 同位置旋转保持原点积 |
+| 1 | $\pi/3$ | 2 | 正投影减小 |
+| 2 | $\pi/2$ | 0 | 两个向量正交 |
+| 3 | $2\pi/3$ | $-2$ | 投影转为负值 |
+| 5 | $\pi$ | $-4$ | 达到固定范数下的负边界 |
+| 11 | $2\pi$ | 4 | 绕回同向，分数重新增大 |
+
+再将 $i=1,j=3$ 同时移到 $i=7,j=9$，两个旋转结果都额外转 $\pi$，但点积仍为 0。这里保持的是**给定内容向量时、共同平移位置索引后的点积**；真实文本换到不同上下文中，深层 $q_i,k_j$ 本身可能变化，不能据此断言整个模型输出不变。
+
+## 高维：许多独立的二维旋转
+
+<Figure src="math/08-blocks.svg" alt="四维向量分成两个独立旋转平面">第一对旋转 π/2，第二对旋转 π。每对的平方范数分别保持为 5 和 25，总平方范数因此保持为 30；多频率 RoPE 为各对分配不同旋转速度。</Figure>
+
+实际注意力头的维度 $d_h$ 远大于 2。RoPE 把坐标分成 $d_h/2$ 对，让每一对在自己的平面内以自己的频率旋转，再把结果拼回去：
+
+$$
+T_p=\operatorname{diag}\big(R(p\theta_0),R(p\theta_1),\ldots,R(p\theta_{d_h/2-1})\big),\qquad
+\theta_m=\beta^{-2m/d_h}.
+$$
+
+频率沿用 [P2](/principles/sinusoidal/) 的几何排列，底数 $\beta$ 同样是设计选择。
+
+### 四维算例：两个平面，各转各的
+
+设 $q=(1,2,3,4)^\top$，第一对 $(1,2)^\top$ 旋转 $\pi/2$，第二对 $(3,4)^\top$ 旋转 $\pi$。分块对角矩阵 $T=\operatorname{diag}(R(\pi/2),R(\pi))$ 的两个旋转块之外全为零，第一对不会混入第二对的坐标：
+
+$$
+Tq=(-2,1,-3,-4)^\top,\qquad
+\|Tq\|^2=4+1+9+16=30=\|q\|^2.
+$$
+
+每个块都满足 $R_m^\top R_m=I_2$，所以整个矩阵满足 $T^\top T=I$；高维保范数由各二维分块的保范数直接得到。
+
+### 总点积是各平面贡献之和
+
+将向量按坐标对写成 $q=(q^{(0)},\ldots,q^{(M-1)})$，$M=d_h/2$。点积按坐标相乘再求和，于是
+
+$$
+(T_iq)^\top(T_jk)
+=\sum_{m=0}^{M-1}(q^{(m)})^\top R((j-i)\theta_m)k^{(m)}
+=\sum_{m=0}^{M-1}r_{q,m}r_{k,m}\cos\big(\beta_m-\alpha_m+(j-i)\theta_m\big),
+$$
+
+其中 $r_{q,m},r_{k,m}$ 是第 $m$ 对的长度，$\alpha_m,\beta_m$ 是内容相位。高维 RoPE 分数是多个“长度乘积 × 相位差余弦”的和，不同分块可以相互加强，也可以相互抵消。零向量分块的贡献为零，不需要给它定义相位。高维整体仍满足“总范数乘积 × 整体夹角余弦”，但一般不能把整体夹角写成一个统一频率的线性位置偏移，也不能仅凭距离变大就断言它单调下降。
+
+### 代码不构造大矩阵
+
+大矩阵中绝大部分元素都是零。直接对每对坐标计算 $a\cos\phi-b\sin\phi$、$a\sin\phi+b\cos\phi$，时间与存储都线性于头维度。下面用四维算例核对，并确认复数乘法给出同一结果：
+
+```python
+import numpy as np
+
+x = np.array([1., 2., 3., 4.])
+angles = np.array([np.pi / 2, np.pi])
+pairs = x.reshape(2, 2)
+c, s = np.cos(angles), np.sin(angles)
+rotated = np.stack([pairs[:, 0] * c - pairs[:, 1] * s,
+                    pairs[:, 0] * s + pairs[:, 1] * c], axis=1).reshape(4)
+np.testing.assert_allclose(rotated, [-2., 1., -3., -4.], atol=1e-14)
+np.testing.assert_allclose(rotated @ rotated, x @ x)
+complex_pairs = pairs[:, 0] + 1j * pairs[:, 1]
+complex_rotated = complex_pairs * np.exp(1j * angles)
+np.testing.assert_allclose(complex_rotated.real, rotated[::2], atol=1e-14)
+np.testing.assert_allclose(complex_rotated.imag, rotated[1::2], atol=1e-14)
+print(rotated)
+```
+
+标准用法在 Q/K 投影后旋转，通常不旋转 V。若先旋转再乘任意学习矩阵，该矩阵一般不与旋转交换，[P2](/principles/sinusoidal/) 中的 $i+j$ 反例可能再次出现。不同模型采用相邻维度配对或前后半维配对，必须与权重约定一致，不能随意混用。
+
+## 范数可能编码语义吗：怎样理解和验证
+
+RoPE 保留旋转前的长度，用位置相关旋转调制已有的内容方向。“长度里可能有语义”常被当作 RoPE 的优点，但它可以拆成三个强度不同的命题：
+
+| 命题 | 是否能直接得到 | 理由 |
+|---|---|---|
+| RoPE 不改变输入 Q/K 的欧氏范数 | 可以证明 | 正交性给出 $\|T_pq\|=\|q\|$ |
+| 长度中若已有信息，旋转这一步不会改变这个数值 | 可以证明 | 旋转前后的长度是同一个数 |
+| 某个模型的范数编码了某种语义属性 | 需要实证 | 数学恒等式没有指定训练会学到什么 |
+
+还要区分两种“保留”。**数值不变**指范数相同；**信息可恢复**指给定位置后可以使用 $q=T_p^\top\widetilde q$ 恢复整个向量。后者依赖已知位置和旋转规则；如果位置未知，不能从旋转结果唯一拆出原内容方向和位置相位。两者都不等于“后续网络的所有行为不变”，因为改变点积正是引入位置的目的。Q/K 已经过学习投影，后续层的输入还融合了上下文，不能将它们的范数等同于原始 token embedding 的范数。
+
+在高维里，只看总范数还会漏掉每个频率分块的幅度分配。比如四维向量 $q_A=(1,0,0,0)^\top$ 与 $q_B=(0,0,1,0)^\top$ 总范数都为 1，但前者全部落在第一对，后者全部落在第二对。面对固定 $k=(1,0,1,0)^\top$，原点积都为 1，位置旋转后的分数却分别为 $\cos(\Delta\theta_0)$ 和 $\cos(\Delta\theta_1)$。总范数相同，并不意味着对位置的响应相同。
+
+若要研究具体模型中范数的作用，可以做以下受控实验。这些是研究设计，不是本文已经得到的实验结论：
+
+1. 在指定层和注意力头收集旋转前 Q/K，记录总范数、各二维分块范数，以及事先定义的 token 类别或上下文属性。比较时控制位置、词频、序列长度等可能的混杂因素。
+2. 固定向量方向，将 $q$ 改为 $cq$ 或将单个 $k$ 改为 $ck$，观察 logits、注意力熵与任务指标。这样直接干预长度，但要注意干预可能使表示偏离训练分布。
+3. 固定范数，改变方向，比较行为变化；再将归一化 Q/K 的结果作为对照，并控制分数温度，避免把尺度变化误认为语义信息损失。
+4. 分开报告“范数与标签相关”“改变范数会影响预测”和“范数编码特定语义”的证据强度。相关性不足以单独证明语义编码或因果机制。
+
+标准 RoPE 本身不会把非零 Q/K 自动归一化。若模型另外使用 Q/K 归一化、额外缩放或非正交位置变换，应按实际算子重新分析；本节的保长结论只针对纯旋转。
+
+## 训练时哪些东西被学习
+
+固定 sin/cos 和标准 RoPE 的位置函数不需要梯度更新；学习的是内容嵌入、Q/K/V 等权重。给定位置时 $\widetilde q=Rq$ 是一个线性层，雅可比就是 $R$。若损失对旋转结果的梯度是 $g$，由 [M6](/math/backprop/) 的雅可比转置规则：
+
+$$
+\frac{\partial\mathcal L}{\partial q}=R^\top g,\qquad
+\|R^\top g\|=\|g\|.
+$$
+
+旋转这一步本身不放大或缩小梯度范数；但整个网络还包含 softmax、投影等运算，不能据此保证整体训练没有梯度问题。
+
+```python
+import torch
+
+phi = torch.tensor(0.7, dtype=torch.float64)
+c, s = torch.cos(phi), torch.sin(phi)
+R = torch.stack([torch.stack([c, -s]), torch.stack([s, c])])
+x = torch.tensor([1., 2.], dtype=torch.float64, requires_grad=True)
+g = torch.tensor([3., -4.], dtype=torch.float64)
+z = R @ x
+(z @ g).backward()
+torch.testing.assert_close(x.grad, R.T @ g)
+torch.testing.assert_close(torch.linalg.vector_norm(x.grad), torch.linalg.vector_norm(g))
+print(x.grad)
+```
+
+`z @ g` 只是构造上游梯度为 $g$ 的标量损失，和反向传播章节的梯度种子相同。角度被视为常量；如果它也是可学习参数，还要对正弦和余弦求导。
+
+各路线把位置放在不同地方，也各有不应声称的保证：
+
+| 路线 | 添加位置的地方 | 参数与结构 | 不应声称的保证 |
+|---|---|---|---|
+| 可学习绝对位置 | 输入表示 | 每个槽位学习向量 | 表外位置自动可用 |
+| 2017 sin/cos | 输入表示 | 固定多频率函数 | 任意投影后严格相对化 |
+| 2018 Shaw / 2020 T5 | 注意力关系 | 相对向量或桶偏置 | 所有远距离都可区分 |
+| 2021 ALiBi | 注意力分数 | 固定线性距离惩罚 | 所有任务都优于 RoPE |
+| 2021 RoPE 及扩展 | 投影后的 Q/K | 多频率正交旋转 | 点积随距离单调下降 |
+
+当代模型中常见 RoPE 与长度扩展变体，但位置编码并没有收敛为唯一方案。这里按代表性论文组织，不把表格当作对所有最新模型的普查。
+
+## PyTorch：把等式变成可验证的程序
+
+`sinusoidal_pe` 生成 `[T,d]`；`apply_rope` 接收 `[B,H,T,D]`，角度 `[T,D/2]` 自动广播到批和头。位置计算至少使用 FP32，FP64 输入保留 FP64，最终恢复内容 dtype。示例限定偶数维、无 padding，避免用隐含约定遮住推导。
+
+<CodeFile path="code/principles/position_encoding.py" />
+
+在仓库根目录执行 `python code/principles/position_encoding.py`。`verify()` 依次检查 [P1](/principles/attention-order/) 的置换等变、[P2](/principles/sinusoidal/) 的平移公式、相对位置核与范数，以及本章的共同平移不变性和反向传播。断言验证有限数值案例；普遍成立的理由是前面的证明。
+
+## 常见误区
+
+“RoPE 分数只取决于距离”不对。展开式 $(ac+bd)\cos\phi+(bc-ad)\sin\phi$ 显示分数仍由内容决定，只是显式的位置依赖只剩位置差。
+
+“点积只依赖相对位置”要带上固定内容的条件。实际模型中的 $q,k$ 来自上下文，整体移动一段文字还可能改变内容表示、掩码或其他运算；本章证明的是位置旋转这一步的代数性质。
+
+长度相同不意味着向量表达相同，更不意味着语义相同。旋转保持的是范数这一标量；点积还受两个方向的相对关系影响，高维中还受各分块幅度分配影响。
+
+公式里的位置下标 $i,j$ 与虚数单位 $\mathrm{i}$ 必须区分；频率底数 $\beta$ 也不是批大小 $B$。
+
+## 练习与核对
+
+<details>
+<summary>1. 为什么不能说“范数相同，所以语义相同”？</summary>
+
+同一个圆上的向量范数全部相同，方向却不同，面对同一查询的点积可以完全不同。范数是表示的一个标量属性；它是否与某种语义特征相关，需要在具体模型中通过测量或干预验证，数学恒等式本身不给出答案。
+
+</details>
+
+<details>
+<summary>2. 取 q = (1, 2)、k = (3, 4)，位置差对应 φ = π/2 与 φ = −π/2 时，RoPE 分数各是多少？说明了什么？</summary>
+
+由 $(ac+bd)\cos\phi+(bc-ad)\sin\phi$，$ac+bd=11$，$bc-ad=6-4=2$。$\phi=\pi/2$ 时为 $2$，$\phi=-\pi/2$ 时为 $-2$。键在查询之前或之后，分数符号不同：RoPE 的分数区分方向，而 [P2](/principles/sinusoidal/) 中两个位置向量的点积 $\cos(\Delta\omega)$ 不区分。
+
+</details>
+
+<details>
+<summary>3. ALiBi 中两个候选内容分数相同，距离分别为 1 和 4，斜率为 1/4。权重比是多少？</summary>
+
+权重比等于 $e^{-m_h\cdot1}/e^{-m_h\cdot4}=e^{3m_h}=e^{3/4}\approx2.117$。近的候选权重约是远的 2.1 倍；若远的候选内容分数高出 $3/4$ 以上，就能反超。
+
+</details>
+
+<details>
+<summary>4. 四维向量 q = (0, 1, 2, 0)，第一对转 π/2，第二对转 π/2，结果是什么？范数呢？</summary>
+
+第一对 $(0,1)$ 转 $\pi/2$ 得 $(-1,0)$，第二对 $(2,0)$ 转 $\pi/2$ 得 $(0,2)$，结果 $(-1,0,0,2)^\top$。范数平方 $1+4=5$，与原向量 $0+1+4+0=5$ 相同；每一对的长度也分别保持为 1 和 2。
+
+</details>
+
+训练时整段序列并行计算；生成时不断追加 token。位置规则不因此改变，改变的是张量形状、索引和哪些中间结果可以复用。下一章 [KV cache 的正确性](/principles/kv-cache/) 证明缓存为什么与整段计算相等。
+
+## 原始资料
+
+- [Attention Is All You Need，§3.5](https://arxiv.org/abs/1706.03762)：原始位置编码及设计动机。
+- [Self-Attention with Relative Position Representations](https://arxiv.org/abs/1803.02155)：Shaw 相对位置。
+- [Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer](https://arxiv.org/abs/1910.10683)：T5。
+- [RoFormer，§3.2–3.4](https://arxiv.org/html/2104.09864v5#S3)：二维复数构造、高维分块与正交性质。它提供旋转结构的依据，并未证明 token 语义只由范数编码。
+- [Train Short, Test Long](https://arxiv.org/abs/2108.12409)：ALiBi。
+
+矩阵指数、反例和小维度算例是为讲解补充的数学推导，不声称是论文作者当时的设计过程。

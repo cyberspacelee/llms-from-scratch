@@ -1,0 +1,52 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 47 640 393" role="img" aria-labelledby="title desc">
+
+
+  <title id="title">04 / 正交矩阵保持长度与共同夹角</title>
+  <desc id="desc">左图两个正交单位基向量，右图同时逆时针转90度，基向量长度和直角都保持。</desc>
+
+
+  <defs>
+    <marker id="green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#087f70"/>
+    </marker>
+    <marker id="red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#c16b36"/>
+    </marker>
+    <marker id="blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#3176b5"/>
+    </marker>
+    <marker id="ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#263a34"/>
+    </marker>
+  </defs>
+
+
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+        <text x="160" y="87" font-size="20" fill="#263a34" text-anchor="middle">旋转前</text>
+    <text x="470" y="87" font-size="20" fill="#263a34" text-anchor="middle">逆时针旋转 90°</text>
+    <circle cx="160" cy="220" r="83" fill="none" stroke="#d5ddd7"/>
+    <line x1="50" y1="220" x2="270" y2="220" stroke="#d5ddd7" stroke-width="1"/>
+    <line x1="160" y1="110" x2="160" y2="330" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="262" y="243" font-size="16" fill="#68726d" text-anchor="start">x</text>
+    <text x="140" y="120" font-size="16" fill="#68726d" text-anchor="start">y</text>
+    <text x="141" y="242" font-size="15" fill="#68726d" text-anchor="start">0</text>
+    <circle cx="470" cy="220" r="83" fill="none" stroke="#d5ddd7"/>
+    <line x1="360" y1="220" x2="580" y2="220" stroke="#d5ddd7" stroke-width="1"/>
+    <line x1="470" y1="110" x2="470" y2="330" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="572" y="243" font-size="16" fill="#68726d" text-anchor="start">x</text>
+    <text x="450" y="120" font-size="16" fill="#68726d" text-anchor="start">y</text>
+    <text x="451" y="242" font-size="15" fill="#68726d" text-anchor="start">0</text>
+    <line x1="160" y1="220" x2="243.0" y2="220.0" stroke="#087f70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="251.0" y="210.0" font-size="18" fill="#087f70" text-anchor="start">e₁</text>
+    <line x1="160" y1="220" x2="160.0" y2="137.0" stroke="#c16b36" stroke-width="3" marker-end="url(#red)"/>
+    <text x="168.0" y="127.0" font-size="18" fill="#c16b36" text-anchor="start">e₂</text>
+    <line x1="470" y1="220" x2="470.0" y2="137.0" stroke="#087f70" stroke-width="3" marker-end="url(#green)"/>
+    <text x="478.0" y="127.0" font-size="18" fill="#087f70" text-anchor="start">Re₁</text>
+    <line x1="470" y1="220" x2="387.0" y2="220.0" stroke="#c16b36" stroke-width="3" marker-end="url(#red)"/>
+    <text x="347.0" y="208.0" font-size="18" fill="#c16b36" text-anchor="start">Re₂</text>
+    <line x1="287" y1="220" x2="333" y2="220" stroke="#263a34" stroke-width="2" marker-end="url(#ink)"/>
+    <text x="320" y="367" font-size="22" fill="#263a34" text-anchor="middle">RᵀR = I   →   ‖Ra‖² = aᵀRᵀRa = ‖a‖²</text>
+    <text x="320" y="404" font-size="18" fill="#68726d" text-anchor="middle">基向量的像始终单位长、互相垂直。</text>
+  </g>
+</svg>

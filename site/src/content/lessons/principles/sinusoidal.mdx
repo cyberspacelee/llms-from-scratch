@@ -1,0 +1,360 @@
+---
+title: 从旋转到 sin/cos
+question: 为什么位置编码用多频率的正弦和余弦
+description: 从“固定偏移可以用与起点无关的线性变换表示”出发，推出二维旋转，再得到原始 Transformer 的多频率 sin/cos 位置编码，并检查相对距离在哪里出现、在哪里失效。
+order: 2
+code:
+  - code/principles/position_encoding.py
+---
+
+import RotationLab from '../../../components/labs/RotationLab'
+import FrequencyLab from '../../../components/labs/FrequencyLab'
+import EncodingMatrixLab from '../../../components/labs/EncodingMatrixLab'
+
+[P1](/principles/attention-order/) 留下的问题是：能否用一个函数在任意位置生成编码，并让“相距几位”有一个与起点无关的表示？本章先把这个愿望写成数学要求，发现二维旋转恰好满足它；然后把旋转需要的工具完整推一遍——正交矩阵、极坐标，以及选读的矩阵指数；最后得到原始 Transformer 的多频率 sin/cos，并检查它提供了什么、没有保证什么。
+
+角度默认使用弧度，范数均指欧氏范数。
+
+## 为什么想到 sin 和 cos：先提出要求
+
+### 尝试一：直接把位置当数值
+
+用 $p$ 或 $p\mathbf 1$ 的确能区分位置，但数值随长度增长，位置部分会改变向量尺度；单一标量也缺少多尺度特征。归一化为 $p/L$ 又引入了对所选长度 $L$ 的依赖。这些方法不是“不可能”，而是有不同的归纳偏置。
+
+我们尝试寻找这样的函数 $u(p)$：数值有界，而且固定偏移 $\Delta$ 可以通过一个不依赖起点的线性变换表示。
+
+$$
+u(p+\Delta)=A(\Delta)u(p).
+$$
+
+“不依赖起点”很重要：从 5 到 8 和从 105 到 108 都是平移 3，希望用同一个算子描述。
+
+### 尝试二：平移的合成要求什么
+
+如果平移 $a$ 后再平移 $b$ 应与直接平移 $a+b$ 一致，我们可以主动选择满足下式的一族算子：
+
+$$
+A(0)=I,\qquad A(a+b)=A(a)A(b).
+$$
+
+这是一种“把加法表示为矩阵乘法”的结构。仅凭它还推不出三角函数：例如 $u(p)=(p,1)^\top$ 配合剪切矩阵也能表示平移，但其范数会增长。
+
+$$
+\begin{bmatrix}1&\Delta\\0&1\end{bmatrix}
+\begin{bmatrix}p\\1\end{bmatrix}
+=\begin{bmatrix}p+\Delta\\1\end{bmatrix}.
+$$
+
+进一步选择保持长度，即 $A(\Delta)^\top A(\Delta)=I$，就把算子限制到了正交变换。注意：这是我们添加的设计约束，不是从“位置编码”四个字必然得到的定理。
+
+二维旋转保持长度，而且先转两个角度等于转它们的和，正好提供了满足这些要求的候选。下面三节把旋转本身研究清楚，再回到位置编码。
+
+## 旋转矩阵：为什么保长，为什么出现相对角度
+
+<Figure src="math/04-matrix.svg" alt="正交旋转保持基向量的长度和夹角">两支单位基向量一起转过 90°，长度仍为 1，彼此仍然垂直。矩阵的列记录它们的新坐标，正交性把这个几何事实写成 RᵀR = I。</Figure>
+
+矩阵 $M\in\mathbb R^{m\times d}$ 将 $d$ 维列向量映射为 $m$ 维列向量：$(Ma)_r=\sum_s M_{rs}a_s$。它的第 $s$ 列就是第 $s$ 个标准基向量变换后的结果。标准基 $e_1=(1,0)^\top$ 逆时针转 $\phi$ 后为 $(\cos\phi,\sin\phi)^\top$；$e_2=(0,1)^\top$ 转后为 $(-\sin\phi,\cos\phi)^\top$。将这两个结果作为矩阵的两列，就得到旋转矩阵：
+
+<KeyEq label="二维旋转">
+
+$$
+R(\phi)=\begin{bmatrix}\cos\phi&-\sin\phi\\\sin\phi&\cos\phi\end{bmatrix},
+\qquad
+R(\phi)\begin{bmatrix}a\\b\end{bmatrix}
+=\begin{bmatrix}a\cos\phi-b\sin\phi\\a\sin\phi+b\cos\phi\end{bmatrix}.
+$$
+
+</KeyEq>
+
+取 $a=1,b=0,\phi=\pi/2$，结果为 $(0,1)^\top$；取 $a=1,b=2$，结果为 $(-2,1)^\top$。前后平方长度都是 $5$。
+
+普通矩阵并不保长。取 $M=\begin{bmatrix}2&1\\0&1\end{bmatrix}$，则 $M(3,4)^\top=3(2,0)^\top+4(1,1)^\top=(10,4)^\top$：原向量范数为 5，变换后为 $\sqrt{116}$。“列就是基向量的去向”这一读法对任何矩阵都成立，保长则需要额外条件。
+
+### 为什么转置乘积能判断保长
+
+若方阵满足 $R^\top R=I$，则称为正交矩阵，并有 $R^{-1}=R^\top$，且 $\|Ra\|^2=a^\top R^\top Ra=a^\top a=\|a\|^2$。若矩阵的两列记作 $u,v$，那么：
+
+$$
+R^\top R=
+\begin{bmatrix}u^\top u&u^\top v\\v^\top u&v^\top v\end{bmatrix}.
+$$
+
+等于单位矩阵意味着两列长度都是 1，且彼此垂直。对旋转矩阵，令 $c=\cos\phi,s=\sin\phi$，实际相乘得到：
+
+$$
+\begin{bmatrix}c&s\\-s&c\end{bmatrix}
+\begin{bmatrix}c&-s\\s&c\end{bmatrix}
+=\begin{bmatrix}c^2+s^2&-cs+sc\\-sc+cs&s^2+c^2\end{bmatrix}=I.
+$$
+
+正交矩阵也包括反射，不能把所有正交变换都叫旋转。两个向量施加**同一个**正交变换时，$(Ra)^\top(Rb)=a^\top b$，夹角也保持；位置编码能改变分数，是因为不同位置使用不同旋转。
+
+### 为什么相对旋转里出现减号
+
+旋转有三条后面反复使用的规则：$R(0)=I$，$R(\phi)^{-1}=R(-\phi)=R(\phi)^\top$，$R(\phi)R(\psi)=R(\phi+\psi)$。最后一条可以用三角加法公式逐项验证，也可以理解为先转 $\psi$ 再转 $\phi$。转置乘积会倒序：$(AB)^\top=B^\top A^\top$。于是两个分别旋转的向量做点积时：
+
+<KeyEq label="只剩相对转角">
+
+$$
+(R(\phi)a)^\top(R(\psi)b)
+=a^\top R(\phi)^\top R(\psi)b
+=a^\top R(\psi-\phi)b.
+$$
+
+</KeyEq>
+
+也可以给两个已旋转的向量共同施加 $R(-\phi)$：第一个回到 $a$，第二个变成 $R(\psi-\phi)b$。共同旋转不改变点积，因而只需比较这个剩余转角。取 $\phi=i\omega,\psi=j\omega$，便留下 $(j-i)\omega$——这正是位置差。
+
+二维旋转彼此可交换，但普通矩阵乘法不可随意交换。学习到的 Q/K 投影矩阵一般不与旋转矩阵交换，所以“先投影再旋转”不能任意改为“先旋转再投影”。
+
+下面的实验固定内容 $q=k=(1,0)^\top$，使用 $\theta=\pi/8$。保持位移不变而改变起点，两个向量一起转，夹角与点积都不变。
+
+<RotationLab client:visible />
+
+四条断言依次核对正交性、长度、相对角度和共同平移。`atol` 允许三角函数计算中接近零的浮点误差，不把数值近似当成代数等号。
+
+```python
+import numpy as np
+
+def rotation(theta):
+    return np.array([[np.cos(theta), -np.sin(theta)],
+                     [np.sin(theta), np.cos(theta)]], dtype=np.float64)
+
+q = np.array([1., 2.])
+k = np.array([3., -1.])
+a, b = 0.3, 0.9
+np.testing.assert_allclose(rotation(a).T @ rotation(a), np.eye(2), atol=1e-14)
+np.testing.assert_allclose(np.linalg.norm(rotation(a) @ q), np.linalg.norm(q))
+np.testing.assert_allclose((rotation(a) @ q) @ (rotation(b) @ k),
+                           q @ rotation(b - a) @ k)
+np.testing.assert_allclose((rotation(a + 2) @ q) @ (rotation(b + 2) @ k),
+                           (rotation(a) @ q) @ (rotation(b) @ k))
+print("旋转保长、相对转角、共同平移：全部通过")
+```
+
+这里 `(2,)` 数组的 `@` 表示向量点积；列向量形状的显式写法见 [M3](/math/linear-algebra/)。
+
+## 极坐标：把旋转变成相位相加
+
+<Figure src="math/05-polar.svg" alt="从直角坐标转换到极坐标">横纵坐标由半径 r 和相位 α 决定。旋转时半径不变，只把相位从 α 改成 α + φ；展开三角加法公式即可得到旋转后的两个坐标。</Figure>
+
+对非零二维向量 $(x,y)^\top$，令 $r=\sqrt{x^2+y^2}$，用 $\alpha=\operatorname{atan2}(y,x)$ 确定所在象限，就有 $x=r\cos\alpha,\ y=r\sin\alpha$。$r$ 是半径，也就是向量范数；$\alpha$ 是相对横轴的有向角，也叫相位，允许相差整数个 $2\pi$。
+
+旋转 $\phi$ 只需把 $(r,\alpha)$ 改为 $(r,\alpha+\phi)$。转回直角坐标并展开三角加法公式：
+
+$$
+\begin{aligned}
+x'&=r\cos(\alpha+\phi)
+=r\cos\alpha\cos\phi-r\sin\alpha\sin\phi
+=x\cos\phi-y\sin\phi,\\
+y'&=r\sin(\alpha+\phi)
+=r\sin\alpha\cos\phi+r\cos\alpha\sin\phi
+=x\sin\phi+y\cos\phi.
+\end{aligned}
+$$
+
+按 $x,y$ 的系数排列，就是前面的旋转矩阵。例如 $(3,4)^\top$ 旋转 $\pi/2$ 后得到 $(-4,3)^\top$；原相位约为 $53.13^\circ$，新相位约为 $143.13^\circ$，范数仍然为 5。这解释了为什么旋转改变方向却不改变长度。
+
+为什么使用 `atan2(y,x)`？仅看 $\arctan(y/x)$，$(1,1)$ 和 $(-1,-1)$ 的比值同为 1，无法区分象限；还会遇到 $x=0$ 的除零问题。`atan2` 结合两个坐标的符号确定相位。位置编码的实现不需要真的计算 `atan2`，这里只用它解释内容向量原本的方向。
+
+### 相位、夹角、频率与周期不要混在一起
+
+两个非零二维向量相位为 $\alpha,\beta$ 时，有向相位差是 $\delta=\beta-\alpha$；几何夹角是 $\theta=\arccos(\cos\delta)\in[0,\pi]$。比如 $\delta=3\pi/2$ 与 $\delta=-\pi/2$ 指向同一个方向，相应夹角都是 $\pi/2$。这就是“不断增加旋转角”不等于“不断增大夹角”的原因。
+
+位置 $p$ 是 token 索引，角频率 $\omega$ 表示每移动一个 token 转多少弧度，二者相乘得到相位 $p\omega$。例如 $\omega=\pi/4$ 时，位置 0、1、2 对应转角 0、$\pi/4$、$\pi/2$，每走 8 个 token 转完一周。一般连续位置下的周期为 $2\pi/\omega$；整数位置要精确重复，还要求存在非零整数 $N$ 满足 $N\omega=2\pi k$。不能把任意实数周期直接当成整数序列的重复步数。
+
+## 选读：连续、保长的变换为什么导向旋转
+
+<Figure src="math/07-exponential.svg" alt="用生成元和矩阵指数描述连续旋转">绿色 v 从原点指向圆周，橙色 Sv 从终点沿切线指向瞬时运动方向。把这样的无穷小变化连续合成，得到保持长度的有限旋转。</Figure>
+
+前面从几何理解了旋转。这一节回答：如果希望一个变换连续变化、可以组合，并且始终保长，为什么二维旋转会自然出现？这部分使用导数与幂级数，可以先读结论，学完 [M4](/math/calculus/) 再回来看推导。
+
+一维正交变换只有 $+1$ 和 $-1$，没有丰富的连续变化。二维中，考虑与单位矩阵连续相连、可微的一族正交变换 $R(t)$，并要求 $R(0)=I$、$R(t+s)=R(t)R(s)$。参数 $t$ 可以理解为连续的位置变量；这里只是为推导暂时将整数 token 位置推广到实数。记 $G=R'(0)$。对 $R(t)^\top R(t)=I$ 在零点用乘积法则求导：$R'(0)^\top R(0)+R(0)^\top R'(0)=0$，代入 $R(0)=I$ 得
+
+$$
+G^\top+G=0.
+$$
+
+$G$ 叫作生成元，描述刚开始时向量朝哪个方向变化。反对称条件意味着对任意 $v$ 有 $v^\top Gv=0$，所以瞬时变化 $Gv$ 与当前位置 $v$ 垂直；图中的切线方向正是在表示这一点。二维反对称矩阵只能形如 $G=\omega S$，其中
+
+$$
+S=\begin{bmatrix}0&-1\\1&0\end{bmatrix},\qquad S^2=-I.
+$$
+
+由合成律求导得 $R'(t)=R(t)G$，且 $R(0)=I$，因此 $R(t)=\exp(tG)$。展开矩阵指数，将偶次幂与奇次幂分别收集：
+
+$$
+\begin{aligned}
+e^{t\omega S}
+&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I
++\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)S\\
+&=\cos(t\omega)I+\sin(t\omega)S
+=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
+\end{aligned}
+$$
+
+矩阵指数由幂级数定义：$e^A=I+A+A^2/2!+\cdots$，每个幂都表示矩阵乘法，不能理解为把矩阵中每个元素分别取指数。因为 $S^2=-I$，高次幂只在 $I,S,-I,-S$ 之间循环，所以整个级数能收集为两个标量函数乘矩阵。
+
+取 $\omega=1,t=\pi/2$，得到 $e^{(\pi/2)S}=S$，它将 $(3,4)^\top$ 变成 $(-4,3)^\top$，与前面的几何旋转一致。只保留线性近似 $I+\varepsilon S$ 则不是精确旋转：$(I+\varepsilon S)^\top(I+\varepsilon S)=(1+\varepsilon^2)I$。“小步沿切线移动”只是瞬时直觉，有限角度的精确保长需要完整的旋转算子。
+
+sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长度的二维平移表示，可以通过旋转实现，而旋转矩阵指数自然包含 sin/cos。** 这是一条帮助理解的构造路线，不冒充原论文的历史推导，也不证明所有位置编码只能这样设计。
+
+## 原论文的排列：sin 在前，cos 在后
+
+《Attention Is All You Need》的二维排列是 $u(p)=(\sin(p\omega),\cos(p\omega))^\top$。从加法公式出发：
+
+$$
+\begin{aligned}
+\sin((p+\Delta)\omega)&=\sin(p\omega)\cos(\Delta\omega)+\cos(p\omega)\sin(\Delta\omega),\\
+\cos((p+\Delta)\omega)&=\cos(p\omega)\cos(\Delta\omega)-\sin(p\omega)\sin(\Delta\omega).
+\end{aligned}
+$$
+
+将 $\sin(p\omega)$ 与 $\cos(p\omega)$ 的系数按行收集：
+
+$$
+u(p+\Delta)=
+\underbrace{\begin{bmatrix}\cos(\Delta\omega)&\sin(\Delta\omega)\\-\sin(\Delta\omega)&\cos(\Delta\omega)\end{bmatrix}}_{A(\Delta)=R(-\Delta\omega)}u(p).
+$$
+
+$A(\Delta)$ 只依赖偏移，不依赖起点 $p$，满足本章开头的要求。因为坐标顺序交换了，它对应标准旋转的负角度；这不是符号错误，前面的单位圆构造采用的是 $(\cos,\sin)$ 坐标。
+
+为什么不能只用 sin？如果要求 $\sin((p+\Delta)\omega)=c_\Delta\sin(p\omega)$ 对所有 $p$ 成立，取 $p=0$，右边必为 0，左边通常非零。sin 单独不对平移封闭，cos 恰好补上缺失分量。
+
+## 从一对坐标到多频率位置编码
+
+一个圆只能提供一个频率。一个完整周期间隔会给出相同相位；对整数 token 位置，是否精确重复还取决于频率，但相近相位依然会造成分辨困难。于是使用多个二维子空间，每一对分配不同角频率。
+
+<KeyEq label="原始 Transformer 位置编码">
+
+$$
+\mathrm{PE}(p,2m)=\sin(p\omega_m),\qquad
+\mathrm{PE}(p,2m+1)=\cos(p\omega_m),\qquad
+\omega_m=10000^{-2m/d}.
+$$
+
+</KeyEq>
+
+$p$ 是位置，$m=0,\ldots,d/2-1$ 是维度对编号，$d$ 是偶数隐藏维度。不能把维度对编号当成位置索引。
+
+### 为什么是几何频率，不是等差频率
+
+希望从快变化到慢变化覆盖多个数量级，可以让对数频率等间隔：$\log\omega_m=-\frac{2m}{d}\log B$，指数化后即 $\omega_m=B^{-2m/d}$。这说明公式如何从“对数尺度均匀覆盖”的选择得到；$B=10000$ 本身是超参数，不是某个定理算出的唯一常数。
+
+| $d=8$ 的维度对 | 角频率 $\omega_m$ | 波长 $2\pi/\omega_m$，单位 token |
+|---|---|---|
+| 0、1 | 1 | 约 6.28 |
+| 2、3 | 0.1 | 约 62.83 |
+| 4、5 | 0.01 | 约 628.32 |
+| 6、7 | 0.001 | 约 6283.19 |
+
+<FrequencyLab client:visible />
+
+移动一步时每对的相位变化为 $\omega_m$。高频对短位移变化大；低频在长距离上变化缓慢。更精确地，每对的欧氏距离满足：
+
+$$
+\|u(p+\Delta)-u(p)\|^2=2-2\cos(\Delta\omega)
+=4\sin^2\!\left(\frac{\Delta\omega}{2}\right).
+$$
+
+当 $|\Delta\omega|\ll1$ 时，距离近似 $|\Delta\omega|$。它解释了“不同频率提供不同分辨尺度”，也说明距离并不单调增长。
+
+原论文在 token embedding 上乘 $\sqrt d$，再加位置向量并施加 dropout：
+
+$$
+z_p=\operatorname{Dropout}\left(\sqrt d\,e_{\text{token}_p}+\mathrm{PE}(p)\right).
+$$
+
+每对平方长度为 $\sin^2+\cos^2=1$，所以 $\|\mathrm{PE}(p)\|^2=d/2$，不随位置膨胀。有限维度下最大波长为 $2\pi B^{1-2/d}$，不是恰好 $2\pi B$。把所有位置的编码按行堆起来，就得到一张位置 × 维度的矩阵：
+
+<EncodingMatrixLab client:visible />
+
+## 相对距离藏在哪里，又在哪里失效
+
+### 原始位置向量的点积
+
+$$
+\begin{aligned}
+u(i)^\top u(j)
+&=\sin(i\omega)\sin(j\omega)+\cos(i\omega)\cos(j\omega)
+=\cos((i-j)\omega),\\
+\mathrm{PE}(i)^\top\mathrm{PE}(j)
+&=\sum_m\cos((i-j)\omega_m).
+\end{aligned}
+$$
+
+绝对位置消失，只剩差值。但 cos 是偶函数，所以**这个点积本身**不区分前后。编码并非完全丢掉方向，例如交叉组合可得到：
+
+$$
+\sin(i\omega)\cos(j\omega)-\cos(i\omega)\sin(j\omega)=\sin((i-j)\omega).
+$$
+
+### 为什么这还不等于注意力严格相对化
+
+真实位置项是 $p_i^\top M p_j$，不一定是 $p_i^\top p_j$。取某一对 $p_i=(\sin i,\cos i)^\top$ 和 $M=\operatorname{diag}(1,0)$：
+
+$$
+p_i^\top Mp_j=\sin i\sin j
+=\tfrac12\big[\cos(i-j)-\cos(i+j)\big].
+$$
+
+出现了 $i+j$，同时移动两个位置时会改变结果。再加上内容与位置的交叉项，普通加法 PE 并未强制整个注意力满足相对位置结构。
+
+因此，原论文提出的“固定偏移可线性表示”是可利用的结构，不是模型一定学会相对关系的保证。函数在表外能求值，也不是训练长度之外性能良好的证明。原论文的学习式与正弦式位置编码对照结果接近，没有确立 sin/cos 的普遍最优性。
+
+## 常见误区
+
+“正交”与“旋转”不能完全互换。反射同样满足 $R^\top R=I$，却不能从恒等变换沿连续旋转到达。二维旋转同时满足保长和角度合成规则，矩阵指数推导还明确使用了可微性及合成律。
+
+位置差增加时，相位会绕圈，夹角与点积一般都不单调。高频对在几个 token 内就转完一周，低频对才在长距离上缓慢变化；“距离越远越不相似”不是 sin/cos 编码的性质。
+
+位置编码点积只依赖 $i-j$，不代表注意力分数只依赖 $i-j$。投影矩阵和内容交叉项会重新引入绝对位置，上一节的 $i+j$ 反例说明了这一点。
+
+底数 10000 与维度配对方式都是设计选择。换底数改变频率分布，换配对方式改变哪些坐标一起旋转；二者都不影响“每对保长、偏移可线性表示”的性质。
+
+## 练习与核对
+
+<details>
+<summary>1. 将 a = (3, 4) 旋转 90°，结果与范数是什么？</summary>
+
+$R(\pi/2)(3,4)^\top=(3\cdot0-4\cdot1,\ 3\cdot1+4\cdot0)^\top=(-4,3)^\top$，范数仍为 $\sqrt{16+9}=5$。坐标变了、方向变了、长度没变。非零向量的单位化会把长度改为 1，因此不能用单位化解释旋转。
+
+</details>
+
+<details>
+<summary>2. 两个向量都旋转 90°，点积会改变吗？只旋转其中一个呢？</summary>
+
+同转不变。取 $a=(1,0)^\top,b=(1,1)^\top$，原点积为 1；同转后分别为 $(0,1)^\top,(-1,1)^\top$，点积仍为 1。只旋转 $b$ 后得到 $(-1,1)^\top$，与 $a$ 的点积变为 $-1$。后一种情况中两个范数依旧不变，但相对方向改变了。
+
+</details>
+
+<details>
+<summary>3. 为什么只用 sin 不能表示固定偏移？</summary>
+
+若存在只依赖偏移的系数 $c_\Delta$，使 $\sin((p+\Delta)\omega)=c_\Delta\sin(p\omega)$ 对所有 $p$ 成立，取 $p=0$ 得 $\sin(\Delta\omega)=0$，这只在 $\Delta\omega$ 是 $\pi$ 的整数倍时成立。一般偏移下需要把 $\cos(p\omega)$ 也写进右边，这正是加法公式给出的第二项。
+
+</details>
+
+<details>
+<summary>4. 取 ω = π/2，位移 0、1、2、3、4 时 u(i)ᵀu(j) 依次是多少？</summary>
+
+点积等于 $\cos(\Delta\omega)$，依次为 $\cos0=1$、$\cos(\pi/2)=0$、$\cos\pi=-1$、$\cos(3\pi/2)=0$、$\cos2\pi=1$。位移 4 与位移 0 完全相同，显然不是随距离单调下降；单个频率只能在一个周期内区分位移，这正是使用多个频率的原因。
+
+</details>
+
+<details>
+<summary>5. d = 8 时，第 4、5 维一起构成哪一对？它的波长大约多少个 token？</summary>
+
+第 4、5 维是 $m=2$ 的一对，$\omega_2=10000^{-4/8}=0.01$，波长 $2\pi/0.01\approx628.32$ 个 token。它在几百个 token 的尺度上才明显变化，负责区分远距离位移。
+
+</details>
+
+下一章 [相对位置与 RoPE](/principles/rope/) 不再把位置加到输入上，而是直接修改注意力分数：先看三种相对位置方法，再把本章的旋转施加到查询和键上。
+
+## 原始资料
+
+- [Attention Is All You Need，§3.5](https://arxiv.org/abs/1706.03762)：sin/cos 位置编码的定义与“固定偏移可线性表示”的动机。
+- [Chasnov：旋转矩阵与正交矩阵](https://math.libretexts.org/Bookshelves/Differential_Equations/Applied_Linear_Algebra_and_Differential_Equations_(Chasnov)/02:_II._Linear_Algebra/01:_Matrices/1.04:_Rotation_Matrices_and_Orthogonal_Matrices)：正交条件与保长性质。
+- [MIT：极坐标与复数](https://ocw.mit.edu/courses/res-18-001-calculus-fall-2023/resources/mitres_18_001_f17_ch09_pdf/)：极坐标、复数和欧拉公式。
+
+从平移要求推出旋转、矩阵指数与反例是为讲解组织的推导，不声称是原论文作者的设计过程。

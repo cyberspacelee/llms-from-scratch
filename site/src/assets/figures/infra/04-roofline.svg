@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 32 720 448" role="img" aria-labelledby="title desc">
+  <title id="title">H100 SXM 的示意屋顶线，以及低算术强度放大图</title>
+  <desc id="desc">主图里屋顶线在约 295 FLOP 每字节处碰到 989.5 TFLOP/s 的平台。放大图里，1 和 4 FLOP 每字节仍贴在带宽斜线上。</desc>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+    
+    <line x1="56" y1="300" x2="330" y2="300" stroke="#d9e0da"/>
+    <line x1="56" y1="300" x2="56" y2="70" stroke="#d9e0da"/>
+    <path d="M56 300 L258 92 L330 92" fill="none" stroke="#087f70" stroke-width="3"/>
+    <circle cx="258" cy="92" r="4" fill="#b94a34"/>
+    <text x="64" y="64" font-size="12" fill="#68726d">989.5 TFLOP/s</text>
+    <text x="188" y="80" font-size="12" fill="#b94a34">脊点 ≈ 295</text>
+    <text x="70" y="322" font-size="12" fill="#68726d">算术强度 FLOP/byte →</text>
+    <text x="250" y="250" font-size="13" fill="#087f70">带宽斜线</text>
+    <text x="276" y="112" font-size="13" fill="#087f70">算力平台</text>
+    <text x="64" y="286" font-size="12" fill="#245fb0">decode 在原点附近</text>
+
+    <rect x="370" y="56" width="322" height="268" rx="8" fill="#f7f8f6" stroke="#d9e0da"/>
+    <text x="386" y="82" font-size="14" fill="#1c2926">放大：0 到 10 FLOP/byte</text>
+    <line x1="400" y1="286" x2="660" y2="286" stroke="#d9e0da"/>
+    <line x1="400" y1="286" x2="400" y2="110" stroke="#d9e0da"/>
+    <path d="M400 286 L660 138" fill="none" stroke="#087f70" stroke-width="2.5"/>
+    <circle cx="426" cy="271" r="5" fill="#245fb0"/>
+    <circle cx="504" cy="227" r="5" fill="#b94a34"/>
+    <text x="436" y="266" font-size="12" fill="#245fb0">1 → 3.35 TFLOP/s</text>
+    <text x="514" y="222" font-size="12" fill="#b94a34">4 → 13.4 TFLOP/s</text>
+    <text x="400" y="306" font-size="12" fill="#68726d">纵轴只到 40，所以斜线看得见</text>
+
+    <text x="24" y="360" font-size="15" fill="#1c2926">斜线的斜率是 H100 SXM 的 3.35 TB/s。平台是去掉稀疏后的 FP16 Tensor Core 峰值 989.5 TFLOP/s。</text>
+    <text x="24" y="388" font-size="15" fill="#1c2926">batch = 1 的线性层大约 1 FLOP/byte，长上下文的 decode 注意力大约 4。它们离平台很远。</text>
+    <text x="24" y="430" font-size="14" fill="#68726d">这是产品页数字画出的上限，不是某个 kernel 的实测速度。</text>
+  </g>
+</svg>

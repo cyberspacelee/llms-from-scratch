@@ -1,0 +1,34 @@
+---
+title: 模型原理导读
+question: 位置怎样进入注意力，缓存为什么不改变结果
+description: 四章从注意力的对称性出发，推到 sin/cos、RoPE 与 KV cache，并说明每个结论的成立条件和验证方法。
+order: 0
+code:
+  - code/principles/position_encoding.py
+  - code/principles/kv_cache.py
+---
+
+注意力只比较内容，不看位置：打乱输入 token，输出只是跟着一起打乱。这条路线先证明这件事，再一步步补上位置信息，最后回答推理时的问题：逐个生成 token 并复用历史 K/V，为什么和整段重新计算得到同一个结果。
+
+## 四章各回答一个问题
+
+<ChapterList track="principles" />
+
+P1 到 P3 是一条推导链：先说明缺什么（P1），再从“平移可以用一个与起点无关的线性变换表示”这一要求构造 sin/cos（P2），然后把同样的旋转直接施加在查询和键上，得到只依赖相对位置的分数（P3）。P4 换到推理视角，用前三章的结论证明缓存的正确性，并列出位置、掩码和频率必须满足的条件。
+
+## 先修与记号
+
+需要 [M3 向量与矩阵](/math/linear-algebra/) 中的点积、范数、转置和矩阵乘法。P3 的训练一节用到 [M6 链式法则与反向传播](/math/backprop/) 的雅可比转置；P2 的矩阵指数是选读，需要 [M4 微积分与梯度](/math/calculus/) 的导数与幂级数。
+
+这条路线沿用注意力论文的写法：内容向量 $x_i\in\mathbb R^d$ 是列向量，按行堆成 $X\in\mathbb R^{n\times d}$，投影写作 $Q=XW_Q$，其中 $W_Q\in\mathbb R^{d\times d_h}$。它是数学基础里线性层权重 $W\in\mathbb R^{m\times d}$ 的转置布局；换算时先对齐形状，不要因为都叫 $W$ 就直接套用公式。位置下标用 $i,j,p$，虚数单位写作正体 $\mathrm i$。
+
+## 怎样核对
+
+每个等式都区分两种依据：可以证明的性质，以及人为选择的设计。证明写在正文里；有限数值上的核对交给两个只需 CPU 的脚本。
+
+```sh
+python code/principles/position_encoding.py
+python code/principles/kv_cache.py
+```
+
+第一个脚本检查置换等变、sin/cos 的平移公式、相对位置核、RoPE 的共同平移不变性与梯度；第二个比较整段注意力与四种分块解码，并用一个故意把位置重置为零的错误实现作负面对照。断言通过只说明这些有限算例成立，普遍成立的理由是正文中的证明。

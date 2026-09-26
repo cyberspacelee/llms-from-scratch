@@ -1,0 +1,18 @@
+---
+/** A short left-to-right sequence, e.g. the stages of engine start-up. */
+interface Props {
+  items: { title: string; detail?: string; tag?: string }[]
+  label: string
+}
+const { items, label } = Astro.props
+const number = (value: number) => String(value).padStart(2, '0')
+---
+<ol aria-label={label} class="not-prose my-6 grid list-none grid-cols-[repeat(auto-fit,minmax(7rem,1fr))] gap-px overflow-hidden rounded-lg border border-rule bg-rule p-0">
+  {items.map((item, index) => (
+    <li class="flex flex-col gap-1 bg-raised p-3">
+      <span class="font-mono text-xs text-muted">{item.tag ?? number(index + 1)}</span>
+      <b class="text-sm font-semibold wrap-anywhere">{item.title}</b>
+      {item.detail && <span class="font-mono text-xs text-muted wrap-anywhere">{item.detail}</span>}
+    </li>
+  ))}
+</ol>

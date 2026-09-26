@@ -1,0 +1,75 @@
+---
+import FigureShell from '../FigureShell.astro'
+
+/**
+ * An SVG from src/assets/figures, inlined so it follows the site theme.
+ * The fixed palette the figures were drawn in is mapped onto theme tokens,
+ * and ids are prefixed so several figures can share a page.
+ */
+interface Props {
+  /** Path under src/assets/figures, e.g. "math/04-matrix.svg". */
+  src: string
+  /** What the figure shows, for screen readers. */
+  alt: string
+  /** Smallest readable width; narrower screens scroll the figure sideways. */
+  minWidth?: string
+}
+
+const { src, alt, minWidth = '36rem' } = Astro.props
+
+const files = import.meta.glob<string>('../../assets/figures/**/*.svg', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+})
+const raw = files[`../../assets/figures/${src}`]
+if (!raw) throw new Error(`Figure not found: ${src}`)
+
+const palette: Record<string, string> = {
+  '#263a34': 'var(--ink)', '#1c2926': 'var(--ink)', '#000000': 'var(--ink)',
+  '#68726d': 'var(--muted)', '#52645e': 'var(--muted)', '#94a3b8': 'var(--muted)', '#b0b0b0': 'var(--muted)',
+  '#d5ddd7': 'var(--rule-strong)', '#d9e0da': 'var(--rule-strong)',
+  '#fffefa': 'var(--raised)',
+  '#f0f3f1': 'var(--sunken)', '#f7f8f6': 'var(--sunken)',
+  '#087f70': 'var(--accent)', '#1f8f80': 'var(--accent)',
+  '#e1eee9': 'var(--accent-soft)', '#e7f3f1': 'var(--accent-soft)',
+  '#c16b36': 'var(--accent2)', '#b94a34': 'var(--accent2)', '#8f3a2a': 'var(--accent2)',
+  '#f7e9da': 'var(--accent2-soft)', '#f6f1e8': 'var(--accent2-soft)',
+  '#3176b5': 'var(--info)', '#245fb0': 'var(--info)',
+  '#e2eaf7': 'var(--info-soft)', '#e8eef8': 'var(--info-soft)', '#8eafd4': 'var(--info-soft)',
+}
+
+const prefix = `fig-${src.replace(/\.svg$/, '').replace(/[^a-z0-9]+/gi, '-')}`
+const ids = [...raw.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1])
+
+let svg = raw
+  .replace(/<\?xml[^>]*>\s*/, '')
+  .replace(/<!DOCTYPE[^>]*>\s*/, '')
+  .replace(/<metadata>[\s\S]*?<\/metadata>\s*/, '')
+  .replace(/<title[^>]*>[\s\S]*?<\/title>\s*/g, '')
+  .replace(/<desc[^>]*>[\s\S]*?<\/desc>\s*/g, '')
+  .replace(/\sfont-family="[^"]*"/g, '')
+  .replace(/#[0-9a-fA-F]{6}\b/g, (hex) => palette[hex.toLowerCase()] ?? hex)
+
+for (const id of ids) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  svg = svg
+    .replace(new RegExp(`\\sid="${escaped}"`, 'g'), ` id="${prefix}-${id}"`)
+    .replace(new RegExp(`url\\(#${escaped}\\)`, 'g'), `url(#${prefix}-${id})`)
+    .replace(new RegExp(`href="#${escaped}"`, 'g'), `href="#${prefix}-${id}"`)
+}
+
+svg = svg.replace(/<svg\b([^>]*)>/, (_, attributes: string) => {
+  const kept = attributes
+    .replace(/\s(?:width|height|role|aria-labelledby|aria-label)="[^"]*"/g, '')
+  return `<svg${kept} role="img" aria-label="${alt.replace(/"/g, '&quot;')}">`
+})
+---
+<FigureShell label={alt}>
+  <div
+    class="[&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:w-full [&>svg]:min-w-(--fig-min) [&>svg]:font-sans"
+    style={`--fig-min: ${minWidth}`}
+    set:html={svg}
+  ></div>
+  <slot slot="caption" />
+</FigureShell>

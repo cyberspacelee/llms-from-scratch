@@ -1,0 +1,17 @@
+---
+import { render } from 'astro:content'
+import LessonLayout from '../layouts/LessonLayout.astro'
+import { getLessons, type Lesson } from '../lib/lessons'
+import { mdxComponents } from '../lib/mdx-components'
+
+export async function getStaticPaths() {
+  const lessons = await getLessons()
+  return lessons.map((lesson) => ({ params: { path: lesson.path }, props: { lesson } }))
+}
+
+const { lesson } = Astro.props as { lesson: Lesson }
+const { Content, headings } = await render(lesson.entry)
+---
+<LessonLayout lesson={lesson} headings={headings}>
+  <Content components={mdxComponents} />
+</LessonLayout>

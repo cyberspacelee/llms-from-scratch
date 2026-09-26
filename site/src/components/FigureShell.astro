@@ -1,0 +1,23 @@
+---
+/** The frame and numbered caption shared by every figure and diagram. */
+interface Props {
+  /** Describes the drawing for the scroll region. */
+  label: string
+  /** Frame padding, for drawings that are not full-bleed SVGs. */
+  padded?: boolean
+}
+const { label, padded = false } = Astro.props
+---
+<figure class="not-prose my-8 [counter-increment:figure]">
+  <div
+    class:list={['overflow-x-auto rounded-lg border border-rule bg-raised text-ink', padded && 'p-4']}
+    tabindex="0"
+    role="region"
+    aria-label={`${label}（可横向滚动）`}
+  >
+    <slot />
+  </div>
+  <figcaption class="mt-3 text-sm text-muted before:mr-2 before:font-semibold before:text-ink before:content-['图_'_counter(figure)]">
+    <slot name="caption" />
+  </figcaption>
+</figure>

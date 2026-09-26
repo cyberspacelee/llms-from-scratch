@@ -1,0 +1,232 @@
+---
+title: KV cache 的正确性
+question: 逐 token 解码为什么与整段计算得到同一个结果
+description: 从整段因果注意力推到 prefill、分块与逐 token 解码，证明缓存 K/V 与重算等价，并列出位置、掩码和频率必须满足的条件。
+order: 4
+code:
+  - code/principles/kv_cache.py
+---
+
+import CacheIndexLab from '../../../components/labs/CacheIndexLab'
+
+训练和推理使用同一组模型权重、同一套位置约定。KV cache 的目标是复用因果模型中不会再变化的历史结果，而不是近似替换位置编码。
+
+> 本章从单层注意力推到多层缓存。先假设没有 padding、没有滑动窗口、固定 RoPE 频率，处于 eval 模式。每次放宽假设时，都明确指出新增条件。
+
+## 完整因果计算究竟算了什么？
+
+沿用 [P1](/principles/attention-order/) 的列向量记号，$T_i$ 是 [P3](/principles/rope/) 中位置 $i$ 的分块旋转。整段序列的位置为 $0,\ldots,T-1$，先计算 $q_i,k_i,v_i$，再旋转查询与键：
+
+$$
+\widetilde q_i=T_iq_i,\qquad \widetilde k_j=T_jk_j,\qquad
+s_{ij}=\frac{\widetilde q_i^\top\widetilde k_j}{\sqrt{d_h}}+M_{ij}.
+$$
+
+因果掩码是 $M_{ij}=0$（$j\le i$）或 $-\infty$（$j>i$）。由于 $e^{-\infty}=0$，第 $i$ 行的输出只有历史与当前值参与：
+
+$$
+y_i=\frac{\sum_{j=0}^{i}\exp(\widetilde q_i^\top\widetilde k_j/\sqrt{d_h})v_j}
+{\sum_{\ell=0}^{i}\exp(\widetilde q_i^\top\widetilde k_\ell/\sqrt{d_h})}.
+$$
+
+追加第 $i+1$ 个 token，不会改变上式的可见集合。若旧输入状态不变、参数不变、关闭随机 dropout，旧结果也不变。这就是可以缓存的理由。
+
+## 为什么缓存 K/V，不缓存完整注意力？
+
+新位置 $t$ 需要一个新查询 $\widetilde q_t$，与历史各 $\widetilde k_j$ 配对，并混合各 $v_j$。历史查询 $q_j$ 只用于计算历史输出，新查询不会读取它们。
+
+$$
+\underbrace{\widetilde q_t^\top}_{1\times d_h}
+\underbrace{[\widetilde k_0,\ldots,\widetilde k_t]}_{d_h\times(t+1)}
+\longrightarrow\underbrace{s_t}_{1\times(t+1)}
+\longrightarrow\underbrace{y_t^\top}_{1\times d_v}.
+$$
+
+因此缓存旋转后的 K 和未旋转的 V；新 Q 每步现算，旧注意力权重没有复用价值，因为新 Q 的内容不同。也可以设计缓存未旋转 K 的实现，但那需要在使用时另行旋转；本章采用常见的“先旋转，再缓存”。
+
+| 阶段 | Q 的形状 | 可用 K/V 的形状 | 分数形状 |
+|---|---|---|---|
+| Prefill，提示长 $L$ | $[B,H,L,D]$ | $[B,H,L,D]$ | $[B,H,L,L]$ |
+| Decode，已有 $L$ 个 token | $[B,H,1,D]$ | $[B,H,L+1,D]$ | $[B,H,1,L+1]$ |
+
+这里为简化令 $d_v=D=d_h$，Q/K/V 头数相同；GQA/MQA 的 KV 头数更少，但位置逻辑相同。
+
+<CacheIndexLab client:visible />
+
+## 为什么新位置不能从 0 重新编号？
+
+假设缓存里已有 $\widetilde k_0=R(0)k_0$ 到 $\widetilde k_{L-1}=R((L-1)\theta)k_{L-1}$。新 token 的绝对位置应为 $L$：
+
+$$
+\widetilde q_L^\top\widetilde k_j
+=q_L^\top R((j-L)\theta)k_j.
+$$
+
+如果新查询误用 0，分数变成 $q_L^\top R(j\theta)k_j$。把目标差值 $j-L$ 换成 $j$，不是实现细节，而是改变了注意力。
+
+取 $q=k=(1,0)^\top$，$\theta=\pi/4$，新位置 $L=4$，历史键位置 $j=3$：正确点积是 $\cos(-\pi/4)=\sqrt2/2$；错误重置后是 $\cos(3\pi/4)=-\sqrt2/2$，连符号都变了。
+
+共同平移不变性不能救这个错误。它要求所有参与的 Q/K 坐标一起改变，而非只重置新查询。
+
+## 缓存中的键为什么不能每步再旋转？
+
+键在位置 $j$ 入缓存时已经是 $R(j\theta)k_j$。若每次使用时又乘 $R(j\theta)$，结果就是 $R(2j\theta)k_j$。旋转会累加，不是重复调用也不变的操作。
+
+$$
+R(j\theta)\underbrace{R(j\theta)k_j}_{\text{已缓存的键}}
+=R(2j\theta)k_j\ne R(j\theta)k_j.
+$$
+
+正确的数据流是：新 token 投影 → 用它自己的绝对位置旋转新 Q/K → 将新 K/V 追加到缓存 → 新 Q 读取全部可见 K/V。旧缓存原样保留。
+
+## 一次追加多个 token，掩码要怎么写？
+
+假设已有 $L$ 个历史 token，现在一次追加 $C$ 个。新查询的局部行号 $r\in[0,C-1]$，绝对位置是 $L+r$；全部键的位置为 $j\in[0,L+C-1]$。
+
+$$
+\operatorname{visible}(r,j)\iff j\le L+r.
+$$
+
+例如 $L=3,C=2$：
+
+$$
+\begin{array}{c|ccccc}
+ &j=0&j=1&j=2&j=3&j=4\\\hline
+i=3&1&1&1&1&0\\
+i=4&1&1&1&1&1
+\end{array}
+$$
+
+这个 $2\times5$ 掩码不是从左上角开始的普通下三角。只写一个“causal=True”而不核对具体 API 对非方阵的对齐约定，可能使新查询只能看见很少的历史键。示例显式比较绝对位置，避免这类歧义。
+
+单 token 解码时，新查询是缓存中的最后位置，全部已有键都可见；如果缓存没有预分配空槽，也没有 padding，则无需额外因果屏蔽未来。
+
+## 如何证明缓存与整段计算相等？
+
+### 单层：逐项比较 softmax 的输入
+
+在某个位置 $t$，两条路径使用同一个 $q_t$、同一组 $k_0,\ldots,k_t$、相同位置旋转和同一组值。每个 logit 相同，分母求和集合也相同，所以输出相同：
+
+$$
+\forall j\le t:\ s^{\rm full}_{tj}=s^{\rm cache}_{tj}
+\quad\Longrightarrow\quad
+\alpha^{\rm full}_{tj}=\alpha^{\rm cache}_{tj}
+\quad\Longrightarrow\quad y^{\rm full}_t=y^{\rm cache}_t.
+$$
+
+### 多层：对层数归纳
+
+输入层同一位置的 token 与位置处理相同。若第 $\ell$ 层输入相同，则投影相同；按单层结论，注意力输出相同；确定性的逐 token 归一化、MLP 和残差也相同。因此第 $\ell+1$ 层输入相同。
+
+这也说明**每层都需要自己的 KV cache**。第 1 层的 K/V 和第 20 层的 K/V 来自不同隐藏状态，不可共用。
+
+浮点实现会因矩阵块大小、kernel、求和顺序不同产生微小差异。数学等价不意味着不同硬件下逐 bit 相同；应使用合理数值容差比较。
+
+## PyTorch：整段、prefill、分块、逐 token 对照
+
+本程序复用 [P3](/principles/rope/) 的 `apply_rope`，避免维护两套公式。输入是预先给定的单层 Q/K/V，不是完整语言模型；验证的是该层缓存机制，不把它描述成端到端生成测试。
+
+<CodeFile path="code/principles/kv_cache.py" />
+
+在仓库根目录执行 `python code/principles/kv_cache.py`。它比较 4 种分块方式，并增加错误对照：故意将新查询位置重置为零，确认输出确实发生变化。
+
+代码里的 `torch.cat` 便于观察追加语义，但每步会复制缓存；生产实现一般用预分配或分页存储。这里刻意不引入复杂缓存管理，以便把数学对应关系保持清晰。
+
+## Padding、窗口与缓存索引不是同一个概念
+
+### 左侧 padding
+
+缓存存储槽位、序列内逻辑位置和可见性是三个变量。批次里提示长度不同，左侧 padding 不能被当成正常 token。一种常见逻辑位置构造是：
+
+$$
+\operatorname{position\_ids}=\operatorname{cumsum}(\operatorname{attention\_mask},-1)-1.
+$$
+
+padding 对应的位置数值仍需安全填充，并用 mask 屏蔽；实际规则必须与模型接口一致。[P3](/principles/rope/) 的示例只接受统一的 `[T]` 位置，若支持这种批次，需要扩展为每条样本独立的 `[B,T]`，而不是直接套用当前代码。
+
+### 滑动窗口
+
+丢弃旧缓存不意味着剩余 token 的绝对位置自动重置。可以继续递增逻辑位置。如果要将共同坐标原点移动 $c$，在固定频率条件下，旧旋转键必须同步变换：
+
+$$
+\widetilde k'_j=R(-c\theta)\widetilde k_j
+=R((j-c)\theta)k_j.
+$$
+
+这只保持保留下来的 Q/K 配对分数；丢掉窗口外 token 改变了 softmax 的可见集合，不能声称与原来的全上下文注意力完全等价。
+
+## 能算更远的位置，为什么不等于会理解？
+
+训练长 $L$ 时，模型学习到的是一定范围的相位差与内容模式。推理扩到 $sL$，虽然 sin/cos 仍然有定义，但 $\Delta\theta_m$ 的分布可能超出训练范围；多个频率的组合、注意力归一化中的候选数量也改变了。
+
+### 位置插值：压缩位置，相当于缩小频率
+
+$$
+p'=p/s,\qquad R(p'\theta_m)=R(p\theta_m/s).
+$$
+
+它把更长序列压到原相位范围附近，但也将邻近 token 的相位差从 $\theta_m$ 缩为 $\theta_m/s$，改变了局部距离分辨率。因此存在“覆盖远处”和“保留近处分辨率”的取舍。
+
+### 调整基底不是均匀缩放
+
+若 $\theta_m=B^{-2m/D}$，改为 $B'$ 后：
+
+$$
+\frac{\theta'_m}{\theta_m}=\left(\frac{B'}{B}\right)^{-2m/D}.
+$$
+
+比值随维度对变化，$m=0$ 时甚至不变。这与每对都除以同一个 $s$ 不同。YaRN 等方案进一步按频段处理缩放并调整注意力尺度；不能用“把位置除以一个常数”概括所有变体。
+
+### 动态改变频率会使已有缓存失配
+
+如果历史键用旧频率 $\theta$ 旋转，新查询却用新频率 $\theta'$，实际配对变成：
+
+$$
+q_i^\top R(-i\theta')R(j\theta)k_j
+=q_i^\top R(j\theta-i\theta')k_j.
+$$
+
+这不是新规则所需的 $R((j-i)\theta')$。需要遵循具体模型的缓存更新策略，或固定此次请求使用的频率方案；不能在序列中途只改新 token 的参数。
+
+## 验收时检查这些等式，而不只看文字生成
+
+| 检查对象 | 应满足的关系 | 典型错误 |
+|---|---|---|
+| 新位置 | $p_{\rm new}=\text{逻辑历史长度}$ | decode 每次从 0 开始 |
+| 缓存键 | $\widetilde k_j=T_jk_j$ | 对已旋转 K 重复旋转 |
+| 分块掩码 | $j\le L+r$ | 非方阵掩码错误对齐 |
+| 固定内容的共同平移 | $T_{i+c}^\top T_{j+c}=T_i^\top T_j$ | 只平移新 Q，不处理旧 K |
+| Full / cached | 同一可见集合下输出数值接近 | dropout、位置或频率不一致 |
+
+## 练习与核对
+
+<details>
+<summary>1. 已有 3 个历史 token，一次追加 2 个。新查询的绝对位置是多少？各自能看见哪些键？</summary>
+
+新查询的局部行号 $r=0,1$，绝对位置是 $L+r=3,4$。可见条件 $j\le L+r$：位置 3 的查询看见键 0–3，位置 4 的查询看见键 0–4。这正是正文中那个 $2\times5$ 掩码。
+
+</details>
+
+<details>
+<summary>2. 一条样本左侧有 2 个 padding，attention_mask 为 [0, 0, 1, 1, 1]。按 cumsum − 1 构造的 position_ids 是什么？</summary>
+
+累加和为 $[0,0,1,2,3]$，减 1 得 $[-1,-1,0,1,2]$。三个真实 token 的位置是 0、1、2，与没有 padding 时一致；两个 padding 位置得到 $-1$，需要按模型接口替换成安全值，并由 mask 屏蔽。下一步解码的新 token 位置应为 3，而不是 5。
+
+</details>
+
+<details>
+<summary>3. 为什么每一层都要有自己的 KV cache？</summary>
+
+第 $\ell$ 层的 K/V 由第 $\ell$ 层的输入隐藏状态投影得到，不同层的输入不同、投影权重也不同。归纳证明依赖“每层输入相同 ⇒ 该层 K/V 相同”，所以缓存必须逐层保存，不能共用。
+
+</details>
+
+到这里，我们已经说明缓存为什么正确，以及位置、掩码和频率必须满足什么条件。下一步是工程问题：如何避免每步复制缓存，如何让多条请求共享有限显存，又如何决定每一步计算哪些 token？[推理系统](/systems/) 路线先给一次生成记账，再沿 nano-vLLM 源码走到分页缓存与连续批处理。
+
+## 原始资料
+
+- [RoFormer](https://arxiv.org/abs/2104.09864)：相对旋转结构。
+- [Extending Context Window of Large Language Models via Positional Interpolation](https://arxiv.org/abs/2306.15595)：位置插值。
+- [YaRN](https://arxiv.org/abs/2309.00071)：长上下文扩展。
+
+缓存等价性证明、矩形掩码算例与错误对照是本讲义的解释性推导，不依赖某个框架隐藏的缓存接口。

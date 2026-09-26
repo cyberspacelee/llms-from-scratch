@@ -1,0 +1,24 @@
+---
+/** A verification script from code/, shown whole so the page and the file cannot drift apart. */
+import { Code } from 'astro:components'
+import { repoUrl } from '../../lib/lessons'
+
+interface Props {
+  /** Repository path, e.g. "code/principles/position_encoding.py". */
+  path: string
+}
+
+const { path } = Astro.props
+const files = import.meta.glob<string>('../../../../code/**/*.py', { query: '?raw', import: 'default', eager: true })
+const source = files[`../../../../${path}`]
+if (source === undefined) throw new Error(`Code file not found: ${path}`)
+---
+<div class="not-prose my-6 overflow-hidden rounded-lg border border-rule bg-code-bg">
+  <div class="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-4 py-2 text-xs text-muted">
+    <code class="font-semibold text-ink">{path}</code>
+    <a href={`${repoUrl}/blob/master/${path}`} class="text-muted hover:text-accent">在 GitHub 查看</a>
+  </div>
+  <div class="prose prose-lesson max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
+    <Code code={source.trimEnd()} lang="python" themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} />
+  </div>
+</div>

@@ -1,0 +1,114 @@
+---
+import BaseLayout from './BaseLayout.astro'
+import { getLessons, readingMinutes, repoUrl, url, type Lesson } from '../lib/lessons'
+import { tracks } from '../lib/tracks'
+
+interface Props {
+  lesson: Lesson
+  headings: { depth: number; slug: string; text: string }[]
+}
+
+const { lesson, headings } = Astro.props
+const lessons = await getLessons()
+const index = lessons.indexOf(lesson)
+const previous = lessons[index - 1]
+const next = lessons[index + 1]
+const siblings = lessons.filter((item) => item.track === lesson.track)
+const sections = headings.filter((heading) => heading.depth === 2)
+const minutes = readingMinutes(lesson.entry.body ?? '')
+const number = (value: number) => String(value).padStart(2, '0')
+const label = (item: Lesson) => (item.isIntro ? '导读' : item.code)
+---
+<BaseLayout title={lesson.title} description={lesson.description} trackId={lesson.track.id} reading>
+  <div class="mx-auto max-w-page px-4 sm:px-6 lg:grid lg:grid-cols-[var(--spacing-sidebar)_minmax(0,1fr)] lg:gap-12">
+    <div data-nav-scrim class="fixed inset-x-0 top-header bottom-0 z-20 hidden bg-ink/30 lg:hidden"></div>
+    <aside
+      id="sidebar"
+      aria-label="章节目录"
+      class="invisible fixed top-header bottom-0 left-0 z-30 w-[min(20rem,88vw)] -translate-x-full overflow-y-auto overscroll-contain border-r border-rule bg-paper p-5 transition-[transform,visibility] duration-200 motion-reduce:transition-none data-open:visible data-open:translate-x-0 lg:visible lg:sticky lg:top-header lg:z-auto lg:max-h-[calc(100dvh-var(--spacing-header))] lg:w-auto lg:translate-x-0 lg:self-start lg:border-r-0 lg:bg-transparent lg:px-0 lg:py-8"
+    >
+      <nav aria-label="学习路线" class="mb-5 flex gap-1 border-b border-rule pb-4 sm:hidden">
+        {tracks.map((track) => (
+          <a
+            href={url(track.id)}
+            aria-current={track === lesson.track ? 'page' : undefined}
+            class="rounded-full px-3 py-1 text-xs text-muted no-underline aria-[current=page]:bg-accent-soft aria-[current=page]:font-semibold aria-[current=page]:text-accent-strong"
+          >{track.label}</a>
+        ))}
+      </nav>
+      <p class="mb-3 text-xs font-semibold text-muted">
+        <a href={url(lesson.track.id)} class="text-muted no-underline hover:text-accent">{lesson.track.label}</a>
+      </p>
+      <ol class="m-0 list-none space-y-px p-0">
+        {siblings.map((item) => (
+          <li>
+            <a
+              href={url(item.path)}
+              aria-current={item === lesson ? 'page' : undefined}
+              class="grid grid-cols-[2.25rem_minmax(0,1fr)] items-baseline rounded-lg px-2 py-1 text-sm text-muted no-underline hover:bg-sunken hover:text-ink aria-[current=page]:bg-accent-soft aria-[current=page]:font-semibold aria-[current=page]:text-accent-strong"
+            >
+              <span class="font-mono text-xs font-medium">{label(item)}</span>
+              <span>{item.title}</span>
+            </a>
+            {item === lesson && sections.length > 0 && (
+              <ol class="mt-1 mb-3 ml-11 list-none border-l border-rule p-0">
+                {sections.map((section, position) => (
+                  <li>
+                    <a
+                      href={`#${section.slug}`}
+                      data-section-link
+                      class="-ml-px flex gap-2 border-l-2 border-transparent py-1 pl-3 text-xs text-muted no-underline hover:text-ink aria-[current=true]:border-accent aria-[current=true]:font-semibold aria-[current=true]:text-ink"
+                    >
+                      <span class="font-mono">{number(position + 1)}</span>
+                      <span>{section.text}</span>
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </li>
+        ))}
+      </ol>
+    </aside>
+
+    <main id="content" class="min-w-0 max-w-content pt-6 pb-16 lg:pt-8">
+      <header class="mb-8 border-b border-rule pb-6">
+        <p class="mb-3 flex flex-wrap items-center gap-2 text-xs font-semibold text-muted">
+          <a href={url(lesson.track.id)} class="text-muted no-underline hover:text-accent">{lesson.track.label}</a>
+          <span aria-hidden="true">/</span>
+          <span class="rounded-sm bg-accent-soft px-1.5 py-0.5 font-mono text-accent-strong">{label(lesson)}</span>
+        </p>
+        <h1 class="text-2xl font-semibold tracking-tight">{lesson.title}</h1>
+        <p class="mt-4 mb-0 text-lg text-muted">{lesson.description}</p>
+        <ul class="mt-4 mb-0 flex list-none flex-wrap gap-x-5 gap-y-1 p-0 text-xs text-muted">
+          <li>阅读约 <strong class="font-semibold text-ink">{minutes}</strong> 分钟</li>
+          {sections.length > 0 && <li><strong class="font-semibold text-ink">{sections.length}</strong> 节</li>}
+          {lesson.entry.data.code.map((path) => (
+            <li>验证脚本 <a href={`${repoUrl}/blob/master/${path}`} class="font-mono">{path}</a></li>
+          ))}
+        </ul>
+      </header>
+
+      <article class="prose prose-lesson max-w-none text-base prose-headings:font-semibold prose-h2:mt-16 prose-h2:mb-4 prose-h2:text-xl prose-h3:mt-8 prose-h3:mb-3 prose-h3:text-lg prose-a:font-normal prose-a:decoration-1 prose-a:underline-offset-[0.2em] hover:prose-a:decoration-2 prose-li:my-1.5 prose-img:my-0 prose-hr:my-12">
+        <slot />
+      </article>
+
+      {(previous || next) && (
+        <nav aria-label="上一章与下一章" class="mt-16 grid gap-4 sm:grid-cols-2">
+          {previous && (
+            <a href={url(previous.path)} rel="prev" class="block rounded-lg border border-rule p-4 text-ink no-underline hover:border-accent">
+              <small class="block text-xs text-muted">上一章 · {previous.track.label} {label(previous)}</small>
+              <strong class="mt-1 block text-sm font-semibold">{previous.title}</strong>
+            </a>
+          )}
+          {next && (
+            <a href={url(next.path)} rel="next" class="block rounded-lg border border-rule p-4 text-ink no-underline hover:border-accent sm:col-start-2 sm:text-right">
+              <small class="block text-xs text-muted">下一章 · {next.track.label} {label(next)}</small>
+              <strong class="mt-1 block text-sm font-semibold">{next.title}</strong>
+            </a>
+          )}
+        </nav>
+      )}
+    </main>
+  </div>
+</BaseLayout>

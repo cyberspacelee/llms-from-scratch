@@ -1,0 +1,17 @@
+---
+/** An aside: `note` for route hints and definitions, `warn` for boundaries and pitfalls. */
+interface Props {
+  tone?: 'note' | 'warn'
+  title?: string
+}
+const { tone = 'note', title } = Astro.props
+---
+<aside
+  class:list={[
+    'my-6 rounded-r-lg border-l-[3px] px-4 py-3 [&>p]:my-2 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
+    tone === 'warn' ? 'border-accent2 bg-accent2-soft' : 'border-accent bg-accent-soft',
+  ]}
+>
+  {title && <p class="mb-1! font-semibold">{title}</p>}
+  <slot />
+</aside>

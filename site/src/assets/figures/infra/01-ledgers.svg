@@ -1,0 +1,40 @@
+<?xml version="1.0" ?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 30 720 410" role="img" aria-labelledby="title desc">
+  <title id="title">权重基本固定，KV 随并发线性变长</title>
+  <desc id="desc">Llama 3 8B 的 bf16 权重约 14.96 GiB。一条 8192 token 请求的 KV 是 1 GiB，十六条同样请求是 16 GiB。</desc>
+  <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
+        <text x="28" y="64" font-size="14" fill="#68726d">Llama 3 8B 公开宽度，bf16，每条请求 8192 token。刻度是 GiB。</text>
+
+    <text x="28" y="122" font-size="15" fill="#1c2926">权重</text>
+    <text x="28" y="142" font-size="13" fill="#68726d">14.96 GiB</text>
+    <rect x="168" y="104" width="369" height="36" rx="4" fill="#087f70"/>
+
+    <text x="28" y="196" font-size="15" fill="#1c2926">1 条请求的 KV</text>
+    <text x="28" y="216" font-size="13" fill="#68726d">1.00 GiB</text>
+    <rect x="168" y="178" width="25" height="36" rx="4" fill="#245fb0"/>
+    <text x="202" y="202" font-size="13" fill="#245fb0">1 GiB</text>
+
+    <text x="28" y="270" font-size="15" fill="#1c2926">16 条请求的 KV</text>
+    <text x="28" y="290" font-size="13" fill="#68726d">16.00 GiB</text>
+    <rect x="168" y="252" width="395" height="36" rx="4" fill="#b94a34"/>
+
+    <line x1="168" y1="312" x2="612" y2="312" stroke="#d9e0da"/>
+    <g fill="#68726d" font-size="12" text-anchor="middle">
+      <text x="168" y="332">0</text>
+      <text x="267" y="332">4</text>
+      <text x="365" y="332">8</text>
+      <text x="464" y="332">12</text>
+      <text x="563" y="332">16</text>
+      <text x="612" y="332">18 GiB</text>
+    </g>
+    <g stroke="#d9e0da" stroke-width="1">
+      <line x1="267" y1="308" x2="267" y2="316"/>
+      <line x1="365" y1="308" x2="365" y2="316"/>
+      <line x1="464" y1="308" x2="464" y2="316"/>
+      <line x1="563" y1="308" x2="563" y2="316"/>
+    </g>
+
+    <text x="28" y="378" font-size="15" fill="#1c2926">单 token 的 KV = 2 × 32 层 × 8 个 KV 头 × 128 × 2 字节 = 128 KiB</text>
+    <text x="28" y="404" font-size="15" fill="#1c2926">8192 token 正好是 1 GiB。并发从 1 增到 16，KV 从短蓝条变成超过权重的红条。</text>
+  </g>
+</svg>

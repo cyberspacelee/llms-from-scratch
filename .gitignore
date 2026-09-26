@@ -41,4 +41,5 @@ playwright-report/
 htmlcov/
 coverage.xml
 
-# Keep lesson HTML, Markdown, Python sources and dependency lockfiles tracked.
+# Build output of the site
+site/dist/

@@ -1,0 +1,23 @@
+---
+/** The chapters of a track, generated from the content collection. */
+import { getTrackLessons, url } from '../../lib/lessons'
+
+interface Props {
+  track: string
+  /** Leave out the track introduction. */
+  chaptersOnly?: boolean
+}
+const { track, chaptersOnly = true } = Astro.props
+const lessons = (await getTrackLessons(track)).filter((lesson) => !chaptersOnly || !lesson.isIntro)
+---
+<ol class="not-prose my-6 list-none border-t border-rule p-0">
+  {lessons.map((lesson) => (
+    <li>
+      <a href={url(lesson.path)} class="group grid grid-cols-[3rem_minmax(0,1fr)] gap-x-3 border-b border-rule py-3 text-ink no-underline">
+        <span class="pt-0.5 font-mono text-xs font-medium text-muted">{lesson.isIntro ? '导读' : lesson.code}</span>
+        <span class="font-semibold group-hover:text-accent">{lesson.title}</span>
+        <span class="col-start-2 text-sm text-muted">{lesson.question}</span>
+      </a>
+    </li>
+  ))}
+</ol>

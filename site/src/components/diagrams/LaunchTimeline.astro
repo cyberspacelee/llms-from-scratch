@@ -1,0 +1,25 @@
+---
+import FigureShell from '../FigureShell.astro'
+
+/** Eager launches versus one CUDA Graph replay; a shape sketch, not a measurement. */
+const rows = [
+  { label: 'Eager', cells: ['gap', 'kernel', 'gap', 'kernel', 'gap', 'kernel', 'gap', 'kernel'] },
+  { label: 'Graph replay', cells: ['graph', 'graph', 'graph', 'graph', 'graph', 'graph', 'graph', 'graph'] },
+]
+const tone: Record<string, string> = { gap: 'bg-accent2', kernel: 'bg-info', graph: 'bg-accent' }
+---
+<FigureShell label="eager 与 CUDA Graph 的发射时间线" padded>
+  <div class="grid gap-2" role="img" aria-label="eager 模式在每个 kernel 之间有 CPU 发射间隙，graph 重放是一段连续执行">
+    {rows.map((row) => (
+      <div class="grid grid-cols-[7rem_minmax(0,1fr)] items-center gap-3 max-sm:grid-cols-1 max-sm:gap-1">
+        <b class="font-mono text-xs font-semibold">{row.label}</b>
+        <div class="grid h-7 grid-cols-8 gap-0.5">
+          {row.cells.map((cell) => <span class:list={['rounded-xs', tone[cell]]} />)}
+        </div>
+      </div>
+    ))}
+  </div>
+  <Fragment slot="caption">
+    橙色是 CPU 发射 kernel 的间隙，蓝色是逐个发射的 kernel，绿色是一次 graph 重放的连续执行。这里只示意形状，不代表实测时长。
+  </Fragment>
+</FigureShell>

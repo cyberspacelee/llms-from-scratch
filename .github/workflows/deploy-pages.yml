@@ -1,8 +1,9 @@
-name: Deploy Astro site to GitHub Pages
+name: Verify and deploy
 
 on:
   push:
     branches: [master]
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,10 +12,33 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  verify-code:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install CPU dependencies
+        run: pip install -r code/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Run verification scripts
+        run: |
+          for script in code/math/probability.py code/math/linear_algebra.py code/math/calculus.py \
+                        code/math/neural_network.py code/principles/position_encoding.py code/principles/kv_cache.py; do
+            echo "::group::$script"
+            python "$script"
+            echo "::endgroup::"
+          done
+
   build:
     runs-on: ubuntu-24.04
     steps:
@@ -29,27 +53,29 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          cache-dependency-path: astro-site/pnpm-lock.yaml
+          cache-dependency-path: site/pnpm-lock.yaml
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-        working-directory: astro-site
+        working-directory: site
 
-      - name: Check Astro project
+      - name: Type-check
         run: pnpm check
-        working-directory: astro-site
+        working-directory: site
 
-      - name: Build Astro site
+      - name: Build and check links
         run: pnpm build
-        working-directory: astro-site
+        working-directory: site
 
       - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v5
         with:
-          path: astro-site/dist
+          path: site/dist
 
   deploy:
-    needs: build
+    if: github.event_name != 'pull_request'
+    needs: [verify-code, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment:

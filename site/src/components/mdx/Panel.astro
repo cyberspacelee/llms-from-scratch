@@ -1,0 +1,12 @@
+---
+interface Props {
+  title: string
+  tone?: 'accent' | 'accent2' | 'info'
+}
+const { title, tone = 'accent' } = Astro.props
+const border = { accent: 'border-t-accent', accent2: 'border-t-accent2', info: 'border-t-info' }[tone]
+---
+<section class:list={['min-w-0 rounded-lg border border-t-[3px] border-rule bg-raised px-4 py-3 text-sm [&>p]:my-1', border]}>
+  <p class="mt-0! mb-1! text-base font-semibold">{title}</p>
+  <slot />
+</section>

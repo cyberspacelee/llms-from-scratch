@@ -1,0 +1,126 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro'
+import { getLessons, repoUrl, url, type Lesson } from '../lib/lessons'
+import { tracks } from '../lib/tracks'
+
+const lessons = await getLessons()
+const byTrack = (id: string) => lessons.filter((lesson) => lesson.track.id === id)
+const chapters = lessons.filter((lesson) => !lesson.isIntro)
+const find = (path: string) => {
+  const lesson = lessons.find((item) => item.path === path)
+  if (!lesson) throw new Error(`Home page links to missing lesson ${path}`)
+  return lesson
+}
+const routes: { title: string; detail: string; steps: Lesson[] }[] = [
+  {
+    title: '完整路线',
+    detail: '从统计与矩阵读起，一路读到调度器和集群。每章只用前面已经推导过的东西。',
+    steps: [find('math'), find('principles'), find('systems')],
+  },
+  {
+    title: '只为弄懂 RoPE',
+    detail: '先补点积、范数与转置，再进入位置编码的三章。',
+    steps: [find('math/linear-algebra'), find('principles/attention-order'), find('principles/rope')],
+  },
+  {
+    title: '关心推理性能',
+    detail: '先确认缓存为什么正确，再给一次生成记账，然后读引擎源码。',
+    steps: [find('principles/kv-cache'), find('systems/ledger'), find('systems/engine-runtime')],
+  },
+]
+const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))]
+---
+<BaseLayout title="LLMs From Scratch" description="用数学推导、图解、交互实验与可运行的 PyTorch 验证，理解大语言模型从训练原理到推理系统的每一步。">
+  <main id="content" class="mx-auto max-w-page px-4 pb-20 sm:px-6">
+    <section class="grid gap-10 border-b border-rule py-14 sm:py-20 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-end">
+      <div>
+        <p class="mb-4 text-sm font-semibold text-accent">中文讲义 · 推导 · 图解 · 可运行验证</p>
+        <h1 class="max-w-[16em] text-2xl font-semibold tracking-tight">从一行点积推到一台推理引擎，每一步都能手算、能运行。</h1>
+        <p class="mt-5 mb-0 max-w-content text-lg text-muted">
+          三条相连的路线：先用数学基础搭好统计、矩阵与反向传播，再推导位置编码与 KV cache，最后沿 nano-vLLM 源码走进调度、分页缓存和集群。
+        </p>
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a href={url('math')} class="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-paper no-underline hover:bg-accent-strong hover:text-paper">从数学基础开始</a>
+          <a href={url('principles')} class="rounded-lg border border-rule-strong px-5 py-2.5 text-sm font-semibold text-ink no-underline hover:border-accent hover:text-accent-strong">直接读模型原理</a>
+        </div>
+      </div>
+      <dl class="m-0 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-rule bg-rule lg:grid-cols-1">
+        {[
+          [String(chapters.length), '章正文'],
+          [String(scripts.length), '个验证脚本'],
+          ['8', '个交互实验'],
+        ].map(([value, label]) => (
+          <div class="flex flex-col-reverse bg-raised px-4 py-3">
+            <dt class="text-xs text-muted">{label}</dt>
+            <dd class="m-0 font-mono text-xl font-semibold text-accent">{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
+
+    <section aria-labelledby="tracks-heading" class="py-14">
+      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">三条路线</h2>
+      <div class="grid gap-6 lg:grid-cols-3">
+        {tracks.map((track) => {
+          const items = byTrack(track.id)
+          return (
+            <section class="flex flex-col rounded-lg border border-rule bg-raised">
+              <header class="border-b border-rule p-5">
+                <p class="mb-2 font-mono text-xs font-semibold text-accent">{track.letter} · {items.length - 1} 章 + 导读</p>
+                <h3 class="text-lg font-semibold"><a href={url(track.id)} class="text-ink no-underline hover:text-accent">{track.label}</a></h3>
+                <p class="mt-2 mb-0 text-sm text-muted">{track.summary}</p>
+              </header>
+              <ol class="m-0 flex-1 list-none p-2">
+                {items.map((lesson) => (
+                  <li>
+                    <a href={url(lesson.path)} class="group grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-2 rounded-lg px-3 py-2 text-ink no-underline hover:bg-sunken">
+                      <span class="pt-px font-mono text-xs text-muted">{lesson.isIntro ? '导读' : lesson.code}</span>
+                      <span class="text-sm font-semibold group-hover:text-accent">{lesson.title}</span>
+                      <span class="col-start-2 text-xs text-muted">{lesson.question}</span>
+                    </a>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )
+        })}
+      </div>
+    </section>
+
+    <section aria-labelledby="routes-heading" class="border-t border-rule py-14">
+      <h2 id="routes-heading" class="mb-2 text-xl font-semibold">从哪里开始</h2>
+      <p class="mt-0 mb-8 text-muted">三条路线按依赖排好；已经熟悉前面的内容，可以沿下面的捷径直接进入。</p>
+      <div class="grid gap-6 md:grid-cols-3">
+        {routes.map((route) => (
+          <section>
+            <h3 class="text-base font-semibold">{route.title}</h3>
+            <p class="mt-1 mb-3 text-sm text-muted">{route.detail}</p>
+            <ol class="m-0 flex list-none flex-wrap items-center gap-2 p-0 text-sm">
+              {route.steps.map((lesson, index) => (
+                <li class="flex items-center gap-2">
+                  {index > 0 && <span aria-hidden="true" class="text-muted">→</span>}
+                  <a href={url(lesson.path)} class="rounded-full border border-rule px-3 py-1 text-ink no-underline hover:border-accent hover:text-accent-strong">
+                    <span class="font-mono text-xs text-muted">{lesson.isIntro ? lesson.track.letter : lesson.code}</span> {lesson.isIntro ? lesson.track.label : lesson.title}
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))}
+      </div>
+    </section>
+
+    <section aria-labelledby="verify-heading" class="grid gap-8 border-t border-rule py-14 lg:grid-cols-2">
+      <div>
+        <h2 id="verify-heading" class="mb-2 text-xl font-semibold">公式都有程序核对</h2>
+        <p class="mt-0 text-muted">
+          每章的推导都配一个只需 CPU 的脚本，用 float64 和 assert 检查等式：梯度与自动微分一致、RoPE 只依赖相对位置、分块解码与整段注意力相等。脚本就是正文里展示的代码，页面直接从文件读入。
+        </p>
+        <p class="mb-0 text-sm"><a href={repoUrl}>在 GitHub 查看全部源码</a></p>
+      </div>
+      <pre class="m-0 overflow-x-auto rounded-lg border border-rule bg-code-bg px-5 py-4 font-mono text-code"><code>python -m venv .venv
+.venv/bin/pip install -r code/requirements.txt
+{scripts.map((path) => `.venv/bin/python ${path}`).join('\n')}</code></pre>
+    </section>
+  </main>
+</BaseLayout>

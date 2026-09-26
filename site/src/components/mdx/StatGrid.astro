@@ -1,0 +1,15 @@
+---
+/** A handful of headline numbers. */
+interface Props {
+  items: { value: string; label: string }[]
+}
+const { items } = Astro.props
+---
+<dl class="not-prose my-6 grid grid-cols-[repeat(auto-fit,minmax(9rem,1fr))] gap-px overflow-hidden rounded-lg border border-rule bg-rule">
+  {items.map((item) => (
+    <div class="flex flex-col-reverse bg-raised px-4 py-3">
+      <dt class="text-xs text-muted">{item.label}</dt>
+      <dd class="m-0 font-mono text-xl font-semibold text-accent">{item.value}</dd>
+    </div>
+  ))}
+</dl>

@@ -1,0 +1,44 @@
+---
+import FigureShell from '../FigureShell.astro'
+
+/** One Qwen3 decoder layer as nano-vLLM implements it. */
+const box = 'fill-sunken stroke-rule-strong'
+const blocks = [
+  { x: 40, w: 110, title: 'RMSNorm', lines: ['fused add'] },
+  { x: 210, w: 160, title: 'Self Attention', lines: ['QKV → Q/K norm', 'RoPE → KV cache', 'FlashAttention'] },
+  { x: 430, w: 110, title: 'RMSNorm', lines: ['fused add'] },
+  { x: 600, w: 160, title: 'Gated MLP', lines: ['gate_up_proj', 'SiLU(gate) × up', 'down_proj'], accent: true },
+]
+---
+<FigureShell label="Qwen3 解码层数据通路">
+    <svg viewBox="0 0 880 300" role="img" aria-label="输入经过 RMSNorm、自注意力、RMSNorm、门控 MLP，残差以融合加法贯穿" class="block h-auto w-full min-w-xl font-sans text-[14px] [&_text]:fill-ink">
+      <defs>
+        <marker id="qwen-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-muted" /></marker>
+        <marker id="qwen-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-accent2" /></marker>
+      </defs>
+      <text x="40" y="36" class="font-mono text-[12px] fill-accent2!">Qwen3DecoderLayer × N</text>
+      {blocks.map((block) => {
+        const h = block.lines.length > 1 ? 104 : 60
+        const y = 120 - h / 2
+        return (
+          <g>
+            <rect x={block.x} y={y} width={block.w} height={h} rx="6" class={block.accent ? 'fill-accent-soft stroke-accent' : box} />
+            <text x={block.x + block.w / 2} y={y + 26} text-anchor="middle" class="font-semibold">{block.title}</text>
+            {block.lines.map((line, index) => (
+              <text x={block.x + block.w / 2} y={y + 48 + index * 20} text-anchor="middle" class="font-mono text-[12px] fill-muted!">{line}</text>
+            ))}
+          </g>
+        )
+      })}
+      <rect x="820" y="96" width="44" height="48" rx="6" class={box} />
+      <text x="842" y="127" text-anchor="middle" class="text-[20px]">+</text>
+      {[[150, 202], [370, 422], [540, 592], [760, 812]].map(([from, to]) => (
+        <path d={`M${from} 120H${to}`} class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#qwen-arrow)" />
+      ))}
+      <path d="M40 120H22V236H842V152" class="fill-none stroke-accent2 stroke-[1.5] [stroke-dasharray:7_5]" marker-end="url(#qwen-arrow-accent)" />
+      <text x="430" y="266" text-anchor="middle" class="font-mono text-[12px] fill-accent2!">残差以融合的 add + RMSNorm 贯穿每一层</text>
+    </svg>
+  <Fragment slot="caption">
+    结构和普通 Transformer 解码层一致；不同在于每个线性层已按张量并行切好，注意力同时负责读写 KV cache，RMSNorm 与残差加法融合在一次调用里。
+  </Fragment>
+</FigureShell>
