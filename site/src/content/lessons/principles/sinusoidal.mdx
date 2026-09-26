@@ -59,7 +59,9 @@ $$
 
 $$
 R(\phi)=\begin{bmatrix}\cos\phi&-\sin\phi\\\sin\phi&\cos\phi\end{bmatrix},
-\qquad
+$$
+
+$$
 R(\phi)\begin{bmatrix}a\\b\end{bmatrix}
 =\begin{bmatrix}a\cos\phi-b\sin\phi\\a\sin\phi+b\cos\phi\end{bmatrix}.
 $$
@@ -144,12 +146,12 @@ print("旋转保长、相对转角、共同平移：全部通过")
 
 $$
 \begin{aligned}
-x'&=r\cos(\alpha+\phi)
-=r\cos\alpha\cos\phi-r\sin\alpha\sin\phi
-=x\cos\phi-y\sin\phi,\\
-y'&=r\sin(\alpha+\phi)
-=r\sin\alpha\cos\phi+r\cos\alpha\sin\phi
-=x\sin\phi+y\cos\phi.
+x'&=r\cos(\alpha+\phi)\\
+&=r\cos\alpha\cos\phi-r\sin\alpha\sin\phi\\
+&=x\cos\phi-y\sin\phi,\\
+y'&=r\sin(\alpha+\phi)\\
+&=r\sin\alpha\cos\phi+r\cos\alpha\sin\phi\\
+&=x\sin\phi+y\cos\phi.
 \end{aligned}
 $$
 
@@ -185,11 +187,11 @@ $$
 
 $$
 \begin{aligned}
-e^{t\omega S}
-&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I
-+\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)S\\
-&=\cos(t\omega)I+\sin(t\omega)S
-=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
+&e^{t\omega S}\\
+&=\left(1-\frac{(t\omega)^2}{2!}+\frac{(t\omega)^4}{4!}-\cdots\right)I\\
+&\quad+\left(t\omega-\frac{(t\omega)^3}{3!}+\frac{(t\omega)^5}{5!}-\cdots\right)S\\
+&=\cos(t\omega)I+\sin(t\omega)S\\
+&=\begin{bmatrix}\cos(t\omega)&-\sin(t\omega)\\\sin(t\omega)&\cos(t\omega)\end{bmatrix}.
 \end{aligned}
 $$
 
@@ -205,8 +207,12 @@ sin/cos 在这里不是被随意塞进公式的：**连续、可组合、保长�
 
 $$
 \begin{aligned}
-\sin((p+\Delta)\omega)&=\sin(p\omega)\cos(\Delta\omega)+\cos(p\omega)\sin(\Delta\omega),\\
-\cos((p+\Delta)\omega)&=\cos(p\omega)\cos(\Delta\omega)-\sin(p\omega)\sin(\Delta\omega).
+&\sin((p+\Delta)\omega)\\
+&=\sin(p\omega)\cos(\Delta\omega)\\
+&\quad+\cos(p\omega)\sin(\Delta\omega),\\[0.5em]
+&\cos((p+\Delta)\omega)\\
+&=\cos(p\omega)\cos(\Delta\omega)\\
+&\quad-\sin(p\omega)\sin(\Delta\omega).
 \end{aligned}
 $$
 
@@ -275,10 +281,11 @@ $$
 
 $$
 \begin{aligned}
-u(i)^\top u(j)
-&=\sin(i\omega)\sin(j\omega)+\cos(i\omega)\cos(j\omega)
-=\cos((i-j)\omega),\\
-\mathrm{PE}(i)^\top\mathrm{PE}(j)
+&u(i)^\top u(j)\\
+&=\sin(i\omega)\sin(j\omega)\\
+&\quad+\cos(i\omega)\cos(j\omega)\\
+&=\cos((i-j)\omega),\\[0.5em]
+&\mathrm{PE}(i)^\top\mathrm{PE}(j)\\
 &=\sum_m\cos((i-j)\omega_m).
 \end{aligned}
 $$

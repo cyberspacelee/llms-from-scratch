@@ -101,8 +101,10 @@ decode 每步 token 少、kernel 多，CPU 发射开销容易显眼；这正是 
 
 <LaunchTimeline />
 
+记 $N=\min(\text{max\_num\_seqs},512)$，捕获的批大小列表为：
+
 $$
-\text{captured batch sizes}=[1,2,4,8]+[16,32,\ldots,\min(\text{max\_num\_seqs},512)].
+\text{captured batch sizes}=[1,2,4,8]+[16,32,\ldots,N].
 $$
 
 <Panels>
@@ -118,14 +120,21 @@ $$
 
 构造时先用上限形状 warmup，读取 CUDA 峰值显存。随后把目标显存利用率内的剩余字节除以单个 KV 块的字节数，得到 `num_kvcache_blocks`。块字节数就是 [S1](/systems/ledger/) 的单 token KV 公式乘上块大小，再按张量并行切开 KV 头：
 
+沿用 S1 的记号：$L$ 是层数，$n_{kv}$ 是 KV 头数，$d_h$ 是头维度，$b$ 是每元素字节数；另记块大小为 $T_b$，张量并行度为 $P$，块字节数为 $B_{\mathrm{KV}}$，对应代码里的 `block_bytes`。
+
 <KeyEq label="KV 块预算">
 
 $$
-\text{block\_bytes}=2\times\text{num\_layers}\times\text{block\_size}\times\frac{\text{num\_kv\_heads}}{\text{TP}}\times\text{head\_dim}\times\text{dtype\_bytes},
+B_{\mathrm{KV}}=2LT_b\frac{n_{kv}}{P}d_hb.
 $$
 
 $$
-\text{num\_blocks}=\left\lfloor\frac{\text{total}\times\text{utilization}-\text{used}-\text{peak}+\text{current}}{\text{block\_bytes}}\right\rfloor.
+\begin{aligned}
+&M_{\mathrm{free}}\\
+&=\text{total}\times\text{utilization}\\
+&\quad-\text{used}-\text{peak}+\text{current},\\
+&\text{num\_blocks}=\left\lfloor\frac{M_{\mathrm{free}}}{B_{\mathrm{KV}}}\right\rfloor.
+\end{aligned}
 $$
 
 </KeyEq>
@@ -160,7 +169,8 @@ Hugging Face checkpoint 中独立的 `q_proj/k_proj/v_proj` 被装入融合参�
 logits 先除以每条序列的 temperature，再 softmax。实现使用指数竞争技巧：对每个类别采样 $E_i\sim\operatorname{Exp}(1)$，取 $\arg\max_i p_i/E_i$，得到服从类别分布的样本。
 
 $$
-\text{token}=\arg\max_i\ \frac{\operatorname{softmax}(\text{logits}/T)_i}{E_i},\qquad E_i\sim\operatorname{Exp}(1).
+p_i=\operatorname{softmax}(\text{logits}/T)_i,\qquad
+\text{token}=\arg\max_i\frac{p_i}{E_i},\qquad E_i\sim\operatorname{Exp}(1).
 $$
 
 <Callout tone="warn" title="不要读出不存在的能力">

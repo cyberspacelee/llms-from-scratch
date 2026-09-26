@@ -180,11 +180,16 @@ stateDiagram-v2
 
 在 nano-vLLM 里，每条序列看到的是连续 token；`block_table` 把第 0、1、2… 个逻辑块翻译为任意物理块。模型不需要搬动历史 K/V，只要把逻辑位置换算成正确槽位：
 
+记位置为 $p$、块大小为 $b$，逻辑块号为 $\ell$、物理槽位为 $s$；分别对应代码中的 `position`、`block_size`、`logical_block` 和 `slot`。
+
 <KeyEq label="逻辑位置到物理槽位">
 
 $$
-\text{logical\_block}=\left\lfloor\frac{\text{position}}{\text{block\_size}}\right\rfloor,\qquad
-\text{slot}=\text{block\_table}[\text{logical\_block}]\times\text{block\_size}+\text{position}\bmod\text{block\_size}.
+\begin{aligned}
+\ell&=\left\lfloor\frac{p}{b}\right\rfloor,\\
+s&=\text{block\_table}[\ell]b\\
+&\quad+(p\bmod b).
+\end{aligned}
 $$
 
 </KeyEq>
@@ -193,9 +198,16 @@ $$
 
 GPU 上真正分配的张量是
 
-$$
-\text{kv\_cache.shape}=[2,\ \text{num\_layers},\ \text{num\_blocks},\ \text{block\_size},\ \text{kv\_heads\_per\_rank},\ \text{head\_dim}].
-$$
+```python
+kv_cache.shape == (
+    2,
+    num_layers,
+    num_blocks,
+    block_size,
+    kv_heads_per_rank,
+    head_dim,
+)
+```
 
 第一维的 2 分别是 K 与 V。每个注意力层拿到自己在 `kv_cache` 中的一片 view；`slot_mapping` 再告诉 Triton kernel 本批每个新 K/V 应写到哪一个扁平槽位。
 

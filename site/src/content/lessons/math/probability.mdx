@@ -84,10 +84,10 @@ $$
 
 $$
 \begin{aligned}
-\mathbb E[aU+bV]
+&\mathbb E[aU+bV]\\
 &=\sum_{k,r}(au_k+bv_r)p_{kr}\\
-&=a\sum_k u_k\underbrace{\sum_rp_{kr}}_{P(U=u_k)}
-+b\sum_r v_r\underbrace{\sum_kp_{kr}}_{P(V=v_r)}\\
+&=a\sum_k u_k\underbrace{\sum_rp_{kr}}_{P(U=u_k)}\\
+&\quad+b\sum_r v_r\underbrace{\sum_kp_{kr}}_{P(V=v_r)}\\
 &=a\mathbb E[U]+b\mathbb E[V].
 \end{aligned}
 $$
@@ -184,8 +184,10 @@ $$
 把平方展开推广到 $B$ 项，得到小批量均值的方差：
 
 $$
-\operatorname{Var}(\bar U)=\frac1{B^2}\left[
-\sum_i\operatorname{Var}(U_i)+2\sum_{i<r}\operatorname{Cov}(U_i,U_r)\right].
+\begin{aligned}
+\operatorname{Var}(\bar U)&=\frac1{B^2}\sum_i\operatorname{Var}(U_i)\\
+&\quad+\frac2{B^2}\sum_{i<r}\operatorname{Cov}(U_i,U_r).
+\end{aligned}
 $$
 
 独立同分布时，交叉项为零，第一项含 $B$ 个 $\sigma^2$，所以方差为 $\sigma^2/B$、标准差为 $\sigma/\sqrt B$。批大小乘 4，均值标准差才减半。如果所有样本其实是同一个随机变量的复制，所有交叉协方差都等于 $\sigma^2$，最后仍是 $\sigma^2$：复制数据不会增加信息。

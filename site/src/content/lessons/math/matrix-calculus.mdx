@@ -91,17 +91,21 @@ $$
 由于 $z_k=\sum_j W_{kj}x_j+b_k$，对 $W_{kj}$ 的微调只直接影响第 $k$ 个输出：
 
 $$
-\frac{\partial\ell}{\partial W_{kj}}=g_kx_j,
-\qquad\frac{\partial\ell}{\partial b_k}=g_k,
-\qquad\frac{\partial\ell}{\partial x_j}=\sum_k W_{kj}g_k.
+\begin{aligned}
+\frac{\partial\ell}{\partial W_{kj}}&=g_kx_j,\\
+\frac{\partial\ell}{\partial b_k}&=g_k,\\
+\frac{\partial\ell}{\partial x_j}&=\sum_k W_{kj}g_k.
+\end{aligned}
 $$
 
 于是
 
 $$
-\boxed{\nabla_W\ell=gx^\top,\qquad
-\nabla_b\ell=g,\qquad
-\nabla_x\ell=W^\top g.}
+\boxed{\begin{aligned}
+\nabla_W\ell&=gx^\top,\\
+\nabla_b\ell&=g,\\
+\nabla_x\ell&=W^\top g.
+\end{aligned}}
 $$
 
 第一项是外积：$(m\times1)(1\times d)$，产生 $(m\times d)$。第三项把所有输出通路的贡献相加，形状是 $(d\times m)(m\times1)$。形状检查不能证明公式正确，但能迅速排除很多转置错误。
@@ -145,9 +149,12 @@ print(loss, weight_grad, input_grad)
 批大小（batch size）为 $B$，输入 $X\in\mathbb R^{B\times d}$、目标 $Y\in\mathbb R^{B\times m}$。本章定义
 
 $$
-Z=XW^\top+\mathbf1_Bb^\top,\quad E=Z-Y,\quad
-L=\frac1B\sum_{i=1}^B\frac12\|z_i-y_i\|_2^2
-=\frac1{2B}\|E\|_F^2.
+\begin{aligned}
+Z&=XW^\top+\mathbf1_Bb^\top,\\
+E&=Z-Y,\\
+L&=\frac1B\sum_{i=1}^B\frac12\|z_i-y_i\|_2^2\\
+&=\frac1{2B}\|E\|_F^2.
+\end{aligned}
 $$
 
 这里对样本平均、对输出特征求和，并带系数 $1/2$。PyTorch 默认 `MSELoss(reduction="mean")` 对所有 $Bm$ 个元素取平均且没有 $1/2$，所以其损失和梯度是本章的 $2/m$ 倍。名称“均方误差”本身不能确定系数，必须看具体公式。
@@ -155,16 +162,20 @@ $$
 记 $G=\nabla_Z L=E/B\in\mathbb R^{B\times m}$。对每个共享权重收集所有样本的贡献：
 
 $$
-\frac{\partial L}{\partial W_{kj}}=\sum_iG_{ik}X_{ij},
-\qquad\frac{\partial L}{\partial b_k}=\sum_iG_{ik}.
+\begin{aligned}
+\frac{\partial L}{\partial W_{kj}}&=\sum_iG_{ik}X_{ij},\\
+\frac{\partial L}{\partial b_k}&=\sum_iG_{ik}.
+\end{aligned}
 $$
 
 因此
 
 $$
-\boxed{\nabla_W L=G^\top X,\qquad
-\nabla_b L=G^\top\mathbf1_B,\qquad
-\nabla_X L=GW.}
+\boxed{\begin{aligned}
+\nabla_W L&=G^\top X,\\
+\nabla_b L&=G^\top\mathbf1_B,\\
+\nabla_X L&=GW.
+\end{aligned}}
 $$
 
 ### 从单样本外积走到小批量矩阵乘法

@@ -129,9 +129,11 @@ $$
 
 $$
 \begin{aligned}
-q^\top R(\phi)k
-&=a(c\cos\phi-d\sin\phi)+b(c\sin\phi+d\cos\phi)\\
-&=(ac+bd)\cos\phi+(bc-ad)\sin\phi.
+&q^\top R(\phi)k\\
+&=a(c\cos\phi-d\sin\phi)\\
+&\quad+b(c\sin\phi+d\cos\phi)\\
+&=(ac+bd)\cos\phi\\
+&\quad+(bc-ad)\sin\phi.
 \end{aligned}
 $$
 
@@ -186,9 +188,17 @@ $$
 
 实际注意力头的维度 $d_h$ 远大于 2。RoPE 把坐标分成 $d_h/2$ 对，让每一对在自己的平面内以自己的频率旋转，再把结果拼回去：
 
+记 $M=d_h/2$、$R_m(p)=R(p\theta_m)$，则
+
 $$
-T_p=\operatorname{diag}\big(R(p\theta_0),R(p\theta_1),\ldots,R(p\theta_{d_h/2-1})\big),\qquad
-\theta_m=\beta^{-2m/d_h}.
+\begin{aligned}
+T_p&=\begin{bmatrix}
+R_0(p)&&0\\
+&\ddots&\\
+0&&R_{M-1}(p)
+\end{bmatrix},\\
+\theta_m&=\beta^{-2m/d_h}.
+\end{aligned}
 $$
 
 频率沿用 [P2](/principles/sinusoidal/) 的几何排列，底数 $\beta$ 同样是设计选择。
@@ -208,10 +218,14 @@ $$
 
 将向量按坐标对写成 $q=(q^{(0)},\ldots,q^{(M-1)})$，$M=d_h/2$。点积按坐标相乘再求和，于是
 
+记 $\Delta=j-i$，每个平面的相位差为 $\phi_m=\beta_m-\alpha_m+\Delta\theta_m$。
+
 $$
-(T_iq)^\top(T_jk)
-=\sum_{m=0}^{M-1}(q^{(m)})^\top R((j-i)\theta_m)k^{(m)}
-=\sum_{m=0}^{M-1}r_{q,m}r_{k,m}\cos\big(\beta_m-\alpha_m+(j-i)\theta_m\big),
+\begin{aligned}
+&(T_iq)^\top(T_jk)\\
+&=\sum_{m=0}^{M-1}(q^{(m)})^\top R(\Delta\theta_m)k^{(m)}\\
+&=\sum_{m=0}^{M-1}r_{q,m}r_{k,m}\cos\phi_m.
+\end{aligned}
 $$
 
 其中 $r_{q,m},r_{k,m}$ 是第 $m$ 对的长度，$\alpha_m,\beta_m$ 是内容相位。高维 RoPE 分数是多个“长度乘积 × 相位差余弦”的和，不同分块可以相互加强，也可以相互抵消。零向量分块的贡献为零，不需要给它定义相位。高维整体仍满足“总范数乘积 × 整体夹角余弦”，但一般不能把整体夹角写成一个统一频率的线性位置偏移，也不能仅凭距离变大就断言它单调下降。

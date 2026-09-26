@@ -1,5 +1,5 @@
-@import "katex/dist/katex.min.css";
 @import "tailwindcss";
+@import "katex/dist/katex.min.css" layer(components);
 @plugin "@tailwindcss/typography";
 
 /* The only style entry of the site. Components style themselves with utilities;
@@ -168,9 +168,11 @@
   .astro-code, .astro-code span { color: var(--shiki-light); }
   [data-theme="dark"] .astro-code, [data-theme="dark"] .astro-code span { color: var(--shiki-dark); }
 
-  /* KaTeX display equations stay in the text flow and scroll when wide. */
+  /* Break between KaTeX atoms; indivisible matrices still scroll when wide. */
   .prose-lesson .katex { font-size: 1.05em; }
-  .prose-lesson .katex-display { @apply my-6 overflow-x-auto overflow-y-hidden py-1; }
+  :where(.prose-lesson) .katex-display { @apply my-6 overflow-x-auto overflow-y-hidden py-1; }
+  .prose-lesson .katex-display > .katex { @apply whitespace-normal; }
+  .prose-lesson :is(td, th) .katex { @apply whitespace-nowrap; }
 
   .prose-lesson table { @apply my-0 text-sm; }
   .prose-lesson th { @apply whitespace-nowrap; }

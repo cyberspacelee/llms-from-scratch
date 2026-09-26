@@ -145,9 +145,11 @@ $$
 
 $$
 \begin{aligned}
-\nabla_{W_2}L&=G_2^\top H,&\nabla_{b_2}L&=\sum_i(G_2)_{i,:},\\
+\nabla_{W_2}L&=G_2^\top H,\\
+\nabla_{b_2}L&=\sum_i(G_2)_{i,:},\\
 G_1&=(G_2W_2)\odot(1-H\odot H),\\
-\nabla_{W_1}L&=G_1^\top X,&\nabla_{b_1}L&=\sum_i(G_1)_{i,:}.
+\nabla_{W_1}L&=G_1^\top X,\\
+\nabla_{b_1}L&=\sum_i(G_1)_{i,:}.
 \end{aligned}
 $$
 

@@ -35,10 +35,13 @@ Prefill 读入整段提示，同一层里各个 token 的矩阵乘可以一起�
 
 $$
 \begin{aligned}
-W_q &\colon d \times n_q d_h = 256 \times 256 = 65536,\\
-W_k, W_v &\colon d \times n_{kv} d_h = 256 \times 64 = 16384,\\
-W_o &\colon n_q d_h \times d = 65536,\\
-W_{gate}, W_{up}, W_{down} &\colon 131072 \times 3.
+&W_q\colon d \times n_q d_h\\
+&\quad=256 \times 256 = 65536,\\
+&W_k,W_v\colon d \times n_{kv} d_h\\
+&\quad=256 \times 64 = 16384,\\
+&W_o\colon n_q d_h \times d = 65536,\\
+&W_{gate},W_{up},W_{down}\colon\\
+&\quad131072 \times 3.
 \end{aligned}
 $$
 
