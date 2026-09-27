@@ -13,6 +13,8 @@ code:
 
 ## 向量、矩阵与张量：先标注形状
 
+如果对 NumPy 的 `shape`、切片、`reshape` 或广播还不熟悉，可就近读 [F1 数组](/frameworks/numpy-arrays/) 与 [F2 批量计算](/frameworks/numpy-computation/)。本章解释数学关系，F 路线逐项核对 API 的输入、输出和存储行为。
+
 标量是一个数；向量是一组有序坐标；矩阵把数排成两个轴；深度学习中的张量通常指有任意个轴的多维数组。这里采用数值计算语境，不讨论几何学中的张量变换定义。
 
 单样本写成列向量 $x\in\mathbb R^d$，小批量（mini-batch）输入写成 $X\in\mathbb R^{B\times d}$，每行是一个样本的转置。$B$ 是批大小（batch size），即本次一起计算的样本数，$d$ 是输入特征数；例如三个样本、每个两个特征：

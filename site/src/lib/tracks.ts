@@ -1,4 +1,4 @@
-export type TrackId = 'math' | 'principles' | 'training' | 'gpu' | 'systems' | 'advanced'
+export type TrackId = 'math' | 'frameworks' | 'principles' | 'training' | 'gpu' | 'systems' | 'advanced'
 
 export type Track = {
   id: TrackId
@@ -15,6 +15,10 @@ export const tracks: Track[] = [
     letter: 'M',
     label: '数学基础',
     summary: '从统计、分布、矩阵和微积分出发，手算并验证一次完整的神经网络训练。',
+  },
+  {
+    id: 'frameworks', letter: 'F', label: '数组与框架',
+    summary: '用 NumPy 与 PyTorch 对齐数组的轴、存储、梯度、模块，以及数据、更新与训练状态。',
   },
   {
     id: 'principles',

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 245" role="img" aria-label="一次前向保存反向所需值，反向累加梯度并释放保存值，下次重做前向">
+  <g fill="#e1eee9" stroke="#087f70"><rect x="18" y="35" width="180" height="100" rx="5"/><rect x="270" y="35" width="180" height="100" rx="5"/><rect x="522" y="35" width="180" height="100" rx="5"/></g>
+  <g fill="#263a34" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="108" y="73">前向：建立新图</text><text x="108" y="107">保存求导所需值</text><text x="360" y="73">反向：传播 VJP</text><text x="360" y="107">累加到叶子 .grad</text><text x="612" y="73">保存值通常释放</text><text x="612" y="107">叶子与梯度仍存活</text><text x="360" y="210">下一批重做前向；是否清空 .grad 是另一项决定</text></g>
+  <g fill="none" stroke="#c16b36" stroke-width="3"><path d="M207 85H257m-10-6 10 6-10 6M459 85H509m-10-6 10 6-10 6M612 143V172H108V143m-6 10 6-10 6 10"/></g>
+</svg>

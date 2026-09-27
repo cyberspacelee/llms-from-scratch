@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict'
+import { maskedLoss } from '../src/lib/masked-loss-model.ts'
+const close = (actual, expected) => assert.ok(Math.abs(actual - expected) < 1e-12)
+const base = maskedLoss([0, 2, 1], [false, false, true], 'mean')
+close(base.result, 0.4076059644443804)
+close(base.total, 0.8152119288887608)
+assert.equal(base.valid, 2)
+assert.equal(base.rows[2].loss, 0)
+for (const row of base.rows) close(row.probability.reduce((a, b) => a + b, 0), 1)
+close(maskedLoss([0, 2, 1], [false, false, false], 'mean').result, 0.6379414058522902)
+close(maskedLoss([2, 2, 1], [false, false, true], 'mean').result, 1.4076059644443804)
+assert.deepEqual(maskedLoss([0, 2, 1], [true, true, true], 'none').result, [0, 0, 0])
+assert.equal(maskedLoss([0, 2, 1], [true, true, true], 'mean').result, 0)
+assert.throws(() => maskedLoss([3, 2, 1], [false, false, false], 'mean'), RangeError)
+console.log('Masked CE model: logits/probabilities, targets, ignored denominator, reductions and empty policy passed.')

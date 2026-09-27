@@ -1,0 +1,273 @@
+---
+title: 模块、参数与损失
+question: 数学层怎样成为能遍历参数、切换行为和核对损失的模块
+description: 用小词表模型理解 Module 的登记树、常见层的形状与状态，再把 logits、类别轴、忽略位置和归约分母对齐成可靠的交叉熵调用。
+order: 5
+code:
+  - code/frameworks/modules_and_losses.py
+---
+
+import MaskedLossLab from '../../../components/labs/MaskedLossLab'
+
+假设你已经会写 `x @ w.T + b`，也知道 `backward()` 能算出梯度。现在要把若干层放进一个模型：怎样一次列出所有权重，怎样让 Dropout 在评估时停止丢弃，怎样判断词表分数和目标的轴有没有对齐？只把矩阵装进 Python 类，并不会自动得到这些行为。模型需要一套能递归找到子层、参数和状态的登记规则，损失函数还需要明确的输入契约。
+
+先修是 [F3 张量](/frameworks/torch-tensors/) 与 [F4 自动微分](/frameworks/autograd/)。本章的例子只有四个词、三个隐藏通道，从参数树走到 $(B,T,V)$ 的词表分数；每个位置给出一个类别目标，最后计算交叉熵。这里 $B$ 是批大小、$T$ 是序列长度、$V$ 是本章词表大小，在模型路线中对应 $n_{\mathrm{vocab}}$。CPU 核对统一使用 float64，索引用 long，不涉及大模型默认精度或 GPU 性能。参数更新、批次组织与恢复交给 [F6 数据与训练](/frameworks/data-and-training/)。
+
+## Module：把计算函数与登记树放在一起
+
+`nn.Module` 同时提供前向计算的入口与模块登记机制。子类在 `__init__` 中先调用 `super().__init__()`，再把层赋给属性；在 `forward` 中写数据怎样经过这些层。调用模型时写 `model(x)`，框架会进入模块调用流程，再执行 `forward`。一般不直接调用 `model.forward(x)`，因为前者还负责已登记 hook 等模块机制。
+
+一个最小线性模块如下。输入最后一轴宽度为 3，输出最后一轴宽度为 2，所有其他前导轴保留。
+
+```python
+class Project(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(3, 2, dtype=torch.float64)
+
+    def forward(self, x):
+        return self.linear(x)
+```
+
+将 `nn.Linear` 赋给 `self.linear` 时，父模块登记了这个子模块。于是 `model.parameters()` 能递归找到其 weight 与 bias，`model.eval()` 能递归切换其训练标志，`model.to(...)` 能处理已登记参数和 buffer 的设备或类型。登记不是通过解析 `forward` 的源码完成的：即使某一层这次前向没有调用，它仍可以属于参数树；反过来，前向真的调用过一个对象，也不表示父模块已经登记它。
+
+这两棵结构要分别看。计算图描述本次前向的张量依赖，供 autograd 求导；模块树描述对象之间的持有关系，供遍历参数和管理状态。一个登记好的层可以在不同输入分支里多次使用，形成不同计算图；一个未登记对象也可以参与 autograd，却不会被父模块的参数遍历发现。把这两者混为一谈，常会得到“有梯度却没进入训练参数列表”的模型。
+
+### Parameter 和普通 Tensor 的区别是什么
+
+`nn.Parameter` 是用来向模块声明参数的张量类型。把它赋给模块属性，就登记在参数集合中。普通 `torch.Tensor` 即使 `requires_grad=True`，赋给普通属性也不会自动成为模块参数。例如：
+
+```python
+self.gain = nn.Parameter(torch.ones((), dtype=torch.float64))
+self.raw = torch.ones((), dtype=torch.float64, requires_grad=True)
+```
+
+两个标量都能参与可微计算，但 `named_parameters()` 只自动列出 `gain`。如果训练代码从 `model.parameters()` 获取对象，`raw` 就会被遗漏。参数类型表达“属于这个模块的参数”，`requires_grad` 表达“是否对它记录求导”，两者不是同一个开关。将某个 Parameter 的 `requires_grad` 设为 False 后，它仍是已登记参数，只是默认不再求它的梯度。
+
+有些持久张量不需要训练，却应该跟模型一起迁移或出现在状态中，例如固定缩放、累计统计。这时用 `register_buffer`，而不是假装它是可训练参数。本章登记一个零标量 `offset`，默认作为持久 buffer 出现在 `state_dict()`，但不在 `parameters()` 中。不是每个临时张量都要登记：前向临时结果属于计算过程，通常不应被保存成模型状态。
+
+## 容器：普通 list 为什么会藏住子层
+
+Python list 能持有层对象，却不会代替父模块登记这些对象。下面两种写法都能在 `forward` 里通过循环调用层，管理行为却不同：
+
+```python
+self.hidden = [nn.Linear(3, 3), nn.Linear(3, 3)]
+self.blocks = nn.ModuleList([nn.Linear(3, 3), nn.Linear(3, 3)])
+```
+
+第一种仅登记了一个普通属性，父模块不会递归搜普通列表的内容；第二种是登记子模块的容器，可以通过 `blocks.0.weight`、`blocks.1.weight` 找到权重。完整脚本构造了一个只有普通 list 的错误示范：前向和反向都能成功，列表内部 weight 有 `.grad`，但父模块的 `parameters()` 与 `state_dict()` 是空的。调用父模块 `eval()` 后，里面的层仍保持训练标志；调用父模块类型转换，也没有迁移里面的权重。
+
+这种情况不应靠手工在每次训练、迁移和保存时逐项补列表来处理。已有的 `ModuleList` 覆盖了所需登记规则，`forward` 仍由你决定。列表里可以依次执行，也可以按条件选择，甚至给各层输入不同数据。容器不要求固定的链式模型。
+
+`nn.Sequential` 则把登记与顺序调用一起提供：前一层的输出作为后一层输入。本章把 `Linear(3,2)` 与 `ReLU()` 放进 Sequential，结果与 `F.relu(linear(x))` 一致。如果数据流就是这种简单链条，Sequential 已足够；如果要做残差相加或维护多分支，用 ModuleList 加显式 forward 通常更清楚。ModuleList 本身没有替你实现这条链式前向，不能把 `self.blocks(x)` 当成顺序执行所有块。
+
+还要留意对象共享。`[layer] * 2` 是同一个层对象的两次引用，两个调用共享同一套参数；`[nn.Linear(3,3) for _ in range(2)]` 才是两个独立对象。共享不一定错误，但必须由模型定义决定。本章两个块独立生成，参数数量因此翻倍；登记一个对象的两条名字路径，也不意味着参数标量真的变成两份。
+
+<Figure src="frameworks/module-tree.svg" alt="TinyWords 模块的登记树：Embedding、LayerNorm、两个 ModuleList 线性块、输出头、显式 gain 参数和 offset buffer">绿色节点由子模块带来参数，橙色是显式标量 Parameter，蓝色是非参数状态。名字中的点表示登记路径，不表示张量轴。</Figure>
+
+图中 Embedding 有 $4\times3=12$ 个标量，LayerNorm 的 weight 与 bias 各有 3 个，两个 Linear 块各有 $3\times3+3=12$ 个，输出头有 $4\times3+4=16$ 个，加上 gain 的一个，总计 $12+6+24+16+1=59$。Dropout 没有参数，offset 是状态而非参数。沿树读出的这些名字，正是脚本核对 `named_parameters()` 和 `state_dict()` 的依据。
+
+`parameters()` 适合获取参数对象，`named_parameters()` 同时给出路径，`state_dict()` 给出登记参数与持久 buffer 的状态映射。训练模式本身不被自动写成这个映射中的一项；加载权重后仍要显式确定使用 train 还是 eval。实际存盘和完整训练恢复见 F6，本章只核对“哪些对象属于模型”。
+
+## Linear：公式里的转置对应哪种权重布局
+
+沿用 [M3 向量与矩阵](/math/linear-algebra/) 的约定，单样本 $x\in\mathbb R^{d_{\mathrm{in}}}$，输出宽度为 $d_{\mathrm{out}}$：
+
+$$
+z=Wx+b,\qquad W\in\mathbb R^{d_{\mathrm{out}}\times d_{\mathrm{in}}}.
+$$
+
+PyTorch 的 `nn.Linear(in_features, out_features)` 存储 weight 的形状正是 `(out_features, in_features)`。批输入按行存放，$X\in\mathbb R^{B\times d_{\mathrm{in}}}$，于是批公式写成 $Z=XW^\top+b$。这不是 API 在暗中把层改成了另一种线性变换，只是从列向量公式改成批行排列。
+
+取权重两行为 $(1,2,3)$、$(-1,0,1)$，偏置 $(0.5,-0.5)$。输入第一行为 $(1,0,-1)$，输出第一坐标为 $1-3+0.5=-1.5$，第二坐标为 $-1-1-0.5=-2.5$。第二输入 $(2,1,0)$ 得到 $(4.5,-2.5)$。脚本将同一组值写进层，用显式矩阵乘核对，没有依赖随机初始化来推断布局。
+
+Linear 接受 `(*, in_features)`，星号表示任意前导轴。如果输入是 $(B,T,3)$，输出就是 $(B,T,2)$，同一 weight 用于所有批次和位置。它不是创建了 $BT$ 份独立参数，也不是把 $T$ 当成输入宽度。只有最后一轴与 `in_features` 匹配，才是我们这里讨论的逐位置投影。
+
+在模型代码中，参数通常随机初始化，再由训练更新。教学核对给定权重时使用 `torch.no_grad()` 中的 `copy_`，让赋值不成为训练计算的一部分。不要在每次 forward 内重新构造 Linear，否则本次调用得到新的参数对象，已经登记和传给训练代码的对象可能与当前计算不一致。
+
+## Embedding：查表也有参数梯度
+
+嵌入层（Embedding）保存一个 $V\times d$ 的参数矩阵 E。输入是词编号，不是词的连续特征；编号 $k$ 的输出为表的第 k 行。`nn.Embedding(4,3)` 接受 `(B,T)` 的整数索引，返回 `(B,T,3)`。本章统一使用 `torch.long`，它是 int64 类别索引；输出浮点 dtype 由嵌入参数决定，不需要把 token 编号改成 float64。
+
+查表选择是离散的，模型通常不对编号本身求梯度，但被选中表项的参数可以获得梯度。设输入编号为 `[1,1,3]`，输出每个通道都加入一个总和损失。第一次读取第 1 行贡献三个 1 的梯度，第二次又读取同一行再贡献三个 1；第 3 行贡献三个 1。其余行没有被读取，梯度为零：
+
+$$
+\frac{\partial L}{\partial E}=
+\begin{pmatrix}0&0&0\\2&2&2\\0&0&0\\1&1&1\end{pmatrix}.
+$$
+
+这与 [F4](/frameworks/autograd/) 中共享节点的梯度相加是同一规则。Embedding 默认的稠密梯度给出与参数表同形状的张量；本章没有开启 `sparse=True` 或按词频缩放，所以数值可以直接手算。重复索引不能用“最后一次覆盖”代替累加，那会遗漏多个使用位置的贡献。
+
+`padding_idx=0` 可以指定某行不接收这类嵌入读取的梯度。新建 Embedding 时该行默认初始化为零，但你可以显式修改这行，接口不会在每次前向强行把它清零。更关键的是，padding_idx 只管理这行的嵌入行为，不会自动屏蔽注意力、不自动删除序列位置，也不会自动让交叉熵忽略目标。输入 padding、注意力 mask 和损失 ignore_index 属于不同阶段，通常要分别设置。
+
+## LayerNorm：明确归约轴和 affine 参数
+
+层归一化（LayerNorm）在每个样本的指定末尾维度上计算均值和方差，再乘可学习缩放、加可学习偏移。对本章一条三通道向量，定义：
+
+$$
+\mu=\frac13\sum_{j=0}^2x_j,\quad
+v=\frac13\sum_{j=0}^2(x_j-\mu)^2,\quad
+y_j=\gamma_j\frac{x_j-\mu}{\sqrt{v+\epsilon}}+\beta_j.
+$$
+
+这里方差分母是通道数 3，对应 `correction=0`，不是估计总体方差时使用的自由度修正。`nn.LayerNorm(3)` 对输入最后一轴做归约；输入 $(B,T,3)$ 时，每个 $(b,t)$ 独立计算自己的统计量。默认可学习的 weight 与 bias 分别对应 $\gamma,\beta$，形状都是 `(3,)`，初始化为一和零。
+
+输入 $(1,0,-1)$ 的均值为零，方差为 $2/3$。当 $\epsilon=10^{-5}$ 且默认 affine 时，输出约为 $(1.224736,0,-1.224736)$。加上 epsilon 后归一化结果方差不必精确等于一；再乘非一的 gamma 或加 beta 后，结果更不能被描述为永远零均值、单位方差。常量输入的方差为零，epsilon 让计算仍有定义；默认 affine 下其归一化部分全零。
+
+如果 `normalized_shape=(T,d)`，归约范围会扩展到最后两轴，参数形状也随之改变。它不是简单把同一个 `LayerNorm(d)` 重复调用。写层配置前先确认你希望每个 token 独立处理，还是整个样本的某段轴共同处理。LayerNorm 使用当前输入的统计量，train 与 eval 不像 BatchNorm 那样切换到运行统计；本章也不把 LayerNorm 与 [P8](/principles/modern-decoder/) 的 RMSNorm 当成同一个公式。
+
+## Dropout 与函数式调用：行为开关和梯度开关分开
+
+Dropout 在训练模式中随机将一部分输入置零，同时将保留值乘 $1/(1-p)$，其中 $p$ 是丢弃概率。这样单个位置的期望保持不变。$p=0.5$、输入为一时，每次输出只能是 0 或 2；它不保证每个小批次恰好丢弃一半，也不保证本次整体均值恰好等于一。
+
+`nn.Dropout` 新建时处于训练模式，随父模块 `train()`、`eval()` 递归切换。评估模式下它是恒等映射，不随机丢弃，也不再乘训练补偿系数。因此推理前必须确定模式。完整脚本用固定种子的局部随机环境检查训练输出只出现 0 和 2，再核对 eval 输出等于原输入。
+
+`model.eval()` 的实际作用是等价于 `model.train(False)`，切换模块的 `training` 标志。它不会关闭 autograd，也不会把 Parameter 的 `requires_grad` 自动设成 False。评估模式下仍可做梯度分析、对输入求导或训练某些特定参数。脚本在 eval 状态计算输出总和并反向传播，输出头照样收到梯度。若只要推理、不需要梯度，另用 [F4](/frameworks/autograd/) 的 `no_grad()` 或适合的推理上下文；两个决定服务不同目的。
+
+函数式接口 `torch.nn.functional` 常缩写为 F。`F.relu(x)` 计算 $\max(x,0)$，没有需要登记的参数；`nn.ReLU()` 把同一类运算封装成 Module，适合 Sequential。`F.gelu(x)` 默认计算 $x\Phi(x)$，$\Phi$ 是标准正态分布函数，它让小负数通常仍有非零输出。脚本用误差函数表达式核对默认 GELU：$x(1+\operatorname{erf}(x/\sqrt2))/2$。`approximate='tanh'` 是另一种近似计算，不能与默认数值核对混用。
+
+函数式调用没有自己的模块 training 属性。特别是 `F.dropout(x)` 的 `training` 参数默认是真，即使你在一个 eval 模块的 forward 里调用它，也不会自动读取父模块模式。要写 `F.dropout(x, p=..., training=self.training)`，或者直接用已登记的 `nn.Dropout`。`F.softmax`、`F.log_softmax` 的重点则是类别轴：对于 $(B,T,V)$ 词表分数，应该用 `dim=-1`，沿同一位置的 V 个词形成分布。
+
+## 交叉熵：先选类别，再定义哪些位置参与平均
+
+未归一化分数（logits）记为 $z_{ic}$，i 是位置，c 是类别。索引目标 $y_i$ 表示正确类别。无类别权重、无标签平滑时，softmax 概率和交叉熵是：
+
+<KeyEq label="类别索引交叉熵">
+$$
+p_{ic}=\frac{e^{z_{ic}}}{\sum_r e^{z_{ir}}},\qquad
+\ell_i=-\log p_{i,y_i}=\log\sum_c e^{z_{ic}}-z_{i,y_i}.
+$$
+</KeyEq>
+
+实现用稳定的 log-softmax 或等价计算，避免先形成极小概率再取 log。`F.log_softmax(logits, dim=-1)` 返回对数概率；`F.softmax` 返回概率，两者不应混用。给 `F.cross_entropy` 传的是 logits，不能先做 softmax 再传，因为 API 会把你传来的概率数值当成新的分数，再归一化一次，数学定义已经变了。
+
+取第一位置分数 $(2,1,0)$、目标 0。减最大值后指数为 $(1,e^{-1},e^{-2})$，目标概率约 0.665241，损失约 0.407606。第二位置分数 $(0,1,2)$、目标 2，损失相同。第三位置 $(1,1,1)$ 任意类别都是三分之一，损失为 $\log3\approx1.098612$。概率越接近一，正确目标损失越接近零；预测最高类别正确也不表示损失已经为零。
+
+<MaskedLossLab client:visible />
+
+图中的三组柱表示三条独立类别分布，橙色标目标概率，灰色位置不参与损失归约。初始前两行有效、第三行忽略，有效和为 0.815212，平均为 0.407606。若把第一位置目标改成类别 2，它的损失变为 2.407606，有效平均变为 1.407606。因为同一行 logits 固定，改目标只改变取哪一个对数概率，不改变柱子的分布。
+
+`ignore_index=-100` 让特定目标位置不产生该项索引目标损失。它可以在正常类别范围外，其他有效目标必须满足 $0\le y_i<V$。忽略的是一个位置的训练贡献，不是从 softmax 类别集合删除某个类别。某个有效位置仍会对全部 V 类 logits 归一化，不能把 ignore_index 误解成“额外的被剔除词表项”。
+
+### none、sum、mean 的分母是什么
+
+`reduction='none'` 返回逐位置损失，被忽略位置的输出为零。`sum` 对有效损失求和。无类别权重时，`mean` 用有效位置数做分母，不是总位置数。设有效集合为 $\mathcal I$，本章平均定义为：
+
+$$
+L=\frac{\sum_{i\in\mathcal I}\ell_i}{|\mathcal I|},\qquad |\mathcal I|>0.
+$$
+
+初始第三位置忽略，所以不能再把 0.815212 除以 3；那会得到约 0.271737，改变整体梯度尺度。取消第三位置忽略时，分子也必须加上 1.098612，平均约 0.637941。仅改变分母却不恢复该行损失，同样不是取消屏蔽后的交叉熵。
+
+若开启类别权重，索引目标的 mean 分母变为有效目标类别权重之和；标签平滑又改变逐项损失定义。本章代码明确不使用这两项，以便把当前数值契约核对完整。API 同时支持浮点概率目标，此时目标形状、dtype、ignore_index 支持和归约含义有另一套规则，不要只把整数目标转成 float 就以为切换到了正确的概率目标。概率目标应与类别轴同形状并表达所需分布。
+
+### 全部忽略时怎样保留明确行为
+
+当全部目标被忽略，有效和为零，有效数也为零，普通 mean 没有定义。当前 CPU 核对中，原始 `F.cross_entropy(..., reduction='mean')` 返回 NaN；不要假设训练代码会自动忽略这个坏数。本章选择“返回与 logits 计算图相连的零损失”作为明确策略：先用 `reduction='sum'` 得到有效和，再除以 `valid.sum().clamp_min(1)`。
+
+对至少一个有效位置，这正是有效平均；全忽略时是零除以一，返回零且对 logits 的梯度为零。它与直接返回 `torch.tensor(0.)` 不同，后者通常没有所需的梯度连接。此策略还要求输入 logits 有限，脚本在入口验证这一点；不能指望 zero mask 自动修复非有限的前向计算。空批次或零长度 T 也返回图连接的零，类别宽度 V 则必须大于零。
+
+零损失是本章接口对“没有监督位置”的政策，并不自动规定训练循环是否执行更新。如果还有其他损失，或者参数更新带有权重衰减等机制，整步行为仍需单独定义。F6 负责把批次、损失与更新边界接起来；这里不将“本项梯度为零”扩展成“整次训练什么都没有发生”。
+
+## 类别轴：B、T、V 怎样接入 cross_entropy
+
+默认的索引目标交叉熵把第 1 轴视为类别轴，即 `(N,C,...)`。语言模型常输出 `(B,T,V)`，最后一轴才是类别，所以不能直接照抄二维分类代码。如果直接传三维 logits，它会把 T 当成类别数，期望目标形状 `(B,V)`；当 T 与 V 恰好相等时，错误甚至可能躲过形状检查。
+
+有两种清楚的映射。第一种把批次和位置展平成独立样本，保留类别轴：
+
+```python
+flat_logits = logits.reshape(-1, logits.shape[-1])  # (B*T, V)
+flat_targets = targets.reshape(-1)                # (B*T,), long
+loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100)
+```
+
+第二种只把类别轴移动到第 1 轴：
+
+```python
+loss = F.cross_entropy(logits.transpose(1, 2), targets,
+                       ignore_index=-100)  # (B,V,T) 对 (B,T)
+```
+
+两者都在同一位置对应同一目标，脚本在 float64 下核对输出相等。展平不是随意把张量压成一维：必须留下 V 轴，目标只保留每位置一个编号。`reshape` 是否需要复制由存储布局决定，详见 F3；数学正确性取决于 logits 与 targets 的位置顺序一致。
+
+这里还没有做“预测下一个 token”的位置平移。若模型让当前位置预测下一位置，应先对 logits 与 targets 做一致的序列切片，再展平；例如 logits 去掉最后位置、targets 去掉第一位置。这是 [P2 下一 token 预测](/principles/language-modeling/) 的监督定义，不是 cross_entropy 替你猜出的约定。忽略末尾 padding 也要在切片后检查目标对齐。
+
+一个可靠的接口先检查 logits 为浮点、形状三维、类别非空，targets 是同设备 long 且形状等于 `(B,T)`，有效编号处于词表范围。类型检查不能被“Python list 里看起来是整数”替代：用 `torch.tensor([0.,1.])` 得到的是浮点，和索引目标契约不同。模型输入和目标可以都用 long，但 Embedding 消费输入编号，交叉熵消费输出目标，两者分别对应不同位置与功能。
+
+## 完整核对：把登记、数值和行为串起来
+
+本章脚本的 `TinyWords` 先查表、做 LayerNorm，再经过两个独立线性残差块和 Dropout，最后用输出头给每个位置四个词表分数。它不是完整语言模型：没有注意力、没有数据迭代，也没有更新算法；足够用于核对模块树和输入输出契约。模型的 `forward` 返回 logits，不返回概率，使调用方可以按需要接交叉熵或推理 softmax。
+
+<CodeFile path="code/frameworks/modules_and_losses.py" />
+
+在仓库根执行 `python code/frameworks/modules_and_losses.py`。预期输出 `modules_and_losses: ... passed` 及实际 Torch 版本。检查覆盖普通 list 未登记却仍有梯度、Parameter 与 buffer 的区别、59 个参数标量、Linear 权重布局、Embedding 重复累加、LayerNorm 方差、Dropout 模式、GELU、两种类别轴映射、忽略位置零梯度和全忽略策略。固定种子只用于可复现示例，不表示实际随机过程应该没有变化。
+
+特别要区分验证层次：模块登记检查对象是否被管理；形状检查轴的含义；数值检查函数是否与公式一致；梯度检查依赖是否正确；模式检查随机行为是否符合用途。只打印一个合理的损失数，不能同时证明这些层次。哪怕两个实现恰好得到相同标量，也可能对不同目标、不同归约分母或不同参数求导，因此本章同时保留中间数值和结构断言。
+
+## 常见误区
+
+- 普通 Tensor 的 `requires_grad=True` 不自动把它登记成模块参数，普通 list 也不自动登记里面的层。
+- 有 `.grad` 不保证参数已经包含在 `model.parameters()` 中；计算图和模块树各有职责。
+- Linear 的 weight 是 `(out,in)`，批行输入用右乘 weight 转置；最后一轴才是输入特征。
+- 重复 Embedding 编号的梯度相加，padding_idx 也不会自动替你设置损失 ignore_index。
+- LayerNorm 的归约范围来自 normalized_shape，默认方差没有自由度修正，affine 后不保证零均值。
+- `eval()` 切换部分层的行为而不关闭 autograd；函数式 dropout 还要显式传 training。
+- cross_entropy 接收 logits，类别轴和目标 dtype 需要按接口核对。
+- ignored 位置不进入无权重 mean 分母，全 ignored 需要明确策略，不能任由 NaN 进入后续计算。
+
+## 练习与核对
+
+<details>
+<summary>一个层放在普通 list 中，反向传播后 weight.grad 非空，为什么仍可能没有被训练代码处理？</summary>
+
+autograd 依据本次计算图求导，与父模块的对象遍历独立。普通 list 的层没有自动登记，`model.parameters()` 不包含它。应使用 ModuleList 或其他登记机制，并核对 named_parameters；有梯度只证明计算依赖存在。
+
+</details>
+
+<details>
+<summary>Linear(3,2) 接收形状 (2,4,3)，输出是什么？参数有多少？</summary>
+
+前导的批次和位置保留，输出为 `(2,4,2)`。weight 是 `(2,3)` 共六个标量，bias 是 `(2,)` 共两个，总计八个。八个输入位置共享同一套参数，不将参数数量乘以位置数。
+
+</details>
+
+<details>
+<summary>Embedding 输入 [1,1,3]，输出总和的梯度中，第 1 行为什么是 2？</summary>
+
+两次查表都读取同一参数行，每次每通道贡献梯度 1，因此累加成 2。第 3 行只读取一次，梯度为 1，没读取的行梯度为零。这不是频率归一化后的结果，本章没有开启 scale_grad_by_freq。
+
+</details>
+
+<details>
+<summary>三行初始 logits 的第三行被忽略，mean 为什么是 0.407606 而不是 0.271737？</summary>
+
+有效和为两次 0.407606，相加为 0.815212。无类别权重时，mean 分母是两个有效位置，所以结果为 0.407606；除以总位置三会错误缩小损失。取消忽略时，还要把第三行的 log(3) 加进分子。
+
+</details>
+
+<details>
+<summary>模型 eval 后，是否可以对输入或参数求导？F.dropout(x) 会自动停止丢弃吗？</summary>
+
+可以求导，eval 不改变 autograd 记录模式，也不自动冻结 Parameter。函数式 dropout 没有自己的 Module 状态，默认 training=True，必须传入 self.training 或使用已登记 nn.Dropout 才随父模型模式变化。
+
+</details>
+
+<details>
+<summary>logits 为 (B,T,V)、targets 为 (B,T)，怎样调用交叉熵？全部目标 -100 时怎样处理？</summary>
+
+可以展平为 `(B*T,V)` 对 `(B*T,)`，或转置 logits 为 `(B,V,T)` 对原目标。本章采用 sum 除以有效数量 clamped 到至少一的策略，全忽略得到连接计算图的零损失和零 logits 梯度；原始 mean 的零分母行为不能当成已处理。
+
+</details>
+
+接下来读 [F6 数据与训练](/frameworks/data-and-training/)，把已登记参数与已对齐损失接到批次、更新和恢复流程。
+
+## 原始资料
+
+资料核对日期：2026-09-27。以下为 PyTorch 官方接口资料，实际 CPU 验证版本由脚本输出。图、参数数量和三行 logits 的数值为本讲义独立构造，交互不运行浏览器中的 PyTorch。
+
+- [Module](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Module.html)：参数、子模块、buffer、模式与状态遍历。
+- [ModuleList](https://docs.pytorch.org/docs/2.14/generated/torch.nn.ModuleList.html) 与 [Sequential](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Sequential.html)：登记容器与顺序前向的区别。
+- [Linear](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Linear.html) 与 [Embedding](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Embedding.html)：权重形状、索引读取与 padding 参数。
+- [LayerNorm](https://docs.pytorch.org/docs/2.14/generated/torch.nn.LayerNorm.html) 与 [Dropout](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Dropout.html)：统计轴、affine 与训练行为。
+- [functional](https://docs.pytorch.org/docs/2.14/nn.functional.html)：激活、softmax、log_softmax 与函数式 dropout。
+- [CrossEntropyLoss](https://docs.pytorch.org/docs/2.14/generated/torch.nn.CrossEntropyLoss.html)：类别轴、索引与概率目标、ignore_index 和 reduction 的接口边界。

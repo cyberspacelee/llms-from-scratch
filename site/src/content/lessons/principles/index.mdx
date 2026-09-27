@@ -18,6 +18,8 @@ P1–P4 从离散输入、任务目标与注意力建立完整教学 Decoder。�
 
 ## 先修与记号
 
+不熟悉 NumPy/PyTorch API 时，先读 [数组与框架 F 路线](/frameworks/)，尤其是 F3 的轴重排、F4 的求导边界和 F5 的模块、嵌入与交叉熵。已有框架经验的读者可直接进入本路线。
+
 需要 [M3 向量与矩阵](/math/linear-algebra/) 中的点积、范数、转置和矩阵乘法，以及 [M7](/math/training/) 的预测与更新闭环。P7 的训练一节用到 [M6](/math/backprop/) 的雅可比转置。P6 的矩阵指数和 P7 的复数写法都是选读；M4 提供导数与有限阶 Taylor，无限级数所需条件在选读处补充，不是实矩阵主线的先修。
 
 这条路线沿用注意力论文的写法：内容向量 $x_i\in\mathbb R^d$ 是列向量，按行堆成 $X\in\mathbb R^{T\times d}$，投影写作 $Q=XW_Q$，其中 $W_Q\in\mathbb R^{d\times d_h}$。它是数学基础里线性层权重 $W\in\mathbb R^{m\times d}$ 的转置布局；换算时先对齐形状，不要因为都叫 $W$ 就直接套用公式。位置下标用 $i,j,p$，虚数单位写作正体 $\mathrm i$。

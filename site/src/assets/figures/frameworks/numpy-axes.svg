@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 300" role="img" aria-label="输入X的样本与特征轴，权重W的输出与特征轴，沿共同特征轴求和生成Z的样本与输出轴">
+<g font-family="sans-serif" font-size="16" fill="#263a34">
+<rect x="16" y="16" width="232" height="80" rx="4" fill="#e1eee9" stroke="#087f70"/><text x="28" y="42">X：(B,d) = (2,3)</text><text x="28" y="70">保留样本 b，读取特征 k</text>
+<rect x="272" y="16" width="232" height="80" rx="4" fill="#e2eaf7" stroke="#3176b5"/><text x="284" y="42">W：(m,d) = (2,3)</text><text x="284" y="70">保留输出 j，读取特征 k</text>
+<path d="M132 96V120H260V144M388 96V120H260" fill="none" stroke="#3176b5" stroke-width="2"/>
+<text x="260" y="171" text-anchor="middle">同一 k 的两项相乘，再沿 k 求和</text>
+<path d="M260 181V203" stroke="#3176b5" stroke-width="2"/>
+<rect x="100" y="207" width="320" height="52" rx="4" fill="#f7e9da" stroke="#c16b36"/><text x="260" y="240" text-anchor="middle">Z：(B,m) = (2,2)，保留 b、j</text>
+<text x="16" y="288" fill="#68726d">X @ W.T 与 einsum('bd,md-&gt;bm', X, W) 对应相同收缩。</text>
+</g></svg>

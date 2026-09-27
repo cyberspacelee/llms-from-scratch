@@ -6,7 +6,7 @@
     "dev": "astro dev",
     "build": "astro build && node scripts/check-links.mjs",
     "preview": "astro preview",
-    "check": "astro check && node --experimental-strip-types scripts/check-gpu-models.mjs && node --experimental-strip-types scripts/check-gpu-indexing.mjs && node --experimental-strip-types scripts/check-transpose-model.mjs && node --experimental-strip-types scripts/check-kernel-lifecycle.mjs"
+    "check": "astro check && node --experimental-strip-types scripts/check-gpu-models.mjs && node --experimental-strip-types scripts/check-gpu-indexing.mjs && node --experimental-strip-types scripts/check-transpose-model.mjs && node --experimental-strip-types scripts/check-kernel-lifecycle.mjs && node --experimental-strip-types scripts/check-numpy-contracts.mjs && node --experimental-strip-types scripts/check-framework-tensor-model.mjs && node --experimental-strip-types scripts/check-masked-loss.mjs && node --experimental-strip-types scripts/check-batch-plan.mjs"
   },
   "dependencies": {
     "@astrojs/markdown-remark": "^7.3.1",
