@@ -63,7 +63,7 @@ flowchart LR
 
 ## Qwen3 层：最小实现保留了关键优化
 
-模型结构看起来接近普通 Transformer，但每个线性层已经为张量并行切分，attention 同时承担 KV cache 读写，RMSNorm 与 SiLU×Gate 则交给 `torch.compile`。
+模型结构看起来接近普通 Transformer，但每个线性层已经为张量并行切分，attention 同时承担 KV cache 读写，RMSNorm 与 SiLU×Gate 则交给 `torch.compile`。捕获、求导、融合及 guards 见 [F7](/frameworks/torch-compile/)；算子编译与下文的 CUDA Graph 重放属于不同执行层次。
 
 这里的 Q/K normalization 在 `qkv_bias=False` 分支中对每个头的查询与键应用 RMSNorm：对头内坐标 $x_a$ 计算 $x_a/\sqrt{d_h^{-1}\sum_bx_b^2+\varepsilon}$，再乘逐坐标可学习缩放。它不是 M3 中的欧氏单位化，不能据此声称查询与键的范数为 1。RoPE 保持的是 RMSNorm 之后、旋转之前的欧氏范数，见 [qwen3.py:64–80](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L64-L80)。
 

@@ -1,7 +1,7 @@
 ---
 title: 从数组到可训练模块
 question: 怎样把数学公式写成形状、存储、梯度和状态都明确的 NumPy 与 PyTorch 程序
-description: 六章连接 NumPy 数组与批量计算、Torch 张量与求导、模块与损失，以及数据、更新和恢复。
+description: 七章连接 NumPy 数组与批量计算、Torch 张量与求导、模块与损失、数据与状态，以及 torch.compile 的捕获、求导与代码生成。
 order: 0
 ---
 
@@ -9,7 +9,7 @@ order: 0
 
 本路线放在数学与模型原理之间，使用已有 NumPy 与 PyTorch 依赖，回答数组操作和训练对象的常见问题。章节代码 F 表示框架路线，代码里的 `torch.nn.functional as F` 是 Python 模块别名，二者由上下文区分。已经熟悉这些 API 可以直接进入 P；第一次接触数组的人，可在 M3 后先读前三章，再随着数学路线学自动求导与训练接口。
 
-## 六章：轴、存储、梯度与状态逐层增加
+## 七章：从轴与状态走到编译执行
 
 <ChapterList track="frameworks" />
 
@@ -21,6 +21,7 @@ order: 0
 | F4 求导 | 一个输入经过分支，梯度回到哪里 | 叶子张量、VJP、梯度累积、detach 与求导模式 |
 | F5 模块 | 多个运算怎样成为可训练的网络对象 | 参数登记、线性权重、嵌入、归一化与损失契约 |
 | F6 状态 | 五个样本怎样形成三批并恢复训练 | 尾批、有效分母、优化器、随机状态与 checkpoint |
+| F7 编译 | 同一段张量程序怎样被捕获和重复执行 | Dynamo、AOTAutograd、Inductor、guards、图中断与重编译 |
 
 核心顺序是先看数值，再看数组的身份与状态。相同的数值可以存放在不同形状中，两个对象也可能共享同一块数据；相同的前向值可以处于不同的求导模式，加载同样的权重也可能有不同的优化器历史。把这些区别分开，许多看起来像“神秘框架问题”的错误就能逐项核对。
 
@@ -31,6 +32,7 @@ order: 0
 - 写 [P1 嵌入](/principles/tokenization/) 与 [P4 Decoder](/principles/decoder/) 前，读 F3/F5，对齐 token 索引、模块参数和各个张量轴。
 - 在 [T1 数据](/training/data/)、[T2 优化](/training/optimization/) 与 [T3 完整训练](/training/pretraining/) 之前，读 F6，分清加载器、优化器和状态文件。
 - 进入 [G1 GPU 执行模型](/gpu/execution-model/) 时，数组地址与 stride 可回读 F1/F3；框架的 device 与底层线程分工属于不同层次。
+- 给训练或推理程序加 `torch.compile` 前，读 [F7](/frameworks/torch-compile/)；性能部分结合 G3/G4，CUDA Graph 再连接 S6。
 
 M 解释数学原因，F 解释接口契约，P 解释模型结构，T 解释训练算法和实验。新路线不会用 `softmax` 这个函数名代替概率推导，也不会用一个 checkpoint 示例代替完整恢复协议。
 
@@ -49,7 +51,7 @@ M 解释数学原因，F 解释接口契约，P 解释模型结构，T 解释训
 
 ## 运行与可视化的边界
 
-全部六章的 CPU 示例位于 `code/frameworks/`，安装使用仓库统一的 `code/requirements.txt`。数学核对优先 float64，token 索引用 int64/long；这不是建议大型 GPU 模型全部用 float64。实际验证版本记录在验收文档，本轮使用 NumPy 2.5.2 与 PyTorch 2.14.0+cpu。
+全部七章的 CPU 示例位于 `code/frameworks/`，安装使用仓库统一的 `code/requirements.txt`。数学核对优先 float64，token 索引用 int64/long；这不是建议大型 GPU 模型全部用 float64。实际验证版本记录在验收文档，本轮使用 NumPy 2.5.2 与 PyTorch 2.14.0+cpu。F7 默认核对捕获、缓存与 AOT 求导，额外的 `--inductor` 检查需要兼容的本地 C++ 编译器；CPU 结果不代表 GPU 性能。
 
 交互图展示小数组的索引、共享关系、梯度或状态计数，数字与 CPU 脚本可以相互核对。浏览器并未加载 NumPy 或 Torch 运行时，图也不测量真实分配器、GPU 带宽或 kernel 延迟。图片若来自实际数组值，正文说明输入与轴；框架 API 的真实行为仍由 Python 示例验证。
 
