@@ -29,6 +29,8 @@ $$
 
 它保留正均值；LayerNorm 输出则有正有负。把二者都说成“让均值为零、方差为一”是不正确的。
 
+<Figure src="principles/norm-compare.svg" alt="同一个向量 1,2,3,4 经 LayerNorm 变成有正有负、均值为零，经 RMSNorm 保持全正、比例不变">三组柱子画的是同一个位置的四个特征。LayerNorm 先把均值移到 0，于是出现负值；RMSNorm 只整体缩放，四个分量之比仍是 1:2:3:4。</Figure>
+
 忽略 epsilon 时，对正标量 a 有 RMSNorm(ax)=RMSNorm(x)，表示对共同正尺度的不变性。加 epsilon 后仅近似成立。它也不具有 LayerNorm 的共同平移不变性：把 x 的每个分量加 1，会改变方向和输出。因此两者不是数值等价替换。
 
 减少均值归约及平移参数可能简化实现，但实际速度取决于融合内核、输入形状和硬件。不能仅根据公式少一个求和就给出固定加速百分比。某些实现还在更高精度计算统计量，以避免低精度平方累加的问题。
@@ -43,6 +45,8 @@ $$
 $$
 
 $s$ 是 M4 定义的 sigmoid。$W_{\mathrm{gate}},W_{\mathrm{up}}\in\mathbb R^{d_{\mathrm{ff}}\times d}$，$W_{\mathrm{down}}\in\mathbb R^{d\times d_{\mathrm{ff}}}$；公式采用无偏置配置，$\odot$ 为逐元素乘法。
+
+<Figure src="principles/ffn-variants.svg" alt="GELU FFN 是一条扩张再收缩的分支；SwiGLU 有 gate 与 up 两条输入投影，逐元素相乘后再经 down 投影">上面是 P4 的前馈网络，下面是 SwiGLU。两者都是“扩到 d<sub>ff</sub> 再回到 d”的逐位置变换；SwiGLU 多出一条 gate 投影，经 SiLU 后与 up 投影逐元素相乘。</Figure>
 
 例如一个中间坐标的 gate 输入是 1，up 输出是 2，则乘积为 $2s(1)\approx1.4621$。若 gate 输入是 −1，则 SiLU 为约 −0.2689；门并非始终位于 0–1，也不保证“关闭”时输出严格为零。把 SwiGLU 误写成 sigmoid(gate)×up 会遗漏 gate 自身的因子。
 
@@ -59,6 +63,8 @@ Y_h=\operatorname{softmax}\left(\frac{Q_hK_{\lfloor h/g\rfloor}^\top}{\sqrt{d_h}
 $$
 
 每个查询头仍有自己的 Q 和注意力分布；共享 K/V 不代表所有组内输出相同。因为 Q 不同，它们对同一键集合可以分配不同权重。
+
+<Figure src="infra/02-variants.svg" alt="MHA 每个查询头一对 KV，GQA 分组共享，MQA 全体共享">绿色是查询头，蓝色是要写入缓存的 K/V 头。三种结构查询头数相同，缓存宽度只跟着蓝色走；[S1](/systems/ledger/) 用同一张图计算缓存字节。</Figure>
 
 以 $n_q=4,n_{\mathrm{kv}}=2$ 为例，头 0、1 使用 KV 头 0，头 2、3 使用 KV 头 1。实现可以在参考计算中重复 KV 头，也可直接使用支持分组的内核。后者避免物理复制，才保留共享带来的存储优势。
 

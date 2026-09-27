@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 272">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="20" y="26" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">P4 的 GELU FFN：一条分支</text>
+    <rect x="20" y="46" width="80" height="34" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="60.0" y="67.68" font-size="13" fill="#263a34" text-anchor="middle">x（d）</text>
+    <path d="M100 63H122" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="124" y="46" width="130" height="34" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="189.0" y="67.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">1</tspan><tspan dy="-0.3em">​</tspan><tspan>：d → </tspan>d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan></text>
+    <path d="M254 63H276" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="278" y="46" width="70" height="34" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="313.0" y="67.68" font-size="13" fill="#263a34" text-anchor="middle">GELU</text>
+    <path d="M348 63H370" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="372" y="46" width="130" height="34" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="437.0" y="67.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">2</tspan><tspan dy="-0.3em">​</tspan><tspan>：</tspan>d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan><tspan> → d</tspan></text>
+    <text x="20" y="104" font-size="12" fill="#68726d" text-anchor="start">权重约 2d·d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="20" y="140" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">SwiGLU：门控分支逐元素调制内容分支</text>
+    <rect x="20" y="178" width="80" height="34" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="60.0" y="199.68" font-size="13" fill="#263a34" text-anchor="middle">x（d）</text>
+    <rect x="130" y="154" width="130" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="195.0" y="173.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">gate</tspan><tspan dy="-0.3em">​</tspan></text>
+    <rect x="290" y="154" width="70" height="30" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="325.0" y="173.68" font-size="13" fill="#263a34" text-anchor="middle">SiLU</text>
+    <rect x="130" y="206" width="130" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="195.0" y="225.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">up</tspan><tspan dy="-0.3em">​</tspan></text>
+    <path d="M100 195H115V169H126" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M100 195H115V221H126" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M260 169H286" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <circle cx="410" cy="195" r="14" fill="#fffefa" stroke="#263a34" stroke-width="1.5"/>
+    <text x="410" y="200" font-size="15" fill="#263a34" text-anchor="middle">⊙</text>
+    <path d="M360 169H410V177" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M260 221H410V213" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="460" y="180" width="150" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="535.0" y="199.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">down</tspan><tspan dy="-0.3em">​</tspan><tspan>：</tspan>d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan><tspan> → d</tspan></text>
+    <path d="M424 195H456" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="630" y="200" font-size="13" fill="#263a34" text-anchor="start">输出（d）</text>
+    <text x="20" y="264" font-size="12" fill="#68726d" text-anchor="start">三套矩阵，权重约 3d·d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan>；同预算时把 d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan> 缩到约 2/3。⊙ 是逐元素乘，门值可以为负，不是 0–1 的开关。</text>
+  </g>
+</svg>

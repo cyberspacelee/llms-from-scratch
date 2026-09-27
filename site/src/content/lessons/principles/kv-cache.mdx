@@ -43,6 +43,8 @@ $$
 \longrightarrow\underbrace{y_t^\top}_{1\times d_v}.
 $$
 
+<Figure src="principles/kv-cache-steps.svg" alt="prefill 一次计算 4×4 下三角分数并写入缓存；decode 只用新查询 q4 与缓存中的 k0 到 k4 计算一行分数">左边的 prefill 与普通整段计算相同，同时把每个位置的 K/V 写进缓存。右边的 decode 只新算一个位置：新查询读取全部缓存键，本步的 k4、v4 追加到缓存末尾。</Figure>
+
 其中 $s_t=(s_{t0},\ldots,s_{tt})^\top$ 是列向量；上面的箭头概括缩放、softmax 与值加权求和。因此缓存旋转后的 K 和未旋转的 V；新 Q 每步现算，旧注意力权重没有复用价值，因为新 Q 的内容不同。也可以设计缓存未旋转 K 的实现，但那需要在使用时另行旋转；本章采用常见的“先旋转，再缓存”。
 
 | 阶段 | Q 的形状 | 可用 K/V 的形状 | 分数形状 |

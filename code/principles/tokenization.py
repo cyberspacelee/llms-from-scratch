@@ -1,6 +1,7 @@
 """Byte BPE, embedding lookup, and repeated-token gradient checks on CPU."""
 
 from collections import Counter
+import re
 
 import torch
 from torch import nn
@@ -55,6 +56,20 @@ class ByteBPE:
         return b"".join(self.pieces[i] for i in ids).decode("utf-8")
 
 
+# A simplified, ASCII-only version of GPT-2 style pre-tokenization: a word keeps its leading space.
+PRE_SPLIT = re.compile(r" ?[A-Za-z]+| ?[0-9]+| ?[^\sA-Za-z0-9]+|\s+(?!\S)|\s+")
+
+
+class PreSplitBPE(ByteBPE):
+    """Byte BPE whose merges never cross pre-tokenized chunk boundaries."""
+
+    def fit(self, documents, num_merges):
+        return super().fit([chunk for text in documents for chunk in PRE_SPLIT.findall(text)], num_merges)
+
+    def encode(self, text):
+        return [i for chunk in PRE_SPLIT.findall(text) for i in super().encode(chunk)]
+
+
 def verify():
     torch.manual_seed(7)
     tokenizer = ByteBPE().fit(["aba"] * 4 + ["abb"] * 2 + ["bab"], 2)
@@ -65,6 +80,14 @@ def verify():
     for text in ("", "aba", "abb", "bab", "Hello, world!", "\u4e2d\u6587\u548c AI"):
         assert tokenizer.decode(tokenizer.encode(text)) == text
     assert merge_pair([97, 97, 97], (97, 97), 256) == [256, 97]
+    # Without pre-splitting, a frequent phrase merges across the space into one token.
+    raw = ByteBPE().fit(["a b"] * 5, 2)
+    assert raw.pieces[257] == b"a b" and raw.encode("a b") == [257]
+    split = PreSplitBPE().fit(["a b"] * 5, 2)
+    assert PRE_SPLIT.findall("a b") == ["a", " b"]
+    assert [split.pieces[i] for i in split.encode("a b")] == [b"a", b" b"]
+    assert all(b" " not in piece[1:] for piece in split.pieces.values())
+    assert split.decode(split.encode("Hi, a b 42!")) == "Hi, a b 42!"
     ids = torch.tensor([[1, 2, 1], [3, 1, 0]])
     embedding = nn.Embedding(8, 4).double()
     selected = embedding(ids)
@@ -75,7 +98,7 @@ def verify():
     torch.testing.assert_close(embedding.weight.grad, counts[:, None].expand(8, 4))
     assert ids[0, 0] == ids[0, 2]
     torch.testing.assert_close(selected[0, 0], selected[0, 2])
-    print("PASS: BPE weighted pairs, merge order, overlap, UTF-8 round trips")
+    print("PASS: BPE weighted pairs, merge order, overlap, UTF-8 round trips, pre-split boundaries")
     print("PASS: embedding lookup equals one-hot selection; repeated IDs sum gradients")
 
 

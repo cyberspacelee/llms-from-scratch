@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 640">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker><marker id="arrowA" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#087f70"/></marker><marker id="arrowB" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#c16b36"/></marker></defs>
+  <g font-family="sans-serif">
+    <rect x="40" y="16" width="220" height="40" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="150.0" y="41.04" font-size="14" fill="#263a34" text-anchor="middle">整数 ID</text>
+    <text x="274" y="41" font-size="13" fill="#68726d" text-anchor="start">(B, T)</text>
+    <path d="M150 56V78" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="40" y="80" width="220" height="40" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="150.0" y="105.04" font-size="14" fill="#263a34" text-anchor="middle">内容嵌入 + 位置嵌入</text>
+    <text x="274" y="105" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <rect x="20" y="140" width="720" height="350" rx="6" fill="none" stroke="#68726d" stroke-dasharray="5 5"/>
+    <text x="34" y="164" font-size="13" fill="#68726d" text-anchor="start">一个块，重复 n<tspan font-size="0.75em" dy="0.3em">layers</tspan><tspan dy="-0.3em">​</tspan> 次</text>
+    <path d="M150 120V520" stroke="#087f70" stroke-width="5" fill="none" stroke-linecap="round"/>
+    <text x="136" y="262" font-size="14" fill="#087f70" text-anchor="end" font-weight="600">残差流</text>
+    <text x="136" y="282" font-size="12" fill="#087f70" text-anchor="end">形状始终</text>
+    <text x="136" y="298" font-size="12" fill="#087f70" text-anchor="end">(B, T, d)</text>
+    <path d="M150 191H296" fill="none" stroke="#087f70" stroke-width="1.5" marker-end="url(#arrowA)"/>
+    <rect x="300" y="176" width="230" height="30" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="415.0" y="195.68" font-size="13" fill="#263a34" text-anchor="middle">LayerNorm<tspan font-size="0.75em" dy="0.3em">1</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="544" y="196" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <rect x="300" y="216" width="230" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="415.0" y="235.68" font-size="13" fill="#263a34" text-anchor="middle">QKV 投影</text>
+    <text x="544" y="236" font-size="13" fill="#68726d" text-anchor="start">(B, T, 3d)</text>
+    <path d="M415.0 206V214" fill="none" stroke="#3176b5" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="300" y="256" width="230" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="415.0" y="275.68" font-size="13" fill="#263a34" text-anchor="middle">拆头并交换轴</text>
+    <text x="544" y="276" font-size="13" fill="#68726d" text-anchor="start">(B, n<tspan font-size="0.75em" dy="0.3em">q</tspan><tspan dy="-0.3em">​</tspan>, T, d<tspan font-size="0.75em" dy="0.3em">h</tspan><tspan dy="-0.3em">​</tspan>)</text>
+    <path d="M415.0 246V254" fill="none" stroke="#3176b5" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="300" y="296" width="230" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="415.0" y="315.68" font-size="13" fill="#263a34" text-anchor="middle">分数 + 因果遮罩</text>
+    <text x="544" y="316" font-size="13" fill="#68726d" text-anchor="start">(B, n<tspan font-size="0.75em" dy="0.3em">q</tspan><tspan dy="-0.3em">​</tspan>, T, T)</text>
+    <path d="M415.0 286V294" fill="none" stroke="#3176b5" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="300" y="336" width="230" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="415.0" y="355.68" font-size="13" fill="#263a34" text-anchor="middle">加权 V，合并，W<tspan font-size="0.75em" dy="0.3em">O</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="544" y="356" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <path d="M415.0 326V334" fill="none" stroke="#3176b5" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <circle cx="150" cy="351" r="13" fill="#fffefa" stroke="#087f70" stroke-width="1.5"/>
+    <text x="150" y="356" font-size="15" fill="#087f70" text-anchor="middle">+</text>
+    <path d="M300 351H167" fill="none" stroke="#3176b5" stroke-width="1.5" marker-end="url(#arrowA)"/>
+    <text x="164" y="183" font-size="12" fill="#3176b5" text-anchor="start">注意力分支：跨位置读取</text>
+    <path d="M150 400H296" fill="none" stroke="#087f70" stroke-width="1.5" marker-end="url(#arrowA)"/>
+    <rect x="300" y="386" width="230" height="30" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="415.0" y="405.68" font-size="13" fill="#263a34" text-anchor="middle">LayerNorm<tspan font-size="0.75em" dy="0.3em">2</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="544" y="406" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <rect x="300" y="426" width="230" height="30" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="415.0" y="445.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">1</tspan><tspan dy="-0.3em">​</tspan> + GELU</text>
+    <text x="544" y="446" font-size="13" fill="#68726d" text-anchor="start">(B, T, d<tspan font-size="0.75em" dy="0.3em">ff</tspan><tspan dy="-0.3em">​</tspan>)</text>
+    <path d="M415.0 416V424" fill="none" stroke="#c16b36" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="300" y="466" width="230" height="30" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="415.0" y="485.68" font-size="13" fill="#263a34" text-anchor="middle">W<tspan font-size="0.75em" dy="0.3em">2</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="544" y="486" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <path d="M415.0 456V464" fill="none" stroke="#c16b36" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <circle cx="150" cy="481" r="13" fill="#fffefa" stroke="#087f70" stroke-width="1.5"/>
+    <text x="150" y="486" font-size="15" fill="#087f70" text-anchor="middle">+</text>
+    <path d="M300 481H167" fill="none" stroke="#c16b36" stroke-width="1.5" marker-end="url(#arrowB)"/>
+    <text x="164" y="393" font-size="12" fill="#c16b36" text-anchor="start">FFN 分支：逐位置变换</text>
+    <rect x="40" y="522" width="220" height="36" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="150.0" y="544.68" font-size="13" fill="#263a34" text-anchor="middle">最终 LayerNorm</text>
+    <text x="274" y="545" font-size="13" fill="#68726d" text-anchor="start">(B, T, d)</text>
+    <path d="M150 558V574" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <rect x="40" y="576" width="220" height="36" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="150.0" y="598.68" font-size="13" fill="#263a34" text-anchor="middle">LM head</text>
+    <text x="274" y="599" font-size="13" fill="#68726d" text-anchor="start">(B, T, n<tspan font-size="0.75em" dy="0.3em">vocab</tspan><tspan dy="-0.3em">​</tspan>)</text>
+    <text x="360" y="600" font-size="12" fill="#68726d" text-anchor="start">沿最后一轴 softmax = 每个位置的下一 token 分布</text>
+  </g>
+</svg>

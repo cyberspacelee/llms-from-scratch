@@ -1,7 +1,7 @@
 ---
 title: 从零训练一个小语言模型
 question: 怎样完成一个可评估、可保存、可恢复的训练闭环
-description: 复用两层教学 Decoder，固定字符语料与 bigram 对照，连接损失、AdamW、验证、完整 checkpoint 恢复和生成。
+description: 复用两层教学 Decoder，固定字符语料与 bigram 对照，连接损失、AdamW、验证、完整 checkpoint 恢复和生成，再用 6ND 与缩放规律估计放大后的计算预算。
 order: 3
 code:
   - code/training/pretraining.py
@@ -122,11 +122,39 @@ $$
 
 学习式位置表有长度上限。超过 12 不能通过任意取模位置就声称继续使用同一模型；可以明确截断上下文作为新的评估策略，或换用经过设计与评估的位置方案。长上下文扩展将在进阶路线讨论，本实验只生成在位置表范围内的文本。
 
+## 规模：参数、token 与计算预算怎样一起选
+
+本章的模型只有几千个参数，结论只覆盖这组合成数据。放大到真实预训练时，第一个要回答的问题是：固定一笔计算预算，参数量 N 与训练 token 数 D 怎样分配。
+
+### 为什么训练一次约是 6ND
+
+先数矩阵乘法。每个 token 经过一个权重时做一次乘加，按 2 FLOP 计，所以前向约 $2N$ FLOP。反向传播对每个权重要算两件事：传给上一层的激活梯度，以及权重自身的梯度，各是一次同样规模的乘加，约 $4N$。合计每个训练 token 约 $6N$：
+
+<KeyEq label="训练计算量">
+
+$$
+C\approx6ND+12\,n_{\mathrm{layers}}\,T\,d\,D.
+$$
+
+</KeyEq>
+
+第二项来自注意力的 $QK^\top$ 与加权 V：每层前向每个 token 约 $4Td$，训练再乘 3。这里的 N 只计参与矩阵乘法的权重，嵌入查表不是乘法，LM head 是。第二项与第一项之比约为 $T/(6d)$，本章 $T=11,d=16$ 时约占 15%；上下文远长于隐藏维度时，它不能省略。跳过遮罩块的注意力实现只算下三角，第二项约减半。
+
+脚本用 PyTorch 的 `FlopCounterMode` 统计本章模型一次前向加反向的矩阵乘法 FLOP。4160 个线性权重、33 个目标 token 时，计数恰为 $6\times4160\times33+12\times2\times11\times16\times33=963072$。这个等式核对的是乘法次数，不是运行时间；[S1](/systems/ledger/) 与 [S2](/systems/accelerator/) 讨论 FLOP 怎样变成秒。
+
+### 固定预算下的分配
+
+Kaplan 等人发现，在足够宽的范围内，测试损失随 N、D 与 C 近似按幂律下降。Hoffmann 等人（Chinchilla）在固定 C 下系统比较不同的 N、D 组合，拟合得到计算最优的 N 与 D 大致按相同速度增长，各约与 $\sqrt C$ 成正比；他们的 70B 参数模型用了 1.4T token，约每个参数 20 个 token，用同样预算胜过了 280B 参数、300B token 的 Gopher。
+
+把“每参数 20 token”当作经验比例代入 $C=6ND$：预算 $10^{21}$ FLOP 时 $120N^2=10^{21}$，得 $N\approx2.9\times10^9$、$D\approx5.8\times10^{10}$。这个比例是在特定数据、tokenizer 与架构上拟合出的，换条件就要重新测量。
+
+计算最优只针对训练预算。部署时每次推理的成本随 N 增长，所以常见做法是让较小的模型读远多于 20 倍的 token：Llama 3 8B 用了超过 15T token，约每参数 1900 个。这是用更多训练计算换更低的推理成本，不违背缩放规律，只是优化目标不同。缩放曲线预测的是同分布验证损失；它不直接预测某项下游任务的得分，后者由 [T4](/training/evaluation/) 的评估协议另行测量。
+
 ## 完整 CPU 实验
 
 <CodeFile path="code/training/pretraining.py" />
 
-从仓库根运行 `python code/training/pretraining.py`。输出包含三个验证 NLL、恢复核对结果和生成 ID。代码复用 `code/principles/decoder.py`，没有另一份悄悄变化的模型定义。训练数据、配置与所有状态在脚本中显式列出，修改后可以直接重跑。
+从仓库根运行 `python code/training/pretraining.py`。输出包含三个验证 NLL、恢复核对结果、生成 ID，以及 FLOP 计数与 6ND 公式的核对。代码复用 `code/principles/decoder.py`，没有另一份悄悄变化的模型定义。训练数据、配置与所有状态在脚本中显式列出，修改后可以直接重跑。
 
 ## 常见误区
 
@@ -159,6 +187,8 @@ $$
 
 ## 原始资料
 
+- [Kaplan 等：Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361)：损失与参数、数据、计算的幂律。
+- [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)：15T token 预训练规模。
 - [PyTorch：Saving and Loading Models](https://docs.pytorch.org/tutorials/beginner/saving_loading_models.html)：模型与优化器状态保存接口。
 - [PyTorch：Reproducibility](https://docs.pytorch.org/docs/stable/notes/randomness.html)：随机源、确定性及跨环境限制。
-- [Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)：在特定研究设置下的模型与数据预算权衡；不把经验比例当作本章小语料的普遍定律。
+- [Hoffmann 等：Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)：Chinchilla，在特定研究设置下的模型与数据预算权衡；不把经验比例当作本章小语料的普遍定律。

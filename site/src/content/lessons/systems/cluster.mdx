@@ -83,7 +83,20 @@ NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果
 
 ## 训练：重算，或者把 16 字节切开
 
-[S1](/systems/ledger/) 的 16 字节已经让一个 8B 模型超过单卡。两条正交的办法可以叠用。梯度检查点少留激活，反向时重算。ZeRO 按数据并行的成员数 $n_{\mathrm{DP}}$ 切开常驻状态：先切 12 字节的优化器状态（fp32 主权重、一阶矩与二阶原始矩），再切梯度，最后连参数也切，用到时再集齐。切得越细，单卡常驻越小，集合通信越多。分片的定义见 [ZeRO](https://arxiv.org/abs/1910.02054)。训练系统要同时安排这三样：激活留多少、优化器状态放在谁那里、微批怎样填满流水。这是 [AI Infra Book 第 10 章](https://bojieli.github.io/ai-infra-book/manuscripts/10-%E8%AE%AD%E7%BB%83%E7%B3%BB%E7%BB%9F.html) 的问题；分布式推理一侧的放置、扩容和恢复见 [第 9 章](https://bojieli.github.io/ai-infra-book/manuscripts/09-%E5%88%86%E5%B8%83%E5%BC%8F%E6%8E%A8%E7%90%86.html)。
+[S1](/systems/ledger/) 的 16 字节已经让一个 8B 模型超过单卡。两条正交的办法可以叠用。梯度检查点少留激活，反向时重算，[T2](/training/optimization/#激活与重算反向传播要保存什么) 用一个小例子核对了保存量与梯度。另一条是分片：普通数据并行让每张卡都存一整份 16 字节，ZeRO 则按数据并行的成员数 $n_{\mathrm{DP}}$ 把这些常驻状态切开。
+
+| 阶段 | 切开什么 | 每卡字节（N 个参数） | 8B、$n_{\mathrm{DP}}=8$ |
+| --- | --- | --- | --- |
+| 数据并行 | 不切 | $16N$ | 128.5 GB |
+| ZeRO-1 | 12 字节优化器状态 | $4N+12N/n_{\mathrm{DP}}$ | 44.2 GB |
+| ZeRO-2 | 再加 2 字节梯度 | $2N+14N/n_{\mathrm{DP}}$ | 30.1 GB |
+| ZeRO-3 / FSDP | 再加 2 字节参数 | $16N/n_{\mathrm{DP}}$ | 16.1 GB |
+
+表中的 12 字节是 fp32 主权重、一阶矩与二阶原始矩；数字不含激活。PyTorch 的 FSDP 默认策略对应第三阶段。
+
+分片为什么不改变更新结果？数据并行本来就要把各卡梯度求和。all-reduce 可以拆成两步：reduce-scatter 让每张卡只拿到自己那一段的梯度总和，all-gather 再把各段拼回整份。ZeRO-1/2 在两步之间插入更新：每张卡只用自己那段梯度更新自己那段参数与优化器状态，然后 all-gather 拼回参数。每一段都恰好更新一次，结果与不切时相同，通信量也与普通数据并行相同，约每卡收发 $2N$ 个元素。ZeRO-3 连参数也不常驻，前向与反向用到某层时各 all-gather 一次，通信约为 $3N$，即普通数据并行的 1.5 倍。脚本用四个 rank 的 12 维梯度核对“先分段求和、各段更新、再拼接”与整份更新相同。
+
+切得越细，单卡常驻越小，集合通信越多，通信能否与计算重叠就越关键。分片的定义与通信分析见 [ZeRO](https://arxiv.org/abs/1910.02054)，工程实现见 [PyTorch FSDP](https://arxiv.org/abs/2304.11277)。训练系统要同时安排这三样：激活留多少、优化器状态放在谁那里、微批怎样填满流水。这是 [AI Infra Book 第 10 章](https://bojieli.github.io/ai-infra-book/manuscripts/10-%E8%AE%AD%E7%BB%83%E7%B3%BB%E7%BB%9F.html) 的问题；分布式推理一侧的放置、扩容和恢复见 [第 9 章](https://bojieli.github.io/ai-infra-book/manuscripts/09-%E5%88%86%E5%B8%83%E5%BC%8F%E6%8E%A8%E7%90%86.html)。
 
 ## 状态放在哪一台机器上
 

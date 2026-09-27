@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="20" y="24" font-size="14" fill="#263a34" text-anchor="start" font-weight="600">双向自注意力（编码器）</text>
+    <text x="74.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">猫</text>
+    <text x="104.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">吃</text>
+    <text x="134.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">鱼</text>
+    <text x="164.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">了</text>
+    <text x="52" y="83.0" font-size="12" fill="#68726d" text-anchor="end">猫</text>
+    <text x="52" y="113.0" font-size="12" fill="#68726d" text-anchor="end">吃</text>
+    <text x="52" y="143.0" font-size="12" fill="#68726d" text-anchor="end">鱼</text>
+    <text x="52" y="173.0" font-size="12" fill="#68726d" text-anchor="end">了</text>
+    <rect x="60" y="64" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="90" y="64" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="120" y="64" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="150" y="64" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="60" y="94" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="90" y="94" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="120" y="94" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="150" y="94" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="60" y="124" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="90" y="124" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="120" y="124" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="150" y="124" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="60" y="154" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="90" y="154" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="120" y="154" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="150" y="154" width="27" height="27" rx="3" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="20" y="216" font-size="12" fill="#68726d" text-anchor="start">每个位置看全部位置</text>
+    <text x="20" y="236" font-size="12" fill="#68726d" text-anchor="start">适合为整段输入建立表示</text>
+    <text x="270" y="24" font-size="14" fill="#263a34" text-anchor="start" font-weight="600">因果自注意力（解码器）</text>
+    <text x="324.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">猫</text>
+    <text x="354.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">吃</text>
+    <text x="384.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">鱼</text>
+    <text x="414.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">了</text>
+    <text x="302" y="83.0" font-size="12" fill="#68726d" text-anchor="end">猫</text>
+    <text x="302" y="113.0" font-size="12" fill="#68726d" text-anchor="end">吃</text>
+    <text x="302" y="143.0" font-size="12" fill="#68726d" text-anchor="end">鱼</text>
+    <text x="302" y="173.0" font-size="12" fill="#68726d" text-anchor="end">了</text>
+    <rect x="310" y="64" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="340" y="64" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="370" y="64" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="400" y="64" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="310" y="94" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="340" y="94" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="370" y="94" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="400" y="94" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="310" y="124" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="340" y="124" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="370" y="124" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="400" y="124" width="27" height="27" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="310" y="154" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="340" y="154" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="370" y="154" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="400" y="154" width="27" height="27" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <text x="270" y="216" font-size="12" fill="#68726d" text-anchor="start">位置 i 只看 j ≤ i</text>
+    <text x="270" y="236" font-size="12" fill="#68726d" text-anchor="start">续写时不能读未来</text>
+    <text x="520" y="24" font-size="14" fill="#263a34" text-anchor="start" font-weight="600">跨注意力（编码器–解码器）</text>
+    <text x="574.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">the</text>
+    <text x="604.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">cat</text>
+    <text x="634.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">eats</text>
+    <text x="664.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">fish</text>
+    <text x="694.0" y="56" font-size="12" fill="#68726d" text-anchor="middle">.</text>
+    <text x="552" y="83.0" font-size="12" fill="#68726d" text-anchor="end">猫</text>
+    <text x="552" y="113.0" font-size="12" fill="#68726d" text-anchor="end">吃</text>
+    <text x="552" y="143.0" font-size="12" fill="#68726d" text-anchor="end">鱼</text>
+    <rect x="560" y="64" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="590" y="64" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="620" y="64" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="650" y="64" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="680" y="64" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="560" y="94" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="590" y="94" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="620" y="94" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="650" y="94" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="680" y="94" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="560" y="124" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="590" y="124" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="620" y="124" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="650" y="124" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <rect x="680" y="124" width="27" height="27" rx="3" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="520" y="186" font-size="12" fill="#68726d" text-anchor="start">行：解码器查询（T<tspan font-size="0.75em" dy="0.3em">tgt</tspan><tspan dy="-0.3em">​</tspan><tspan>）</tspan></text>
+    <text x="520" y="206" font-size="12" fill="#68726d" text-anchor="start">列：编码器键值（T<tspan font-size="0.75em" dy="0.3em">src</tspan><tspan dy="-0.3em">​</tspan><tspan>）</tspan></text>
+    <text x="520" y="226" font-size="12" fill="#68726d" text-anchor="start">分数形状 T<tspan font-size="0.75em" dy="0.3em">tgt</tspan><tspan dy="-0.3em">​</tspan><tspan> × </tspan>T<tspan font-size="0.75em" dy="0.3em">src</tspan><tspan dy="-0.3em">​</tspan></text>
+    <text x="20" y="284" font-size="12" fill="#68726d" text-anchor="start">行是查询，列是键；着色格参与 softmax，灰格被遮罩。三者用同一个缩放点积公式，只换可见集合与 K/V 来源。</text>
+  </g>
+</svg>

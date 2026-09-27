@@ -40,7 +40,7 @@ order: 0
 
 具备 Python 数组基础就可以从 G1 开始。G3 的矩阵乘需要 [M3 线性代数](/math/linear-algebra/)，softmax 回读 [P3 注意力](/principles/attention/)。不需要先训练完整模型，才能理解线程索引与内存地址。
 
-如果从系统路线进入，建议 [S2 单卡上限](/systems/accelerator/) → G1–G3 → [S3 FlashAttention](/systems/flash-attention/)。S2 负责算术强度和屋顶线，G 路线负责把算子映射到线程、协作与存储，S3 再应用这些思想减少注意力的中间流量。
+本路线位于推理系统之前：G3 定义算术强度与屋顶线，G4 定义测量边界，[S2 单卡上限](/systems/accelerator/) 再代入真实硬件规格，[S3 FlashAttention](/systems/flash-attention/) 应用分块与融合减少注意力的中间流量。已经读过 [S1 计算账本](/systems/ledger/) 的读者，可以把那里的负载强度带到 G3 的屋顶线上对照。
 
 需要解释 CUDA Graph 与发射开销时，读完 G4 再回 [S6 GPU 执行器](/systems/engine-execution/)。跨设备并行属于 [S9 集群](/systems/cluster/)；block、warp 是一张 GPU 内的工作组织，不要与 tensor parallel rank 混成一层。
 

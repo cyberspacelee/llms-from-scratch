@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 262">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="50" y="24" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">Prefill：提示一次算完</text>
+    <text x="63.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k0</text>
+    <text x="89.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k1</text>
+    <text x="115.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k2</text>
+    <text x="141.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k3</text>
+    <text x="42" y="87" font-size="11" fill="#087f70" text-anchor="end">q0</text>
+    <rect x="50" y="70" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="76" y="70" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="102" y="70" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="128" y="70" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="42" y="113" font-size="11" fill="#087f70" text-anchor="end">q1</text>
+    <rect x="50" y="96" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="76" y="96" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="102" y="96" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <rect x="128" y="96" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="42" y="139" font-size="11" fill="#087f70" text-anchor="end">q2</text>
+    <rect x="50" y="122" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="76" y="122" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="102" y="122" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="128" y="122" width="23" height="23" rx="2" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="42" y="165" font-size="11" fill="#087f70" text-anchor="end">q3</text>
+    <rect x="50" y="148" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="76" y="148" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="102" y="148" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="128" y="148" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="50" y="196" font-size="12" fill="#68726d" text-anchor="start">4 个查询 × 4 个键，得到 4 行输出</text>
+    <text x="50" y="46" font-size="12" fill="#68726d" text-anchor="start">同时写入缓存 k0…k3、v0…v3</text>
+    <text x="330" y="24" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">Decode：每步只有一个新查询</text>
+    <text x="330" y="46" font-size="12" fill="#68726d" text-anchor="start">旧键值从缓存读，只新算 q4、k4、v4</text>
+    <text x="373.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k0</text>
+    <text x="399.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k1</text>
+    <text x="425.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k2</text>
+    <text x="451.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k3</text>
+    <text x="477.0" y="62" font-size="11" fill="#3176b5" text-anchor="middle">k4</text>
+    <rect x="360" y="70" width="23" height="23" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="386" y="70" width="23" height="23" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="412" y="70" width="23" height="23" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="438" y="70" width="23" height="23" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <rect x="464" y="70" width="23" height="23" rx="2" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="352" y="87" font-size="11" fill="#68726d" text-anchor="end">缓存</text>
+    <text x="352" y="131" font-size="11" fill="#087f70" text-anchor="end">q4</text>
+    <rect x="360" y="114" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="386" y="114" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="412" y="114" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="438" y="114" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <rect x="464" y="114" width="23" height="23" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="500" y="131" font-size="12" fill="#68726d" text-anchor="start">1 × (T<tspan font-size="0.75em" dy="0.3em">past</tspan><tspan dy="-0.3em">​</tspan><tspan> + 1) 分数</tspan></text>
+    <text x="330" y="176" font-size="12" fill="#68726d" text-anchor="start">橙色是本步追加的 K/V；蓝色来自前几步，数值与整段计算时完全相同。</text>
+    <text x="330" y="198" font-size="12" fill="#68726d" text-anchor="start">历史查询 q0…q3 不再被读取，所以不缓存 Q，也不缓存旧输出。</text>
+    <text x="20" y="250" font-size="13" fill="#263a34" text-anchor="start">两种调用得到同一组可见集合：decode 的一行，正是整段计算下三角矩阵的最后一行。</text>
+  </g>
+</svg>

@@ -72,7 +72,7 @@
 - 对照朴素与 tiled CPU 模型；数学 FLOP 相同，重复访问计数不同。矩阵乘教学 kernel 不宣称达到 cuBLAS 性能。
 - 融合偏置/激活减少中间写回，也可能增加寄存器压力；Tensor Core 的类型、布局与指令约束作概念桥梁。
 - 用一段 NVIDIA CUDA、Triton、库调用的选择表指导读者；CUTLASS、TMA、warpgroup/cluster 的专门优化放在延伸阅读。
-- 链接回 S2 的屋顶线与 S3 的在线 softmax，避免重复推导 FlashAttention。
+- 在分块强度之后定义屋顶线（假想设备，不引用产品规格）；S2 再代入真实硬件。链接 S3 的在线 softmax，避免重复推导 FlashAttention。
 
 交付：tile 消费与复用交互、计算阶段 SVG、由真实小矩阵生成的 tile 图片；CPU softmax/分块矩阵乘验证；CUDA tiled GEMM 和 Triton 向量加法/softmax 可选示例。
 
@@ -80,7 +80,7 @@
 
 ## G4：异步执行、资源约束与测量
 
-拟定路径：`/gpu/measurement/`。先修 G1–G3；屋顶线链接 S2。
+拟定路径：`/gpu/measurement/`。先修 G1–G3；屋顶线回读 G3，真实硬件规格见 S2。
 
 核心问题：为什么看起来更并行的代码不一定更快，怎样得到可信的测量？
 

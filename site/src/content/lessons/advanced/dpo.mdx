@@ -84,6 +84,8 @@ $$
 
 所以最小化损失会推动 $z$ 增大。在把两个回复 log-prob 暂时看成独立标量时，chosen 的导数为 $-\lambda_{\mathrm{DPO}}s(-z)$，rejected 为正的对应值。回到模型参数时，两条序列共享网络，更新不是对这两个标量分别独立修改。
 
+<Figure src="advanced/dpo-loss.svg" alt="DPO 损失随偏好差 z 单调下降，梯度幅度 s(−z) 在 z 很大时趋近零">实线是单对损失，虚线是它对 z 的梯度幅度。z 为负时梯度接近 1，模型正在偏好 rejected，更新最强；z 越大梯度越小，已经分得开的偏好对几乎不再贡献更新。起点 z = 0 的损失是 ln 2。</Figure>
+
 沿用上一节概率，参考给 chosen 0.4、rejected 0.3，系数 0.2：
 
 $$

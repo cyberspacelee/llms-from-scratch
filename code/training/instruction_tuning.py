@@ -81,5 +81,38 @@ def verify():
     print("SFT format task: generated reply", before_reply, "->", after_reply, "; target [5, 7]")
 
 
+def distillation_loss(student_logits, teacher_logits, temperature=1.0):
+    """tau^2 * KL(teacher_tau || student_tau), averaged over positions."""
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    teacher = (teacher_logits / temperature).softmax(-1)
+    student_log = (student_logits / temperature).log_softmax(-1)
+    kl = (teacher * (teacher.clamp_min(1e-300).log() - student_log)).sum(-1)
+    return temperature ** 2 * kl.mean()
+
+
+def verify_distillation():
+    torch.manual_seed(13)
+    student = torch.randn(3, 5, dtype=torch.float64, requires_grad=True)
+    teacher = torch.randn(3, 5, dtype=torch.float64)
+    # tau = 1: the gradient on each student logit is (p_student - p_teacher) / positions.
+    distillation_loss(student, teacher).backward()
+    expected = (student.detach().softmax(-1) - teacher.softmax(-1)) / 3
+    torch.testing.assert_close(student.grad, expected, atol=1e-12, rtol=1e-12)
+    # A one-hot teacher turns the KL into ordinary cross-entropy on its label.
+    labels = torch.tensor([4, 0, 2])
+    one_hot = torch.full((3, 5), -torch.inf, dtype=torch.float64).scatter(1, labels[:, None], 0.)
+    torch.testing.assert_close(distillation_loss(student, one_hot),
+                               torch.nn.functional.cross_entropy(student, labels), atol=1e-12, rtol=1e-12)
+    # The tau^2 factor keeps gradient size comparable: at tau = 4 it rescales the 1/tau^2 shrinkage.
+    student.grad = None
+    distillation_loss(student, teacher, temperature=4.).backward()
+    soft = (student.detach() / 4).softmax(-1) - (teacher / 4).softmax(-1)
+    torch.testing.assert_close(student.grad, 4 * soft / 3, atol=1e-12, rtol=1e-12)
+    assert distillation_loss(teacher, teacher).abs() < 1e-12
+    print("distillation: KL gradient p_s - p_t, one-hot teacher equals CE, tau^2 scaling verified")
+
+
 if __name__ == "__main__":
     verify()
+    verify_distillation()

@@ -40,6 +40,20 @@ def tiled_gemm(a, b, tile=4):
     return out
 
 
+def tile_intensity(tile, element_bytes):
+    """Input-only FLOP/byte of one square output tile per K step: 2t^3 FLOP over 2t^2 loads."""
+    if tile < 1 or element_bytes <= 0:
+        raise ValueError("Positive tile and element size required")
+    return 2 * tile**3 / (element_bytes * 2 * tile**2)
+
+
+def roofline(intensity, peak_flops, bandwidth):
+    """Attainable FLOP/s bound and ridge point; a model, not a measurement."""
+    if min(intensity, peak_flops, bandwidth) <= 0:
+        raise ValueError("Positive intensity, peak and bandwidth required")
+    return min(peak_flops, bandwidth * intensity), peak_flops / bandwidth
+
+
 def demo():
     rng = np.random.default_rng(7)
     x = np.array([[1000., 1001., 1002.], [-2., 0., 2.], [1., 2., 3.]])
@@ -53,7 +67,12 @@ def demo():
         a, b = rng.normal(size=(m, k)), rng.normal(size=(k, n))
         for tile in (1, 2, 4, 8):
             np.testing.assert_allclose(tiled_gemm(a, b, tile), a @ b, rtol=1e-12, atol=1e-12)
-    print("G3 CPU checks passed: stable masked softmax, zero empty rows, tiled GEMM edges")
+    # Teaching device from G3: 100 TFLOP/s, 2 TB/s, so the ridge is 50 FLOP/byte.
+    assert tile_intensity(16, 4) == 4 and tile_intensity(16, 2) == 8
+    bound, ridge = roofline(tile_intensity(16, 4), 100e12, 2e12)
+    assert ridge == 50 and bound == 8e12
+    assert roofline(tile_intensity(256, 2), 100e12, 2e12)[0] == 100e12
+    print("G3 CPU checks passed: stable masked softmax, zero empty rows, tiled GEMM edges, tile roofline")
 
 
 if __name__ == "__main__":

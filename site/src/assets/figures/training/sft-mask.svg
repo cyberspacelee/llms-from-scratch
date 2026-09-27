@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 210">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="20" y="24" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">一条多轮对话的 token 流与损失遮罩</text>
+    <rect x="20" y="44" width="52" height="30" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="46.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">S</text>
+    <text x="46.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="78" y="44" width="52" height="30" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="104.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">规则</text>
+    <text x="104.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">1</text>
+    <rect x="136" y="44" width="52" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="162.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">U</text>
+    <text x="162.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">2</text>
+    <rect x="194" y="44" width="52" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="220.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">问题一</text>
+    <text x="220.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">3</text>
+    <rect x="252" y="44" width="52" height="30" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="278.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">A</text>
+    <text x="278.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">4</text>
+    <rect x="310" y="44" width="52" height="30" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="336.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">回答一</text>
+    <text x="336.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">5</text>
+    <rect x="368" y="44" width="52" height="30" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="394.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">E</text>
+    <text x="394.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">6</text>
+    <rect x="426" y="44" width="52" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="452.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">U</text>
+    <text x="452.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">7</text>
+    <rect x="484" y="44" width="52" height="30" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="510.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">问题二</text>
+    <text x="510.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">8</text>
+    <rect x="542" y="44" width="52" height="30" rx="4" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="568.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">A</text>
+    <text x="568.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">9</text>
+    <rect x="600" y="44" width="52" height="30" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="626.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">回答二</text>
+    <text x="626.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">10</text>
+    <rect x="658" y="44" width="52" height="30" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="684.0" y="63.32" font-size="12" fill="#263a34" text-anchor="middle">E</text>
+    <text x="684.0" y="92" font-size="11" fill="#68726d" text-anchor="middle">11</text>
+    <text x="20" y="124" font-size="12" fill="#68726d" text-anchor="start">输入行 i 预测 token i+1；只有预测助手内容与结束标记的行计入损失：</text>
+    <rect x="49.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="75.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="107.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="133.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="165.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="191.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="223.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="249.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="281.0" y="138" width="52" height="26" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <text x="307.0" y="156" font-size="12" fill="#263a34" text-anchor="middle">1</text>
+    <rect x="339.0" y="138" width="52" height="26" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <text x="365.0" y="156" font-size="12" fill="#263a34" text-anchor="middle">1</text>
+    <rect x="397.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="423.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="455.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="481.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="513.0" y="138" width="52" height="26" rx="3" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="539.0" y="156" font-size="12" fill="#68726d" text-anchor="middle">0</text>
+    <rect x="571.0" y="138" width="52" height="26" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <text x="597.0" y="156" font-size="12" fill="#263a34" text-anchor="middle">1</text>
+    <rect x="629.0" y="138" width="52" height="26" rx="3" fill="#e1eee9" stroke="#087f70"/>
+    <text x="655.0" y="156" font-size="12" fill="#263a34" text-anchor="middle">1</text>
+    <text x="20" y="196" font-size="12" fill="#68726d" text-anchor="start">灰：system　蓝：user　橙：assistant 头（被读取、不被预测）　绿：assistant 内容与 E。遮罩只挡损失，不挡注意力。</text>
+  </g>
+</svg>

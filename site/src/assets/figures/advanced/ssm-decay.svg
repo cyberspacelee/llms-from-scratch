@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="20" y="24" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">最后状态对每个历史输入的权重 aᵗ⁻ʲ</text>
+    <text x="40" y="54" font-size="14" fill="#087f70" text-anchor="start" font-weight="600">a = 0.5</text>
+    <rect x="40" y="189.0625" width="30" height="1" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="55" y="206" font-size="11" fill="#68726d" text-anchor="middle">u0</text>
+    <text x="55" y="183.0625" font-size="10" fill="#263a34" text-anchor="middle">0.008</text>
+    <rect x="80" y="188.125" width="30" height="1.875" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="95" y="206" font-size="11" fill="#68726d" text-anchor="middle">u1</text>
+    <text x="95" y="182.125" font-size="10" fill="#263a34" text-anchor="middle">0.02</text>
+    <rect x="120" y="186.25" width="30" height="3.75" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="135" y="206" font-size="11" fill="#68726d" text-anchor="middle">u2</text>
+    <text x="135" y="180.25" font-size="10" fill="#263a34" text-anchor="middle">0.03</text>
+    <rect x="160" y="182.5" width="30" height="7.5" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="175" y="206" font-size="11" fill="#68726d" text-anchor="middle">u3</text>
+    <text x="175" y="176.5" font-size="10" fill="#263a34" text-anchor="middle">0.06</text>
+    <rect x="200" y="175.0" width="30" height="15.0" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="215" y="206" font-size="11" fill="#68726d" text-anchor="middle">u4</text>
+    <text x="215" y="169.0" font-size="10" fill="#263a34" text-anchor="middle">0.12</text>
+    <rect x="240" y="160.0" width="30" height="30.0" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="255" y="206" font-size="11" fill="#68726d" text-anchor="middle">u5</text>
+    <text x="255" y="154.0" font-size="10" fill="#263a34" text-anchor="middle">0.25</text>
+    <rect x="280" y="130.0" width="30" height="60.0" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="295" y="206" font-size="11" fill="#68726d" text-anchor="middle">u6</text>
+    <text x="295" y="124.0" font-size="10" fill="#263a34" text-anchor="middle">0.50</text>
+    <rect x="320" y="70.0" width="30" height="120.0" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="335" y="206" font-size="11" fill="#68726d" text-anchor="middle">u7</text>
+    <text x="335" y="64.0" font-size="10" fill="#263a34" text-anchor="middle">1.00</text>
+    <path d="M34 190H360" fill="none" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="410" y="54" font-size="14" fill="#3176b5" text-anchor="start" font-weight="600">a = 0.9</text>
+    <rect x="410" y="132.60437199999998" width="30" height="57.39562800000001" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="425" y="206" font-size="11" fill="#68726d" text-anchor="middle">u0</text>
+    <text x="425" y="126.60437199999998" font-size="10" fill="#263a34" text-anchor="middle">0.48</text>
+    <rect x="450" y="126.22708" width="30" height="63.772920000000006" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="465" y="206" font-size="11" fill="#68726d" text-anchor="middle">u1</text>
+    <text x="465" y="120.22708" font-size="10" fill="#263a34" text-anchor="middle">0.53</text>
+    <rect x="490" y="119.1412" width="30" height="70.8588" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="505" y="206" font-size="11" fill="#68726d" text-anchor="middle">u2</text>
+    <text x="505" y="113.1412" font-size="10" fill="#263a34" text-anchor="middle">0.59</text>
+    <rect x="530" y="111.268" width="30" height="78.732" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="545" y="206" font-size="11" fill="#68726d" text-anchor="middle">u3</text>
+    <text x="545" y="105.268" font-size="10" fill="#263a34" text-anchor="middle">0.66</text>
+    <rect x="570" y="102.51999999999998" width="30" height="87.48000000000002" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="585" y="206" font-size="11" fill="#68726d" text-anchor="middle">u4</text>
+    <text x="585" y="96.51999999999998" font-size="10" fill="#263a34" text-anchor="middle">0.73</text>
+    <rect x="610" y="92.8" width="30" height="97.2" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="625" y="206" font-size="11" fill="#68726d" text-anchor="middle">u5</text>
+    <text x="625" y="86.8" font-size="10" fill="#263a34" text-anchor="middle">0.81</text>
+    <rect x="650" y="82.0" width="30" height="108.0" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="665" y="206" font-size="11" fill="#68726d" text-anchor="middle">u6</text>
+    <text x="665" y="76.0" font-size="10" fill="#263a34" text-anchor="middle">0.90</text>
+    <rect x="690" y="70.0" width="30" height="120.0" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="705" y="206" font-size="11" fill="#68726d" text-anchor="middle">u7</text>
+    <text x="705" y="64.0" font-size="10" fill="#263a34" text-anchor="middle">1.00</text>
+    <path d="M404 190H730" fill="none" stroke="#d5ddd7" stroke-width="1"/>
+    <text x="20" y="240" font-size="12" fill="#68726d" text-anchor="start">s₇ = Σ a⁷⁻ʲ uⱼ：同一个状态以几何衰减的权重混合全部历史。a = 0.5 时 u₀ 的权重只剩 0.008；</text>
+    <text x="20" y="260" font-size="12" fill="#68726d" text-anchor="start">a = 0.9 时仍有 0.48。选择性状态空间模型让 a 随输入变化，从而决定哪些内容多保留一会儿。</text>
+  </g>
+</svg>

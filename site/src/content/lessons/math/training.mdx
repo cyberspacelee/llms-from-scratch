@@ -7,6 +7,8 @@ code:
   - code/math/neural_network.py
 ---
 
+import SoftmaxLossLab from '../../../components/labs/SoftmaxLossLab'
+
 给网络四个输入，它能不能学会“两个数不同就输出 1，相同就输出 0”？这个异或问题足够小，可以逐步检查：网络能表示这个规则吗，预测有多错，哪个参数需要往哪个方向调整？本章沿着这三个问题，把前面学到的矩阵、概率与导数接成一个训练过程。先修是 [矩阵求导](/math/matrix-calculus/)、[链式法则](/math/backprop/) 和 [交叉熵](/math/distributions/)。
 
 ## 神经元与隐藏层：为什么需要非线性
@@ -136,6 +138,10 @@ $$
 $$
 
 因此 $\partial\ell/\partial z_c=p_c-\mathbf1_{c=y}$。正确类别的梯度通常为负，梯度下降会倾向于增加它的分数；错误类别的梯度为正，下降会倾向于降低它们的分数。这些是对独立分数的局部方向，真实网络共享参数后，还要把各样本贡献合并。对整个批量：
+
+<SoftmaxLossLab client:visible />
+
+拖动分数时，概率柱与梯度柱同时变化：三个梯度之和始终为零，因为概率之和固定为一。把正确类别的分数调高，它的概率接近 1、梯度接近 0，损失的信号随之变弱；把温度调低，同样的分数差被放大，概率更尖锐，梯度公式也多出 $1/\tau$ 因子。温度在 [P9](/principles/generation/) 中还会作为采样选项再次出现，那里它只改变采样分布，不参与训练。
 
 $$
 G_2=\frac{\partial L}{\partial Z}=\frac{P-Y}{B}\in\mathbb R^{B\times C}.

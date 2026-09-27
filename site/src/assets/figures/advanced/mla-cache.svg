@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 250">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <text x="20" y="24" font-size="15" fill="#263a34" text-anchor="start" font-weight="600">每层、每个历史位置要缓存多少个元素（DeepSeek-V3 形状）</text>
+    <text x="20" y="64" font-size="13" fill="#263a34" text-anchor="start">MHA：128 头 × 128 维 × K、V 两份</text>
+    <rect x="20" y="72" width="560.0" height="22" rx="2" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="586.0" y="88" font-size="13" fill="#3176b5" text-anchor="start">32,768</text>
+    <text x="20" y="122" font-size="13" fill="#263a34" text-anchor="start">GQA 假想：8 个 KV 头 × 128 × 2</text>
+    <rect x="20" y="130" width="35.0" height="22" rx="2" fill="#f7e9da" stroke="#c16b36"/>
+    <text x="61.0" y="146" font-size="13" fill="#c16b36" text-anchor="start">2,048</text>
+    <text x="20" y="180" font-size="13" fill="#263a34" text-anchor="start">MLA：潜变量 512 + 位置键 64</text>
+    <rect x="20" y="188" width="9.84375" height="22" rx="2" fill="#e1eee9" stroke="#087f70"/>
+    <text x="35.84375" y="204" font-size="13" fill="#087f70" text-anchor="start">576</text>
+    <text x="20" y="236" font-size="12" fill="#68726d" text-anchor="start">MLA 的 576 个元素同时提供 K 与 V、跨头共享，约为同头数 MHA 的 1/57；它不乘查询头数，也没有 KV 的两份。</text>
+  </g>
+</svg>

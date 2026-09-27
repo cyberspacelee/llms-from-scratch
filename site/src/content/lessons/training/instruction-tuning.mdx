@@ -1,7 +1,7 @@
 ---
 title: 指令微调
 question: 下一 token 的续写目标怎样训练成对话回复
-description: 明确 Base 与 Instruct、对话序列化、generation prompt、多轮 assistant 标签、损失掩码和提示梯度，并完成一个微型格式任务的 SFT 对照。
+description: 明确 Base 与 Instruct、对话序列化、generation prompt、多轮 assistant 标签、损失掩码和提示梯度，完成一个微型格式任务的 SFT 对照，并把 SFT 推广为用教师分布训练的蒸馏。
 order: 5
 code:
   - code/training/instruction_tuning.py
@@ -73,7 +73,9 @@ $$
 | 10 | 10 | 回答二 | assistant |
 | 11 | 11 | E | assistant |
 
-移位后有十一行 logits，有效行为 $i=4,5,9,10$。行 4 读取 A 预测回答一，行 5 读取回答一预测 E；行 9、10 对第二轮重复这个过程。有效目标数为四，不能除以原始十二个 token 或输入十一行。
+移位后有十一行 logits，有效行为 $i=4,5,9,10$。
+
+<Figure src="training/sft-mask.svg" alt="十二个 token 的多轮对话中，只有预测回答一、结束标记、回答二、结束标记的四行计入损失">上排是完整 token 流，颜色表示角色；下排的每格位于相邻两个 token 之间，表示“读到第 i 个 token、预测第 i+1 个”的那一行。只有 4、5、9、10 四行的目标属于助手，其余行照常参与前向与注意力，只是不计损失。</Figure>行 4 读取 A 预测回答一，行 5 读取回答一预测 E；行 9、10 对第二轮重复这个过程。有效目标数为四，不能除以原始十二个 token 或输入十一行。
 
 这张表使用不同 ID 区分两次相同角色符号，目的是方便逐行核查，不是推荐真实词表为每一轮建立新的角色 ID。真实模型应复用相同角色标记的编码，仍可在预处理元数据中记录每个目标归属。
 
@@ -115,6 +117,23 @@ $$
 
 注意回复 NLL使用真实前缀的教师强制，生成结果使用自己的首个选择作为后续输入。代码同时输出两个观察，避免仅用低 NLL 推断实际格式成功。没有同时调整温度、提示模板或重复次数，因此这项前后比较的主要变化来自参数更新。
 
+## 蒸馏：用教师分布代替单个目标 token
+
+SFT 在每个回复位置只给出一个正确 token，交叉熵的目标是独热分布。若已有一个更大的教师模型，它在同一位置给出的是整个词表上的分布：除了最可能的 token，还说明哪些替代写法也合理、哪些明显错误。知识蒸馏（knowledge distillation）让学生去拟合这个分布。
+
+设教师与学生在同一位置的 logits 为 $z^{\mathrm t},z^{\mathrm s}$，温度 $\tau$ 下的分布记作 $p^{\mathrm t}_\tau=\operatorname{softmax}(z^{\mathrm t}/\tau)$，学生同理。逐位置损失为：
+
+$$
+\ell_{\mathrm{KD}}=\tau^2\,\mathrm{KL}\big(p^{\mathrm t}_\tau\,\|\,p^{\mathrm s}_\tau\big)
+=\tau^2\sum_c p^{\mathrm t}_{\tau,c}\big(\ln p^{\mathrm t}_{\tau,c}-\ln p^{\mathrm s}_{\tau,c}\big).
+$$
+
+对学生 logits 求导，沿用 [M2](/math/distributions/) 的 softmax 交叉熵结果，得到 $\partial\ell_{\mathrm{KD}}/\partial z^{\mathrm s}_c=\tau\,(p^{\mathrm s}_{\tau,c}-p^{\mathrm t}_{\tau,c})$。$\tau=1$ 时就是“学生概率减教师概率”；教师分布若是独热，KL 退化为普通交叉熵，SFT 是蒸馏的特例。升温使两个分布都变平，让低概率项的差别也进入梯度；除以 $\tau$ 缩小了 logits，前面的 $\tau^2$ 把梯度幅度补回同一量级，便于与普通交叉熵项混合。
+
+实际有两种做法。逐 token 蒸馏需要教师与学生共用同一个 tokenizer 和词表，训练时对每个位置运行教师前向，损失遮罩与 SFT 相同，只在回复位置计算。序列级蒸馏更简单：让教师为一批提示生成回复，再把这些回复当作普通 SFT 数据训练学生，只用到教师的采样结果，不需要词表一致。[A5](/advanced/reasoning-rl/) 中用推理模型生成的轨迹训练较小模型，就是序列级蒸馏。
+
+蒸馏只能把学生推向教师的分布，教师的错误也会一起学到；它同样需要本章的模板契约、去重与独立评估。脚本核对三件事：$\tau=1$ 时梯度等于概率差，独热教师下损失等于交叉熵，以及 $\tau=4$ 时梯度为 $\tau$ 倍的软概率差。
+
 ## 数据质量与遗忘：为什么 SFT 不能只增加样本数
 
 错误答案、互相矛盾的角色规则、模板不一致和低质量自动生成回复，都会进入监督目标。去重和文档划分仍按 [T1](/training/data/) 执行，尤其同一会话的改写版本不能散入训练和验证。来源、回复生成方法与审核规则应记录，以便解释数据偏好。
@@ -129,7 +148,7 @@ SFT 也不是可靠性或安全性的保证。学习到训练回复的风格不�
 
 <CodeFile path="code/training/instruction_tuning.py" />
 
-运行 `python code/training/instruction_tuning.py`，先核对多轮有效行为 `[4,5,9,10]`，再检查直接 logits 梯度与提示表示梯度，最后输出微型格式任务更新前后的验证 NLL 和自由生成回复。前半部分是透明梯度参考，后半部分是真正 Decoder 更新，两者职责不同。
+运行 `python code/training/instruction_tuning.py`，先核对多轮有效行为 `[4,5,9,10]`，再检查直接 logits 梯度与提示表示梯度，最后输出微型格式任务更新前后的验证 NLL 和自由生成回复。前半部分是透明梯度参考，后半部分是真正 Decoder 更新，两者职责不同。最后一个函数核对蒸馏损失的梯度、独热退化与温度缩放。
 
 ## 常见误区
 
@@ -162,6 +181,8 @@ assistant-only loss 不代表 prompt 不影响训练；assistant 头不是回复
 
 ## 原始资料
 
+- [Hinton 等：Distilling the Knowledge in a Neural Network](https://arxiv.org/abs/1503.02531)：温度软目标与 $\tau^2$ 缩放。
+- [Kim 和 Rush：Sequence-Level Knowledge Distillation](https://arxiv.org/abs/1606.07947)：用教师生成序列训练学生。
 - [Hugging Face：Chat templates](https://huggingface.co/docs/transformers/main/en/chat_templating)：角色消息、generation prompt 与特殊 token 接口。
 - [Training language models to follow instructions with human feedback](https://arxiv.org/abs/2203.02155)：SFT 在多阶段后训练中的位置；本章只实现监督步骤。
 - [Hugging Face TRL：SFT Trainer](https://huggingface.co/docs/trl/sft_trainer)：完整序列、completion 与 assistant 监督选择的工程接口。实际模板能否返回可靠 span 需要按具体 tokenizer 核对。

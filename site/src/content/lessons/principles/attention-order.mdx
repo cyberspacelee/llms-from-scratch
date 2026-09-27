@@ -7,53 +7,20 @@ code:
   - code/principles/position_encoding.py
 ---
 
-import DotProductLab from '../../../components/labs/DotProductLab'
-
-在 [P3](/principles/attention/) 中，我们已定义注意力；[P4](/principles/decoder/) 又加入了位置表。本章将位置项移除，证明无位置、双向注意力的置换等变性，再单独分析因果遮罩的边界。后两章讨论可以添加的结构及其保证。下面的单查询回顾沿用 P3 数值，重点从计算转向对称性。
+在 [P3](/principles/attention/) 中，我们已定义注意力；[P4](/principles/decoder/) 又加入了位置表。本章将位置项移除，证明无位置、双向注意力的置换等变性，再单独分析因果遮罩的边界。后两章讨论可以添加的结构及其保证。
 
 > 推导路线：点积与排列 → 加法位置向量 → 平移的线性表示 → sin/cos → 相对关系 → 旋转 Q/K。数学上“可以证明的性质”和工程上“人为选择的设计”会分别标明。
 
-点积是整条路线的起点。下面的实验里，分数既取决于两个向量的长度，也取决于它们的相对方向；给两个向量施加同一个旋转，点积不变，只转其中一个才会改变它。[P7](/principles/rope/) 的 RoPE 正是利用这一点。
+## 回顾：注意力里哪一步用到了下标
 
-<DotProductLab client:visible />
-
-## 先把注意力拆成普通运算
-
-### 从一个查询开始，而不是直接背矩阵公式
-
-设一段序列有 $T$ 个 token。每个内容向量 $x_i\in\mathbb R^d$ 是列向量。投影矩阵 $W_Q,W_K\in\mathbb R^{d\times d_h}$ 把它变成查询和键：
+P3 已经从单个查询推到矩阵形式，这里只取证明需要的部分。把内容向量按行堆成 $X\in\mathbb R^{T\times d}$，去掉位置表与遮罩，双向单头注意力是：
 
 $$
-q_i=W_Q^\top x_i,\qquad k_j=W_K^\top x_j,\qquad
-s_{ij}=\frac{q_i^\top k_j}{\sqrt{d_h}}.
-$$
-
-点积就是对应分量相乘后求和：$q_i^\top k_j=\sum_{a=1}^{d_h}q_{i,a}k_{j,a}$。也可以写成 $\|q_i\|_2\|k_j\|_2\cos\phi$：既取决于长度，也取决于方向，不是纯粹的夹角相似度。
-
-例如 $q=(1,2)^\top$，$k_0=(2,0)^\top$，$k_1=(0,1)^\top$。两次点积都是 $2$，所以两项缩放分数相同，softmax 给出各 $1/2$ 的权重。若 $v_0=(1,0)^\top,v_1=(0,3)^\top$，输出就是 $(0.5,1.5)^\top$。
-
-<KeyEq label="单个查询的注意力输出">
-
-$$
-\alpha_{ij}=\frac{\exp(s_{ij})}{\sum_{\ell=0}^{T-1}\exp(s_{i\ell})},\qquad
-y_i=\sum_{j=0}^{T-1}\alpha_{ij}v_j.
-$$
-
-</KeyEq>
-
-在各分量独立、均值为零且方差为一的简化假设下，点积方差为 $d_h$；除以 $\sqrt{d_h}$ 将方差缩回 1，缓解 softmax 过早饱和。这是缩放因子的动机，不是位置编码本身。
-
-### 矩阵乘法只是把所有配对一起算
-
-将列向量转置后按行堆叠为 $X\in\mathbb R^{T\times d}$，于是 $Q=XW_Q$。$QK^\top$ 的第 $(i,j)$ 项恰好就是刚才的点积。
-
-$$
-\underbrace{Q}_{T\times d_h}\underbrace{K^\top}_{d_h\times T}
-=\underbrace{\big[q_i^\top k_j\big]_{ij}}_{T\times T},\qquad
+Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\qquad
 F(X)=\operatorname{softmax}_{\mathrm{row}}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
 $$
 
-这里还没有任何一个运算使用“第几位”或“相距几位”。数组有下标，不等于模型使用了下标的数值。
+$QK^\top$ 的第 $(i,j)$ 项是 $q_i^\top k_j$，只由这两行的内容决定；softmax 的分母是整行的和；输出是值行的加权和。逐项检查会发现：没有任何一步读取“第几位”或“相距几位”的数值。数组有下标，不等于模型使用了下标的数值。下面把这个观察写成证明。
 
 ## 为什么它不能自行识别顺序
 

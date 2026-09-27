@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300">
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#68726d"/></marker></defs>
+  <g font-family="sans-serif">
+    <rect x="20" y="118" width="70" height="40" rx="4" fill="#f0f3f1" stroke="#d5ddd7"/>
+    <text x="55.0" y="143.4" font-size="15" fill="#263a34" text-anchor="middle">x</text>
+    <text x="55" y="176" font-size="12" fill="#68726d" text-anchor="middle">(d)</text>
+    <rect x="170" y="40" width="160" height="120" rx="4" fill="#e2eaf7" stroke="#3176b5"/>
+    <text x="250" y="96" font-size="18" fill="#3176b5" text-anchor="middle">W</text>
+    <text x="250" y="120" font-size="12" fill="#68726d" text-anchor="middle">冻结 · m × d</text>
+    <rect x="170" y="199" width="160" height="26" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="250" y="217" font-size="12" fill="#087f70" text-anchor="middle">A · r × d</text>
+    <rect x="390" y="180" width="28" height="64" rx="4" fill="#e1eee9" stroke="#087f70"/>
+    <text x="404" y="172" font-size="13" fill="#087f70" text-anchor="middle">B</text>
+    <text x="404" y="262" font-size="12" fill="#087f70" text-anchor="middle">m × r</text>
+    <path d="M90 138H130V100H166" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M130 138V212H166" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M330 212H386" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="358" y="204" font-size="11" fill="#68726d" text-anchor="middle">Ax</text>
+    <circle cx="560" cy="138" r="15" fill="#fffefa" stroke="#263a34" stroke-width="1.5"/>
+    <text x="560" y="143" font-size="15" fill="#263a34" text-anchor="middle">+</text>
+    <path d="M330 100H560V121" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <path d="M418 212H560V155" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="470" y="204" font-size="12" fill="#087f70" text-anchor="start">× s = α / r</text>
+    <path d="M575 138H620" fill="none" stroke="#68726d" stroke-width="1.5" marker-end="url(#arrow)"/>
+    <text x="630" y="143" font-size="14" fill="#263a34" text-anchor="start">y (m)</text>
+    <text x="20" y="290" font-size="12" fill="#68726d" text-anchor="start">只训练绿色的 A 与 B，共 r(d + m) 个参数；B 从零初始化，所以训练开始时 y 与基座完全相同。</text>
+  </g>
+</svg>

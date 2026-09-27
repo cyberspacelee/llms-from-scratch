@@ -109,7 +109,25 @@ $$
 I_{\mathrm{input}}=\frac{2t^3}{4\cdot2t^2}=\frac{t}{4}\ \mathrm{FLOP/byte}.
 $$
 
-边长 16 时，这个局部计数为 4 FLOP/byte。增大 tile 会增加输入复用，但输出累计、共享缓冲区和线程资源也增大。[S2 单卡的上限](/systems/accelerator/) 的屋顶线说明为什么复用有价值；G4 会说明资源约束为什么阻止“越大越好”。这个公式不是整个 kernel 的实测速率，也没把所有开销算进去。
+边长 16 时，这个局部计数为 4 FLOP/byte。增大 tile 会增加输入复用，但输出累计、共享缓冲区和线程资源也增大；G4 会说明资源约束为什么阻止“越大越好”。这个公式不是整个 kernel 的实测速率，也没把所有开销算进去。
+
+### 屋顶线：强度决定上限贴着哪条线
+
+算术强度本身没有快慢，它要和硬件的两个峰值放在一起才有意义。设设备的算力峰值为 $\pi$ FLOP/s、显存带宽为 $\beta$ byte/s。一个强度为 $I$ 的 kernel 每秒最多搬 $\beta$ 字节，因此每秒最多完成 $\beta I$ FLOP；它也不能超过算力峰值。[Williams 等人](https://dl.acm.org/doi/10.1145/1498765.1498785) 把这两条上限画成屋顶线：
+
+<KeyEq label="屋顶线">
+
+$$
+\text{可达 FLOP/s}\le\min(\pi,\ \beta I),\qquad I_{\mathrm{ridge}}=\frac{\pi}{\beta}.
+$$
+
+</KeyEq>
+
+两条线在脊点 $I_{\mathrm{ridge}}$ 相交。强度在脊点左边，上限贴着带宽斜线，此时减少字节才能提高上限；在右边，上限贴着算力平台，再省字节也不会更快。
+
+用一台假想设备手算：$\pi=100$ TFLOP/s，$\beta=2$ TB/s，脊点为 50 FLOP/byte。上面边长 16 的 float32 tile 强度为 4，上限只有 $2\times4=8$ TFLOP/s，远在斜线上。输入改用 2 字节元素后，同一 tile 的强度变为 $t/2=8$，上限翻倍到 16 TFLOP/s；按这个局部计数，边长要到 100 才碰到脊点，而两块 $100\times100$ 的 2 字节 tile 已占 40 KB 共享缓冲区。真实库还依靠 L2 让不同 block 共用装载，所以 HBM 实际字节少于逐 block 相加的计数。
+
+屋顶线是上限模型，不是测量值：它不含发射开销、边界 tile、同步等待和驻留不足。脚本用同一组假想数字核对上限与脊点；真实 GPU 的峰值、产品规格读取方式和 LLM 负载在屋顶线上的位置，由 [S2 单卡的上限](/systems/accelerator/) 代入。
 
 <FigureShell label="5×7 与 7×6 的真实矩阵及其乘积">
   <img src={import.meta.env.DEV ? import.meta.env.BASE_URL.replace(/\/$/, '') + matrixTiles.src : matrixTiles.src} width={matrixTiles.width} height={matrixTiles.height} alt="三幅逐格标数的矩阵热力图：A 为 5×7，B 为 7×6，C 为 5×6；绿色边框标出第一组四乘四分块" class="block h-auto w-full min-w-176" loading="lazy" />

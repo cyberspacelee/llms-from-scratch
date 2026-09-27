@@ -118,6 +118,20 @@ def verify():
                 reference[b, i, span] = scores.softmax(0) @ v[b, :i + 1, span]
     torch.testing.assert_close(attention(x), attention.output(reference))
 
+    # Residual stream: the final hidden state is the embedding plus every branch write.
+    with torch.no_grad():
+        deep = Decoder(8, width=4, heads=2, ff_width=8, layers=3, max_length=4).double()
+        x0 = deep.embedding(ids) + deep.position(torch.arange(4))
+        stream, writes = x0, []
+        for block in deep.blocks:
+            writes.append(block.attention(block.norm_attention(stream)))
+            stream = stream + writes[-1]
+            writes.append(block.ff(block.norm_ff(stream)))
+            stream = stream + writes[-1]
+        assert len(writes) == 6
+        torch.testing.assert_close(x0 + sum(writes), stream)
+        torch.testing.assert_close(deep.head(deep.norm(stream)), deep(ids))
+
     with torch.no_grad():
         model.position.weight.zero_()
         for block in model.blocks:
@@ -132,7 +146,7 @@ def verify():
     expected = (torch.arange(1., 5., dtype=torch.float64) - 2.5) / math.sqrt(1.25 + 1e-5)
     torch.testing.assert_close(model(torch.tensor([[0]]))[0, 0, :4], expected)
     print("PASS: complete forward/backward, 268 parameters, causal and batch isolation")
-    print("PASS: loop vs multihead matrix attention; hand LayerNorm-to-logits example")
+    print("PASS: loop vs multihead matrix attention; residual stream sum; hand LayerNorm-to-logits example")
 
 
 if __name__ == "__main__":

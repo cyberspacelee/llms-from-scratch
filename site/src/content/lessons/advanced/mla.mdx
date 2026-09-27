@@ -123,6 +123,8 @@ $$
 
 官方 [DeepSeek-V3 e815299 配置](https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/e815299/config.json) 中 $d_c=512,d_{\mathrm R}=64$，所以这种潜在表示每位置每层为 576 个元素；这只是结构容量，运行时可能另有临时缓存或内核工作区。其内容头维 128、查询头数 128 不应再直接代入 GQA 的双份 KV 公式。[报告 §2.1.1](https://arxiv.org/html/2412.19437v2#S2.SS1.SSS1)
 
+<Figure src="advanced/mla-cache.svg" alt="每层每位置缓存元素数：MHA 32768，假想 GQA 2048，MLA 576">三根条按同一比例画出。GQA 一行是为比较而假设的 8 个 KV 头，不是 DeepSeek-V3 的配置；MLA 的条最短，因为一份潜变量同时服务所有头的 K 与 V。</Figure>
+
 缓存更短不保证所有形状上更快：吸收后查询维可能大于普通单头维，后端能否高效执行潜在注意力、批大小和权重搬移也会影响时间。[S1](/systems/ledger/) 的成本方法仍适用，只需重新列矩阵和状态。
 
 ## CPU 核对：相同参数的两条计算链

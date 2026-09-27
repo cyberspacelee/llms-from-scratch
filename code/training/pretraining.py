@@ -7,6 +7,7 @@ import random
 import sys
 
 import torch
+from torch.utils.flop_counter import FlopCounterMode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "principles"))
 from decoder import Decoder
@@ -133,5 +134,29 @@ def verify():
     print(f"pretraining: fixed-batch overfit NLL {start:.6f} -> {end:.6f} (not a generalization result)")
 
 
+def training_flops(matmul_weights, layers, width, length, tokens):
+    """Forward + backward FLOP: 6 per matmul weight per token, plus full-square attention matmuls."""
+    return 6 * matmul_weights * tokens + 12 * layers * length * width * tokens
+
+
+def verify_compute():
+    torch.manual_seed(37)
+    model = Decoder(**CONFIG).double()
+    batch, length = 3, 12
+    ids = torch.randint(0, CONFIG["vocab_size"], (batch, length))
+    # Embedding lookups are not matrix multiplications; every Linear weight is.
+    weights = sum(m.weight.numel() for m in model.modules() if isinstance(m, torch.nn.Linear))
+    with FlopCounterMode(display=False) as counter:
+        sequence_loss(model(ids[:, :-1]), ids[:, 1:]).backward()
+    predicted = training_flops(weights, CONFIG["layers"], CONFIG["width"], length - 1, batch * (length - 1))
+    assert weights == 4160 and counter.get_total_flops() == predicted
+    # Chinchilla-style budget: C = 6ND with D = 20N gives N = sqrt(C / 120).
+    budget = 1e21
+    params = (budget / 120) ** 0.5
+    assert abs(params - 2.886751e9) < 1e3 and abs(6 * params * 20 * params - budget) < 1e9
+    print(f"pretraining: counted {counter.get_total_flops()} FLOP = 6ND + attention term; 1e21 FLOP -> N={params:.3e}")
+
+
 if __name__ == "__main__":
     verify()
+    verify_compute()
