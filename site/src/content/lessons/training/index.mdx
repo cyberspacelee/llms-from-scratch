@@ -1,0 +1,16 @@
+---
+title: 训练与适配
+question: 怎样把一个前向模型变成可评估、可恢复、可适配的语言模型
+description: 从文档划分和有效 token 损失，到 AdamW、可恢复预训练、评估、指令微调与 LoRA。
+order: 0
+---
+
+模型原理路线已经说明，给定一段 token，Decoder 怎样输出下一 token 的分布。训练路线回答接下来的问题：这些分布来自什么数据，怎样更新，怎样判断改善，以及怎样让同一个基座适配对话和特定任务。
+
+先完成 [P1 文本、token 与嵌入](/principles/tokenization/)、[P2 下一 token 预测](/principles/language-modeling/) 和 [P4 一个完整 Decoder](/principles/decoder/)。优化器推导还会用到 [M6 反向传播](/math/backprop/) 与 [M7 神经网络训练](/math/training/)。现代块、生成和缓存分别回读 [P8](/principles/modern-decoder/)、[P9](/principles/generation/) 与 [P10](/principles/kv-cache/)。
+
+六章使用同一套训练约定：先按文档划分，再构造样本；损失按有效目标 token 求平均；参数与优化器状态分开；每个指标都有数据、模板和上下文边界。CPU 小模型用于验证算法与实验流程，不能据此推断大模型的能力或 GPU 吞吐。
+
+<ChapterList track="training" />
+
+如果已经有公开 checkpoint，可以从 [T4 模型评估](/training/evaluation/) 开始，再回到数据和训练实现。需要微调时，先明确 [T5](/training/instruction-tuning/) 中哪些目标 token 参与损失，再用 [T6](/training/lora/) 决定更新哪些参数。

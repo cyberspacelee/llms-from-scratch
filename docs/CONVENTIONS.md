@@ -4,7 +4,7 @@
 
 ## 路线与章节
 
-- 三条路线各占一个目录：`math/`（M）、`principles/`（P）、`systems/`（S）。路线元数据在 `site/src/lib/tracks.ts`。
+- 四条主线与进阶各占一个目录：`math/`（M）、`principles/`（P）、`training/`（T）、`systems/`（S）、`advanced/`（A）。路线元数据在 `site/src/lib/tracks.ts`。
 - 每条路线的 `index.mdx` 是导读，`order: 0`；章节 `order` 从 1 连续编号，章节代码（M3、P2、S4）由路线字母和 `order` 生成。新增或调整章节只改 frontmatter，不维护任何目录表。
 - 一章讲清一个问题，篇幅以 5k–9k 字正文为宜。过长就按问题拆开，过短就并入相邻章节；两章不重复推导同一个结论，后出现的一章链接到先出现的那一节。
 

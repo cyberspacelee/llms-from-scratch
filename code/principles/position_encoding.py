@@ -54,6 +54,8 @@ def apply_rope(x, positions, base=10000.0):
 def attention(q, k, v, mask=None):
     scores = q @ k.transpose(-1, -2) / math.sqrt(q.shape[-1])
     if mask is not None:
+        if mask.dtype != torch.bool or not mask.any(dim=-1).all():
+            raise ValueError("boolean mask must leave at least one visible key per query")
         scores = scores.masked_fill(~mask, float("-inf"))
     return scores.softmax(dim=-1) @ v
 
@@ -67,6 +69,19 @@ def verify():
     order = torch.tensor([2, 0, 4, 1, 3])
     f = lambda z: attention(z @ wq, z @ wk, z @ wv)
     close(f(x[order]), f(x)[order])
+    causal = torch.ones(5, 5, dtype=torch.bool).tril()
+    original = attention(x @ wq, x @ wk, x @ wv, causal)
+    moved_mask = causal[order][:, order]
+    moved = attention(x[order] @ wq, x[order] @ wk, x[order] @ wv, moved_mask)
+    close(moved, original[order])
+    fixed = attention(x[order] @ wq, x[order] @ wk, x[order] @ wv, causal)
+    assert not torch.allclose(fixed, original[order])
+    try:
+        attention(x @ wq, x @ wk, x @ wv, torch.zeros(5, 5, dtype=torch.bool))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("all-masked queries must be rejected")
 
     p = torch.arange(5, dtype=dtype)
     pe = sinusoidal_pe(p, 8)

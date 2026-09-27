@@ -2,9 +2,10 @@
 title: KV cache 的正确性
 question: 逐 token 解码为什么与整段计算得到同一个结果
 description: 从整段因果注意力推到 prefill、分块与逐 token 解码，证明缓存 K/V 与重算等价，并列出位置、掩码和频率必须满足的条件。
-order: 4
+order: 10
 code:
   - code/principles/kv_cache.py
+  - code/principles/decoder.py
 ---
 
 import CacheIndexLab from '../../../components/labs/CacheIndexLab'
@@ -15,7 +16,7 @@ import CacheIndexLab from '../../../components/labs/CacheIndexLab'
 
 ## 完整因果计算究竟算了什么？
 
-沿用 [P1](/principles/attention-order/) 的列向量记号，$T_i$ 是 [P3](/principles/rope/) 中位置 $i$ 的分块旋转。整段序列的位置为 $0,\ldots,T-1$，先计算 $q_i,k_i,v_i$，再旋转查询与键：
+沿用 [P5](/principles/attention-order/) 的列向量记号，$T_i$ 是 [P7](/principles/rope/) 中位置 $i$ 的分块旋转。整段序列的位置为 $0,\ldots,T-1$，先计算 $q_i,k_i,v_i$，再旋转查询与键：
 
 $$
 \widetilde q_i=T_iq_i,\qquad \widetilde k_j=T_jk_j,\qquad
@@ -124,13 +125,21 @@ $$
 
 ## PyTorch：整段、prefill、分块、逐 token 对照
 
-本程序复用 [P3](/principles/rope/) 的 `apply_rope`，避免维护两套公式。输入是预先给定的单层 Q/K/V，不是完整语言模型；验证的是该层缓存机制，不把它描述成端到端生成测试。
+本程序复用 [P7](/principles/rope/) 的 `apply_rope`，避免维护两套公式。输入是预先给定的单层 Q/K/V，不是完整语言模型；验证的是该层缓存机制，不把它描述成端到端生成测试。
 
 <CodeFile path="code/principles/kv_cache.py" />
 
 在仓库根目录执行 `python code/principles/kv_cache.py`。它比较 4 种分块方式，并增加错误对照：故意将新查询位置重置为零，确认输出确实发生变化。
 
 代码里的 `torch.cat` 便于观察追加语义，但每步会复制缓存；生产实现一般用预分配或分页存储。这里刻意不引入复杂缓存管理，以便把数学对应关系保持清晰。
+
+## 完整模型：核对最终 logits，而不止一层注意力
+
+单层 Q/K/V 算例只能核对局部关系。脚本还实例化 [P4](/principles/decoder/) 的三层完整 Decoder：内容与学习式位置嵌入、逐层 Pre-Norm、注意力、FFN、最终归一化和 LM head 全部参与。固定输入后，对整段、逐项与 3/2/4 分块前向分别比较每个位置的全部词表 logits，误差容限为 float64 下的 $10^{-10}$。
+
+每一层有独立 K/V，进入下一块前层内历史长度一致。新位置采用历史长度加本地索引，不是重新从零开始。教学 Decoder 使用学习式位置表，因此这项核对验证完整模型的缓存归纳；脚本开头的 RoPE 算例另行验证固定旋转规则，两项验收共同覆盖结构与位置边界。模型代码见 P4，`forward_cached` 返回新 logits 与各层新缓存。
+
+参考实现每步用 `torch.cat`，存在重复分配与复制；生产缓存的预分配、分页与共享在 [S5](/systems/paged-cache/) 展开。正确性证明不依赖必须复制这些张量。
 
 ## Padding、窗口与缓存索引不是同一个概念
 
@@ -142,7 +151,7 @@ $$
 \operatorname{position\_ids}=\operatorname{cumsum}(\operatorname{attention\_mask},-1)-1.
 $$
 
-padding 对应的位置数值仍需安全填充，并用 mask 屏蔽；实际规则必须与模型接口一致。[P3](/principles/rope/) 的示例只接受统一的 `[T]` 位置，若支持这种批次，需要扩展为每条样本独立的 `[B,T]`，而不是直接套用当前代码。
+padding 对应的位置数值仍需安全填充，并用 mask 屏蔽；实际规则必须与模型接口一致。[P7](/principles/rope/) 的示例只接受统一的 `[T]` 位置，若支持这种批次，需要扩展为每条样本独立的 `[B,T]`，而不是直接套用当前代码。
 
 ### 滑动窗口
 
@@ -155,38 +164,9 @@ $$
 
 这只保持保留下来的 Q/K 配对分数；丢掉窗口外 token 改变了 softmax 的可见集合，不能声称与原来的全上下文注意力完全等价。
 
-## 能算更远的位置，为什么不等于会理解？
+## 长上下文：固定频率也是缓存契约
 
-训练序列长 $T$ 时，模型学习到的是一定范围的相位差与内容模式。推理扩到 $sT$（$s>1$ 为扩展倍数），虽然 sin/cos 仍然有定义，但 $\Delta\omega_r$ 的分布可能超出训练范围；多个频率的组合、softmax 的候选数量也改变了。
-
-### 位置插值：压缩位置，相当于缩小频率
-
-$$
-p'=p/s,\qquad R(p'\omega_r)=R(p\omega_r/s).
-$$
-
-它把更长序列压到原相位范围附近，但也将邻近 token 的相位差从 $\omega_r$ 缩为 $\omega_r/s$，改变了局部距离分辨率。因此存在“覆盖远处”和“保留近处分辨率”的取舍。
-
-### 调整基底不是均匀缩放
-
-若 $\omega_r=\beta^{-2r/d_h}$，改为 $\beta'$ 后：
-
-$$
-\frac{\omega'_r}{\omega_r}=\left(\frac{\beta'}{\beta}\right)^{-2r/d_h}.
-$$
-
-比值随维度对变化，$r=0$ 时甚至不变。这与每对都除以同一个 $s$ 不同。YaRN 等方案进一步按频段处理缩放并调整注意力尺度；不能用“把位置除以一个常数”概括所有变体。
-
-### 动态改变频率会使已有缓存失配
-
-如果历史键用旧频率 $\omega$ 旋转，新查询却用新频率 $\omega'$，实际配对变成：
-
-$$
-q_i^\top R(-i\omega')R(j\omega)k_j
-=q_i^\top R(j\omega-i\omega')k_j.
-$$
-
-这不是新规则所需的 $R((j-i)\omega')$。需要遵循具体模型的缓存更新策略，或固定此次请求使用的频率方案；不能在序列中途只改新 token 的参数。
+能计算更大位置不保证理解更长上下文。位置插值、频段缩放与滑动窗口的完整分析见 [A4 长上下文](/advanced/long-context/)。本章只保留缓存约束：此次请求的旧键与新查询应使用兼容的位置变换；不能序列中途只修改新 token 的 RoPE 频率，否则配对相位不再是同一规则下的位置差。
 
 ## 验收时检查这些等式，而不只看文字生成
 

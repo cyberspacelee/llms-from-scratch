@@ -4,6 +4,7 @@ import torch
 
 # Python puts this file's directory on sys.path, so the sibling module imports directly.
 from position_encoding import apply_rope, attention
+from decoder import Decoder
 
 
 @torch.no_grad()
@@ -43,6 +44,19 @@ def verify():
     bad = attention(apply_rope(q[..., -1:, :], pos[:1]), apply_rope(k, pos), v)
     assert not torch.allclose(good, bad)
     print("PASS: resetting the decode position is detected as incorrect")
+    model = Decoder(13, width=16, heads=4, ff_width=32, layers=3, max_length=9).double().eval()
+    ids = torch.randint(0, 13, (2, 9))
+    with torch.no_grad():
+        expected = model(ids)
+        for chunks in ([9], [1] * 9, [3, 2, 4]):
+            caches, outputs, offset = None, [], 0
+            for size in chunks:
+                logits, caches = model.forward_cached(ids[:, offset:offset + size], caches)
+                outputs.append(logits)
+                offset += size
+                assert all(k.shape[-2] == offset for k, v in caches)
+            torch.testing.assert_close(torch.cat(outputs, 1), expected, atol=1e-10, rtol=1e-10)
+    print("PASS: complete three-layer Decoder cached logits equal full logits")
 
 
 if __name__ == "__main__":

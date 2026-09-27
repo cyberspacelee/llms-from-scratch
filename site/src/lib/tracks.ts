@@ -1,8 +1,8 @@
-export type TrackId = 'math' | 'principles' | 'systems'
+export type TrackId = 'math' | 'principles' | 'training' | 'systems' | 'advanced'
 
 export type Track = {
   id: TrackId
-  /** One letter that prefixes chapter codes: M3, P2, S4. */
+  /** One letter that prefixes chapter codes: M3, P6, S4. */
   letter: string
   label: string
   summary: string
@@ -20,13 +20,21 @@ export const tracks: Track[] = [
     id: 'principles',
     letter: 'P',
     label: '模型原理',
-    summary: '注意力为什么需要位置，sin/cos 与 RoPE 怎样写进点积，KV cache 为什么与整段计算相等。',
+    summary: '从文本与预测目标搭起完整 Decoder，推导位置、现代结构、生成与缓存。',
+  },
+  {
+    id: 'training', letter: 'T', label: '训练与评估',
+    summary: '准备数据，完整训练与恢复小语言模型，再做评估、指令微调和低秩适配。',
   },
   {
     id: 'systems',
     letter: 'S',
     label: '推理系统',
     summary: '给一次生成记账，看清单卡上限，再沿 nano-vLLM 源码走到调度、分页缓存与集群。',
+  },
+  {
+    id: 'advanced', letter: 'A', label: '进阶模型',
+    summary: '沿不同设计轴理解稀疏专家、压缩状态、偏好与推理训练，以及多模态输入。',
   },
 ]
 

@@ -3,6 +3,8 @@ title: 一次生成的账单
 question: 时间、容量和数据搬移各记在哪里，架构和负载怎样改写它们
 description: 用一个能手算的小模型和 Llama 3 8B 的公开宽度记下权重与 KV 的字节，再看 GQA、分数矩阵、专家结构和 prefill/decode/训练三种负载怎样改写这笔账。
 order: 1
+code:
+  - code/systems/ledger.py
 ---
 
 一次生成同时记三本账：花了多少时间，占了多少字节，这些字节在存储层级之间搬了几次。权重、激活和键值缓存（KV cache）是这三本账里反复出现的三项。本章先把字节算出来，再看两类改动怎样改写它：换一种架构，改的是公式里的因子；换一种负载，改的是同样这些字节被读的次数。
@@ -31,7 +33,7 @@ flowchart LR
 | $n_{\mathrm{vocab}}$ | 128 | 词表 |
 | $b_{\mathrm{elem}}$ | 2 | fp16，每元素字节数 |
 
-沿用 P1 的论文布局，输入按行存放，投影写作 $XW$；代码中 `nn.Linear.weight` 存储这些投影矩阵的转置。一层里的大矩阵形状是：
+沿用 [P3 注意力](/principles/attention/) 的论文布局，输入按行存放，投影写作 $XW$；代码中 `nn.Linear.weight` 存储这些投影矩阵的转置。一层里的大矩阵形状是：
 
 $$
 \begin{aligned}
@@ -90,7 +92,7 @@ $$
 
 ## 时间账先分开两个时刻
 
-用户感受到的时间至少有两段。首 token 之前的等待包含排队、prefill 和第一次采样，叫首 token 延迟（time to first token，TTFT）。之后逐次输出的间隔叫输出间隔（inter-token latency，ITL）；每条请求从首 token 到末 token 的时间除以后续 token 数，叫平均每输出 token 时间（time per output token，TPOT）。若一次流式事件输出多个 token，事件间隔不能直接当作每个 token 的间隔。只测量 decode，会把长提示的 prefill 整段漏掉；只报平均值，会把排队的长尾抹平。[S4](/systems/engine-execution/) 给出指标公式，这里先记住：prefill 的账单随提示长度一次付清，decode 的账单按生成长度逐 token 重复。
+用户感受到的时间至少有两段。首 token 之前的等待包含排队、prefill 和第一次采样，叫首 token 延迟（time to first token，TTFT）。之后逐次输出的间隔叫输出间隔（inter-token latency，ITL）；每条请求从首 token 到末 token 的时间除以后续 token 数，叫平均每输出 token 时间（time per output token，TPOT）。若一次流式事件输出多个 token，事件间隔不能直接当作每个 token 的间隔。只测量 decode，会把长提示的 prefill 整段漏掉；只报平均值，会把排队的长尾抹平。[S10](/systems/serving-evaluation/) 给出指标公式，这里先记住：prefill 的账单随提示长度一次付清，decode 的账单按生成长度逐 token 重复。
 
 数据搬移账问的是另一件事：这 14.96 GiB 权重在每个 decode token 上要不要从显存再读一遍，KV 是按整个上下文读还是只读新增的一块。本章最后把「读了多少字节、做了多少浮点运算」收成一个比值，[S2](/systems/accelerator/) 才把这个比值放到具体 GPU 的带宽和算力上。
 
@@ -107,7 +109,7 @@ flowchart LR
 
 ### 因果掩码决定谁能并行
 
-解码器在位置 $t$ 只能看见 $0,\ldots,t$，沿用 P4 从 0 开始的位置索引。Prefill 仍然可以把整段提示放进同一次矩阵乘，因为每个位置需要的历史都已经在输入里，掩码只是把未来的分数盖住。Decode 则没有这种自由：位置 $t+1$ 的查询依赖位置 $t$ 刚采样出来的 token。所以 KV 可以复用，生成本身仍是串行的。位置如何进入 Q 和 K，见 [相对位置与 RoPE](/principles/rope/)。
+解码器在位置 $t$ 只能看见 $0,\ldots,t$，沿用 P10 从 0 开始的位置索引。Prefill 仍然可以把整段提示放进同一次矩阵乘，因为每个位置需要的历史都已经在输入里，掩码只是把未来的分数盖住。Decode 则没有这种自由：位置 $t+1$ 的查询依赖位置 $t$ 刚采样出来的 token。所以 KV 可以复用，生成本身仍是串行的。位置如何进入 Q 和 K，见 [相对位置与 RoPE](/principles/rope/)。
 
 ### KV 头数直接乘在缓存上
 
@@ -129,7 +131,7 @@ FlashAttention 的做法是按 tile 计算分数、在线归一化、只把输�
 
 稠密层每个 token 都经过同一套前馈权重。混合专家层先为 token 选择少数专家，再只计算那几个前馈。参数总量按全部专家计，一次前向的乘加按被选中的专家计。容量规划因此有两个数：卡上要放得下所有专家，算力只覆盖活跃的那一部分。
 
-专家若分放在不同设备上，token 要被送到它选中的设备，通信形态是 all-to-all。设备上的专家放置见 [GShard](https://arxiv.org/abs/2006.16668)，稀疏门控的大规模训练见 [Switch Transformer](https://arxiv.org/abs/2101.03961)。一个具体的稀疏模型形状可以对照 [Mixtral](https://arxiv.org/abs/2401.04088)。[S5](/systems/cluster/) 再把这种通信放进集群账单；这里只把「总参数」和「活跃参数」拆成两个量。
+专家若分放在不同设备上，token 要被送到它选中的设备，通信形态是 all-to-all。设备上的专家放置见 [GShard](https://arxiv.org/abs/2006.16668)，稀疏门控的大规模训练见 [Switch Transformer](https://arxiv.org/abs/2101.03961)。一个具体的稀疏模型形状可以对照 [Mixtral](https://arxiv.org/abs/2401.04088)。[S9](/systems/cluster/) 再把这种通信放进集群账单；这里只把「总参数」和「活跃参数」拆成两个量。
 
 ## 负载改写同一份字节被读的次数
 
@@ -144,17 +146,19 @@ FlashAttention 的做法是按 tile 计算分数、在线归一化、只把输�
 <KeyEq label="线性层的算术强度">
 
 $$
-I_{\mathrm{linear}}=\frac{2NB}{2N}=B\text{ FLOP/byte}.
+I_{\mathrm{linear}}=\frac{2N_{\mathrm{linear}}B}{2N_{\mathrm{linear}}}=B\text{ FLOP/byte}.
 $$
 
 </KeyEq>
 
-$B = 1$ 时强度是 1。8B 模型因此在单请求 decode 上，大约读 16.06 GB、做 $1.6 \times 10^{10}$ FLOP。这个比值要到 [S2](/systems/accelerator/) 才和某张 GPU 的带宽天花板比较；这里先把它当成负载的签名。
+$N_{\mathrm{linear}}$ 是本步实际参与稠密矩阵乘的权重数，不等于常驻总参数 $N$。词嵌入是按 ID 查表，通常只读取相应行，不能按整个词表矩阵乘收费；RMSNorm 也另记元素级运算。上述不共享输出头的 8B 形状，层内矩阵共 $N_{\mathrm{blocks}}=6979321856$，输出头 $N_{\mathrm{head}}=525336576$，单步 decode 的 $N_{\mathrm{linear}}=7504658432$。常驻容量仍按完整 $N$ 计。共享嵌入与输出头时容量只收一次，而它作为输出投影执行时仍需矩阵乘，不能因此删除计算量。
+
+$B = 1$ 时强度是 1。该形状单请求 decode 的线性主项大约读 15.01 GB、做 $1.501\times10^{10}$ FLOP，另有 embedding 行、KV、激活与元素级算子。这个比值要到 [S2](/systems/accelerator/) 才和某张 GPU 的带宽天花板比较；这里先把它当成负载的签名。
 
 批大小的作用是让同一份权重服务多个 token。$B$ 从 1 增到 8，线性层的强度从 1 增到 8，权重字节不变。KV 不能这样共享：每条请求有自己的上下文，字节随 $B$ 和长度一起涨。前面的图已经显示，16 条 8192 token 请求的 KV 是 16 GiB。强度公式在 KV 不能忽略时变成
 
 $$
-I_{\mathrm{linear+KV}}=\frac{2NB}{2N+m_{\mathrm{KV}}}.
+I_{\mathrm{linear+KV}}=\frac{2N_{\mathrm{linear}}B}{2N_{\mathrm{linear}}+m_{\mathrm{KV}}}.
 $$
 
 这里 $m_{\mathrm{KV}}$ 是本步读入的所有请求的 KV 字节数；分子暂时只计线性层 FLOP，因此这个比值用于观察加入 KV 流量后的变化，不是完整注意力加线性层的总算术强度。长上下文、大并发会把分母里的第二项抬起来，瓶颈从「重复读权重」转到「读每条请求的缓存」。
@@ -165,17 +169,25 @@ $$
 
 Softmax 的元素级运算比这个主项小，这里不收进分子。这个 4 和前面的 1 GiB 是同一笔账的两侧：字节已经算过，现在知道这些字节只支撑很少的乘加。
 
-Prefill 的线性层则是 $2NT$ FLOP。$T = 8192$ 时约 $1.32 \times 10^{14}$ FLOP，另有约 $3.5 \times 10^{13}$ FLOP 的注意力计算（按完整方阵的两次矩阵乘估算）。提示足够长时，一次 prefill 的计算量比单步 decode 高几个数量级，而且权重在这次大矩阵乘内部被大量复用。所以「计算密集」和「带宽密集」不是模型的属性，是这一步负载的属性。
+Prefill 的计费还取决于输出头计算哪些位置。训练或评估全部 token 的 logits 时，线性主项为 $2T(N_{\mathrm{blocks}}+N_{\mathrm{head}})$；只为生成第一个输出、并且执行器仅投影每条提示的最后位置时，则为 $2TN_{\mathrm{blocks}}+2N_{\mathrm{head}}$。$T=8192$、单条提示下，后一种约为 $1.144\times10^{14}$ FLOP，不能把输入 embedding 或全部位置输出头重复记入。
+
+此外有约 $3.5\times10^{13}$ FLOP 的注意力计算，这是按完整方阵的两次矩阵乘估算的上限形状。有效因果对数为 $T(T+1)/2$，若 kernel 能跳过完全不可见的 tile，主项接近完整方阵的一半，边界 tile、softmax 与实际调度仍另算。提示足够长时，一次 prefill 的计算量比单步 decode 高几个数量级，而且权重在大矩阵乘内部被大量复用。所以「计算密集」和「带宽密集」需要结合实际负载和执行策略判断。
 
 ### 训练要留下梯度和优化器状态
 
 推理部署可以只保留低精度权重，也就是图中最左边的 2 字节。混合精度 Adam 的一种常见布局是：低精度参数 2 字节、低精度梯度 2 字节、fp32 主权重 4 字节、一阶矩 4 字节、二阶原始矩 4 字节，合计 16 字节。后两个状态分别累计梯度和梯度平方；梯度平方的滑动平均没有减去均值平方，不应直接叫方差。这个构成写在 [ZeRO 论文](https://arxiv.org/abs/1910.02054) 的显存分析里；fp32 主权重的来源是 [混合精度训练](https://arxiv.org/abs/1710.03740)，矩估计来自 [Adam](https://arxiv.org/abs/1412.6980)。
 
-8B 的 $N \times 16 \approx 1.28 \times 10^{11}$ 字节，约 128 GB，已经超过一张 80GB 的卡，而且还没有激活。激活随批大小和序列长度增长。梯度检查点丢掉前向激活，反向时再算一遍，用计算换这块显存，见 [Chen 等人](https://arxiv.org/abs/1604.06174)。[S5](/systems/cluster/) 再讨论把 16 字节里的哪一段切到别的卡上。
+8B 的 $N \times 16 \approx 1.28 \times 10^{11}$ 字节，约 128 GB，已经超过一张 80GB 的卡，而且还没有激活。激活随批大小和序列长度增长。梯度检查点丢掉前向激活，反向时再算一遍，用计算换这块显存，见 [Chen 等人](https://arxiv.org/abs/1604.06174)。[S9](/systems/cluster/) 再讨论把 16 字节里的哪一段切到别的卡上。
 
 ### 到达过程让平均长度失效
 
-上面的强度都假设长度和批大小已经给定。线上请求的长度分布是尖的，到达是一阵一阵的。用平均长度估出来的 KV，会在一串长请求同时到达时不够用；用最大长度预留，又会在短请求上空转。调度要在每个 decode 步重新决定这一步算哪些请求。那是 [S3](/systems/engine-runtime/) 的事，它使用的输入就是这一章的两套强度和字节。
+上面的强度都假设长度和批大小已经给定。线上请求的长度分布是尖的，到达是一阵一阵的。用平均长度估出来的 KV，会在一串长请求同时到达时不够用；用最大长度预留，又会在短请求上空转。调度要在每个 decode 步重新决定这一步算哪些请求。那是 [S4](/systems/engine-runtime/) 的事，它使用的输入就是这一章的两套强度和字节。
+
+## CPU 核对：容量与执行分开计数
+
+脚本从形状计算模型 S 和公开 8B 形状，分别返回常驻总参数、层内矩阵、输出头和每 token KV 字节；核对最后位置输出头与全部位置输出头的 prefill 运算差异。没有读取 checkpoint，因此数值仍是忽略 norm 的结构账，不是实测显存峰值。
+
+<CodeFile path="code/systems/ledger.py" />
 
 ## 练习与核对
 
@@ -196,9 +208,11 @@ Prefill 的线性层则是 $2NT$ FLOP。$T = 8192$ 时约 $1.32 \times 10^{14}$ 
 <details>
 <summary>3. 16 条 8192 token 的请求一起 decode，把 KV 计入分母后，线性层的强度是多少？</summary>
 
-分子 $2NB=2\times8029995008\times16\approx2.570\times10^{11}$。分母是权重 $1.606\times10^{10}$ 字节加 KV $16\times2^{30}\approx1.718\times10^{10}$ 字节，共约 $3.324\times10^{10}$。强度约 $7.7$ FLOP/byte，只有不计 KV 时的 16 的一半左右：并发上去以后，读缓存和读权重一样贵。
+分子 $2N_{\mathrm{linear}}B=2\times7504658432\times16\approx2.401\times10^{11}$。分母是本步线性权重读入 $1.501\times10^{10}$ 字节加 KV $16\times2^{30}\approx1.718\times10^{10}$ 字节，共约 $3.219\times10^{10}$。强度约 $7.46$ FLOP/byte，只有不计 KV 时的 16 的一半左右；这仍只在分子计线性 FLOP，完整强度还要加入注意力算术及其他流量。
 
 </details>
+
+下一章 [S2 单卡执行](/systems/accelerator/) 将容量、FLOP 与字节比放到 GPU 的存储层级和屋顶线上。
 
 ## 引用与边界
 

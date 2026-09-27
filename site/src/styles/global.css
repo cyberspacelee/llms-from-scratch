@@ -178,7 +178,7 @@
   .prose-lesson th { @apply whitespace-nowrap; }
 
   /* Exercises and optional detail use native <details>. */
-  .prose-lesson details { @apply my-3 rounded-lg border border-rule bg-raised; }
+  .prose-lesson details { @apply my-3 rounded-lg border border-rule bg-raised wrap-anywhere; }
   .prose-lesson summary { @apply flex gap-2 px-4 py-3 font-semibold; list-style: none; }
   .prose-lesson summary::-webkit-details-marker { display: none; }
   .prose-lesson summary::before { @apply flex-none font-mono font-semibold text-accent; content: "+"; }

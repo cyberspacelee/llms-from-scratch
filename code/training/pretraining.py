@@ -1,0 +1,137 @@
+"""A tiny LM training run and exact CPU checkpoint recovery."""
+
+import copy
+import io
+from pathlib import Path
+import random
+import sys
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "principles"))
+from decoder import Decoder
+from language_model import sequence_loss
+
+
+CONFIG = dict(vocab_size=4, width=16, heads=2, ff_width=32, layers=2, max_length=12)
+TRAIN = torch.tensor([[0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 3],
+                      [1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 3],
+                      [2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 3]])
+VALIDATION = torch.tensor([[0, 1, 2, 0, 1, 2, 0, 1, 2, 3],
+                           [2, 0, 1, 2, 0, 1, 2, 0, 1, 3]])
+
+
+def new_run():
+    model = Decoder(**CONFIG).double()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=0.01, weight_decay=0.01, foreach=False)
+    return model, optimizer
+
+
+def train_steps(model, optimizer, count, cursor=0, order=None):
+    model.train()
+    order = list(range(len(TRAIN))) if order is None else list(order)
+    losses = []
+    for _ in range(count):
+        if cursor == len(order):
+            order = torch.randperm(len(TRAIN)).tolist()
+            cursor = 0
+        index = order[cursor]
+        cursor += 1
+        document = TRAIN[index:index + 1, random.randrange(0, 3):]
+        optimizer.zero_grad(set_to_none=True)
+        loss = sequence_loss(model(document[:, :-1]), document[:, 1:])
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        optimizer.step()
+        losses.append(loss.item())
+    return cursor, order, losses
+
+
+@torch.no_grad()
+def evaluate(model):
+    model.eval()
+    return sequence_loss(model(VALIDATION[:, :-1]), VALIDATION[:, 1:]).item()
+
+
+def verify():
+    torch.set_num_threads(1)
+    torch.manual_seed(29)
+    random.seed(29)
+    model, optimizer = new_run()
+    initial = evaluate(model)
+    cursor, order, _ = train_steps(model, optimizer, 18)
+    checkpoint = dict(config=CONFIG, model=copy.deepcopy(model.state_dict()),
+                      optimizer=copy.deepcopy(optimizer.state_dict()), step=18,
+                      cursor=cursor, order=order, torch_rng=torch.get_rng_state(),
+                      python_rng=random.getstate(), tokenizer={"a": 0, "b": 1, "c": 2, "EOS": 3})
+    stream = io.BytesIO()
+    torch.save(checkpoint, stream)
+    cursor, order, continuous_losses = train_steps(model, optimizer, 12, cursor, order)
+    expected_parameters = copy.deepcopy(model.state_dict())
+    final = evaluate(model)
+    stream.seek(0)
+    # Only load this process's trusted payload; pickle can execute arbitrary code.
+    loaded = torch.load(stream, weights_only=False)
+    restored, restored_optimizer = new_run()
+    assert loaded["config"] == CONFIG
+    restored.load_state_dict(loaded["model"])
+    restored_optimizer.load_state_dict(loaded["optimizer"])
+    torch.set_rng_state(loaded["torch_rng"])
+    random.setstate(loaded["python_rng"])
+    restored_cursor, restored_order, restored_losses = train_steps(
+        restored, restored_optimizer, 12, loaded["cursor"], loaded["order"]
+    )
+    assert restored_cursor == cursor and restored_order == order
+    assert restored_losses == continuous_losses
+    for key, value in expected_parameters.items():
+        torch.testing.assert_close(restored.state_dict()[key], value, rtol=0, atol=0)
+    assert final < initial
+    counts = torch.ones(4, 4, dtype=torch.float64)
+    for document in TRAIN:
+        for current, following in zip(document[:-1], document[1:]):
+            counts[current, following] += 1
+    probabilities = counts / counts.sum(dim=1, keepdim=True)
+    baseline = -probabilities[VALIDATION[:, :-1], VALIDATION[:, 1:]].log().mean().item()
+    restored.eval()
+    with torch.no_grad():
+        inputs = VALIDATION[:, :-1]
+        reference = restored(inputs)
+        for chunks in ([9], [1] * 9, [3, 2, 4]):
+            caches, outputs, offset = None, [], 0
+            for length in chunks:
+                output, caches = restored.forward_cached(inputs[:, offset:offset + length], caches)
+                outputs.append(output)
+                offset += length
+                assert all(k.shape[-2] == offset for k, v in caches)
+            torch.testing.assert_close(torch.cat(outputs, dim=1), reference, atol=1e-10, rtol=1e-10)
+    generated = torch.tensor([[0, 1]])
+    with torch.no_grad():
+        for _ in range(6):
+            following = restored(generated)[:, -1].argmax(-1, keepdim=True)
+            generated = torch.cat([generated, following], dim=1)
+            if following.item() == 3:
+                break
+    print(f"pretraining: initial validation NLL={initial:.6f}, final={final:.6f}, bigram={baseline:.6f}")
+    print("pretraining: resumed 12 steps exactly equal uninterrupted parameters and losses")
+    print("pretraining: trained two-layer model full/cached logits agree for three chunkings")
+    print("pretraining: generated IDs", generated.tolist())
+
+    # Separate correctness probe: deliberately overfit one fixed training document.
+    torch.manual_seed(31)
+    probe, probe_optimizer = new_run()
+    fixed = TRAIN[:1]
+    with torch.no_grad():
+        start = sequence_loss(probe(fixed[:, :-1]), fixed[:, 1:]).item()
+    for _ in range(60):
+        probe_optimizer.zero_grad(set_to_none=True)
+        objective = sequence_loss(probe(fixed[:, :-1]), fixed[:, 1:])
+        objective.backward()
+        probe_optimizer.step()
+    with torch.no_grad():
+        end = sequence_loss(probe(fixed[:, :-1]), fixed[:, 1:]).item()
+    assert end < 0.03 and end < start
+    print(f"pretraining: fixed-batch overfit NLL {start:.6f} -> {end:.6f} (not a generalization result)")
+
+
+if __name__ == "__main__":
+    verify()

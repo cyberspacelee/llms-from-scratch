@@ -14,8 +14,8 @@ const find = (path: string) => {
 const routes: { title: string; detail: string; steps: Lesson[] }[] = [
   {
     title: '完整路线',
-    detail: '从统计与矩阵读起，一路读到调度器和集群。每章只用前面已经推导过的东西。',
-    steps: [find('math'), find('principles'), find('systems')],
+    detail: '从数学搭起模型，完成训练与评估，再进入推理系统与进阶结构。选读段落单独标出。',
+    steps: tracks.map((track) => find(track.id)),
   },
   {
     title: '只为弄懂 RoPE',
@@ -37,7 +37,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
         <p class="mb-4 text-sm font-semibold text-accent">中文讲义 · 推导 · 图解 · 可运行验证</p>
         <h1 class="max-w-[16em] text-2xl font-semibold tracking-tight">从一行点积推到一台推理引擎，每一步都能手算、能运行。</h1>
         <p class="mt-5 mb-0 max-w-content text-lg text-muted">
-          三条相连的路线：先用数学基础搭好统计、矩阵与反向传播，再推导位置编码与 KV cache，最后沿 nano-vLLM 源码走进调度、分页缓存和集群。
+          从数学基础搭起完整 Decoder，完成小语言模型训练与评估，再沿推理引擎理解调度、分页缓存和集群，最后比较不同进阶模型的设计。
         </p>
         <div class="mt-8 flex flex-wrap gap-3">
           <a href={url('math')} class="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-paper no-underline hover:bg-accent-strong hover:text-paper">从数学基础开始</a>
@@ -48,7 +48,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
         {[
           [String(chapters.length), '章正文'],
           [String(scripts.length), '个验证脚本'],
-          ['8', '个交互实验'],
+          [String(Object.keys(import.meta.glob('../components/labs/*Lab.tsx')).length), '个交互实验'],
         ].map(([value, label]) => (
           <div class="flex flex-col-reverse bg-raised px-4 py-3">
             <dt class="text-xs text-muted">{label}</dt>
@@ -59,7 +59,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
     </section>
 
     <section aria-labelledby="tracks-heading" class="py-14">
-      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">三条路线</h2>
+      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">四条主线与进阶模型</h2>
       <div class="grid gap-6 lg:grid-cols-3">
         {tracks.map((track) => {
           const items = byTrack(track.id)
@@ -89,7 +89,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
 
     <section aria-labelledby="routes-heading" class="border-t border-rule py-14">
       <h2 id="routes-heading" class="mb-2 text-xl font-semibold">从哪里开始</h2>
-      <p class="mt-0 mb-8 text-muted">三条路线按依赖排好；已经熟悉前面的内容，可以沿下面的捷径直接进入。</p>
+      <p class="mt-0 mb-8 text-muted">路线按依赖排好；已经熟悉前面的内容，可以沿下面的捷径直接进入。</p>
       <div class="grid gap-6 md:grid-cols-3">
         {routes.map((route) => (
           <section>

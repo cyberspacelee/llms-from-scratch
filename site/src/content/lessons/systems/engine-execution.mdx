@@ -1,15 +1,17 @@
 ---
-title: 推理引擎：张量、并行与加速
+title: 引擎执行器与 CUDA Graph
 question: 同一个模型怎样在 prefill 与 decode 中高效执行
-description: 继续读 nano-vLLM 的数据面：两种批形状、Qwen3 层、张量并行、CUDA Graph、显存预算与采样；再看量化和投机解码改写哪一笔账，以及怎样判断自己真的读懂了。
-order: 4
+description: 继续读 nano-vLLM 的数据面：打平 token、累计长度、绝对位置、物理槽位、权重映射与静态缓冲，核对 eager 和 CUDA Graph 的执行契约。多卡细节在 S9 后回读。
+order: 6
+code:
+  - code/systems/parallel_layout.py
 ---
 
 import Qwen3Layer from '../../../components/diagrams/Qwen3Layer.astro'
 import LaunchTimeline from '../../../components/diagrams/LaunchTimeline.astro'
 import Checklist from '../../../components/labs/Checklist'
 
-[S3](/systems/engine-runtime/) 读完了控制面：调度器决定这一步算谁，块管理器决定 K/V 写到哪里。本章进入数据面，看 `ModelRunner` 怎样把调度结果变成张量、Qwen3 怎样在多张卡上计算、CUDA Graph 怎样压掉 decode 的启动开销。最后两节离开源码，讨论量化和投机解码这两种引擎级优化，以及怎样用不变量和实验检验自己的理解。
+[S4](/systems/engine-runtime/) 与 [S5](/systems/paged-cache/) 决定这一步算谁、K/V 写到哪里。本章进入数据面，看 `ModelRunner` 怎样把这些决定变成张量，以及 CUDA Graph 怎样减少 decode 的启动开销。第一次阅读先沿单卡主线；张量并行段可在 [S9](/systems/cluster/) 的切片与 collective 数值例之后回读。
 
 ## 同一个模型，两种批形状
 
@@ -42,6 +44,14 @@ flowchart LR
 ```
 
 `positions` 一行正是 [KV cache 的正确性](/principles/kv-cache/) 中“新位置不能从 0 重新编号”的工程落点：decode 的位置是序列当前长度减一，而不是批内行号。
+
+### 三条请求怎样核对 packed 元数据
+
+本步新增长度为 3、2、4，先前缓存长度分别为 0、4、0。打平输入共有 9 个 token，查询累计长度为 `[0,3,5,9]`，可见键累计长度为 `[0,3,9,13]`；第二条的 Q 只有 2 个，但可见 K 有 6 个。位置列表为 `[0,1,2,4,5,0,1,2,3]`，不是全局连续 0 到 8。每条请求最后一个新增隐藏状态在 packed 数组中的下标为 2、4、8。
+
+这三个下标可用于完整 prefill 后的输出头选择；若该请求只是中间 chunk，还不能采样。两个请求具有同样位置 0 并不代表它们可互相注意；varlen 边界和块表仍区分请求。元数据错一个偏移，可能得到有限数值却读错别人的缓存，所以仅检查“不报错”不足以验证打包。
+
+<CodeFile path="code/systems/parallel_layout.py" />
 
 ### 为什么 prefill 也可能读缓存
 
@@ -91,7 +101,7 @@ flowchart LR
     V --> G[gather 未归一化分数 → rank 0 采样]
 ```
 
-一次“列并行接行并行”只在块的末尾通信一次，这是 [Megatron-LM](https://arxiv.org/abs/1909.08053) 的切法；[S5](/systems/cluster/) 会把这笔通信放到机内、机间不同的线上计价。
+一次“列并行接行并行”只在块的末尾通信一次，这是 [Megatron-LM](https://arxiv.org/abs/1909.08053) 的切法；[S9](/systems/cluster/) 会把这笔通信放到机内、机间不同的线上计价。
 
 ### 进程间如何同步一次调用
 
@@ -188,49 +198,9 @@ $$
 当前 `SamplingParams` 没有 top-k、top-p、frequency penalty、随机种子或 greedy sampling。API 形似 vLLM，不代表功能等价。
 </Callout>
 
-## 量化与投机解码：改字节，或改步数
+## 执行边界：模型算子、采样与服务分别验证
 
-nano-vLLM 没有实现这两项，但它们是推理引擎最常见的两个旋钮，而且各自只改写一本账。
-
-### 量化先改字节
-
-把权重或 KV 从 2 字节收成 1 字节，[S1](/systems/ledger/) 里由权重主导的算术强度大约翻倍，容量也大约减半。误差是否可接受，要在固定的评测集上和改字节之前的模型比，再看吞吐和尾延迟。两条常见的不同做法：SmoothQuant 把激活里难量化的幅度搬一部分到权重上，使两侧都能用 8 位整数，见 [Xiao 等人](https://arxiv.org/abs/2211.10438)；AWQ 按激活的幅度保护少量显著权重，见 [Lin 等人](https://arxiv.org/abs/2306.00978)。具体缩放和 kernel 以论文和所用引擎的实现为准。
-
-### 投机解码用接受率决定一步产出几个 token
-
-草稿模型先提出若干候选，目标模型再一次验证能接受多长的前缀。设草稿长度为 $\gamma$，每个草稿 token 被独立接受的概率是常数 $\alpha$，并在第一次拒绝时仍由目标分布产出一个 token。一步验证期望得到的 token 数是
-
-<KeyEq label="投机解码每步期望产出">
-
-$$
-\sum_{i=0}^{\gamma} \alpha^{i} = \frac{1-\alpha^{\gamma+1}}{1-\alpha}.
-$$
-
-</KeyEq>
-
-$\alpha = 0$ 时这个和是 1，相当于没有草稿。$\alpha$ 接近 1 时，一步可以接近 $\gamma+1$ 个 token。净加速还要扣掉草稿模型自己的时间，所以接受率高而草稿很贵时，端到端仍可能变慢。过程的定义见 [Leviathan 等人](https://arxiv.org/abs/2211.17192)。这里的常数 $\alpha$ 是为了把期望写成等比级数，真实接受率随上下文和采样方式变化。
-
-### 服务指标：先说明测量区间
-
-| 指标 | 它记的区间 |
-| --- | --- |
-| TTFT | 请求到达到首个输出 token 的时间 |
-| ITL | 连续两次输出事件的时间间隔；逐 token 输出时就是相邻 token 间隔 |
-| TPOT | 每条请求从首 token 到末 token 的时间，除以后续输出 token 数 |
-| 有效吞吐 | 满足延迟目标的完成量，而不是不计延迟的最大 token 速率 |
-
-记请求到达时间为 $t_{\mathrm{arrival}}$、首次与最后输出时间为 $t_{\mathrm{first}},t_{\mathrm{last}}$、输出 token 数为 $n_{\mathrm{out}}$，则
-
-$$
-\begin{aligned}
-t_{\mathrm{TTFT}}&=t_{\mathrm{first}}-t_{\mathrm{arrival}},\\
-t_{\mathrm{TPOT}}&=\frac{t_{\mathrm{last}}-t_{\mathrm{first}}}{n_{\mathrm{out}}-1},\qquad n_{\mathrm{out}}>1.
-\end{aligned}
-$$
-
-ITL 对每次输出间隔采样，TPOT 对每条完成请求采样；两者的分位数及跨请求平均值不能互换。投机解码可能一次输出多个 token，事件 ITL 尤其不能直接解释为每 token 时间。输出不超过一个 token 时，上面的 TPOT 未定义，报告中说明排除或记零的规则。测量边界也要说明是在引擎还是客户端。参见 [vLLM 指标定义](https://docs.vllm.ai/en/latest/design/metrics/)（2026-09-27 查阅）。
-
-基准记录要包含模型、输入输出长度、并发、dtype、硬件、正确性做法和延迟目标。[Etalon](https://arxiv.org/abs/2407.07000) 讨论怎样让服务基准反映这些目标，[MLPerf Inference](https://mlcommons.org/benchmarks/inference-datacenter/) 是一组公开的基准定义。
+本文的执行器读取固定精度权重并每步采样一个 token。改变表示精度需要 [S7 量化](/systems/quantization/) 的误差与存储分析；改变每步产出需要 [S8 投机解码](/systems/speculative-decoding/) 的接受与补偿证明；用户侧速度则按 [S10 服务评估](/systems/serving-evaluation/) 定义的事件记录核对。这三种改动需要独立验收，不能只看 CUDA Graph 的 kernel 时间判断整体收益。
 
 ## 它为什么适合学习，也为什么还不是生产 vLLM
 
@@ -297,9 +267,9 @@ decode 的输入形状稳定、单步计算小且重复次数多，发射开销�
 </details>
 
 <details>
-<summary>3. 草稿长度 γ = 4，接受率 α = 0.8，一步验证期望产出多少 token？</summary>
+<summary>3. 新增长度 `[3,2,4]`、缓存长度 `[0,4,0]`，为什么查询累计长度末项是 9，键累计长度末项是 13？</summary>
 
-$\dfrac{1-0.8^5}{1-0.8}=\dfrac{1-0.32768}{0.2}=3.3616$。每次调用目标模型平均得到约 3.4 个 token；草稿模型每步要跑 4 次，只有它足够便宜时这个倍数才能转成端到端加速。
+Q 只对应本步新增 token，总数 3+2+4=9；K 包含各请求自己的历史与新增，总数 3+6+4=13。累计长度是边界元数据，并不意味着历史 K 重新拼成同一个跨请求共享上下文。
 
 </details>
 
@@ -310,6 +280,8 @@ $\dfrac{1-0.8^5}{1-0.8}=\dfrac{1-0.32768}{0.2}=3.3616$。每次调用目标模�
 
 </details>
 
+下一章 [S7 量化与精度](/systems/quantization/) 将权重与状态的表示字节、数值误差和实际 kernel 支持分别核对。
+
 ## 引用与边界
 
 | 用到的内容 | 出处 | 本页的处理 |
@@ -317,6 +289,6 @@ $\dfrac{1-0.8^5}{1-0.8}=\dfrac{1-0.32768}{0.2}=3.3616$。每次调用目标模�
 | 调度、并行、CUDA Graph、显存预算、采样 | [nano-vLLM @ bb823b3](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) | 沿源码调用链解释，锚点指向具体行 |
 | 批处理、KV、量化与投机解码何时有效 | [AI Infra Book，推理优化](https://bojieli.github.io/ai-infra-book/manuscripts/08-%E6%8E%A8%E7%90%86%E4%BC%98%E5%8C%96.html) | 每项只保留它改写的那一本账 |
 | 引擎主题的原始论文 | [Wafer，Inference engines](https://github.com/wafer-ai/gpu-perf-engineering-resources#4-inference-engines) | 索引 |
-| 两种量化、投机解码、服务基准 | SmoothQuant、AWQ、Leviathan 等，链在正文 | 机制用自己的例子重写，等比级数是常数接受率下的期望 |
+| 量化、投机与服务评估 | S7、S8、S10 | 各章独立定义误差、分布与测量协议 |
 
 本章没有给出任何实测性能数字；图中的时间线只示意形状。要比较 eager 与 graph、量化前后的吞吐，用 [S2](/systems/accelerator/) 的记录方法在目标机器上测。

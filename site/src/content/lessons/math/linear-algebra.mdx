@@ -208,7 +208,7 @@ $$
 (Qx)^\top(Qy)=x^\top y.
 $$
 
-正交变换保持长度和点积，可以是旋转，也可以包含反射。RoPE 使用旋转这一特殊情形，[模型原理 P2](/principles/sinusoidal/) 会从单位圆把它推出来。一般线性层不保证正交，也不保证保留距离。
+正交变换保持长度和点积，可以是旋转，也可以包含反射。RoPE 使用旋转这一特殊情形，[模型原理 P6](/principles/sinusoidal/) 会从单位圆把它推出来。一般线性层不保证正交，也不保证保留距离。
 
 正交性还能解释一个简单的数值现象：令 $Q=\left[\begin{smallmatrix}0&-1\\1&0\end{smallmatrix}\right]$，它把 $(3,4)^\top$ 变成 $(-4,3)^\top$，长度仍为 5。若改成对角矩阵 $D=\left[\begin{smallmatrix}10&0\\0&0.1\end{smallmatrix}\right]$，同一输入变成 $(30,0.4)^\top$，不同方向的尺度被明显改变。
 

@@ -3,6 +3,8 @@ title: 单卡的上限
 question: 一张加速器给出哪些上限，kernel 怎样靠近它们，怎样测出离上限多远
 description: 用 H100 SXM 的产品页数字画出屋顶线并放上 S1 的强度，再看分块、融合与 Tensor Core 怎样减少 HBM 往返，最后写下一次可证伪的测量。
 order: 2
+code:
+  - code/systems/ledger.py
 ---
 
 [S1](/systems/ledger/) 得到两个强度：单请求线性层约 1 FLOP/byte，长上下文的 decode 注意力约 4 FLOP/byte。它们快还是慢，要看这张卡每秒能搬多少字节、每秒能做多少乘加。本章分三步：先由产品规格画出上限，再看 kernel 怎样让读进来的数据被复用、从而靠近上限，最后说明怎样测量一次运行离上限有多远。
@@ -144,12 +146,18 @@ CUDA C++ 先变成 PTX，再变成目标 GPU 的机器码。PTX 的语义在 [PT
 
 一次实验里同时改 tile、dtype 和启动方式，快了也无法知道是哪一项生效。可执行的循环是：用屋顶线的下界写下预期站在斜线还是平台，用时间线确认时间是否真在那个 kernel 里，只改一个结构，再测端到端的 TTFT 或 TPOT。Kernel 内部变快，而端到端不变，通常说明空档在别处。
 
+## CPU 核对：屋顶线计算不是实测性能
+
+[S1 的验证脚本](/systems/ledger/) 同时核对本章的两个数：989.5 TFLOP/s 除以 3.35 TB/s 得到约 295.37 FLOP/byte 的脊点；强度为 4 时，理想带宽上限是 13.4 TFLOP/s。脚本只做单位与算式验证，不加载 GPU，也不将这条理论线当成真实 kernel 测量。
+
+<CodeFile path="code/systems/ledger.py" />
+
 ## 练习与核对
 
 <details>
 <summary>1. 只看线性层、忽略 KV，8B 模型的 decode 批大小要到多少，才碰到 H100 SXM 的脊点？</summary>
 
-线性层强度等于批大小 $B$，脊点约 295 FLOP/byte，所以 $B\approx295$。实际上远在这之前 KV 就会进入分母：[S1](/systems/ledger/) 的练习已经算出 16 条 8192 token 请求时强度只剩约 7.7，长上下文的 decode 很难靠增大批大小走到平台上。
+线性层理想强度等于批大小 $B$，脊点约 295 FLOP/byte，所以 $B\approx295$。实际上远在这之前 KV 就会进入分母：[S1](/systems/ledger/) 的练习按实际线性矩阵计费后，16 条 8192 token 请求时强度只剩约 7.46，长上下文的 decode 很难靠增大批大小走到平台上。
 
 </details>
 
@@ -166,6 +174,8 @@ $8\times3.35=26.8$ TFLOP/s，约为平台的 2.7%，仍在带宽斜线上。先�
 只能写“两处改动合起来快了 20%”，不能归因给其中任何一项：dtype 改变了字节数和可用的 Tensor Core 指令，tile 改变了复用和占用率，二者的效果可能互相抵消或叠加。还要确认正确性对照在新 dtype 下仍在容差内，否则比较的是另一个计算。
 
 </details>
+
+下一章 [S3 FlashAttention](/systems/flash-attention/) 从一行 softmax 开始推导怎样通过在线合并减少中间矩阵的显存往返。
 
 ## 引用与边界
 

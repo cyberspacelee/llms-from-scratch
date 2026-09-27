@@ -1,0 +1,146 @@
+---
+title: 现代 Decoder 的结构选择
+question: RMSNorm、SwiGLU 与 GQA 分别改变哪个计算
+description: 在完整教学 Decoder 上逐项替换部件，推导参数与缓存变化，并用 Llama 3 和 Qwen3 的固定配置核对边界。
+order: 8
+code:
+  - code/principles/modern_decoder.py
+---
+
+[P4](/principles/decoder/) 已搭好完整网络，[P7](/principles/rope/) 已把显式位置关系放进 Q/K。阅读现代模型配置时，接下来常遇到 RMSNorm、SwiGLU、GQA、QK Norm 与权重绑定。它们不是一组必须同时启用的“升级包”：每项改动都有自己的计算对象和成本。
+
+本章按归一化、前馈网络、注意力头、词表权重的顺序逐项替换。先修是 P3/P4/P7 与 M3/M6。我们比较结构与配置，不用没有统一实验条件的榜单断言某种组合总是最好。
+
+## RMSNorm：不减均值的特征尺度控制
+
+LayerNorm 已在 P4 定义。均方根归一化（root mean square normalization，RMSNorm）保留平方平均的尺度控制，但不减特征均值。对列向量 $x\in\mathbb R^d$：
+
+$$
+\operatorname{RMSNorm}(x)_a=\gamma_a\frac{x_a}{\sqrt{d^{-1}\sum_{c=1}^{d}x_c^2+\epsilon}}.
+$$
+
+$\gamma\in\mathbb R^d$ 是可训练缩放；这里采用没有平移参数的常见形式。均方根不是标准差：如果各分量都为 2，方差为 0，均方根却是 2。两个名称不能互换。
+
+例如 $x=(1,2,3,4)^\top$，平方平均是 7.5，取单位缩放与很小 epsilon 后，输出为：
+
+$$
+\operatorname{RMSNorm}(x)\approx\begin{bmatrix}0.365148\\0.730297\\1.095445\\1.460593\end{bmatrix}.
+$$
+
+它保留正均值；LayerNorm 输出则有正有负。把二者都说成“让均值为零、方差为一”是不正确的。
+
+忽略 epsilon 时，对正标量 a 有 RMSNorm(ax)=RMSNorm(x)，表示对共同正尺度的不变性。加 epsilon 后仅近似成立。它也不具有 LayerNorm 的共同平移不变性：把 x 的每个分量加 1，会改变方向和输出。因此两者不是数值等价替换。
+
+减少均值归约及平移参数可能简化实现，但实际速度取决于融合内核、输入形状和硬件。不能仅根据公式少一个求和就给出固定加速百分比。某些实现还在更高精度计算统计量，以避免低精度平方累加的问题。
+
+## SwiGLU：用一条分支控制另一条
+
+P4 的 FFN 是一条扩张分支。门控前馈网络则有两条输入投影：一条提供内容，一条提供逐元素门。以常见 SwiGLU 定义为例：
+
+$$
+\operatorname{SwiGLU}(x)=W_{\mathrm{down}}\Big(\operatorname{SiLU}(W_{\mathrm{gate}}x)\odot(W_{\mathrm{up}}x)\Big),
+\qquad \operatorname{SiLU}(a)=a\,s(a).
+$$
+
+$s$ 是 M4 定义的 sigmoid。$W_{\mathrm{gate}},W_{\mathrm{up}}\in\mathbb R^{d_{\mathrm{ff}}\times d}$，$W_{\mathrm{down}}\in\mathbb R^{d\times d_{\mathrm{ff}}}$；公式采用无偏置配置，$\odot$ 为逐元素乘法。
+
+例如一个中间坐标的 gate 输入是 1，up 输出是 2，则乘积为 $2s(1)\approx1.4621$。若 gate 输入是 −1，则 SiLU 为约 −0.2689；门并非始终位于 0–1，也不保证“关闭”时输出严格为零。把 SwiGLU 误写成 sigmoid(gate)×up 会遗漏 gate 自身的因子。
+
+三套矩阵意味着权重数约为 $3dd_{\mathrm{ff}}$，普通两层无偏置 FFN 为 $2dd_{\mathrm{ff}}$。若保持相同中间宽度，门控网络参数更多。比较相同预算时，可以令门控宽度约为原宽度的 $2/3$，使两者权重数近似相等；实际配置还需按硬件对齐取整。
+
+门控并不使网络稀疏执行。一般情况下每个 token 仍计算全部中间特征。它与 [A1 MoE](/advanced/moe/) 的稀疏专家选择不同，后者改变哪些参数分支实际执行。
+
+## GQA：查询头保留，键值头共享
+
+P3 的多头注意力令 $n_q=n_{\mathrm{kv}}$。分组查询注意力（grouped-query attention，GQA）允许 $n_q>n_{\mathrm{kv}}$，通常要求 $g=n_q/n_{\mathrm{kv}}$ 为整数。查询头 h 使用键值头 $\lfloor h/g\rfloor$。
+
+$$
+Y_h=\operatorname{softmax}\left(\frac{Q_hK_{\lfloor h/g\rfloor}^\top}{\sqrt{d_h}}+M\right)V_{\lfloor h/g\rfloor}.
+$$
+
+每个查询头仍有自己的 Q 和注意力分布；共享 K/V 不代表所有组内输出相同。因为 Q 不同，它们对同一键集合可以分配不同权重。
+
+以 $n_q=4,n_{\mathrm{kv}}=2$ 为例，头 0、1 使用 KV 头 0，头 2、3 使用 KV 头 1。实现可以在参考计算中重复 KV 头，也可直接使用支持分组的内核。后者避免物理复制，才保留共享带来的存储优势。
+
+多查询注意力（multi-query attention，MQA）是 $n_{\mathrm{kv}}=1$ 的特例，MHA 是 $n_{\mathrm{kv}}=n_q$ 的特例。它们形成一组结构选择，而不是“一个头负责全部任务”这么简单。
+
+### 参数与缓存分别减少多少
+
+先取教学配置 $d=n_qd_h$，无偏置 Q 投影有 $d^2$ 权重，K 和 V 各有 $dn_{\mathrm{kv}}d_h$，输出投影有 $d^2$。总数为 $2d^2+2dn_{\mathrm{kv}}d_h$，MHA 时回到 $4d^2$。这个等式不是所有模型的硬约束；一般配置的 Q/O 各有 $dn_qd_h$ 权重，总数为 $2d(n_q+n_{\mathrm{kv}})d_h$。
+
+若 $d=16,d_h=4,n_q=4,n_{\mathrm{kv}}=2$，Q/O 各 256，K/V 各 128，共 768；MHA 为 1024。整个模型的 FFN、嵌入等并未减少，因此不能把注意力投影减少比例当成总模型缩小比例。
+
+对历史长度 T、层数 $n_{\mathrm{layers}}$、批大小 B，普通 KV 缓存元素数是 $2Bn_{\mathrm{layers}}Tn_{\mathrm{kv}}d_h$。上例 KV 头减半，缓存也减半；查询头不进历史缓存。完整缓存正确性将在 P10 推导，具体容量账本见 S1。
+
+## QK Norm：归一化作用的位置也有区别
+
+某些现代模型对投影后的 Q/K 再按头维度做 RMSNorm。它控制参与点积的向量尺度，不等于在整个隐藏向量上做一次 Pre-Norm。要检查归一化轴、可训练缩放是否共享、epsilon，以及在 RoPE 前还是之后施加。
+
+对固定缩放和正交旋转，平方和保持不变；但若归一化包含逐维可训练缩放，它通常不与任意旋转交换。例如不等的对角缩放矩阵 D 与旋转 R 通常满足 DR≠RD。所以不能只说“RoPE 保范数”就自由调整所有 QK Norm 算子的顺序。
+
+QK Norm 也不是余弦注意力的统一同义词。RMSNorm 把向量平方平均尺度控制到某个水平；逐维参数与点积分母仍会影响实际分数。阅读配置时应回到计算式，而不根据名称猜测它必定产生单位欧氏向量。
+
+## 权重绑定：共享的是参数，不是两次操作
+
+输入嵌入 $E\in\mathbb R^{n_{\mathrm{vocab}}\times d}$ 按 ID 选行，输出 head 用所有行与隐藏向量做点积。绑定令 $W_{\mathrm{head}}=E$，减少一份 $n_{\mathrm{vocab}}d$ 权重，但两种运算仍不同。
+
+同一 E 接收两路梯度。输入查表只有出现的行得到该路径贡献；输出 softmax 一般让所有类别参与，因此未出现在输入中的词表行也可能收到输出路径梯度。脚本专门检查 ID 0 未被查表却仍有梯度，避免把稀疏输入梯度误推广到绑定后的总梯度。
+
+模型是否绑定取决于配置。有些模型采用独立输入输出矩阵，有些采用绑定，不能将前者自动“优化”为后者而期待旧权重的输出保持不变。
+
+## 固定配置：怎样阅读真实模型而不追逐名称
+
+Llama 3 的标准密集 Decoder 使用 RMSNorm、SwiGLU、RoPE 与 GQA。这里以公开的 Llama 3 8B 配置作为系统参数账本的一组输入：32 层，隐藏维度 4096，查询头 32、KV 头 8，头维度 128。应记录具体模型与配置版本，不能将这些数字移用于所有 Llama 3 家族成员。
+
+Qwen3 的密集模型同样使用这几类部件，并加入 QK Norm；Qwen3 系列还包含 MoE 成员，不能从系列名称推断一定是密集结构。本课源码路线使用 Qwen3-0.6B 的明确配置：隐藏维度 1024，查询头 16，KV 头 8，头维度 128，因此查询总宽度 2048 **不等于**隐藏维度。输出投影从 2048 映回 1024。它还绑定词表权重。下载时以该权重目录中的 config 与 tokenizer 文件为准。模型输出的思考模式或模板又属于生成与训练协议，不由上述归一化公式单独决定。
+
+阅读新模型时，先填入结构表：词表、d、$d_{\mathrm{ff}}$、层数、查询/KV 头、位置方式、Norm、FFN、偏置和绑定。之后再计算参数、缓存与调用顺序。这样比较能够直接连接代码，而不是仅记住“属于某某家族”。
+
+## 验证：四项改动分别核对
+
+脚本核对 RMSNorm 数值与非平移不变性、SwiGLU 维度、GQA 的头映射和绑定权重的输出梯度。它刻意没有把这些实验包装成一个宣称达到真实模型质量的小网络；真实配置与训练权重仍来自各自发布契约。
+
+<CodeFile path="code/principles/modern_decoder.py" />
+
+运行 `python code/principles/modern_decoder.py`。GQA 用重复 KV 的参考形式展示含义；生产内核不应以此物理复制作为唯一实现。
+
+## 常见误区
+
+- 把 RMSNorm 的均方根说成去均值后的标准差。
+- 同宽度替换 SwiGLU，却宣称参数量没有改变。
+- 用查询头数计算 GQA 的历史 KV 容量。
+- 将共享 KV 当成共享所有头的输出。
+- 把模型家族名字当成精确配置和模板。
+
+## 练习与核对
+
+<details>
+<summary>n_q=8、n_kv=2，查询头 5 使用哪个 KV 头？</summary>
+
+每组 g=4，$\lfloor5/4\rfloor=1$，因此使用 KV 头 1。编号从 0 开始，头 0–3 属于第一组，4–7 属于第二组。
+
+</details>
+
+<details>
+<summary>无偏置普通 FFN 宽度为 12，要保持相同权重数，SwiGLU 宽度应是多少？</summary>
+
+令 $2d\times12=3d\times w$，得到 w=8。实际需要结合矩阵内核对齐与模型容量选择；这个等式只比较权重数量。
+
+</details>
+
+<details>
+<summary>给 RMSNorm 输入所有分量都加相同常数，输出一定不变吗？</summary>
+
+不一定。它不减均值，分子与平方平均都改变。对 x=(1,2) 和 x+(1,1)=(2,3)，分量比例已不同，单一尺度因子无法使输出相同。
+
+</details>
+
+下一章 [P9 生成与采样](/principles/generation/) 讨论如何从词表分布产生完整文本，以及如何处理停止和对话格式。
+
+## 原始资料
+
+- [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)。
+- [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202)。
+- [GQA: Training Generalized Multi-Query Transformer Models](https://arxiv.org/abs/2305.13245)。
+- [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783) 与 [Llama 3 8B 配置](https://huggingface.co/meta-llama/Meta-Llama-3-8B/blob/main/config.json)。
+- [Qwen3 官方仓库](https://github.com/QwenLM/Qwen3) 与 [Qwen3-0.6B 配置](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json)。这些来源用于指定结构，未据此作统一性能结论。

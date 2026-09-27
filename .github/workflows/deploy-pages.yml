@@ -33,7 +33,8 @@ jobs:
       - name: Run verification scripts
         run: |
           for script in code/math/probability.py code/math/linear_algebra.py code/math/calculus.py \
-                        code/math/neural_network.py code/principles/position_encoding.py code/principles/kv_cache.py; do
+                        code/math/neural_network.py code/principles/*.py code/training/*.py \
+                        code/systems/*.py code/advanced/*.py; do
             echo "::group::$script"
             python "$script"
             echo "::endgroup::"

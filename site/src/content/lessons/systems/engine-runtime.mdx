@@ -1,15 +1,16 @@
 ---
-title: 推理引擎：调度与分页缓存
-question: 每一步算哪些请求，每个 token 的 K/V 写到哪里
-description: 沿 nano-vLLM 的真实调用链，从三行 API 走到调度循环、连续批处理、分页 KV cache 与前缀缓存，并在交互实验中逐步推演。
-order: 3
+title: 请求生命周期与连续批处理
+question: 每次迭代算哪些请求，怎样让新请求接替已完成请求
+description: 沿 nano-vLLM 的真实调用链，从单请求计数走到迭代调度、连续批处理、分块预填充与抢占，逐步核对何时写缓存、何时采样和何时释放容量。
+order: 4
+code:
+  - code/systems/scheduling.py
 ---
 
 import NanoOverview from '../../../components/diagrams/NanoOverview.astro'
 import SchedulerLab from '../../../components/labs/SchedulerLab'
-import PagedKvLab from '../../../components/labs/PagedKvLab'
 
-单卡的屋顶线和 kernel 决定一步计算能有多快。推理引擎决定这一步算哪些请求、KV 放在哪、权重用多少字节，以及一步能产出几个 token。模型权重可以不变，这些决定仍会改掉 [S1](/systems/ledger/) 的三本账。本章和 [S4](/systems/engine-execution/) 沿一个真实的小引擎读下去：本章讲控制面——调度与缓存的所有权，下一章讲数据面——张量、并行与 kernel 启动。
+单卡的屋顶线和 kernel 决定一步计算能有多快。推理引擎决定这一步算哪些请求、怎样使用缓存容量，以及何时产出 token。模型权重可以不变，这些决定仍会改掉 [S1](/systems/ledger/) 的三本账。本章沿一个真实的小引擎读调度控制面；[S5](/systems/paged-cache/) 解释缓存所有权与地址，[S6](/systems/engine-execution/) 再解释张量与 kernel 启动。
 
 <Callout title="源码快照">
 [nano-vLLM](https://github.com/GeeeekExplorer/nano-vllm) 提交 [bb823b3](https://github.com/GeeeekExplorer/nano-vllm/commit/bb823b3e06983d71485a8e1f23715ebd87d98ef8)（2026-04-26），约 1,200 行 Python。正文中的源码锚点都指向这一提交；上游后续变化后，先核对调度器与 ModelRunner 再对照阅读。目标不是记住类名，而是能独立解释一个 token 如何被调度、计算、缓存并采样。
@@ -170,78 +171,38 @@ stateDiagram-v2
 
 <SourceNote>[scheduler.py:25-92](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py#L25-L92)</SourceNote>
 
-## 分页 KV cache：逻辑连续，物理可以离散
+## 缓存容量：调度器只需要哪些契约
 
-若每条请求占一块连续显存，并且按最大长度预留，短请求会留下用不上的尾巴，结束一条长请求还会迫使别的请求搬家。分页把 KV 切成固定大小的块，逻辑 token 通过块表找到物理块。请求之间的物理块可以交错，结束的块回到空闲列表。
+调度前查询可用容量，接纳时获得缓存所有权，结束或抢占时释放。当前章先把这些操作视为抽象容量接口；物理块映射与前缀复用在 [S5 分页与前缀缓存](/systems/paged-cache/) 推导。不能在资源尚未保留时先启动前向，否则另一个请求可能占走同一缓存。
 
-<Figure src="infra/07-paging.svg" alt="请求 A 的逻辑块映射到不连续的物理块">教学用的块大小是 4。A 的 10 个 token 在逻辑上连续，物理上占用 1、2、5 三块。B 的块夹在中间。空闲块可以给下一条请求。</Figure>
+## 分块预填充：预算不足时不能提前生成
 
-[PagedAttention](https://arxiv.org/abs/2309.06180) 把操作系统的分页用到 KV 上，[vLLM](https://github.com/vllm-project/vllm) 是对应的实现。块大小在生产系统里通常大于 4，映射方式相同。
+区分三个量：序列已有 ID 数、已经写入 KV 的输入数、本步安排的输入数。提示 `[A,B,C,D,E]`、预算为 2，没有前缀命中时，前两步分别计算 A/B 与 C/D，只能增加缓存计数，不能采样答案；第三步处理 E，完整提示条件已经具备，才用 E 的隐藏状态采样第一个输出 F。若在第二步用 D 的 logits 提前生成，就是在截断提示 `[A,B,C,D]` 下回答另一个任务。
 
-在 nano-vLLM 里，每条序列看到的是连续 token；`block_table` 把第 0、1、2… 个逻辑块翻译为任意物理块。模型不需要搬动历史 K/V，只要把逻辑位置换算成正确槽位：
+| 迭代 | 序列 ID | 本步输入 | 计算后缓存长度 | 是否采样 |
+| --- | --- | --- | --- | --- |
+| 1 | A–E | A、B | 2 | 否 |
+| 2 | A–E | C、D | 4 | 否 |
+| 3 | A–E | E | 5 | 是，追加 F |
+| 4 | A–F | F | 6 | 是，追加 G |
 
-记位置为 $p$、块大小为 $T_b$，逻辑块号为 $\ell$、物理槽位为 $s$；分别对应代码中的 `position`、`block_size`、`logical_block` 和 `slot`。以 $a_\ell$ 表示块表 `block_table[logical_block]` 给出的物理块号。
+chunked prefill 是调度策略，计算依然应与完整 prompt 前向等价。后续块的查询读取之前块的 K/V，并按绝对位置使用因果规则。只把提示切成几段独立前向、不传历史缓存，会失去前段条件；只把缓存长度增加却没有完成 GPU 写入，也会读取无效状态。
 
-<KeyEq label="逻辑位置到物理槽位">
+调度通常同时有 token 预算与序列预算：前者限制本步输入总数，后者限制请求个数。三个 prompt 长 11、5、8、token 预算 12 时，允许分块的策略可能先安排第一条 11 再把第二条留到下一轮，也可能先给第一条一小块以让其他请求获得机会。合法性来自不超预算、资源可用和状态连续；哪种策略更好需要按 S10 的固定负载比较，不由数学正确性唯一决定。
 
-$$
-\begin{aligned}
-\ell&=\left\lfloor\frac{p}{T_b}\right\rfloor,\\
-s&=a_\ell T_b+(p\bmod T_b).
-\end{aligned}
-$$
+## 抢占与公平：重算也有系统成本
 
-</KeyEq>
+缓存紧张时，抢占可释放某条请求的状态，保留其已生成 ID，之后重新 prefill 这些 ID 恢复 K/V。恢复时是在重算已提交历史，不应再次把这些 token 当新输出发送，也不应重新抽样改变历史。若前缀缓存命中，则部分状态可以直接复用；没有命中就支付完整重算成本。
 
-<PagedKvLab client:visible />
+优先短请求可能改善平均完成时间，却使长请求饥饿；prefill 优先可能改善新请求 TTFT，却延长已经开始流式输出的 ITL。公平策略可以限制每轮 prefill 预算、增加等待年龄权重或区分请求优先级，但引入一种策略之前应先记录目标指标与约束。nano-vLLM 的规则是固定源码案例，不是所有线上负载的最优解。
 
-GPU 上真正分配的张量是
+完成、取消与抢占是不同终态：完成与取消不会再次进入 waiting，抢占会；取消需要释放所有权且不继续采样；在途 GPU 工作尚未结束时不能立刻将同一物理资源给别的请求。CPU 队列状态、GPU 状态和客户端事件必须对应，否则会产生重复 token、缓存被覆盖或资源泄漏。
 
-```python
-kv_cache.shape == (
-    2,
-    num_layers,
-    num_blocks,
-    block_size,
-    kv_heads_per_rank,
-    head_dim,
-)
-```
+## CPU 核对：只在完整条件具备后采样
 
-第一维的 2 分别是 K 与 V。每个注意力层拿到自己在 `kv_cache` 中的一片 view；`slot_mapping` 再告诉 Triton kernel 本批每个新 K/V 应写到哪一个扁平槽位。
+下面参考状态机采用单请求与固定 token 预算，验证分块预填充不提前输出、完成请求不继续前向，以及抢占重算不重复发送已有输出。它不复刻 nano-vLLM 的请求排序或分页实现；源码策略仍由上面的交互实验说明。
 
-<SourceNote>[KV 分配](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py#L103-L127)、[Triton 写缓存](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py#L10-L40)</SourceNote>
-
-## 前缀缓存：缓存的是完整块链，不是字符串
-
-共享前缀时，只读块可以被多条请求指到同一物理块。nano-vLLM 为每个完整块计算哈希，它同时依赖“前一块哈希”和“本块 token_ids”。因此相同 token 块只有出现在相同前缀链上才命中；命中后还会逐 token 比较，避免仅凭哈希确认。
-
-记第 $i$ 块 token ID 的序列化字节串为 $u_i$，$\mathbin{\Vert}$ 表示字节串拼接，区别于向量范数 $\|x\|_2$。前一块哈希也按实现规则序列化后参与拼接：
-
-$$
-\begin{aligned}
-h_0&=\operatorname{xxh64}(u_0),\\
-h_i&=\operatorname{xxh64}(h_{i-1}\mathbin{\Vert}u_i).
-\end{aligned}
-$$
-
-<Panels>
-<Panel title="命中时">复用物理 block id，增加 `ref_count`；prefill 只计算未命中的后缀，FlashAttention 通过 block table 读取完整 K/V。</Panel>
-<Panel title="释放时" tone="accent2">按序列的 block table 逆序减引用计数；归零的块回到 free 队列，但哈希与 token 元数据暂留到块再次分配。</Panel>
-</Panels>
-
-| 设计点 | nano-vLLM 的选择 | 含义 |
-| --- | --- | --- |
-| 匹配粒度 | 完整物理块 | 部分块不进入共享前缀索引 |
-| 链式身份 | 前缀哈希 + 本块 tokens | 相同局部 token、不同历史不会误复用 |
-| 冲突防护 | 再比较 `token_ids` | 哈希命中不是最终证据 |
-| 所有权 | `ref_count` | 多个序列可安全共享同一前缀块 |
-
-<Callout tone="warn" title="保守的尾块">
-`can_allocate()` 只扫描 `range(seq.num_blocks - 1)`，即不复用序列最后一个逻辑块。阅读与优化时要把“可缓存的完整块”和“未来可能继续写的尾块”分开考虑。
-</Callout>
-
-<SourceNote>[block_manager.py:35-120](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py#L35-L120)</SourceNote>
+<CodeFile path="code/systems/scheduling.py" />
 
 ## 练习与核对
 
@@ -260,15 +221,17 @@ prefill 已经为 prompt 全部位置写入 KV，并用最后一个 prompt隐藏
 </details>
 
 <details>
-<summary>3. 块大小 4，block_table = [6, 2, 9]，位置 9 的 token 写入哪个物理槽位？</summary>
+<summary>3. prompt 长 5、每轮最多处理 2 个输入，没有前缀命中，何时可以采样第一个输出？</summary>
 
-逻辑块 $\lfloor 9/4\rfloor=2$，块内偏移 $9\bmod4=1$，物理块 `block_table[2] = 9`，槽位 $9\times4+1=37$。可以把实验里的序列长度调到 9 核对。
+第三轮才处理 prompt 最后一个输入，缓存数从 4 到 5，随后才采样。前两轮只做历史状态计算；提前采样会忽略剩余 prompt。
 
 </details>
 
 <details>
 <summary>4. prefix cache 命中时，Q 的长度为什么可以小于 K 的长度？</summary>
 
-Q 只为未缓存后缀计算；K 则包含共享前缀的历史 K 和当前后缀的新 K。FlashAttention 通过累计长度与 block table 获得这个非对称的注意力窗口，[S4](/systems/engine-execution/) 的批形状一节会展开 `cu_seqlens_q` 与 `cu_seqlens_k`。
+Q 只为未缓存后缀计算；K 则包含共享前缀的历史 K 和当前后缀的新 K。FlashAttention 通过累计长度与 block table 获得这个非对称的注意力窗口，[S6](/systems/engine-execution/) 的批形状一节会展开 `cu_seqlens_q` 与 `cu_seqlens_k`。
 
 </details>
+
+下一章 [S5 分页与前缀缓存](/systems/paged-cache/) 将这里的抽象容量转换成块表、物理槽位和可核对的所有权。

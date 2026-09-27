@@ -1,107 +1,25 @@
 ---
 title: 相对位置与 RoPE
 question: 怎样让注意力分数只通过位置差依赖位置
-description: 从 Shaw、T5 与 ALiBi 的相对位置设计出发，用复数和分块旋转推出 RoPE，检查它保证了什么、没有保证什么，并用 PyTorch 验证。
-order: 3
+description: 先用实矩阵推导 RoPE，再以复数核对旋转并对照其他相对位置方案，检查它保证了什么、没有保证什么，并用 PyTorch 验证。
+order: 7
 code:
   - code/principles/position_encoding.py
 ---
 
-[P2](/principles/sinusoidal/) 的加法编码把位置放进输入，投影之后又会出现绝对位置项。本章换一个思路：直接修改注意力分数，让新增的位置依赖只读取位置差。先看三种代表性做法，再用复数这一工具把 [P2](/principles/sinusoidal/) 的旋转施加到查询和键上，得到 RoPE。
-
-## 直接把相对位置写进分数
-
-我们希望同一内容关系在整段文本平移后尽量保持一致。令 $\Delta=j-i$，最直接的做法是让新增项只读取 $\Delta$，而不是分别读取 $i,j$。
-
-### Shaw：让“偏移”成为一个向量
-
-给每个截断后的偏移学习一个键侧向量 $a^K_\Delta$：
-
-$$
-s_{ij}=\frac{q_i^\top(k_j+a^K_{\operatorname{clip}(j-i,-r,r)})}{\sqrt{d_h}}.
-$$
-
-展开后是原有内容分数加 $q_i^\top a^K_\Delta$。相同距离对于不同查询可以产生不同修正，因为这个修正与内容有关。截断把无限多距离压成有限参数，但所有超出窗口的同方向距离会共享编码。原方法也有值侧相对项，以上只展示分数如何改变。
-
-### T5：从内容相关向量，简化成标量偏置
-
-$$
-s_{ij}^{(h)}=\frac{q_i^\top k_j}{\sqrt{d_h}}+b_h(\operatorname{bucket}(j-i)).
-$$
-
-不再与查询做点积，而是每个头、每个距离桶一个标量。近处可以分得细，远处分得粗。代价是桶内距离不能通过这项区分，偏置本身也不依赖查询内容。
-
-### ALiBi：把距离先验变成指数权重
-
-对因果注意力 $j\le i$，固定每个头的正斜率 $m_h$：
-
-$$
-s_{ij}^{(h)}=c_{ij}^{(h)}-m_h(i-j),\qquad
-\alpha_{ij}^{(h)}=
-\frac{e^{c_{ij}^{(h)}}e^{-m_h(i-j)}}{\sum_{\ell\le i}e^{c_{i\ell}^{(h)}}e^{-m_h(i-\ell)}}.
-$$
-
-这不是“因为距离远所以直接置零”，而是给未归一化内容权重乘上指数距离因子。若两个候选的内容分数相同，距离分别为 2 和 6，斜率为 $1/2$，其权重比为 $e^2$。内容分数足够大仍可克服距离惩罚。
-
-## 复数：用一次乘法完成旋转
-
-<Figure src="math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转">从 z = 1 + i 出发，反复乘 i，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 e^(iφ) 表示。</Figure>
-
-RoPE 论文用复数书写旋转，推导也更短。将 $(x,y)^\top$ 对应到复数 $z=x+\mathrm{i}y$，其中 $\mathrm{i}^2=-1$；不要将虚数单位 $\mathrm{i}$ 与位置下标 $i$ 混淆。复数的模 $|z|=\sqrt{x^2+y^2}$ 对应向量范数。欧拉公式把 [P2](/principles/sinusoidal/) 的极坐标和指数连接起来：
-
-$$
-e^{\mathrm{i}\alpha}=\cos\alpha+\mathrm{i}\sin\alpha,
-\qquad z=r e^{\mathrm{i}\alpha}.
-$$
-
-可从指数的幂级数验证：利用 $\mathrm{i}^2=-1$，把偶次项与奇次项分别收集，得到
-
-$$
-e^{\mathrm{i}\alpha}
-=\left(1-\frac{\alpha^2}{2!}+\frac{\alpha^4}{4!}-\cdots\right)
-+\mathrm{i}\left(\alpha-\frac{\alpha^3}{3!}+\frac{\alpha^5}{5!}-\cdots\right)
-=\cos\alpha+\mathrm{i}\sin\alpha.
-$$
-
-这与 [P2 选读](/principles/sinusoidal/) 中矩阵指数的展开是同一个计算：$\mathrm i$ 扮演了 $S$ 的角色，两者平方都是 $-1$。
-
-### 乘单位复数就是旋转
-
-一般复数乘法为 $(x+\mathrm{i}y)(u+\mathrm{i}v)=(xu-yv)+\mathrm{i}(xv+yu)$。取 $u=\cos\phi,v=\sin\phi$，上式立即变成旋转坐标公式。在极坐标下，$ze^{\mathrm{i}\phi}=r e^{\mathrm{i}(\alpha+\phi)}$：模不变，相位加 $\phi$。特别地，$\mathrm{i}(x+\mathrm{i}y)=-y+\mathrm{i}x$，坐标从 $(x,y)$ 变成 $(-y,x)$，正好逆时针四分之一圈。
-
-“把实向量写成复数”本身没有改变数据；复数乘法只是恰好同时完成了两个坐标的交叉组合。一般复数乘法 $(r e^{\mathrm{i}\alpha})(s e^{\mathrm{i}\beta})=rs e^{\mathrm{i}(\alpha+\beta)}$ 既缩放又旋转；RoPE 乘的是模为 1 的 $e^{\mathrm{i}p\omega}$，才只旋转、不缩放。
-
-### 共轭把实点积变成复数乘法
-
-$$
-\bar z w=(x-\mathrm{i}y)(u+\mathrm{i}v)
-=(xu+yv)+\mathrm{i}(xv-yu),\qquad
-\operatorname{Re}(\bar z w)=xu+yv.
-$$
-
-若漏掉共轭，$\operatorname{Re}(zw)=xu-yv$，就不是原来的实点积。取 $z=3+4\mathrm{i},w=4$，$\bar z w=12-16\mathrm{i}$，实部 12 等于 $(3,4)^\top$ 与 $(4,0)^\top$ 的点积。结合极坐标，$\operatorname{Re}(\bar z w)=|z||w|\cos(\beta-\alpha)$。
-
-同一个运算的三种写法：
-
-| 操作 | 实向量／矩阵 | 极坐标 | 复数 |
-|---|---|---|---|
-| 表示一个二维向量 | $(x,y)^\top$ | $(r,\alpha)$ | $x+\mathrm{i}y=r e^{\mathrm{i}\alpha}$ |
-| 长度 | $\sqrt{x^2+y^2}$ | $r$ | $\lvert z\rvert$ |
-| 旋转 $\phi$ | $R(\phi)a$ | $(r,\alpha+\phi)$ | $ze^{\mathrm{i}\phi}$ |
-| 撤销旋转 | $R(\phi)^\top$ | 相位减去 $\phi$ | 乘 $e^{-\mathrm{i}\phi}$ |
-| 两向量点积 | $a^\top b$ | $rs\cos(\beta-\alpha)$ | $\operatorname{Re}(\bar z w)$ |
+[P6](/principles/sinusoidal/) 的加法编码把位置放进输入，投影之后又会出现绝对位置项。本章换一个思路：直接修改注意力分数，让新增的位置依赖只读取位置差。先用实旋转矩阵把 [P6](/principles/sinusoidal/) 的旋转施加到查询和键上，得到 RoPE。复数与其他相对位置方案放在主线之后回读。
 
 ## RoPE：从目标条件反推旋转
 
 ### 目标是消去共同起点
 
-先得到内容 $q_i,k_j$，再施加与位置相关的线性变换 $T_i,T_j$。沿用 P2 的角频率 $\omega$；RoPE 原论文用 $\theta$ 表示同一个量。希望对任意内容向量，分数的位置部分仅依赖差值：
+先得到内容 $q_i,k_j$，再施加与位置相关的线性变换 $T_i,T_j$。沿用 P6 的角频率 $\omega$；RoPE 原论文用 $\theta$ 表示同一个量。希望对任意内容向量，分数的位置部分仅依赖差值：
 
 $$
 (T_iq_i)^\top(T_jk_j)=q_i^\top\underbrace{T_i^\top T_j}_{H(j-i)}k_j.
 $$
 
-若再选择 $H(0)=I$，同一位置变换不改变任意两个向量的点积，因此 $T_i^\top T_i=I$。选择满足合成律的正交表示 $T_i=R(i\omega)$，由 [P2](/principles/sinusoidal/) 的相对转角公式正好有 $R(i\omega)^\top R(j\omega)=R((j-i)\omega)$。这是一个充分构造，不意味着不存在其他方案。把这些性质串起来，就得到 RoPE 的核心等式：
+若再选择 $H(0)=I$，同一位置变换不改变任意两个向量的点积，因此 $T_i^\top T_i=I$。选择满足合成律的正交表示 $T_i=R(i\omega)$，由 [P6](/principles/sinusoidal/) 的相对转角公式正好有 $R(i\omega)^\top R(j\omega)=R((j-i)\omega)$。这是一个充分构造，不意味着不存在其他方案。把这些性质串起来，就得到 RoPE 的核心等式：
 
 <KeyEq label="RoPE 的相对位置性质">
 
@@ -114,14 +32,7 @@ $$
 
 </KeyEq>
 
-用复数写，同一件事是
-
-$$
-\operatorname{Re}\left(\overline{ze^{\mathrm{i}i\omega}}\,we^{\mathrm{i}j\omega}\right)
-=\operatorname{Re}\left(\bar z w e^{\mathrm{i}(j-i)\omega}\right).
-$$
-
-矩阵表示中，转置把查询旋转变为逆旋转；复数表示中，共轭把查询相位变为负相位。两种推导的减号来自同一件事。
+矩阵转置把查询旋转变成逆旋转，共同位置角度因此抵消。复数中的对应运算是共轭，后面的选读再建立这一等价关系；主线只使用已经定义的实矩阵。
 
 ### 展开每个乘法，看看内容去了哪里
 
@@ -201,7 +112,7 @@ R_0(p)&&0\\
 \end{aligned}
 $$
 
-频率沿用 [P2](/principles/sinusoidal/) 的几何排列，底数 $\beta$ 同样是设计选择。
+频率沿用 [P6](/principles/sinusoidal/) 的几何排列，底数 $\beta$ 同样是设计选择。
 
 ### 四维算例：两个平面，各转各的
 
@@ -252,7 +163,7 @@ np.testing.assert_allclose(complex_rotated.imag, rotated[1::2], atol=1e-14)
 print(rotated)
 ```
 
-标准用法在 Q/K 投影后旋转，通常不旋转 V。若先旋转再乘任意学习矩阵，该矩阵一般不与旋转交换，[P2](/principles/sinusoidal/) 中的 $i+j$ 反例可能再次出现。不同模型采用相邻维度配对或前后半维配对，必须与权重约定一致，不能随意混用。
+标准用法在 Q/K 投影后旋转，通常不旋转 V。若先旋转再乘任意学习矩阵，该矩阵一般不与旋转交换，[P6](/principles/sinusoidal/) 中的 $i+j$ 反例可能再次出现。不同模型采用相邻维度配对或前后半维配对，必须与权重约定一致，不能随意混用。
 
 ## 范数可能编码语义吗：怎样理解和验证
 
@@ -323,7 +234,89 @@ print(x.grad)
 
 <CodeFile path="code/principles/position_encoding.py" />
 
-在仓库根目录执行 `python code/principles/position_encoding.py`。`verify()` 依次检查 [P1](/principles/attention-order/) 的置换等变、[P2](/principles/sinusoidal/) 的平移公式、相对位置核与范数，以及本章的共同平移不变性和反向传播。断言验证有限数值案例；普遍成立的理由是前面的证明。
+在仓库根目录执行 `python code/principles/position_encoding.py`。`verify()` 依次检查 [P5](/principles/attention-order/) 的置换等变、[P6](/principles/sinusoidal/) 的平移公式、相对位置核与范数，以及本章的共同平移不变性和反向传播。断言验证有限数值案例；普遍成立的理由是前面的证明。
+
+## 选读：复数用一次乘法完成旋转
+
+<Figure src="math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转">从 z = 1 + i 出发，反复乘 i，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 e^(iφ) 表示。</Figure>
+
+RoPE 论文用复数书写旋转，推导也更短。将 $(x,y)^\top$ 对应到复数 $z=x+\mathrm{i}y$，其中 $\mathrm{i}^2=-1$；不要将虚数单位 $\mathrm{i}$ 与位置下标 $i$ 混淆。复数的模 $|z|=\sqrt{x^2+y^2}$ 对应向量范数。欧拉公式把 [P6](/principles/sinusoidal/) 的极坐标和指数连接起来：
+
+$$
+e^{\mathrm{i}\alpha}=\cos\alpha+\mathrm{i}\sin\alpha,
+\qquad z=r e^{\mathrm{i}\alpha}.
+$$
+
+可从指数的幂级数验证：利用 $\mathrm{i}^2=-1$，把偶次项与奇次项分别收集，得到
+
+$$
+e^{\mathrm{i}\alpha}
+=\left(1-\frac{\alpha^2}{2!}+\frac{\alpha^4}{4!}-\cdots\right)
++\mathrm{i}\left(\alpha-\frac{\alpha^3}{3!}+\frac{\alpha^5}{5!}-\cdots\right)
+=\cos\alpha+\mathrm{i}\sin\alpha.
+$$
+
+这与 [P6 选读](/principles/sinusoidal/) 中矩阵指数的展开是同一个计算：$\mathrm i$ 扮演了 $S$ 的角色，两者平方都是 $-1$。
+
+### 乘单位复数就是旋转
+
+一般复数乘法为 $(x+\mathrm{i}y)(u+\mathrm{i}v)=(xu-yv)+\mathrm{i}(xv+yu)$。取 $u=\cos\phi,v=\sin\phi$，上式立即变成旋转坐标公式。在极坐标下，$ze^{\mathrm{i}\phi}=r e^{\mathrm{i}(\alpha+\phi)}$：模不变，相位加 $\phi$。特别地，$\mathrm{i}(x+\mathrm{i}y)=-y+\mathrm{i}x$，坐标从 $(x,y)$ 变成 $(-y,x)$，正好逆时针四分之一圈。
+
+“把实向量写成复数”本身没有改变数据；复数乘法只是恰好同时完成了两个坐标的交叉组合。一般复数乘法 $(r e^{\mathrm{i}\alpha})(s e^{\mathrm{i}\beta})=rs e^{\mathrm{i}(\alpha+\beta)}$ 既缩放又旋转；RoPE 乘的是模为 1 的 $e^{\mathrm{i}p\omega}$，才只旋转、不缩放。
+
+### 共轭把实点积变成复数乘法
+
+$$
+\bar z w=(x-\mathrm{i}y)(u+\mathrm{i}v)
+=(xu+yv)+\mathrm{i}(xv-yu),\qquad
+\operatorname{Re}(\bar z w)=xu+yv.
+$$
+
+若漏掉共轭，$\operatorname{Re}(zw)=xu-yv$，就不是原来的实点积。取 $z=3+4\mathrm{i},w=4$，$\bar z w=12-16\mathrm{i}$，实部 12 等于 $(3,4)^\top$ 与 $(4,0)^\top$ 的点积。结合极坐标，$\operatorname{Re}(\bar z w)=|z||w|\cos(\beta-\alpha)$。
+
+同一个运算的三种写法：
+
+| 操作 | 实向量／矩阵 | 极坐标 | 复数 |
+|---|---|---|---|
+| 表示一个二维向量 | $(x,y)^\top$ | $(r,\alpha)$ | $x+\mathrm{i}y=r e^{\mathrm{i}\alpha}$ |
+| 长度 | $\sqrt{x^2+y^2}$ | $r$ | $\lvert z\rvert$ |
+| 旋转 $\phi$ | $R(\phi)a$ | $(r,\alpha+\phi)$ | $ze^{\mathrm{i}\phi}$ |
+| 撤销旋转 | $R(\phi)^\top$ | 相位减去 $\phi$ | 乘 $e^{-\mathrm{i}\phi}$ |
+| 两向量点积 | $a^\top b$ | $rs\cos(\beta-\alpha)$ | $\operatorname{Re}(\bar z w)$ |
+
+## 对照：其他相对位置设计
+
+我们希望同一内容关系在整段文本平移后尽量保持一致。令 $\Delta=j-i$，最直接的做法是让新增项只读取 $\Delta$，而不是分别读取 $i,j$。
+
+### Shaw：让“偏移”成为一个向量
+
+给每个截断后的偏移学习一个键侧向量 $a^K_\Delta$：
+
+$$
+s_{ij}=\frac{q_i^\top(k_j+a^K_{\operatorname{clip}(j-i,-r,r)})}{\sqrt{d_h}}.
+$$
+
+展开后是原有内容分数加 $q_i^\top a^K_\Delta$。相同距离对于不同查询可以产生不同修正，因为这个修正与内容有关。截断把无限多距离压成有限参数，但所有超出窗口的同方向距离会共享编码。原方法也有值侧相对项，以上只展示分数如何改变。
+
+### T5：从内容相关向量，简化成标量偏置
+
+$$
+s_{ij}^{(h)}=\frac{q_i^\top k_j}{\sqrt{d_h}}+b_h(\operatorname{bucket}(j-i)).
+$$
+
+不再与查询做点积，而是每个头、每个距离桶一个标量。近处可以分得细，远处分得粗。代价是桶内距离不能通过这项区分，偏置本身也不依赖查询内容。
+
+### ALiBi：把距离先验变成指数权重
+
+对因果注意力 $j\le i$，固定每个头的正斜率 $m_h$：
+
+$$
+s_{ij}^{(h)}=c_{ij}^{(h)}-m_h(i-j),\qquad
+\alpha_{ij}^{(h)}=
+\frac{e^{c_{ij}^{(h)}}e^{-m_h(i-j)}}{\sum_{\ell\le i}e^{c_{i\ell}^{(h)}}e^{-m_h(i-\ell)}}.
+$$
+
+这不是“因为距离远所以直接置零”，而是给未归一化内容权重乘上指数距离因子。若两个候选的内容分数相同，距离分别为 2 和 6，斜率为 $1/2$，其权重比为 $e^2$。内容分数足够大仍可克服距离惩罚。
 
 ## 常见误区
 
@@ -347,7 +340,7 @@ print(x.grad)
 <details>
 <summary>2. 取 q = (1, 2)、k = (3, 4)，位置差对应 φ = π/2 与 φ = −π/2 时，RoPE 分数各是多少？说明了什么？</summary>
 
-由 $(ac+bd)\cos\phi+(bc-ad)\sin\phi$，$ac+bd=11$，$bc-ad=6-4=2$。$\phi=\pi/2$ 时为 $2$，$\phi=-\pi/2$ 时为 $-2$。键在查询之前或之后，分数符号不同：RoPE 的分数区分方向，而 [P2](/principles/sinusoidal/) 中两个位置向量的点积 $\cos(\Delta\omega)$ 不区分。
+由 $(ac+bd)\cos\phi+(bc-ad)\sin\phi$，$ac+bd=11$，$bc-ad=6-4=2$。$\phi=\pi/2$ 时为 $2$，$\phi=-\pi/2$ 时为 $-2$。键在查询之前或之后，分数符号不同：RoPE 的分数区分方向，而 [P6](/principles/sinusoidal/) 中两个位置向量的点积 $\cos(\Delta\omega)$ 不区分。
 
 </details>
 

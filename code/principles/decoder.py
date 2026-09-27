@@ -1,0 +1,139 @@
+"""A complete pre-LayerNorm teaching decoder and causal CPU checks."""
+
+import math
+
+import torch
+from torch import nn
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, width, heads):
+        super().__init__()
+        if width <= 0 or heads <= 0 or width % heads:
+            raise ValueError("width must be positive and divisible by heads")
+        self.heads, self.head_width = heads, width // heads
+        self.qkv = nn.Linear(width, 3 * width)
+        self.output = nn.Linear(width, width)
+
+    def forward(self, x, cache=None, return_cache=False):
+        batch, length, width = x.shape
+        q, k, v = [part.reshape(batch, length, self.heads, self.head_width)
+                   .transpose(1, 2) for part in self.qkv(x).chunk(3, -1)]
+        past = 0 if cache is None else cache[0].shape[-2]
+        if cache is not None:
+            k, v = torch.cat((cache[0], k), -2), torch.cat((cache[1], v), -2)
+        query_positions = past + torch.arange(length, device=x.device)
+        mask = torch.arange(past + length, device=x.device)[None, :] <= query_positions[:, None]
+        scores = q @ k.transpose(-1, -2) / math.sqrt(self.head_width)
+        weights = scores.masked_fill(~mask, -torch.inf).softmax(-1)
+        result = (weights @ v).transpose(1, 2).contiguous().reshape(batch, length, width)
+        result = self.output(result)
+        return (result, (k, v)) if return_cache else result
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, width, heads, ff_width):
+        super().__init__()
+        self.norm_attention = nn.LayerNorm(width)
+        self.attention = MultiHeadAttention(width, heads)
+        self.norm_ff = nn.LayerNorm(width)
+        self.ff = nn.Sequential(nn.Linear(width, ff_width), nn.GELU(), nn.Linear(ff_width, width))
+
+    def forward(self, x, cache=None, return_cache=False):
+        result = self.attention(self.norm_attention(x), cache, return_cache)
+        if return_cache:
+            result, cache = result
+        x = x + result
+        x = x + self.ff(self.norm_ff(x))
+        return (x, cache) if return_cache else x
+
+
+class Decoder(nn.Module):
+    def __init__(self, vocab_size, width=32, heads=4, ff_width=64, layers=2, max_length=32):
+        super().__init__()
+        if min(vocab_size, width, heads, ff_width, layers, max_length) <= 0:
+            raise ValueError("model dimensions must be positive")
+        self.max_length = max_length
+        self.embedding = nn.Embedding(vocab_size, width)
+        self.position = nn.Embedding(max_length, width)
+        self.blocks = nn.ModuleList([DecoderBlock(width, heads, ff_width) for _ in range(layers)])
+        self.norm = nn.LayerNorm(width)
+        self.head = nn.Linear(width, vocab_size)
+
+    def forward(self, ids):
+        return self.forward_cached(ids)[0]
+
+    def forward_cached(self, ids, caches=None):
+        if caches is not None and len(caches) != len(self.blocks):
+            raise ValueError("one cache is required per decoder layer")
+        past = 0 if caches is None else caches[0][0].shape[-2]
+        if caches is not None and any(k.shape[-2] != past or v.shape != k.shape for k, v in caches):
+            raise ValueError("all layer caches must cover the same prefix")
+        if ids.ndim != 2 or ids.dtype != torch.long or not 0 < ids.shape[1] <= self.max_length:
+            raise ValueError("expected nonempty integer IDs [B,T] within the position table")
+        if past + ids.shape[1] > self.max_length:
+            raise ValueError("cached positions exceed the learned position table")
+        if ids.numel() == 0 or ids.min() < 0 or ids.max() >= self.embedding.num_embeddings:
+            raise ValueError("token IDs must belong to the vocabulary")
+        if caches is not None:
+            for block, (k, v) in zip(self.blocks, caches):
+                expected = (ids.shape[0], block.attention.heads, past, block.attention.head_width)
+                if k.shape != expected or k.device != ids.device or k.dtype != self.embedding.weight.dtype:
+                    raise ValueError("cache batch, heads, width, device and dtype must match this model")
+        positions = past + torch.arange(ids.shape[1], device=ids.device)
+        x = self.embedding(ids) + self.position(positions)
+        next_caches = []
+        for i, block in enumerate(self.blocks):
+            x, cache = block(x, None if caches is None else caches[i], return_cache=True)
+            next_caches.append(cache)
+        return self.head(self.norm(x)), next_caches
+
+
+def verify():
+    from language_model import sequence_loss
+
+    torch.manual_seed(7)
+    torch.set_num_threads(1)
+    model = Decoder(8, width=4, heads=2, ff_width=8, layers=1, max_length=4).double()
+    ids = torch.tensor([[0, 1, 2, 3], [4, 5, 6, 7]])
+    logits = model(ids)
+    assert logits.shape == (2, 4, 8)
+    assert sum(p.numel() for p in model.parameters()) == 268
+    changed = ids.clone()
+    changed[:, 2:] = 7 - changed[:, 2:]
+    torch.testing.assert_close(model(changed)[:, :2], logits[:, :2])
+    torch.testing.assert_close(model(ids[:1]), logits[:1])
+    sequence_loss(logits[:, :-1], ids[:, 1:]).backward()
+    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters())
+
+    attention = model.blocks[0].attention
+    x = torch.randn(2, 4, 4, dtype=torch.float64)
+    q, k, v = attention.qkv(x).chunk(3, -1)
+    reference = torch.zeros_like(x)
+    for b in range(2):
+        for i in range(4):
+            for h in range(2):
+                span = slice(2 * h, 2 * h + 2)
+                scores = k[b, :i + 1, span] @ q[b, i, span] / math.sqrt(2)
+                reference[b, i, span] = scores.softmax(0) @ v[b, :i + 1, span]
+    torch.testing.assert_close(attention(x), attention.output(reference))
+
+    with torch.no_grad():
+        model.position.weight.zero_()
+        for block in model.blocks:
+            for parameter in block.attention.parameters():
+                parameter.zero_()
+            for parameter in block.ff.parameters():
+                parameter.zero_()
+        model.embedding.weight[0] = torch.tensor([1., 2., 3., 4.])
+        model.head.weight.zero_()
+        model.head.weight[:4] = torch.eye(4)
+        model.head.bias.zero_()
+    expected = (torch.arange(1., 5., dtype=torch.float64) - 2.5) / math.sqrt(1.25 + 1e-5)
+    torch.testing.assert_close(model(torch.tensor([[0]]))[0, 0, :4], expected)
+    print("PASS: complete forward/backward, 268 parameters, causal and batch isolation")
+    print("PASS: loop vs multihead matrix attention; hand LayerNorm-to-logits example")
+
+
+if __name__ == "__main__":
+    verify()

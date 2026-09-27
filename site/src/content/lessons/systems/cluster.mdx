@@ -2,7 +2,9 @@
 title: 从一卡到一簇
 question: 多出来的卡切哪一维，通信走哪条线，状态放在哪台机器上
 description: 张量、流水、数据与专家并行各自切开什么、每步多出哪些通信；同一次集合通信的秒数由拓扑决定；再看 prefill/decode 解耦、训练状态分片与端边云的放置。
-order: 5
+order: 9
+code:
+  - code/systems/parallel_layout.py
 ---
 
 [S1](/systems/ledger/) 的字节和 [S2](/systems/accelerator/) 的脊点确定之后，多出来的卡只能做一件事：用通信换容量或换吞吐。先决定切哪一维，再问这些字节要穿过哪条线。
@@ -18,23 +20,66 @@ flowchart TD
 
 ## 切列、切层、复制，以及只送选中的专家
 
-张量并行把一个矩阵乘的列或行分到多张卡。列并行的局部结果要在进入下一个需要完整向量的算子之前归约。[Megatron-LM](https://arxiv.org/abs/1909.08053) 把这种切法和对应的集合通信写进了层结构。通信次数随层数走，所以它换来的是单层放得下，付出的是每层一次同步。
+张量并行把一个矩阵乘的列或行分到多张卡。列并行产生互不重叠的输出通道，下游若需要完整向量，应拼接或 gather；行并行产生同一输出的不同部分和，需要求和归约。[Megatron-LM](https://arxiv.org/abs/1909.08053) 将两种切法配对，让列并行后的一些局部运算继续在各卡执行，在行并行末端才合并。具体通信次数依赖层结构，不能把所有列并行都描述为立即 all-reduce。
 
-流水并行按层把网络切成阶段。前一阶段的激活送给后一阶段。阶段数是 $n_{\mathrm{PP}}$、同时在飞的微批是 $n_{\mathrm{micro}}$ 时，流水里填不满的那一段比例大约是 $(n_{\mathrm{PP}}-1)/n_{\mathrm{micro}}$。这个气泡来自 [GPipe](https://arxiv.org/abs/1811.06965) 的排程；后来的交错阶段能把它压小，见 [Narayanan 等人](https://arxiv.org/abs/2104.04473)，但阶段之间的激活传输还在。
+流水并行按层把网络切成阶段。前一阶段的激活送给后一阶段。理想均衡阶段、忽略通信、使用 $n_{\mathrm{micro}}$ 个微批的填充排空模型中，相对有效计算时间的气泡开销为 $(n_{\mathrm{PP}}-1)/n_{\mathrm{micro}}$，而总历时中的气泡占比为 $(n_{\mathrm{PP}}-1)/(n_{\mathrm{micro}}+n_{\mathrm{PP}}-1)$。它们的分母不同。这个模型用于理解 [GPipe](https://arxiv.org/abs/1811.06965) 的微批排程；交错阶段见 [Narayanan 等人](https://arxiv.org/abs/2104.04473)，阶段之间的传输仍在。
 
 数据并行每张卡留一份完整模型，各自吃不同的样本。推理时可以不通信，直接把请求分出去。训练时梯度要合到一起，再更新那份共享的权重。
 
 专家并行是 [S1](/systems/ledger/) 专家结构的自然延伸：token 只去它选中的专家所在的卡，集合操作是 all-to-all，而不是把所有专家的结果加起来。放置方式见 [GShard](https://arxiv.org/abs/2006.16668)。
 
+## 两卡矩阵：先算局部结果，再选择 collective
+
+rank 是协作进程的编号，shard 是它持有的数据切片。沿用论文布局，输入 $X\in\mathbb R^{B\times d_{\mathrm{in}}}$，权重 $W\in\mathbb R^{d_{\mathrm{in}}\times d_{\mathrm{out}}}$，输出 $Y=XW$。列切分 $W=[W_0\;W_1]$，局部结果分别为 $Y_0=XW_0$、$Y_1=XW_1$；完整结果是沿输出维拼接 $[Y_0\;Y_1]$，不是 $Y_0+Y_1$。
+
+具体取 $X=[1,2,3,4]$，$W$ 的行依次是 $[0,1,2,3]$、$[4,5,6,7]$、$[8,9,10,11]$、$[12,13,14,15]$。完整输出为 $[80,90,100,110]$。两卡各持两列，得到 $[80,90]$ 与 $[100,110]$，拼接才恢复四维输出；若相加得到 $[180,200]$，形状和意义都错误。
+
+行切分则令 $X=[X_0\;X_1]$，$W$ 按输入维上下切成 $W_0,W_1$。完整矩阵乘为
+
+$$
+Y=X_0W_0+X_1W_1.
+$$
+
+上例前两维部分和为 $[8,11,14,17]$，后两维部分和为 $[72,79,86,93]$，相加才得到 $[80,90,100,110]$。all-reduce 可让两卡都得到这份和；若下游只需要分片输出，reduce-scatter 可能更合适。通信选择由输出拥有关系决定，不是仅凭 tensor 名字决定。
+
+| 操作 | 输入在各 rank 的含义 | 输出含义 |
+| --- | --- | --- |
+| all-gather | 不同坐标切片 | 每卡获得拼接结果 |
+| all-reduce | 同一坐标的部分贡献 | 每卡获得求和等归约结果 |
+| reduce-scatter | 同一结果的部分贡献 | 归约后各卡保留不同切片 |
+| all-to-all | 发往不同目的 rank 的数据 | 每卡收集发给自己的部分 |
+
+使用 collective 时所有参与者还必须遵循相同调用次序、形状与数据类型。某 rank 因异常跳过通信，其他 rank 可能永久等待；模型算术一致还不够，进程失败处理也属于分布式正确性。
+
+## 层内配对：怎样减少不必要的 gather
+
+前馈第一投影按输出通道切分，每卡得到一部分中间激活。GELU 或 SwiGLU 的逐元素运算可以在相应局部通道完成，随后下投影按输入通道切分，各卡产出完整隐藏维的部分和，再 all-reduce。若 gate/up 的切片没有对齐，逐元素乘会把不同通道混在一起，因此权重加载映射是正确性的一部分。
+
+多头注意力也可按完整查询头切分，局部头计算之后用行并行输出投影合并。GQA 中 KV 头少于 TP rank 时，不能机械地把 KV 头平均分配成零个头；实现可能复制 KV 头，容量缩减不再简单等于 TP 倍数。具体规则要读模型的分片实现。[S6](/systems/engine-execution/) 给出了 nano-vLLM 的具体权重和通信落点，可在理解本节后回读。
+
+词表并行输出头让各卡计算不同 token 范围的 logits。若 rank 0 负责抽样，可以 gather 全词表；也有分布式 softmax/采样算法在计算最大值、归一化和概率质量时通信，避免完整 gather。它们必须恢复同一个采样分布。embedding 按词表切分时，各卡仅对本地 ID 返回嵌入，其余返回零，再求和恢复输入；因此它的通信与输出头不同，尽管权重形状有关联。
+
+## 流水时间线：训练微批与自回归请求分开
+
+均衡四阶段处理 12 个独立微批，首批需要 4 个时间单位穿过全流水，此后理想每单位完成一个，总历时 $12+4-1=15$。理想满负荷有效单位为 12，填充排空损失为 3。相对有效工作的开销是 3/12=25%，总历时占比是 3/15=20%。实际阶段不均衡、通信与前后向交错会改变时间线。
+
+单个自回归请求的下一个 token 依赖上一 token 在最后阶段采样完毕，再回到第一阶段。它不能像 12 个独立微批那样每单位无依赖推进。因此流水主要依靠多个请求或微批填满，不等于把单请求生成延迟除以阶段数。对低并发服务，按层切分可能主要解决容量，反而增加激活传输和串行等待。
+
+<CodeFile path="code/systems/parallel_layout.py" />
+
+CPU 脚本枚举列切片拼接和行切片求和，核对完整矩阵乘；它还验证 S6 的 packed 位置及理想流水比例。它不发起 NCCL collective，不测机间延迟，数学输出相同与分布式执行可用是两层不同验收。
+
 ## 同一次集合通信，秒数取决于线
 
 NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果应当是什么，文档在 [NCCL User Guide](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/index.html)。字节数由切分方式决定。秒数由拓扑决定：同一机柜里的 NVLink，和穿过网卡的链路，带宽可以差一个数量级以上。
 
-[H100 产品页](https://www.nvidia.com/en-us/data-center/h100/) 在 2026-09-22 给 SXM 列出的 NVLink 是 900 GB/s，HBM 带宽是 3.35 TB/s。不管 900 这个数在脚注里是单向还是双向合计，它都小于本卡 HBM。所以「把张量切到另一张卡」不是免费的容量。机内、机间各是什么链路，要以那台机器的拓扑为准，而不是以产品页上的峰值代替。[Wafer 的并行与拓扑一节](https://github.com/wafer-ai/gpu-perf-engineering-resources#parallelism-collectives-and-topology) 把这部分原始材料集中在一起。超节点和数据中心网络分别是 [AI Infra Book 第 6 章](https://bojieli.github.io/ai-infra-book/manuscripts/06-%E8%B6%85%E8%8A%82%E7%82%B9.html) 与 [第 7 章](https://bojieli.github.io/ai-infra-book/manuscripts/07-%E6%95%B0%E6%8D%AE%E4%B8%AD%E5%BF%83%E7%BD%91%E7%BB%9C.html) 的主题；这里只保留「字节数和秒数分开记」。
+产品页带宽可能按单向、双向合计、每链路或每设备聚合书写，这些口径不能混入同一个传输时间公式。对于消息大小 $m$，粗略下限可写为固定延迟 $\lambda$ 加 $m/b_{\mathrm{link}}$，其中 $b_{\mathrm{link}}$ 必须是实际使用方向与路径的有效带宽；collective 还可能分多阶段、绕不同链路。机内、机间拓扑应以目标机器为准，通过通信基准记录消息大小与参与 rank，再解释模型同步成本。[Wafer 的并行与拓扑一节](https://github.com/wafer-ai/gpu-perf-engineering-resources#parallelism-collectives-and-topology) 给出进一步资料索引。
 
 ## 把 prefill 和 decode 拆开
 
 [S1](/systems/ledger/) 与 [S2](/systems/accelerator/) 已经说明，长提示的 prefill 靠近算力平台，单请求 decode 靠近带宽斜线。把两种请求放在同一张卡上，小而频繁的 decode 会把大矩阵乘切开。拆成两类 worker 之后，各自按自己的强度扩容，代价是 KV 或隐藏状态要跨机传送。传送时间小于混部造成的损失时，拆开才划算。问题的提法见 [DistServe](https://arxiv.org/abs/2401.09670)。[Mooncake](https://www.usenix.org/conference/fast25/presentation/qin) 把 KV 的存放和传输做成独立的一层。阅读索引在 [Wafer 的解耦一节](https://github.com/wafer-ai/gpu-perf-engineering-resources#prefill-and-decode-disaggregation)。
+
+例如 S1 的一条 8192 token 提示有 1 GiB KV。若示意链路有效单向带宽为 50 GB/s，理想复制就需约 21.5 ms，另加固定延迟、排队与协议；这个 50 是教学假设，不是产品测量。若混部损失只有 5 ms，直接全量搬移未必划算；若可转移部分层、压缩、复用驻留前缀或流水重叠，成本模型还需重算。接收端模型、位置配置和缓存布局必须一致，不能把任意 KV 当跨模型可迁移状态。
 
 ## 训练：重算，或者把 16 字节切开
 
@@ -51,7 +96,7 @@ NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果
 <details>
 <summary>1. 流水并行分 4 个阶段、同时有 12 个微批在飞，气泡大约占多少？要把它压到 5% 以下，微批至少要多少？</summary>
 
-气泡比例约 $(n_{\mathrm{PP}}-1)/n_{\mathrm{micro}}=3/12=25\%$。要求 $3/n_{\mathrm{micro}}<0.05$，得 $n_{\mathrm{micro}}>60$，至少 61 个微批。微批越多，每个越小，单次矩阵乘的算术强度越低；这就是交错阶段等排程要解决的矛盾。
+相对有效计算的开销为 $3/12=25\%$，总历时占比为 $3/(12+3)=20\%$。若要求总历时占比严格小于 5%，则 $3/(n_{\mathrm{micro}}+3)<0.05$，即 $n_{\mathrm{micro}}>57$，至少 58 个；若要求相对有效时间开销小于 5%，才是至少 61 个。这里忽略通信且阶段均衡，不能直接套到单请求自回归延迟。
 
 </details>
 
@@ -65,9 +110,11 @@ NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果
 <details>
 <summary>3. 为什么“把张量切到另一张卡”不是免费的容量？</summary>
 
-切开后每一层都要做集合通信，字节数由切分方式决定，秒数由链路决定。按产品页数字，SXM 的 NVLink 900 GB/s 小于本卡 HBM 的 3.35 TB/s；穿过网卡的链路还要再低一个数量级以上。容量换到了，时间要从通信里付。
+切分后的依赖需要传递局部结果或合并部分和，字节数由算子和所有权决定，秒数由消息规模、拓扑、固定延迟和有效带宽决定。TP 常在层内通信，PP 在阶段间传激活，独立推理副本则可不做模型 collective，不能把所有并行概括为每层同一种通信。
 
 </details>
+
+下一章 [S10 服务评估](/systems/serving-evaluation/) 不再只计某一层的运算或通信，而从客户端事件检验整体服务是否满足目标。
 
 ## 引用与边界
 
@@ -78,4 +125,3 @@ NCCL 规定了 all-reduce、all-gather、reduce-scatter 和 all-to-all 的结果
 | Megatron、GPipe、ZeRO、DistServe、NCCL、H100 | 正文中的论文和文档 | 只保留会改变字节或同步次数的规则 |
 
 本页不给出某一代 GPU 的推荐拓扑或并行组合。那种组合依赖模型形状、长度分布和这台集群的线，要用 [S2](/systems/accelerator/) 的记录方法在目标机器上测。
-
