@@ -14,7 +14,7 @@ export const tracks: Track[] = [
     id: 'math',
     letter: 'M',
     label: '数学基础',
-    summary: '从统计、分布、矩阵和微积分出发，手算并验证一次完整的神经网络训练。',
+    summary: '从统计、矩阵与微积分完成训练，再用谱分解、低秩与条件数理解数值稳定性。',
   },
   {
     id: 'frameworks', letter: 'F', label: '数组与框架',
@@ -24,11 +24,11 @@ export const tracks: Track[] = [
     id: 'principles',
     letter: 'P',
     label: '模型原理',
-    summary: '从文本与预测目标搭起完整 Decoder，推导位置、现代结构、生成与缓存。',
+    summary: '从文本搭起基础 Decoder，再组装 RoPE、GQA、RMSNorm 与 SwiGLU 的完整现代模型。',
   },
   {
     id: 'training', letter: 'T', label: '训练与评估',
-    summary: '准备数据，完整训练与恢复小语言模型，再做评估、指令微调和低秩适配。',
+    summary: '完成文本训练、磁盘恢复与适配，再研究缩放规律、数据工程与分布式训练。',
   },
   {
     id: 'gpu', letter: 'G', label: 'GPU 编程',

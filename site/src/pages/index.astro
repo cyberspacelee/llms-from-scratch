@@ -28,6 +28,11 @@ const routes: { title: string; detail: string; steps: Lesson[] }[] = [
     steps: [find('math/linear-algebra'), find('principles/attention-order'), find('principles/rope')],
   },
   {
+    title: '从零训练现代 Transformer',
+    detail: '组装完整模型，训练短文本并保存恢复，再做受控评估与规模实验。',
+    steps: [find('principles/complete-transformer'), find('training/pretraining'), find('training/evaluation'), find('training/scaling-laws')],
+  },
+  {
     title: '开始写 GPU kernel',
     detail: '从数组索引进入线程组织，接着理解访存、同步、分块与测量。',
     steps: [find('gpu/execution-model'), find('gpu/memory-and-sync'), find('gpu/kernel-design'), find('gpu/measurement')],

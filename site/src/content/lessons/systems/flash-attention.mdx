@@ -120,6 +120,8 @@ FlashAttention-2 进一步改进工作划分和并行，减少非矩阵乘运算
 
 运行输出中的 “verified” 指输出与参考的容差核对。NumPy 循环没有 tensor core、共享内存或异步拷贝，通常比一次 dense 矩阵乘慢。真正的 GPU 对照需固定 Q/K/V、掩码、精度、dropout、预热次数和同步点，使用同一设备上的后端；先报告最大误差，再报告时间及峰值内存。自动选择后端时也要记录实际执行的 kernel。
 
+完整模型层面的执行对照见 [G4](/gpu/measurement/#完整模型先对齐输出与梯度再观察执行路径)。`model_profile.py` 在相同权重与输入上先比较显式注意力和 SDPA 的 logits/参数梯度，再采集 profiler；可选 CUDA 分支才报告 event 时间。SDPA 的具体后端由运行条件决定，不把 CPU 等价检查当作 FlashAttention GPU 加速证据。
+
 ## 常见误区
 
 - 认为在线 softmax 必须保留全部历史分数。保存的是最大值、分母和加权分子，大小不随已读键数增长。

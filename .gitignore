@@ -43,3 +43,6 @@ coverage.xml
 
 # Build output of the site
 site/dist/
+
+# Local teaching-model checkpoints and experiment reports
+/runs/

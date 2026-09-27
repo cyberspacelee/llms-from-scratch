@@ -1,6 +1,8 @@
 """Byte BPE, embedding lookup, and repeated-token gradient checks on CPU."""
 
 from collections import Counter
+import json
+from pathlib import Path
 import re
 
 import torch
@@ -23,14 +25,32 @@ def merge_pair(ids, pair, merged_id):
 class ByteBPE:
     """Teaching tokenizer: raw UTF-8, no normalization or pre-tokenization."""
 
-    def __init__(self):
+    def __init__(self, special_tokens=()):
+        if any(not isinstance(s, str) or not s for s in special_tokens) or len(set(special_tokens)) != len(special_tokens):
+            raise ValueError("special token spellings must be nonempty and unique")
         self.pieces = {i: bytes([i]) for i in range(256)}
         self.merges = []
+        self.special_tokens = tuple(special_tokens)
+
+    @property
+    def special_ids(self):
+        return {s: len(self.pieces) + i for i, s in enumerate(self.special_tokens)}
+
+    @property
+    def vocab_size(self):
+        return len(self.pieces) + len(self.special_tokens)
+
+    def _parts(self, text):
+        if not self.special_tokens:
+            return [text]
+        pattern = "(" + "|".join(re.escape(s) for s in sorted(self.special_tokens, key=len, reverse=True)) + ")"
+        return re.split(pattern, text)
 
     def fit(self, documents, num_merges):
         if num_merges < 0 or self.merges:
             raise ValueError("use a fresh tokenizer and a nonnegative merge count")
-        sequences = [list(text.encode("utf-8")) for text in documents]
+        sequences = [list(part.encode("utf-8")) for text in documents
+                     for part in self._parts(text) if part not in self.special_ids]
         if not sequences or not any(sequences):
             raise ValueError("training documents must contain text")
         for _ in range(num_merges):
@@ -44,16 +64,51 @@ class ByteBPE:
             sequences = [merge_pair(ids, pair, merged_id) for ids in sequences]
         return self
 
-    def encode(self, text):
+    def _encode_plain(self, text):
         ids = list(text.encode("utf-8"))
         for pair, merged_id in self.merges:
             ids = merge_pair(ids, pair, merged_id)
         return ids
 
-    def decode(self, ids):
-        if any(i not in self.pieces for i in ids):
+    def encode(self, text, allowed_special=False):
+        if not allowed_special:
+            return self._encode_plain(text)
+        return [i for part in self._parts(text) for i in
+                ([self.special_ids[part]] if part in self.special_ids else self._encode_plain(part))]
+
+    def decode(self, ids, errors="strict"):
+        pieces = {**self.pieces, **{i: s.encode("utf-8") for s, i in self.special_ids.items()}}
+        if any(i not in pieces for i in ids):
             raise ValueError("unknown token ID")
-        return b"".join(self.pieces[i] for i in ids).decode("utf-8")
+        return b"".join(pieces[i] for i in ids).decode("utf-8", errors=errors)
+
+    def state_dict(self):
+        return dict(version=1, kind=type(self).__name__, special_tokens=list(self.special_tokens),
+                    merges=[[a, b] for (a, b), _ in self.merges])
+
+    @staticmethod
+    def from_state_dict(state):
+        if not isinstance(state, dict) or state.get("version") != 1 or state.get("kind") not in ("ByteBPE", "PreSplitBPE"):
+            raise ValueError("unsupported tokenizer state")
+        if not isinstance(state.get("special_tokens"), list) or not isinstance(state.get("merges"), list):
+            raise ValueError("tokenizer state needs special_tokens and merges lists")
+        tokenizer = (PreSplitBPE if state["kind"] == "PreSplitBPE" else ByteBPE)(state["special_tokens"])
+        for pair in state["merges"]:
+            if not isinstance(pair, list) or len(pair) != 2 or any(type(i) is not int or i not in tokenizer.pieces for i in pair):
+                raise ValueError("merge references must precede their output ID")
+            if any(old_pair == tuple(pair) for old_pair, _ in tokenizer.merges):
+                raise ValueError("duplicate merge rule")
+            merged_id = len(tokenizer.pieces)
+            tokenizer.pieces[merged_id] = tokenizer.pieces[pair[0]] + tokenizer.pieces[pair[1]]
+            tokenizer.merges.append((tuple(pair), merged_id))
+        return tokenizer
+
+    def save(self, path):
+        Path(path).write_text(json.dumps(self.state_dict(), ensure_ascii=True, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def load(path):
+        return ByteBPE.from_state_dict(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 # A simplified, ASCII-only version of GPT-2 style pre-tokenization: a word keeps its leading space.
@@ -64,10 +119,11 @@ class PreSplitBPE(ByteBPE):
     """Byte BPE whose merges never cross pre-tokenized chunk boundaries."""
 
     def fit(self, documents, num_merges):
-        return super().fit([chunk for text in documents for chunk in PRE_SPLIT.findall(text)], num_merges)
+        return super().fit([chunk for text in documents for part in self._parts(text)
+                           if part not in self.special_ids for chunk in PRE_SPLIT.findall(part)], num_merges)
 
-    def encode(self, text):
-        return [i for chunk in PRE_SPLIT.findall(text) for i in super().encode(chunk)]
+    def _encode_plain(self, text):
+        return [i for chunk in PRE_SPLIT.findall(text) for i in super()._encode_plain(chunk)]
 
 
 def verify():
@@ -100,6 +156,31 @@ def verify():
     torch.testing.assert_close(selected[0, 0], selected[0, 2])
     print("PASS: BPE weighted pairs, merge order, overlap, UTF-8 round trips, pre-split boundaries")
     print("PASS: embedding lookup equals one-hot selection; repeated IDs sum gradients")
+    import tempfile
+
+    for cls in (ByteBPE, PreSplitBPE):
+        special = cls(["<eos>", "<bos>"]).fit(["abc<eos>abc", "cab"], 3)
+        text = "abc<eos>cab"
+        encoded = special.encode(text, allowed_special=True)
+        assert special.special_ids["<eos>"] in encoded
+        assert special.special_ids["<eos>"] not in special.encode(text)
+        assert special.decode(encoded) == text
+        assert all(b"<eos>" not in p for p in special.pieces.values())
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tokenizer.json"
+            special.save(path)
+            loaded = ByteBPE.load(path)
+            assert loaded.state_dict() == special.state_dict()
+            assert loaded.encode(text, allowed_special=True) == encoded
+        bad = special.state_dict()
+        bad["merges"] = [[9999, 1]]
+        try:
+            ByteBPE.from_state_dict(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid tokenizer merge accepted")
+    print("PASS: special-token opt-in/boundaries and JSON tokenizer round trips")
 
 
 if __name__ == "__main__":

@@ -5,6 +5,20 @@ import math
 import torch
 
 
+def paired_bootstrap(first, second, repeats=2000, seed=17):
+    first, second = torch.as_tensor(first, dtype=torch.float64), torch.as_tensor(second, dtype=torch.float64)
+    if first.ndim != 1 or first.shape != second.shape or first.numel() < 2 or repeats < 1:
+        raise ValueError("need two matching vectors and a positive repeat count")
+    if not torch.isfinite(first).all() or not torch.isfinite(second).all():
+        raise ValueError("paired observations must be finite")
+    generator = torch.Generator().manual_seed(seed)
+    indices = torch.randint(first.numel(), (repeats, first.numel()), generator=generator)
+    differences = (second - first)[indices].mean(-1)
+    lower, upper = differences.quantile(torch.tensor([.025, .975], dtype=torch.float64))
+    return dict(mean=(second - first).mean().item(), lower=lower.item(), upper=upper.item(),
+                seed=seed, repeats=repeats)
+
+
 def target_windows(token_count, context_length, stride):
     if token_count < 2 or not 1 <= stride <= context_length:
         raise ValueError("Need tokens and 1 <= stride <= context length")
@@ -40,6 +54,13 @@ def verify():
     assert 0 < center-radius < rate < center+radius < 1
     print(f"evaluation: NLL={nll.mean():.6f}, PPL={ppl:.6f}, weighted NLL={token_mean:.2f}")
     print(f"8/10 accuracy: Wilson 95% interval [{center-radius:.3f}, {center+radius:.3f}]")
+    identical = paired_bootstrap([1, 0, 1, 1], [1, 0, 1, 1])
+    assert identical["mean"] == identical["lower"] == identical["upper"] == 0
+    shifted = paired_bootstrap([1., 2., 3.], [2., 3., 4.])
+    assert shifted["mean"] == shifted["lower"] == shifted["upper"] == 1
+    scores = paired_bootstrap([0, 0, 1, 0, 1, 0], [1, 0, 1, 1, 1, 0])
+    assert scores == paired_bootstrap([0, 0, 1, 0, 1, 0], [1, 0, 1, 1, 1, 0])
+    print("PASS: paired bootstrap preserves sample identity, constant shift and reproducibility", scores)
 
 
 if __name__ == "__main__":

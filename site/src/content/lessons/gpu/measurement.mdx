@@ -5,6 +5,7 @@ description: 从等待内存的 warp 进入资源驻留，再用 stream 与 even
 order: 4
 code:
   - code/gpu/measurement.py
+  - code/gpu/model_profile.py
 ---
 
 import OccupancyLab from '../../../components/labs/OccupancyLab'
@@ -208,6 +209,26 @@ python code/gpu/examples/event_timing.py --elements 1000003 --warmup 10 --repeat
 <CodeFile path="code/gpu/examples/event_timing.py" />
 
 本仓库这次编写环境没有 CUDA 设备和 `nvcc`，因此没有列出该脚本的 GPU 实测结果。CPU 核对与 GPU 程序能否运行分别验收；脚本源码语法正确也不代表在某张设备上已经测过。读者运行后应连同 JSON 输出和设备信息保存自己的测量记录。
+
+## 完整模型：先对齐输出与梯度，再观察执行路径
+
+`model_profile.py` 使用 [P11](/principles/complete-transformer/) 的同一个现代 LM，比较显式 `QK→mask→softmax→V` 与 PyTorch SDPA。其余投影、RoPE、GQA 映射、归一化与权重完全相同，先核对所有位置 logits 与每个参数梯度，避免把改变结果的版本当作性能优化。
+
+CPU 默认输入为两条长度三十二的序列，float64。profiler 记录形状与内存分配，用 `record_function` 标出两个完整模型区间；先预热，再采集。CPU 时间包含 Python 与主机算子，它只说明本机这组形状的执行，不能代替 GPU event 或服务延迟。profiler 启用形状/内存记录会增加观测成本，采集表不作为稳定基准排行榜。
+
+```sh
+python code/gpu/model_profile.py
+python code/gpu/model_profile.py --trace model-trace.json
+python code/gpu/model_profile.py --device cuda --trace model-cuda-trace.json
+```
+
+最后一条需要 CUDA-enabled PyTorch 与 NVIDIA GPU；没有 GPU 时明确报错。CUDA 分支改用 float32，先比较输出与梯度，再对预热后的三十次模型前向记录 event 均值，并报告该区间的 peak allocated 相对基线增量。两个实现都在同一进程保留同一模型，结果无需传回 CPU；因此它是模型设备区间，不是端到端请求测量。
+
+SDPA 根据设备、dtype、形状与 mask 选择可用后端，并不总调用 FlashAttention。即使 profiler 观察到融合内核，完整模型总时间仍包括投影、RoPE、归一化和词表输出；优化一部分不保证总吞吐同比例变化。这里还保留教学 GQA 的临时 KV 展开，不能据此声称测出直接分组内核的显存收益。
+
+<CodeFile path="code/gpu/model_profile.py" />
+
+这份 CPU 核对纳入常规 CI；CUDA 计时只在真实硬件上按上述命令运行。注意力分块的数学依据见 [S3](/systems/flash-attention/)，训练梯度跨 rank 的依据见 [T9](/training/distributed-training/)。
 
 ## 常见误区：把一个指标当成所有答案
 

@@ -1,15 +1,18 @@
 ---
 title: 从零训练一个小语言模型
 question: 怎样完成一个可评估、可保存、可恢复的训练闭环
-description: 复用两层教学 Decoder，固定字符语料与 bigram 对照，连接损失、AdamW、验证、完整 checkpoint 恢复和生成，再用 6ND 与缩放规律估计放大后的计算预算。
+description: 先核对基础 Decoder 的合成训练，再用完整现代 Transformer 训练自编文本，保存 tokenizer 与磁盘 checkpoint，恢复精确更新轨迹，并估计计算预算。
 order: 3
 code:
   - code/training/pretraining.py
+  - code/training/text_pretraining.py
 ---
 
 已经有了下一 token 的损失和一个完整 Decoder，现在把它们接起来似乎只需要几行训练循环。真正容易出错的是循环周围：验证时有没有意外记录梯度，保存时是否留下了 AdamW 的矩状态，中断后下一批是否还是同一批，生成时是否用了同一个词表。这些细节决定实验是否可以解释和复现。
 
 先修是 [T1 数据](/training/data/)、[T2 优化](/training/optimization/) 与 [P4 Decoder](/principles/decoder/)。生成和缓存分别参见 [P9](/principles/generation/)、[P10](/principles/kv-cache/)。本章使用同一个 `Decoder` 和 `sequence_loss`，完整脚本在 CPU 上训练、评估、生成并验证恢复轨迹，不下载 checkpoint。我们先把一个可审计的小实验做完整，再讨论怎样扩大规模。
+
+本章有两个互补实验。下面的四 ID 实验用于手算与精确 FLOP 计数；后面的文本实验使用 [P11 完整现代 Transformer](/principles/complete-transformer/) 与真实 UTF-8/BPE 输入，支持磁盘 checkpoint 和命令行恢复。它们使用不同配置，各自保存自己的 tokenizer，不互相加载权重。
 
 ## 固定实验：配置、语料和结论边界
 
@@ -155,6 +158,44 @@ Kaplan 等人发现，在足够宽的范围内，测试损失随 N、D 与 C 近
 <CodeFile path="code/training/pretraining.py" />
 
 从仓库根运行 `python code/training/pretraining.py`。输出包含三个验证 NLL、恢复核对结果、生成 ID，以及 FLOP 计数与 6ND 公式的核对。代码复用 `code/principles/decoder.py`，没有另一份悄悄变化的模型定义。训练数据、配置与所有状态在脚本中显式列出，修改后可以直接重跑。
+
+## 文本实验：同一个现代模型接入可分发语料
+
+`text_pretraining.py` 中六篇训练短文与两篇验证短文均为自编文本。先固定文档划分，再只用训练文档拟合预切分字节 BPE，最多十六次合并。特殊词表项为 `<bos>`、`<eos>`；它们的 ID 位于所有普通字节与合并项之后，模型词表数据此建立。训练程序直接添加控制 ID，不把普通文本中的相同字面串自动升级成控制 token。
+
+模型用两层、隐藏宽 24、前馈宽 48、四个 Q 头、两个 KV 头、独立头宽 8、最大上下文 64，绑定输入输出权重。查询总宽 32 不等于隐藏宽 24，正好让真实训练也覆盖这个边界。PyTorch AdamW 学习率 0.006、衰减 0.01，CPU float64 用于恢复核对；这不是推荐的大模型训练配方。
+
+每篇文档形成 `[BOS,普通文本ID,EOS]`，按 24 个输入目标划成窗口。窗口之间重复一个边界输入以预测后续 token，目标没有重复；每个窗口独立可见历史，位置重新从零开始。尾窗可以更短，程序逐窗更新而不填充，因此没有悄悄要求模型支持 padding。训练还随机截掉窗口前零到两项，作为明确的后缀上下文增强，实际目标数随之变化。
+
+验证不使用随机裁剪，对所有窗口 NLL 求和后按真实目标数平均。输出保留每个窗口的索引、目标数与平均 NLL；短尾窗与完整窗不会获得同样总权重。当前验证共 63 个目标，初始 NLL 约 5.623874，训练 28 次后约 3.638732。这些文本共享题材，数量很小，只用于验证计算与保存流程，不能据此声称开放领域语言能力。
+
+## 磁盘状态：恢复要跨过真正的文件边界
+
+checkpoint 保存模型 config、权重、AdamW 状态、分词器状态、全局步数、窗口顺序、顺序游标、Python/Torch RNG，以及冻结的训练和验证文档。文档与 tokenizer 的 SHA-256 指纹在加载时重算，避免内容或 ID 映射改变后继续使用旧数据游标。词表数、顺序排列和游标范围也要检查。
+
+先在目标目录写临时文件，再用同文件系统的原子替换更新 checkpoint；写入失败不会先删除旧 checkpoint。该流程保护进程级写入中断，不承诺突然断电时的持久化；需要耐断电时应进一步调用文件与目录同步并制定备份策略。加载使用 `weights_only=True` 与 CPU 映射，不启用任意 pickle 对象恢复。
+
+载入模型和优化器后，最后恢复 RNG，因为实例构造本身会消耗初始化随机数。教学程序固定 CPU dtype，所有随机源只有 Python 与 Torch；若接入 NumPy、CUDA、多 worker 或 dropout，必须一并保存相应状态和数据加载器契约。[T9](/training/distributed-training/) 还解释各 rank 随机状态不一定相同。
+
+默认运行 `python code/training/text_pretraining.py`，先更新二十次并保存磁盘文件，连续运行八次，再从该文件恢复八次。断言加载时 logits 逐位相同，之后八个损失、所有参数、游标和顺序均相同。它检验真正的文件序列化，不只是复制一个内存字典。
+
+## 命令行：训练、恢复与生成分别运行
+
+```sh
+python code/training/text_pretraining.py --checkpoint runs/prose.pt --steps 80
+python code/training/text_pretraining.py --checkpoint runs/prose.pt --resume --steps 20
+python code/training/text_pretraining.py --checkpoint runs/prose.pt --generate-only --prompt "the cat" --max-new-tokens 16
+```
+
+`--steps` 是本次额外执行的更新数，所以前两次之后全局步数为 100。恢复使用 checkpoint 自带冻结文本与 tokenizer；不会重新拟合 BPE，也不从命令行替换旧语料。新训练要求 checkpoint 路径尚不存在，避免意外覆盖旧模型，并写对应的 `.tokenizer.json` 供单独查看。
+
+可用 `--train-text train.txt --validation-text valid.txt` 启动新的训练，两份文件都采用 UTF-8、每个非空行一篇文档；程序拒绝完全重叠的文档与空集合。来源分组、近重复和评估污染仍需在进入程序前处理，见 [T8](/training/data-engineering/)，精确集合不重叠不能证明不存在所有泄漏。
+
+生成给 prompt 前添加 BOS，prefill 后逐 token 使用缓存，采样遇 EOS 或达到预算停止。词表包含所有字节，随机生成可能不是合法 UTF-8，展示采用替换字符；P1 的严格往返检查不因此放宽。模型尚小、训练尚短，生成内容不保证可读，训练、评估与恢复才是本实验的验收对象。
+
+<CodeFile path="code/training/text_pretraining.py" />
+
+详细的联合损失拟合与预算分配在 [T7](/training/scaling-laws/)，本章计算账与 pilot 数据分别保留原始口径。
 
 ## 常见误区
 

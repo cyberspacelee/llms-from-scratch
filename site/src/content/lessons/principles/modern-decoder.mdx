@@ -104,7 +104,7 @@ Qwen3 的密集模型同样使用这几类部件，并加入 QK Norm；Qwen3 系
 
 ## 验证：四项改动分别核对
 
-脚本核对 RMSNorm 数值与非平移不变性、SwiGLU 维度、GQA 的头映射和绑定权重的输出梯度。它刻意没有把这些实验包装成一个宣称达到真实模型质量的小网络；真实配置与训练权重仍来自各自发布契约。
+脚本首先核对 RMSNorm 数值与非平移不变性、SwiGLU 维度、GQA 的头映射和绑定权重的输出梯度。后半部分已将这些模块与 RoPE 组装为完整模型；其调用顺序、参数账、训练与逐层缓存在 [P11 完整现代 Transformer](/principles/complete-transformer/) 展开。教学模型不是公开 Llama/Qwen checkpoint 的兼容实现，真实配置与权重仍来自各自发布契约。
 
 <CodeFile path="code/principles/modern_decoder.py" />
 
