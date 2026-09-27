@@ -9,6 +9,20 @@ order: 0
 
 本路线从向量加法进入编程模型。thread 有自己的执行状态，block 确定协作范围，grid 组织一次启动的工作；warp 与 SM 解释这份工作如何在有限硬件上推进。CUDA C++ 把线程职责写明白，Triton 把一段数据的计算写在一起，两种视角最终都要回答同样的正确性问题。
 
+## GPU 总览：软件分工怎样落到硬件
+
+<Figure src="gpu/overall-model.svg" alt="CPU和主机内存连接GPU，GPU内部多个SM共享L2并访问设备内存；放大SM显示调度、寄存器、执行与shared/L1资源" minWidth="42rem">先沿 CPU 到 GPU 的方向看提交与数据，再从多个 SM 放大到一个 SM。矩形表示概念层次与资源关系，不表示芯片面积、实际单元数量或每次访存的固定路径。</Figure>
+
+从图的最上面开始：应用运行在 CPU，host 代码准备数据并提交 kernel；需要显式搬运时，主机内存与设备内存之间还会发生传输。提交命令与搬运数据是两种操作，不能把 kernel launch 当成一次隐含的全部输入复制。统一内存、集成式设备以及不同互连具有各自的规则，图采用常见的主机/设备概念视图。
+
+再看 GPU 内部：多个 SM 承载 block，多个 SM 可通过共享 L2 与设备内存交换数据。放大一个 SM，线程的局部状态占用寄存器资源，warp 调度器选择能够推进的指令，执行单元完成相应工作。shared memory 提供块内协作的存储，L1 是缓存机制；在许多 NVIDIA 架构中二者共享可配置的物理存储资源，但不能因此混淆用途和同步语义。
+
+最后把软件层放回图中：一次 kernel 的 grid 包含 block，block 包含 thread，块内线性线程号决定 warp 与 lane。grid 的大小来自任务，SM 的数量来自设备。二维或三维 grid/block 是给任务编坐标的方法，不能据此推断 GPU 的执行单元排成同样形状。普通 block 的 shared memory 作用域也不会因为另一个 block 驻留在同一个 SM 就扩大。新架构的 cluster 和分布式 shared memory 属于需要显式使用的额外机制，本图不展开。
+
+沿这张图进入 [G1](/gpu/execution-model/)：先看 block 怎样分批进入 SM，再追踪二维矩阵中的一个元素；用三维切片核对线程编号。到 [G2](/gpu/memory-and-sync/) 时追踪转置数据，到 [G3](/gpu/kernel-design/) 时看共享缓冲区和寄存器的生命周期，最后在 [G4](/gpu/measurement/) 中计算资源上限并测量。
+
+总览依据 [NVIDIA CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html)。硬件存储容量、执行单元种类及缓存组织依架构而异；GPC 等层次在图中省略，不能将本图当成某一型号的芯片结构图。
+
 ## 四章：先定义工作与依赖，再测量运行
 
 <ChapterList track="gpu" />
@@ -32,7 +46,7 @@ order: 0
 
 ## 代码与图：三种证据各自有边界
 
-七个交互 SVG 显示索引、lane、地址段、bank、tile、驻留资源和 stream 依赖。数字来自可手算的模型，颜色显示任务或地址关系。图片由实际地址表或小矩阵生成，静态结构图说明数据与执行阶段；它们不提供某张显卡的实测吞吐。
+交互 SVG 显示一维到三维索引、warp 布局、block 调度、地址段、bank、转置路径、tile 生命周期、驻留资源和 stream 依赖。数字来自可手算的模型，颜色显示任务、地址或阶段关系。图片由实际地址表或小矩阵生成，静态结构图说明数据与执行阶段；它们不提供某张显卡的实测吞吐。
 
 每章都有 CPU 验证脚本，检查索引覆盖、访存段数、归约、分块矩阵乘与资源账。它们证明教学算法或计数关系，不模拟 GPU 的全部调度、缓存与指令执行。
 

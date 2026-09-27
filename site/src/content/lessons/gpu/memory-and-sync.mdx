@@ -9,6 +9,7 @@ code:
 
 import CoalescingLab from '../../../components/labs/CoalescingLab'
 import BankConflictLab from '../../../components/labs/BankConflictLab'
+import TransposeLab from '../../../components/labs/TransposeLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import memoryAddresses from '../../../assets/figures/gpu/memory-addresses.png'
 
@@ -102,6 +103,18 @@ lane $\ell$ 读取元素 $w=\ell$ 时，32 个 lane 各访问一个 bank。如�
 `float tile[32][33]` 分配 4224 字节，比 `float tile[32][32]` 多 128 字节。多用约 3.125% 的共享空间，就改变了列读取的 bank 映射。但不能把“加一列”当作对任意布局的万能优化：元素类型、访问宽度、lane 到索引的映射都可能不同。若原本读取的是连续行，填充并不带来同一种收益；共享空间增加也可能影响驻留 block 数量。
 
 广播的例外针对读取。多个线程向同一地址写不同值不是“自动合并成正确结果”；哪个值最终留下不能用来实现求和。即便是相同 bank 的两个不同地址，bank 冲突通常是性能问题；相同地址的无序读写则可能是正确性问题。讨论前先写明是读还是写、是不是同一地址。
+
+### 跟踪一个元素：交换的是负责人，不是数学结果
+
+<TransposeLab client:visible />
+
+从上往下跟踪橙色位置：输入 $A_{r,c}$ 先进入 `tile[r][c]`，再成为输出 $B_{c,r}$。这里图中 $r,c$ 控制 tile 内坐标；旁边的 A、B 标签另行显示完整矩阵坐标。蓝色表示一条 warp 的逻辑访问方向，上方与下方是行，中间是列。三个矩阵都是实际 32×32 数据 tile；shared 右侧细条表示额外填充列，不参与矩阵转置，也不需要装载数据。
+
+默认选中 tile 内 $(r,c)=(2,5)$。装载线程是 `(tx,ty)=(5,2)`，循环偏移 `j=0`；写回线程则是 `(2,5)`，也是 `j=0`。改变 r 为 18、c 为 27，装载线程变为 `(27,2)`、`j=16`，写回线程变为 `(18,3)`、`j=24`。每个线程沿 y 方向分四轮处理 `ty+j`，因此不能直接把 tile 的 32 行当成 32 个 y 维线程。
+
+无填充时，写回 warp 沿 shared 的固定列读取，元素地址为 $32\ell+c$，全部落在 bank $c$；33 列跨度则变成 $33\ell+c$，32 个 bank 各服务一个不同地址。默认元素的 bank 因而从 5 改成 7；这里改善的是整条 shared 读取指令的映射，而不是改变某个数值或让该元素少经过一层存储。
+
+选择右下 tile，会切到 $35\times67$ 输入中的 block `(2,1)`，只有左上 $3\times3$ 有效。灰色选中位置装载零、参与屏障，输出端跳过写入；有效的 `(2,2)` 对应输入 $A_{34,66}$ 与输出 $B_{66,34}$。此时有效输出列的写回 warp 只有 3 个活跃读取 lane，无填充为 3 路冲突模型，填充后为 1 路；无效输出列不发出 shared 读取。屏障保护所有必要装载完成后才换负责人读取，不能因某线程没有有效输出而跳过协作。图只显示地址布局与责任变化，不把 sector 数或 bank 冲突路数解释成真实 HBM 字节或时间。
 
 ## 屏障：给缓冲区安排可证明的阶段
 

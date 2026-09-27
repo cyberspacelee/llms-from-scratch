@@ -8,6 +8,7 @@ code:
 ---
 
 import TileReuseLab from '../../../components/labs/TileReuseLab'
+import KernelLifecycleLab from '../../../components/labs/KernelLifecycleLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import matrixTiles from '../../../assets/figures/gpu/matrix-tiles.png'
 
@@ -132,6 +133,27 @@ $$
 ## 共享缓冲区：装载和复用各需要一道边界
 
 CUDA 教学实现使用两个 `TILE×TILE` shared 数组，每个线程累计一个输出标量。两道 `__syncthreads()` 都在整个 block 一致执行的 K 循环里。第一道保证当前两个输入 tile 填好，再允许读取；第二道保证所有线程消费完本轮数据，再允许快线程进入下一轮覆盖缓冲区。
+
+### 逐步读图：数据在哪里，什么时候可以覆盖
+
+<KernelLifecycleLab client:visible />
+
+这个实验仍用 $5\times7$ 乘 $7\times6$，为便于核对暂存结果，输入改为 $A_{iq}=i+q+1$、$B_{qj}=q-j$；它不与上面的随机热力图共用数值。初始 tile 边长为 4，观察第一块输出，$C_{00}$ 的第一段贡献是 $1\cdot0+2\cdot1+3\cdot2+4\cdot3=20$，第二段贡献是 $5\cdot4+6\cdot5+7\cdot6=92$。两段累计完得到 112，此时先经过回收屏障，再执行最终 store；中途的 20 只保存在累计槽中。
+
+读图时沿着五个阶段追踪同一批数据：先由 global 协作装载 A/B 至两个 shared 数组；发布屏障建立当前轮先写后读；每个线程从 shared 消费输入，向自己的寄存器累计；回收屏障等待全块读完；若还有 K 段，沿右侧虚线返回装载，复用同一组 shared 数组，否则只写有效输出。图的阶段代表依赖顺序，不描述真实耗时，也不要求 block 的所有线程每条指令同时执行。
+
+选择右下边缘块后，$t=4$ 时输出有效尺寸为 $1\times2$。最后一段 K 有三个位置，因此只从 global 装载 $1\cdot3+3\cdot2=9$ 个有效值，两个 shared 数组的另外 $32-9=23$ 个槽补零。总共 16 个逻辑线程仍执行装载与两道屏障，最终只有两个写回。地址边界决定装载有效性，不能用最终输出是否有效来决定谁跳过同步。
+
+图中的资源账对应单份 A tile 与单份 B tile：
+
+$$
+s_{\mathrm{block}}=2t^2\cdot4=8t^2\ \mathrm{byte},\qquad
+n_{\mathrm{acc}}=t^2.
+$$
+
+$s_{\mathrm{block}}$ 是每块 float32 shared 存储，$n_{\mathrm{acc}}$ 是累计标量的槽数。$t=4$ 时是 128 字节和 16 个累计槽；$t=16$ 时是 2048 字节和 256 个累计槽。这里一线程一个输出，所以累计槽通常以寄存器保存，但还需要地址、循环、临时输入等变量，不能把槽数当成编译器报告的总寄存器数；寄存器分配与 spill 仍要看实际编译结果。
+
+两个数组分别存 A 和 B，**并非双缓冲流水线**。真正的双缓冲通常让“当前消费”和“下一轮装载”使用不同的缓冲组，涉及额外资源与异步完成规则；本例没有这类重叠。这里每次先同步装载、再消费、再回收。回到 [G4 驻留资源](/gpu/measurement/#驻留资源先算一个-sm-装得下多少-block) 时，可以把这笔 shared 账与线程、寄存器账放在一起，判断复用增加后还能驻留多少协作组。
 
 <Figure src="gpu/kernel-pipeline.svg" alt="分块矩阵乘的一轮：全局装载、第一道屏障、共享数据乘加、第二道屏障，然后重复 K 或写回" minWidth="42rem">沿箭头追踪同一个 shared 缓冲区。第一道屏障保护先写后读，第二道保护上一轮读完再覆盖；全部 K 完成后才写回。</Figure>
 

@@ -9,6 +9,10 @@ code:
 
 import ThreadIndexLab from '../../../components/labs/ThreadIndexLab'
 import WarpBranchLab from '../../../components/labs/WarpBranchLab'
+import MatrixThreadLab from '../../../components/labs/MatrixThreadLab'
+import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
+import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
+import BlockScheduleLab from '../../../components/labs/BlockScheduleLab'
 
 两个长度为 100 的数组相加，Python 可以写 `c = a + b`，C++ 可以写一个从 0 到 99 的循环。换到 GPU 上，最先需要解决的问题并不是“用多少个核心”，而是：许多执行者拿到同一段程序后，怎样知道自己该写哪个位置？如果大家都写 `c[0]`，并行只会带来争抢；如果遗漏 `c[99]`，再高的吞吐也没有意义。
 
@@ -89,6 +93,12 @@ __global__ void add_once(const float* a, const float* b, float* c, size_t n) {
 
 <Figure src="gpu/execution-map.svg" alt="上方四组 block 属于同一个软件 grid，下方两个 SM 分别承载部分 block，并从可运行 warp 发射指令">上方是工作组织，下方是硬件承载。箭头只画一种可能分配，不表示真实硬件数量、驻留上限或固定调度顺序。</Figure>
 
+<BlockScheduleLab client:visible />
+
+调度实验提交六个 block，假设两个 SM 各有两个教学槽位，每块 64 个线程、两个 warp。步骤 2 中，B0 的 warp 0 等待数据，仍占据驻留资源；同一 SM 上 B2 的 warp 0 可以发射指令。继续推进，可以看到 B1 先结束，释放的槽位随后接纳 B4。编号较大的块可以先结束，待执行、驻留和可运行是三种不同状态。这里没有跨 block 的数据依赖，步骤也不代表真实时间或某款 GPU 的发射策略。
+
+可以回读 [GPU 导读](/gpu/) 的整体模型，把软件组织与硬件连接起来：线程局部状态使用 SM 的寄存器资源，执行单元负责计算，shared memory 用于块内交换，L1、L2 缓存与显存参与数据访问。它们不是可以互相替换的层次；尤其等待数据的 warp 不会因为暂时没有发射就释放全部资源。详细内存路径与作用域在 [G2](/gpu/memory-and-sync/) 展开。
+
 读图时先看上半部分：编号是程序的身份。再看下半部分：同一个 SM 可能承载块 0 和块 2，另一 SM 承载块 1。grid 可以比 SM 数大得多，尚未获得资源的 block 后续再执行。运行在更多 SM 的 GPU 上时，正确的任务映射不应变化，只是硬件可以承载的并发工作不同。
 
 因此 `gridDim.x = 1000` 的含义是“提交 1000 个块”，不是“GPU 有 1000 个 SM”，更不是“1000 个块此刻全部驻留”。CUDA 中常说的核心数也不能直接作为线程数：线程描述程序状态，执行单元负责执行指令，两者会通过调度复用。把一百万线程想成一百万份永久占用的硬件，心智模型就会走偏。
@@ -145,6 +155,12 @@ $r,c$ 决定逻辑矩阵元素，$p$ 是连续存储中的元素偏移；字节�
 
 以 $5\times7$ 矩阵、$4\times2$ block 为例，grid 是 $2\times3$。block $(1,2)$ 从行 4、列 4 开始：线程 $(0,0)$ 负责 $(4,4)$，偏移 $4\times7+4=32$；线程 $(2,0)$ 负责 $(4,6)$，偏移 34；线程 $(3,0)$ 的列为 7，越界；y 为 1 的线程行号为 5，也全部越界。总共启动 $2\times3\times4\times2=48$ 个线程，合法矩阵元素有 35 个。
 
+<MatrixThreadLab client:visible />
+
+图的三层分别是 grid 中的 block、选中 block 内的 thread、以及它负责的矩阵位置。底层保留一列和一行尾部，使越界线程也有可观察的位置；有效格中的数字是行主序偏移，蓝色区域表示当前 block 的覆盖。点选块与线程或调整坐标，就能逐层追踪同一个执行者。
+
+初始选择故意给出一个反例：block $(1,0)$ 的 thread $(3,0)$ 得到 $(r,c)=(0,7)$。列号已经越界，但 $p=0\times7+7=7<35$，仅检查偏移会通过。这个位置在有效矩阵中实际上是 $(1,0)$，会与另一线程的职责重叠。因此合法地址不等于合法逻辑坐标，必须检查两条坐标边界。再选择 block $(1,2)$ 的 thread $(2,0)$，可核对最后一个合法元素的偏移 34。
+
 warp 分组使用的则是**块内**线性线程号。在三维 block 中，x 维变化最快：
 
 $$
@@ -153,7 +169,15 @@ $$
 
 这来自逐行展开：每推进一次 y，跳过 $T_x$ 个线程；每推进一次 z，跳过 $T_xT_y$ 个线程。二维时令 $t_z=0$。再用 $t$ 计算 warp 与 lane，不能直接用矩阵偏移 $p$，因为后者还包含块坐标和矩阵宽度。
 
+<BlockVolumeLab client:visible />
+
+这张轴测图使用 $8\times4\times2$ 的逻辑 block。上、下两层分别代表 z 为 1、0；下方平面展开当前 z 切片，并标出线性线程号。x 加一，编号加一；y 加一，编号加八；z 加一，编号加 32。因此初始坐标 $(0,0,1)$ 的编号为 $0+8(0+4\times1)=32$，对应 warp 1、lane 0。把 z 改成 0，其他坐标不动，编号就减去 32。图的深度来自坐标投影，不描述芯片中核心的物理位置。
+
 例如 $8\times8$ 的二维 block 有 64 个线程。编号 32 的线程坐标是 $(0,4)$，属于 warp 1、lane 0。warp 0 经过 y 为 0–3 的四行，每行八个线程；它不是“一整行”。若 block 改成 $32\times2$，每个 warp 才恰好对应块内一行。这就是为什么研究矩阵访存时，必须先确定真实的 lane 到地址映射。
+
+<WarpLayoutLab client:visible />
+
+三幅图都只有 64 个逻辑线程，绿色与蓝色分别表示 warp 0、warp 1，虚线位于线性编号 31 和 32 的分界。滑块始终选择同一个线性编号，所以 warp 与 lane 不变，但二维坐标随布局改变。选择编号 32，可看到它分别位于 $(0,4)$、$(0,2)$、$(0,1)$；选择 31，则分别位于 $(7,3)$、$(15,1)$、$(31,0)$。这也说明 warp 在三种布局中分别跨四行、两行和一行。颜色只说明分组，没有承诺线程同时运行或自动同步。
 
 把线程二维布局换成 $16\times4$ 仍有 64 个线程，但相邻 lane 跨行的位置发生了变化。数学结果可以完全一致，访存和分支分组却可能不同。二维 block 是编址的便利方式，不表示 GPU 上的算术单元也按这个矩阵摆放。三维 block 同理，不是物理的三维核心阵列。
 
