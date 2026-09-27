@@ -52,7 +52,7 @@ $$
 
 单请求 decode 若每个 token 都把 16.06 GB 权重从 HBM 读一遍，并且带宽打满，需要 $16.06 / 3350 \approx 0.0048$ 秒，大约 4.8 ms，对应每秒约 210 个 token。这是权重搬运的下界。真实一步还要读 KV、启动 kernel、做采样，只会更慢。批大小上来以后，同一份权重被多个 token 分摊，这个下界才按 $B$ 下降，直到强度靠近脊点，或者 KV 变成新的大头。
 
-同一模型、8192 token 的 prefill，仅线性层就有约 $1.32 \times 10^{14}$ 次乘加。除以 989.5 TFLOP/s，计算下界约 0.13 秒。注意力另有约 $3.5 \times 10^{13}$ 次乘加。长提示因此更接近平台，短请求的 decode 更接近斜线。优化之前先问这次负载站在哪一侧，否则会把一个带宽问题当成算力问题去调。
+同一模型、8192 token 的 prefill，仅线性层就有约 $1.32\times10^{14}$ FLOP，按一次 FMA 为 2 FLOP 计。除以 989.5 TFLOP/s，计算下界约 0.13 秒。注意力另有约 $3.5\times10^{13}$ FLOP（按完整方阵估算）。长提示因此更接近平台，短请求的 decode 更接近斜线。优化之前先问这次负载站在哪一侧，否则会把一个带宽问题当成算力问题去调。
 
 编程和占用率的进一步阅读从 [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/) 进入。[Wafer 的 GPU fundamentals](https://github.com/wafer-ai/gpu-perf-engineering-resources#1-gpu-fundamentals) 把编程模型和编译链的原始文档排在一起。其他厂商的加速器同样要分开写容量、带宽和算力，数字以各自的规格表为准，见这份清单的 [Current hardware](https://github.com/wafer-ai/gpu-perf-engineering-resources#6-current-hardware)。
 
@@ -96,7 +96,7 @@ assert np.allclose(c, a @ b)
 
 ### 融合是少写回一次
 
-两个 kernel 前后执行时，中间张量往往先写回 HBM，再被下一个 kernel 读出来。融合把它们放进同一次启动，中间结果留在寄存器或 shared memory。[S1](/systems/ledger/) 的 FlashAttention 就是这种思路用在分数矩阵上：不把 $S \times S$ 写回去。融合的收益取决于中间张量有多大；已经很小的张量，融合省下的字节可能还抵不过 kernel 变复杂之后的损失。
+两个 kernel 前后执行时，中间张量往往先写回 HBM，再被下一个 kernel 读出来。融合把它们放进同一次启动，中间结果留在寄存器或 shared memory。[S1](/systems/ledger/) 的 FlashAttention 就是这种思路用在分数矩阵上：不把 $T\times T$ 写回去。融合的收益取决于中间张量有多大；已经很小的张量，融合省下的字节可能还抵不过 kernel 变复杂之后的损失。
 
 ### Tensor Core 吃特定的形状和类型
 
@@ -149,7 +149,7 @@ CUDA C++ 先变成 PTX，再变成目标 GPU 的机器码。PTX 的语义在 [PT
 <details>
 <summary>1. 只看线性层、忽略 KV，8B 模型的 decode 批大小要到多少，才碰到 H100 SXM 的脊点？</summary>
 
-线性层强度等于批大小 $B$，脊点约 295 FLOP/byte，所以 $B\approx295$。实际上远在这之前 KV 就会进入分母：[S1](/systems/ledger/) 的练习已经算出 16 条 8192 token 请求时强度只剩约 7.7，长上下文的 decode 很难靠加大 batch 走到平台上。
+线性层强度等于批大小 $B$，脊点约 295 FLOP/byte，所以 $B\approx295$。实际上远在这之前 KV 就会进入分母：[S1](/systems/ledger/) 的练习已经算出 16 条 8192 token 请求时强度只剩约 7.7，长上下文的 decode 很难靠增大批大小走到平台上。
 
 </details>
 

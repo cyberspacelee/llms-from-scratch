@@ -27,7 +27,7 @@
     <text x="400" y="306" font-size="12" fill="#68726d">纵轴只到 40，所以斜线看得见</text>
 
     <text x="24" y="360" font-size="15" fill="#1c2926">斜线的斜率是 H100 SXM 的 3.35 TB/s。平台是去掉稀疏后的 FP16 Tensor Core 峰值 989.5 TFLOP/s。</text>
-    <text x="24" y="388" font-size="15" fill="#1c2926">batch = 1 的线性层大约 1 FLOP/byte，长上下文的 decode 注意力大约 4。它们离平台很远。</text>
+    <text x="24" y="388" font-size="15" fill="#1c2926">B = 1 的线性层大约 1 FLOP/byte，长上下文的 decode 注意力大约 4。它们离平台很远。</text>
     <text x="24" y="430" font-size="14" fill="#68726d">这是产品页数字画出的上限，不是某个 kernel 的实测速度。</text>
   </g>
 </svg>

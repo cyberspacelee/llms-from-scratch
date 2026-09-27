@@ -33,61 +33,61 @@ $$
 
 ## 为什么缓存 K/V，不缓存完整注意力？
 
-新位置 $t$ 需要一个新查询 $\widetilde q_t$，与历史各 $\widetilde k_j$ 配对，并混合各 $v_j$。历史查询 $q_j$ 只用于计算历史输出，新查询不会读取它们。
+新位置 $t$ 需要一个新查询$\widetilde q_t$，与历史各 $\widetilde k_j$ 配对，并混合各 $v_j$。历史查询$q_j$ 只用于计算历史输出，新查询不会读取它们。
 
 $$
 \underbrace{\widetilde q_t^\top}_{1\times d_h}
 \underbrace{[\widetilde k_0,\ldots,\widetilde k_t]}_{d_h\times(t+1)}
-\longrightarrow\underbrace{s_t}_{1\times(t+1)}
+\longrightarrow\underbrace{s_t^\top}_{1\times(t+1)}
 \longrightarrow\underbrace{y_t^\top}_{1\times d_v}.
 $$
 
-因此缓存旋转后的 K 和未旋转的 V；新 Q 每步现算，旧注意力权重没有复用价值，因为新 Q 的内容不同。也可以设计缓存未旋转 K 的实现，但那需要在使用时另行旋转；本章采用常见的“先旋转，再缓存”。
+其中 $s_t=(s_{t0},\ldots,s_{tt})^\top$ 是列向量；上面的箭头概括缩放、softmax 与值加权求和。因此缓存旋转后的 K 和未旋转的 V；新 Q 每步现算，旧注意力权重没有复用价值，因为新 Q 的内容不同。也可以设计缓存未旋转 K 的实现，但那需要在使用时另行旋转；本章采用常见的“先旋转，再缓存”。
 
 | 阶段 | Q 的形状 | 可用 K/V 的形状 | 分数形状 |
 |---|---|---|---|
-| Prefill，提示长 $L$ | $[B,H,L,D]$ | $[B,H,L,D]$ | $[B,H,L,L]$ |
-| Decode，已有 $L$ 个 token | $[B,H,1,D]$ | $[B,H,L+1,D]$ | $[B,H,1,L+1]$ |
+| Prefill，提示长 $T$ | $(B,n_q,T,d_h)$ | $(B,n_q,T,d_h)$ | $(B,n_q,T,T)$ |
+| Decode，已有 $T_{\mathrm{past}}$ 个 token | $(B,n_q,1,d_h)$ | $(B,n_q,T_{\mathrm{past}}+1,d_h)$ | $(B,n_q,1,T_{\mathrm{past}}+1)$ |
 
-这里为简化令 $d_v=D=d_h$，Q/K/V 头数相同；GQA/MQA 的 KV 头数更少，但位置逻辑相同。
+轴顺序是批、头、位置、特征。这里为简化令 $d_v=d_h$，Q/K/V 头数均为 $n_q=n_{\mathrm{kv}}$；GQA/MQA 的 KV 头数更少，但位置逻辑相同。代码常把头数、头维度缩写为 `H,D`，对应这里的 $n_q,d_h$。
 
 <CacheIndexLab client:visible />
 
 ## 为什么新位置不能从 0 重新编号？
 
-假设缓存里已有 $\widetilde k_0=R(0)k_0$ 到 $\widetilde k_{L-1}=R((L-1)\theta)k_{L-1}$。新 token 的绝对位置应为 $L$：
+假设缓存里已有 $\widetilde k_0=R(0)k_0$ 到 $\widetilde k_{T_{\mathrm{past}}-1}=R((T_{\mathrm{past}}-1)\omega)k_{T_{\mathrm{past}}-1}$。新 token 的绝对位置应为 $T_{\mathrm{past}}$：
 
 $$
-\widetilde q_L^\top\widetilde k_j
-=q_L^\top R((j-L)\theta)k_j.
+\widetilde q_{T_{\mathrm{past}}}^\top\widetilde k_j
+=q_{T_{\mathrm{past}}}^\top R((j-T_{\mathrm{past}})\omega)k_j.
 $$
 
-如果新查询误用 0，分数变成 $q_L^\top R(j\theta)k_j$。把目标差值 $j-L$ 换成 $j$，不是实现细节，而是改变了注意力。
+如果新查询误用 0，分数变成 $q_{T_{\mathrm{past}}}^\top R(j\omega)k_j$。把目标差值 $j-T_{\mathrm{past}}$ 换成 $j$，不是实现细节，而是改变了注意力。
 
-取 $q=k=(1,0)^\top$，$\theta=\pi/4$，新位置 $L=4$，历史键位置 $j=3$：正确点积是 $\cos(-\pi/4)=\sqrt2/2$；错误重置后是 $\cos(3\pi/4)=-\sqrt2/2$，连符号都变了。
+取 $q=k=(1,0)^\top$，$\omega=\pi/4$，新位置 $T_{\mathrm{past}}=4$，历史键位置 $j=3$：正确点积是 $\cos(-\pi/4)=\sqrt2/2$；错误重置后是 $\cos(3\pi/4)=-\sqrt2/2$，连符号都变了。
 
 共同平移不变性不能救这个错误。它要求所有参与的 Q/K 坐标一起改变，而非只重置新查询。
 
 ## 缓存中的键为什么不能每步再旋转？
 
-键在位置 $j$ 入缓存时已经是 $R(j\theta)k_j$。若每次使用时又乘 $R(j\theta)$，结果就是 $R(2j\theta)k_j$。旋转会累加，不是重复调用也不变的操作。
+键在位置 $j$ 入缓存时已经是 $R(j\omega)k_j$。若每次使用时又乘 $R(j\omega)$，结果就是 $R(2j\omega)k_j$。旋转会累加，不是重复调用也不变的操作。
 
 $$
-R(j\theta)\underbrace{R(j\theta)k_j}_{\text{已缓存的键}}
-=R(2j\theta)k_j\ne R(j\theta)k_j.
+R(j\omega)\underbrace{R(j\omega)k_j}_{\text{已缓存的键}}
+=R(2j\omega)k_j\ne R(j\omega)k_j.
 $$
 
 正确的数据流是：新 token 投影 → 用它自己的绝对位置旋转新 Q/K → 将新 K/V 追加到缓存 → 新 Q 读取全部可见 K/V。旧缓存原样保留。
 
 ## 一次追加多个 token，掩码要怎么写？
 
-假设已有 $L$ 个历史 token，现在一次追加 $C$ 个。新查询的局部行号 $r\in[0,C-1]$，绝对位置是 $L+r$；全部键的位置为 $j\in[0,L+C-1]$。
+假设已有 $T_{\mathrm{past}}$ 个历史 token，现在一次追加 $T_{\mathrm{new}}$ 个。新查询的局部行号 $r\in[0,T_{\mathrm{new}}-1]$，绝对位置是 $T_{\mathrm{past}}+r$；全部键的位置为 $j\in[0,T_{\mathrm{past}}+T_{\mathrm{new}}-1]$。
 
 $$
-\operatorname{visible}(r,j)\iff j\le L+r.
+\operatorname{visible}(r,j)\iff j\le T_{\mathrm{past}}+r.
 $$
 
-例如 $L=3,C=2$：
+例如 $T_{\mathrm{past}}=3,T_{\mathrm{new}}=2$：
 
 $$
 \begin{array}{c|ccccc}
@@ -105,13 +105,13 @@ $$
 
 ### 单层：逐项比较 softmax 的输入
 
-在某个位置 $t$，两条路径使用同一个 $q_t$、同一组 $k_0,\ldots,k_t$、相同位置旋转和同一组值。每个 logit 相同，分母求和集合也相同，所以输出相同：
+在某个位置 $t$，两条路径使用同一个 $q_t$、同一组 $k_0,\ldots,k_t$、相同位置旋转和同一组值。每个未归一化分数相同，分母求和集合也相同，所以输出相同：
 
 $$
-\forall j\le t:\ s^{\rm full}_{tj}=s^{\rm cache}_{tj}
+\forall j\le t:\ s^{\mathrm{full}}_{tj}=s^{\mathrm{cache}}_{tj}
 \quad\Longrightarrow\quad
-\alpha^{\rm full}_{tj}=\alpha^{\rm cache}_{tj}
-\quad\Longrightarrow\quad y^{\rm full}_t=y^{\rm cache}_t.
+\alpha^{\mathrm{full}}_{tj}=\alpha^{\mathrm{cache}}_{tj}
+\quad\Longrightarrow\quad y^{\mathrm{full}}_t=y^{\mathrm{cache}}_t.
 $$
 
 ### 多层：对层数归纳
@@ -149,52 +149,52 @@ padding 对应的位置数值仍需安全填充，并用 mask 屏蔽；实际规
 丢弃旧缓存不意味着剩余 token 的绝对位置自动重置。可以继续递增逻辑位置。如果要将共同坐标原点移动 $c$，在固定频率条件下，旧旋转键必须同步变换：
 
 $$
-\widetilde k'_j=R(-c\theta)\widetilde k_j
-=R((j-c)\theta)k_j.
+\widetilde k'_j=R(-c\omega)\widetilde k_j
+=R((j-c)\omega)k_j.
 $$
 
 这只保持保留下来的 Q/K 配对分数；丢掉窗口外 token 改变了 softmax 的可见集合，不能声称与原来的全上下文注意力完全等价。
 
 ## 能算更远的位置，为什么不等于会理解？
 
-训练长 $L$ 时，模型学习到的是一定范围的相位差与内容模式。推理扩到 $sL$，虽然 sin/cos 仍然有定义，但 $\Delta\theta_m$ 的分布可能超出训练范围；多个频率的组合、注意力归一化中的候选数量也改变了。
+训练序列长 $T$ 时，模型学习到的是一定范围的相位差与内容模式。推理扩到 $sT$（$s>1$ 为扩展倍数），虽然 sin/cos 仍然有定义，但 $\Delta\omega_r$ 的分布可能超出训练范围；多个频率的组合、softmax 的候选数量也改变了。
 
 ### 位置插值：压缩位置，相当于缩小频率
 
 $$
-p'=p/s,\qquad R(p'\theta_m)=R(p\theta_m/s).
+p'=p/s,\qquad R(p'\omega_r)=R(p\omega_r/s).
 $$
 
-它把更长序列压到原相位范围附近，但也将邻近 token 的相位差从 $\theta_m$ 缩为 $\theta_m/s$，改变了局部距离分辨率。因此存在“覆盖远处”和“保留近处分辨率”的取舍。
+它把更长序列压到原相位范围附近，但也将邻近 token 的相位差从 $\omega_r$ 缩为 $\omega_r/s$，改变了局部距离分辨率。因此存在“覆盖远处”和“保留近处分辨率”的取舍。
 
 ### 调整基底不是均匀缩放
 
-若 $\theta_m=B^{-2m/D}$，改为 $B'$ 后：
+若 $\omega_r=\beta^{-2r/d_h}$，改为 $\beta'$ 后：
 
 $$
-\frac{\theta'_m}{\theta_m}=\left(\frac{B'}{B}\right)^{-2m/D}.
+\frac{\omega'_r}{\omega_r}=\left(\frac{\beta'}{\beta}\right)^{-2r/d_h}.
 $$
 
-比值随维度对变化，$m=0$ 时甚至不变。这与每对都除以同一个 $s$ 不同。YaRN 等方案进一步按频段处理缩放并调整注意力尺度；不能用“把位置除以一个常数”概括所有变体。
+比值随维度对变化，$r=0$ 时甚至不变。这与每对都除以同一个 $s$ 不同。YaRN 等方案进一步按频段处理缩放并调整注意力尺度；不能用“把位置除以一个常数”概括所有变体。
 
 ### 动态改变频率会使已有缓存失配
 
-如果历史键用旧频率 $\theta$ 旋转，新查询却用新频率 $\theta'$，实际配对变成：
+如果历史键用旧频率 $\omega$ 旋转，新查询却用新频率 $\omega'$，实际配对变成：
 
 $$
-q_i^\top R(-i\theta')R(j\theta)k_j
-=q_i^\top R(j\theta-i\theta')k_j.
+q_i^\top R(-i\omega')R(j\omega)k_j
+=q_i^\top R(j\omega-i\omega')k_j.
 $$
 
-这不是新规则所需的 $R((j-i)\theta')$。需要遵循具体模型的缓存更新策略，或固定此次请求使用的频率方案；不能在序列中途只改新 token 的参数。
+这不是新规则所需的 $R((j-i)\omega')$。需要遵循具体模型的缓存更新策略，或固定此次请求使用的频率方案；不能在序列中途只改新 token 的参数。
 
 ## 验收时检查这些等式，而不只看文字生成
 
 | 检查对象 | 应满足的关系 | 典型错误 |
 |---|---|---|
-| 新位置 | $p_{\rm new}=\text{逻辑历史长度}$ | decode 每次从 0 开始 |
+| 新位置 | $p_{\mathrm{new}}=T_{\mathrm{past}}$ | decode 每次从 0 开始 |
 | 缓存键 | $\widetilde k_j=T_jk_j$ | 对已旋转 K 重复旋转 |
-| 分块掩码 | $j\le L+r$ | 非方阵掩码错误对齐 |
+| 分块掩码 | $j\le T_{\mathrm{past}}+r$ | 非方阵掩码错误对齐 |
 | 固定内容的共同平移 | $T_{i+c}^\top T_{j+c}=T_i^\top T_j$ | 只平移新 Q，不处理旧 K |
 | Full / cached | 同一可见集合下输出数值接近 | dropout、位置或频率不一致 |
 
@@ -203,7 +203,7 @@ $$
 <details>
 <summary>1. 已有 3 个历史 token，一次追加 2 个。新查询的绝对位置是多少？各自能看见哪些键？</summary>
 
-新查询的局部行号 $r=0,1$，绝对位置是 $L+r=3,4$。可见条件 $j\le L+r$：位置 3 的查询看见键 0–3，位置 4 的查询看见键 0–4。这正是正文中那个 $2\times5$ 掩码。
+新查询的局部行号 $r=0,1$，绝对位置是 $T_{\mathrm{past}}+r=3,4$。可见条件 $j\le T_{\mathrm{past}}+r$：位置 3 的查询看见键 0–3，位置 4 的查询看见键 0–4。这正是正文中那个 $2\times5$ 掩码。
 
 </details>
 

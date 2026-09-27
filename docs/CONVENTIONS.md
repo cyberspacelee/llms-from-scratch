@@ -64,13 +64,19 @@ code:                                # 可选，本章对应的验证脚本
 - 统一写“正态分布（高斯分布）”“前向传播”“反向传播”“偏导数”“梯度”“雅可比矩阵”“海森矩阵”。“均值”必须说明对象：样本均值是观测平均，总体均值是分布期望。
 - 首次出现写中文名称与英文：小批量（mini-batch）、批大小（batch size）、未归一化分数（logits）、独热编码（one-hot）、自动微分（automatic differentiation）。后文使用中文；API 和代码标识符保留原文。sigmoid、softmax、ReLU 为函数名称，首次解释其含义。
 - sigmoid 记作 $s(z)$，标准差用 $\sigma$；类别数 $C$；稳定 softmax 的最大分数记 $a$；海森矩阵写作 $\mathcal H$，隐藏激活保留 $H$。
-- 标量、向量小写（默认列向量），矩阵大写；随机变量用 $U,V$，避免与批输入 $X$ 混淆。
+- 标量、向量小写（默认列向量），矩阵大写，不强制粗体；维度与数量允许使用约定的大写字母 $B,T,C$。高阶张量沿用大写，必须说明各轴。随机变量用 $U,V$，避免与批输入 $X$ 混淆。行向量显式写转置；形状与元素个数分开表达。
 - 单样本 $x\in\mathbb R^d$，批输入 $X\in\mathbb R^{B\times d}$ 按行存放样本；$W\in\mathbb R^{m\times d}$，$z=Wx+b$，$Z=XW^\top+b$，与 `torch.nn.Linear` 一致。模型原理路线沿用注意力论文的 $Q=XW_Q$、$W_Q\in\mathbb R^{d\times d_h}$，两者互为转置布局，换算时先对齐形状。
 - 梯度与被求导参数同形状；$J_{ij}=\partial f_i/\partial x_j$，反向传播为 $J^\top g$。
 - 损失单样本 $\ell$，批平均 $L=(1/B)\sum\ell_i$；学习率 $\eta$；$\ln$ 或 $\log$ 都指自然对数。
 - 概率 $P(U=u)$，密度 $p(u)$，期望 $\mathbb E[U]$，方差 $\operatorname{Var}(U)$；$\mathcal N(\mu,\sigma^2)$ 第二参数是方差。明确 `ddof=0` 与 `ddof=1`。
 - 位置下标用 $i,j,p$，虚数单位写作正体 $\mathrm i$；导数的撇号写 `f'`，不写 `f\prime`。
 - 公式用 `$...$` 和独立的 `$$...$$`，转置 `\top`，逐元素乘 `\odot`。
+- 跨路线维度：批大小 $B$、序列长度 $T$、历史缓存长度 $T_{\mathrm{past}}$、本次新增长度 $T_{\mathrm{new}}$；隐藏维度 $d$、头维度 $d_h$、前馈维度 $d_{\mathrm{ff}}$；查询头数 $n_q$、KV 头数 $n_{\mathrm{kv}}$、层数 $n_{\mathrm{layers}}$、词表大小 $n_{\mathrm{vocab}}$。代码中的 `H,D` 等轴名在正文中映射到这些记号，不改外部 API。
+- 块大小 $T_b$、每元素字节数 $b_{\mathrm{elem}}$、张量并行度 $n_{\mathrm{TP}}$；频率底数 $\beta$、二维分块编号 $r$、角频率 $\omega_r$、位置转角 $p\omega_r$；采样温度 $\tau$。RoPE 原论文的 $\theta_r$ 对应本文 $\omega_r$。局部临时变量可以保留，但不要占用跨路线记号而不解释。
+- 向量欧氏范数保留下标 $\|x\|_2$；矩阵 Frobenius 范数用 $\|W\|_F$。单位化、RMSNorm、LayerNorm、softmax 分别说明实际运算，不用“归一化”代替定义。
+- 文字下标和上标用 `\mathrm{...}`，函数名用 `\operatorname{...}`；公式使用短数学符号，旁边说明代码字段映射。拼接等非算术操作必须定义符号。
+- 正文统一“查询、键、值、隐藏状态、小批量、批大小、未归一化分数”，首次附英文。token、RoPE、KV cache、prefill、decode 保留惯用原文并首次解释；源码、API、论文名称保持原文。
+- 性能计量区分 FLOP（运算量）、FLOP/s（速率）和 FLOP/byte（算术强度）；一次融合乘加（FMA）计 2 FLOP。Adam 状态写“一阶矩、二阶原始矩”，不将梯度平方的滑动平均直接称为方差。服务指标区分首 token 延迟 TTFT、逐次输出间隔 ITL、请求级平均每输出 token 时间 TPOT，说明测量边界与聚合方式。
 
 ## 代码与验证
 

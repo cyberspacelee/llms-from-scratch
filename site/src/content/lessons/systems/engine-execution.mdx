@@ -53,6 +53,8 @@ flowchart LR
 
 模型结构看起来接近普通 Transformer，但每个线性层已经为张量并行切分，attention 同时承担 KV cache 读写，RMSNorm 与 SiLU×Gate 则交给 `torch.compile`。
 
+这里的 Q/K normalization 在 `qkv_bias=False` 分支中对每个头的查询与键应用 RMSNorm：对头内坐标 $x_a$ 计算 $x_a/\sqrt{d_h^{-1}\sum_bx_b^2+\varepsilon}$，再乘逐坐标可学习缩放。它不是 M3 中的欧氏单位化，不能据此声称查询与键的范数为 1。RoPE 保持的是 RMSNorm 之后、旋转之前的欧氏范数，见 [qwen3.py:64–80](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py#L64-L80)。
+
 <Qwen3Layer />
 
 | 模块 | 实现重点 | 为什么影响推理 |
@@ -61,11 +63,13 @@ flowchart LR
 | RoPE | 按绝对 `positions` 旋转 Q/K | decode 不能把位置重置为 0 |
 | RMSNorm | 残差加法与归一化融合 | 减少中间张量与 kernel 开销 |
 | Gated MLP | gate/up 合为一个列并行投影 | 匹配权重打包并减少调用 |
-| LM head | prefill 只取每条序列最后一个 hidden state | 避免为所有 prompt token 计算 logits |
+| LM head | prefill 只取每条序列最后一个隐藏状态 | 避免为所有 prompt token 计算未归一化分数 |
 
 ## 张量并行：切权重，也要安排通信落点
 
 每个 rank 都运行完整控制流，但只持有部分权重。列并行切输出维，局部计算后暂不通信；行并行切输入维，局部结果必须 `all_reduce` 才恢复完整输出。
+
+名称沿用论文中的 $Y=XW$ 布局：$W\in\mathbb R^{d_{\mathrm{in}}\times d_{\mathrm{out}}}$，列对应输出维，行对应输入维。PyTorch 的 `weight` 存储 $W^\top$，形状为 `(out_features, in_features)`，所以列并行实际切存储权重的第 0 轴，行并行切第 1 轴。不要只凭“行、列”猜源码的切分轴。参见 [PyTorch Linear](https://docs.pytorch.org/docs/stable/generated/torch.nn.Linear.html) 与 [Megatron 并行层](https://docs.nvidia.com/megatron-core/developer-guide/nightly/apidocs/core/core.extensions.transformer_engine.html)。
 
 <Panels>
 <Panel title="列并行">`QKVParallelLinear` 与 `MergedColumnParallelLinear` 沿输出维切分。每张卡得到一组 attention 头或 MLP 中间通道。</Panel>
@@ -74,7 +78,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    X[完整 hidden states] --> C0[GPU 0: QKV / gate-up shard]
+    X[完整隐藏状态] --> C0[GPU 0: QKV / gate-up shard]
     X --> C1[GPU 1: QKV / gate-up shard]
     C0 --> L0[局部 attention / MLP]
     C1 --> L1[局部 attention / MLP]
@@ -82,9 +86,9 @@ flowchart LR
     L1 --> R1[GPU 1: o/down row shard]
     R0 --> A[NCCL all_reduce]
     R1 --> A
-    A --> Y[每个 rank 获得完整 hidden states]
+    A --> Y[每个 rank 获得完整隐藏状态]
     Y --> V[LM head: vocab shards]
-    V --> G[gather logits → rank 0 sample]
+    V --> G[gather 未归一化分数 → rank 0 采样]
 ```
 
 一次“列并行接行并行”只在块的末尾通信一次，这是 [Megatron-LM](https://arxiv.org/abs/1909.08053) 的切法；[S5](/systems/cluster/) 会把这笔通信放到机内、机间不同的线上计价。
@@ -97,19 +101,19 @@ rank 0 将方法名与参数 pickle 到 1 MiB 共享内存，再用每个 worker
 
 ## CUDA Graph：把稳定的 decode 形状录下来重放
 
-decode 每步 token 少、kernel 多，CPU 发射开销容易显眼；这正是 [S2](/systems/accelerator/) 时间线图里的白道。nano-vLLM 为一组离散 batch size 捕获 graph；运行时向上取最近的已捕获尺寸，把多余槽位设为无效后重放。
+decode 每步 token 少、kernel 多，CPU 发射开销容易显眼；这正是 [S2](/systems/accelerator/) 时间线图里的白道。nano-vLLM 为一组离散批大小捕获 graph；运行时向上取最近的已捕获尺寸，把多余槽位设为无效后重放。
 
 <LaunchTimeline />
 
-记 $N=\min(\text{max\_num\_seqs},512)$，捕获的批大小列表为：
+捕获的批大小列表按代码生成，`max_num_seqs` 是允许的最大序列数：
 
-$$
-\text{captured batch sizes}=[1,2,4,8]+[16,32,\ldots,N].
-$$
+```python
+capture_sizes = [1, 2, 4, 8] + list(range(16, min(max_num_seqs, 512) + 1, 16))
+```
 
 <Panels>
-<Panel title="走 graph">decode、`enforce_eager=False` 且真实 batch size ≤ 512。</Panel>
-<Panel title="走 eager" tone="accent2">所有 prefill、显式 eager 模式，或 batch size 大于 512。</Panel>
+<Panel title="走 graph">decode、`enforce_eager=False` 且真实批大小 ≤ 512。</Panel>
+<Panel title="走 eager" tone="accent2">所有 prefill、显式 eager 模式，或批大小大于 512。</Panel>
 </Panels>
 
 重放前会复制 `input_ids`、`positions`、`slot_mapping`、`context_lens` 与 `block_tables` 到静态缓冲区。padding 槽的 `slot_mapping=-1`、`context_lens=0`，因此不会污染 KV cache。
@@ -120,24 +124,28 @@ $$
 
 构造时先用上限形状 warmup，读取 CUDA 峰值显存。随后把目标显存利用率内的剩余字节除以单个 KV 块的字节数，得到 `num_kvcache_blocks`。块字节数就是 [S1](/systems/ledger/) 的单 token KV 公式乘上块大小，再按张量并行切开 KV 头：
 
-沿用 S1 的记号：$L$ 是层数，$n_{kv}$ 是 KV 头数，$d_h$ 是头维度，$b$ 是每元素字节数；另记块大小为 $T_b$，张量并行度为 $P$，块字节数为 $B_{\mathrm{KV}}$，对应代码里的 `block_bytes`。
+沿用 S1 的记号：$n_{\mathrm{layers}}$ 是层数，$n_{\mathrm{kv}}$ 是 KV 头数，$d_h$ 是头维度，$b_{\mathrm{elem}}$ 是每元素字节数；另记块大小为 $T_b$，张量并行度为 $n_{\mathrm{TP}}$，块字节数为 $m_{\mathrm{KV}}$，对应代码里的 `block_bytes`。
 
 <KeyEq label="KV 块预算">
 
 $$
-B_{\mathrm{KV}}=2LT_b\frac{n_{kv}}{P}d_hb.
+\begin{aligned}
+m_{\mathrm{KV}}&=2n_{\mathrm{layers}}T_b\\
+&\quad\times\frac{n_{\mathrm{kv}}}{n_{\mathrm{TP}}}d_hb_{\mathrm{elem}}.
+\end{aligned}
 $$
 
 $$
 \begin{aligned}
-&M_{\mathrm{free}}\\
-&=\text{total}\times\text{utilization}\\
-&\quad-\text{used}-\text{peak}+\text{current},\\
-&\text{num\_blocks}=\left\lfloor\frac{M_{\mathrm{free}}}{B_{\mathrm{KV}}}\right\rfloor.
+m_{\mathrm{free}}&=u\,m_{\mathrm{total}}-m_{\mathrm{used}}\\
+&\quad-m_{\mathrm{peak}}+m_{\mathrm{current}},\\
+n_{\mathrm{blocks}}&=\left\lfloor\frac{m_{\mathrm{free}}}{m_{\mathrm{KV}}}\right\rfloor.
 \end{aligned}
 $$
 
 </KeyEq>
+
+这里 $u$ 对应 `gpu_memory_utilization`；四个 $m$ 分别对应代码中的 `total`、`used`、`peak`、`current`，单位均为字节。$n_{\mathrm{blocks}}$ 对应 `num_kvcache_blocks`。此处沿用 nano-vLLM 的前提：KV 头数可被张量并行度整除，各卡保存等量 KV 头。
 
 | 旋钮 | 增大后的直接效果 | 主要代价 |
 | --- | --- | --- |
@@ -166,11 +174,14 @@ Hugging Face checkpoint 中独立的 `q_proj/k_proj/v_proj` 被装入融合参�
 
 ### 采样
 
-logits 先除以每条序列的 temperature，再 softmax。实现使用指数竞争技巧：对每个类别采样 $E_i\sim\operatorname{Exp}(1)$，取 $\arg\max_i p_i/E_i$，得到服从类别分布的样本。
+设最后一个位置的词表未归一化分数为列向量 $z\in\mathbb R^{n_{\mathrm{vocab}}}$，先除以该序列的采样温度 $\tau>0$（代码字段 `temperature`），再 softmax。实现使用指数竞争技巧：对每个类别独立采样 $E_c\sim\operatorname{Exp}(1)$，取 $\arg\max_c p_c/E_c$，得到服从类别分布的 token ID $\widehat u$。指数分布参数 1 是速率，$c$ 是类别索引。
 
 $$
-p_i=\operatorname{softmax}(\text{logits}/T)_i,\qquad
-\text{token}=\arg\max_i\frac{p_i}{E_i},\qquad E_i\sim\operatorname{Exp}(1).
+\begin{aligned}
+p_c&=\operatorname{softmax}(z/\tau)_c,\\
+\widehat u&=\operatorname*{arg\,max}_{0\le c<n_{\mathrm{vocab}}}\frac{p_c}{E_c},\\
+E_c&\sim\operatorname{Exp}(1).
+\end{aligned}
 $$
 
 <Callout tone="warn" title="不要读出不存在的能力">
@@ -199,13 +210,25 @@ $$
 
 $\alpha = 0$ 时这个和是 1，相当于没有草稿。$\alpha$ 接近 1 时，一步可以接近 $\gamma+1$ 个 token。净加速还要扣掉草稿模型自己的时间，所以接受率高而草稿很贵时，端到端仍可能变慢。过程的定义见 [Leviathan 等人](https://arxiv.org/abs/2211.17192)。这里的常数 $\alpha$ 是为了把期望写成等比级数，真实接受率随上下文和采样方式变化。
 
-### 三个数描述这次服务
+### 服务指标：先说明测量区间
 
 | 指标 | 它记的区间 |
 | --- | --- |
-| TTFT | 请求到达到第一个 token |
-| TPOT | 之后相邻 token 的间隔 |
+| TTFT | 请求到达到首个输出 token 的时间 |
+| ITL | 连续两次输出事件的时间间隔；逐 token 输出时就是相邻 token 间隔 |
+| TPOT | 每条请求从首 token 到末 token 的时间，除以后续输出 token 数 |
 | 有效吞吐 | 满足延迟目标的完成量，而不是不计延迟的最大 token 速率 |
+
+记请求到达时间为 $t_{\mathrm{arrival}}$、首次与最后输出时间为 $t_{\mathrm{first}},t_{\mathrm{last}}$、输出 token 数为 $n_{\mathrm{out}}$，则
+
+$$
+\begin{aligned}
+t_{\mathrm{TTFT}}&=t_{\mathrm{first}}-t_{\mathrm{arrival}},\\
+t_{\mathrm{TPOT}}&=\frac{t_{\mathrm{last}}-t_{\mathrm{first}}}{n_{\mathrm{out}}-1},\qquad n_{\mathrm{out}}>1.
+\end{aligned}
+$$
+
+ITL 对每次输出间隔采样，TPOT 对每条完成请求采样；两者的分位数及跨请求平均值不能互换。投机解码可能一次输出多个 token，事件 ITL 尤其不能直接解释为每 token 时间。输出不超过一个 token 时，上面的 TPOT 未定义，报告中说明排除或记零的规则。测量边界也要说明是在引擎还是客户端。参见 [vLLM 指标定义](https://docs.vllm.ai/en/latest/design/metrics/)（2026-09-27 查阅）。
 
 基准记录要包含模型、输入输出长度、并发、dtype、硬件、正确性做法和延迟目标。[Etalon](https://arxiv.org/abs/2407.07000) 讨论怎样让服务基准反映这些目标，[MLPerf Inference](https://mlcommons.org/benchmarks/inference-datacenter/) 是一组公开的基准定义。
 
@@ -262,7 +285,7 @@ nano-vLLM 刻意保留最能解释性能来源的机制，同时删掉服务化�
 <details>
 <summary>1. 张量并行下，LM head 为什么用 gather，而不是 all-reduce？</summary>
 
-词表沿行被切成互不重叠的 vocabulary shards，每个 rank 产出不同 token 区间的 logits。最终采样需要拼接完整词表，因此 gather 到 rank 0；这不是对同一输出的部分和求和。
+词表沿行被切成互不重叠的 vocabulary shards，每个 rank 产出不同 token 区间的未归一化分数。最终采样需要拼接完整词表，因此 gather 到 rank 0；这不是对同一输出的部分和求和。
 
 </details>
 
@@ -281,7 +304,7 @@ $\dfrac{1-0.8^5}{1-0.8}=\dfrac{1-0.32768}{0.2}=3.3616$。每次调用目标模�
 </details>
 
 <details>
-<summary>4. 实际 batch size 为 5 时，nano-vLLM 用哪个捕获尺寸重放？多出来的槽位怎样处理？</summary>
+<summary>4. 实际批大小为 5 时，nano-vLLM 用哪个捕获尺寸重放？多出来的槽位怎样处理？</summary>
 
 向上取最近的已捕获尺寸 8。第 6 到 8 个槽位的 `slot_mapping` 设为 $-1$、`context_lens` 设为 0，因此既不写 KV，也不参与注意力；它们的输出被丢弃。
 

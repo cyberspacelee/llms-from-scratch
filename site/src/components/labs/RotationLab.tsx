@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { Arrow, Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
 
-const theta = Math.PI / 8
+const omega = Math.PI / 8
 
 /** Same offset, different starting point: the relative rotation depends only on Δ. */
 export default function RotationLab() {
@@ -11,14 +11,14 @@ export default function RotationLab() {
   const id = useId().replace(/:/g, '')
   const compact = width < 560
 
-  const phi = delta * theta
+  const phi = delta * omega
   const [c, s] = [Math.cos(phi), Math.sin(phi)]
   const view = compact ? { w: 360, h: 540, cx: 180, cy: 150, r: 104 } : { w: 720, h: 320, cx: 170, cy: 160, r: 112 }
   const point = (angle: number, radius = view.r) => [view.cx + radius * Math.cos(angle), view.cy - radius * Math.sin(angle)]
-  const [qx, qy] = point(p * theta)
-  const [kx, ky] = point((p + delta) * theta)
-  const [sx, sy] = point(p * theta, 48)
-  const [ex, ey] = point((p + delta) * theta, 48)
+  const [qx, qy] = point(p * omega)
+  const [kx, ky] = point((p + delta) * omega)
+  const [sx, sy] = point(p * omega, 48)
+  const [ex, ey] = point((p + delta) * omega, 48)
 
   const cell = { w: compact ? 120 : 100, h: 48, gap: 8 }
   const mw = cell.w * 2 + cell.gap
@@ -27,7 +27,7 @@ export default function RotationLab() {
   const values = [c, -s, s, c]
 
   return (
-    <LabFrame title="同样的位移，不同的起点" hint="θ = π/8，查询与键的内容都取 (1, 0)">
+    <LabFrame title="同样的位移，不同的起点" hint="ω = π/8，查询与键的内容都取 (1, 0)">
       <Controls>
         <Range label="起点 p" value={p} min={0} max={20} onChange={setP} />
         <Range label="位移 Δ" value={delta} min={-8} max={8} onChange={setDelta} />
@@ -52,7 +52,7 @@ export default function RotationLab() {
           <text x={Math.min(view.w - 40, qx + 10)} y={Math.max(16, qy - 10)} className={pen.textA}>q(p)</text>
           <text x={Math.min(view.w - 70, kx + 10)} y={Math.min(view.cy + view.r + 34, ky + 20)} className={pen.textB}>k(p + Δ)</text>
 
-          <text x={mx} y={my - 20} className={pen.mono}>R(Δθ) =</text>
+          <text x={mx} y={my - 20} className={pen.mono}>R(Δω) =</text>
           <path
             d={`M ${mx - 8} ${my - 6} h -8 v ${cell.h * 2 + cell.gap + 12} h 8 M ${mx + mw + 8} ${my - 6} h 8 v ${cell.h * 2 + cell.gap + 12} h -8`}
             className={pen.axis}
@@ -67,12 +67,12 @@ export default function RotationLab() {
               </g>
             )
           })}
-          <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 40} textAnchor="middle" className={`${pen.mono} ${pen.muted}`}>Δθ = {fmt(phi)} rad</text>
-          <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 66} textAnchor="middle" className={pen.mono}>qᵀR(Δθ)k = {fmt(c, 6)}</text>
+          <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 40} textAnchor="middle" className={`${pen.mono} ${pen.muted}`}>Δω = {fmt(phi)} rad</text>
+          <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 66} textAnchor="middle" className={pen.mono}>qᵀR(Δω)k = {fmt(c, 6)}</text>
         </svg>
       </div>
       <Readout>
-        p = {p} · j = {p + delta} · Δ = {delta} · 两个向量一起转了 p·θ，夹角只由 Δ 决定 · cos(Δθ) = {fmt(c, 6)}
+        p = {p} · j = {p + delta} · Δ = {delta} · 两个向量一起转了 p·ω，夹角只由 Δ 决定 · cos(Δω) = {fmt(c, 6)}
       </Readout>
     </LabFrame>
   )

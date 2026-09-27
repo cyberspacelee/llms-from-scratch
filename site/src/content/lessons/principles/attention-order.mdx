@@ -21,22 +21,22 @@ import DotProductLab from '../../../components/labs/DotProductLab'
 
 ### 从一个查询开始，而不是直接背矩阵公式
 
-设一段序列有 $n$ 个 token。每个内容向量 $x_i\in\mathbb R^d$ 是列向量。投影矩阵 $W_Q,W_K\in\mathbb R^{d\times d_h}$ 把它变成查询和键：
+设一段序列有 $T$ 个 token。每个内容向量 $x_i\in\mathbb R^d$ 是列向量。投影矩阵 $W_Q,W_K\in\mathbb R^{d\times d_h}$ 把它变成查询和键：
 
 $$
 q_i=W_Q^\top x_i,\qquad k_j=W_K^\top x_j,\qquad
 s_{ij}=\frac{q_i^\top k_j}{\sqrt{d_h}}.
 $$
 
-点积就是对应分量相乘后求和：$q_i^\top k_j=\sum_{a=1}^{d_h}q_{i,a}k_{j,a}$。也可以写成 $\|q_i\|\|k_j\|\cos\phi$：既取决于长度，也取决于方向，不是纯粹的夹角相似度。
+点积就是对应分量相乘后求和：$q_i^\top k_j=\sum_{a=1}^{d_h}q_{i,a}k_{j,a}$。也可以写成 $\|q_i\|_2\|k_j\|_2\cos\phi$：既取决于长度，也取决于方向，不是纯粹的夹角相似度。
 
 例如 $q=(1,2)^\top$，$k_0=(2,0)^\top$，$k_1=(0,1)^\top$。两次点积都是 $2$，所以两项缩放分数相同，softmax 给出各 $1/2$ 的权重。若 $v_0=(1,0)^\top,v_1=(0,3)^\top$，输出就是 $(0.5,1.5)^\top$。
 
 <KeyEq label="单个查询的注意力输出">
 
 $$
-\alpha_{ij}=\frac{\exp(s_{ij})}{\sum_{\ell=0}^{n-1}\exp(s_{i\ell})},\qquad
-y_i=\sum_{j=0}^{n-1}\alpha_{ij}v_j.
+\alpha_{ij}=\frac{\exp(s_{ij})}{\sum_{\ell=0}^{T-1}\exp(s_{i\ell})},\qquad
+y_i=\sum_{j=0}^{T-1}\alpha_{ij}v_j.
 $$
 
 </KeyEq>
@@ -45,12 +45,12 @@ $$
 
 ### 矩阵乘法只是把所有配对一起算
 
-将列向量转置后按行堆叠为 $X\in\mathbb R^{n\times d}$，于是 $Q=XW_Q$。$QK^\top$ 的第 $(i,j)$ 项恰好就是刚才的点积。
+将列向量转置后按行堆叠为 $X\in\mathbb R^{T\times d}$，于是 $Q=XW_Q$。$QK^\top$ 的第 $(i,j)$ 项恰好就是刚才的点积。
 
 $$
-\underbrace{Q}_{n\times d_h}\underbrace{K^\top}_{d_h\times n}
-=\underbrace{\big[q_i^\top k_j\big]_{ij}}_{n\times n},\qquad
-F(X)=\operatorname{softmax}_{\rm row}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
+\underbrace{Q}_{T\times d_h}\underbrace{K^\top}_{d_h\times T}
+=\underbrace{\big[q_i^\top k_j\big]_{ij}}_{T\times T},\qquad
+F(X)=\operatorname{softmax}_{\mathrm{row}}\!\left(\frac{QK^\top}{\sqrt{d_h}}\right)V.
 $$
 
 这里还没有任何一个运算使用“第几位”或“相距几位”。数组有下标，不等于模型使用了下标的数值。
@@ -78,8 +78,8 @@ $$
 第三步，逐行 softmax 的分母是该行所有指数的和，列重排不改变这个和；行重排则只是重排输出行。因此：
 
 $$
-\operatorname{softmax}_{\rm row}(PSP^\top)
-=P\operatorname{softmax}_{\rm row}(S)P^\top.
+\operatorname{softmax}_{\mathrm{row}}(PSP^\top)
+=P\operatorname{softmax}_{\mathrm{row}}(S)P^\top.
 $$
 
 第四步，将值向量也重排，两个中间置换抵消：
@@ -87,7 +87,7 @@ $$
 <KeyEq label="置换等变">
 
 $$
-F(PX)=P\operatorname{softmax}_{\rm row}(S)P^\top PV
+F(PX)=P\operatorname{softmax}_{\mathrm{row}}(S)P^\top PV
 =PF(X).
 $$
 
@@ -119,7 +119,7 @@ $$
 
 所以“相加”并不意味着模型从此无法利用位置：后续双线性运算中会出现内容与位置的交叉项。也不能反过来说模型能从任意和向量中唯一拆回两个原向量。
 
-如果 $p_i$ 是可学习表的一行，训练可调整各位置的行为；但训练只覆盖 $0,\ldots,L-1$ 时，表外没有相应参数，额外预留却未用过的行也没有学到有效位置规律。于是出现下一章的问题：能否用一个函数在任意位置生成编码，并且让“相距几位”有一个与起点无关的表示？
+如果 $p_i$ 是可学习表的一行，训练可调整各位置的行为；但训练只覆盖 $0,\ldots,T-1$ 时，表外没有相应参数，额外预留却未用过的行也没有学到有效位置规律。于是出现下一章的问题：能否用一个函数在任意位置生成编码，并且让“相距几位”有一个与起点无关的表示？
 
 ## 常见误区
 

@@ -5,7 +5,7 @@ import FigureShell from '../FigureShell.astro'
 const box = 'fill-sunken stroke-rule-strong'
 const blocks = [
   { x: 40, w: 110, title: 'RMSNorm', lines: ['fused add'] },
-  { x: 210, w: 160, title: 'Self Attention', lines: ['QKV → Q/K norm', 'RoPE → KV cache', 'FlashAttention'] },
+  { x: 210, w: 160, title: '自注意力', lines: ['Q/K → RMSNorm', 'RoPE → KV cache', 'FlashAttention'] },
   { x: 430, w: 110, title: 'RMSNorm', lines: ['fused add'] },
   { x: 600, w: 160, title: 'Gated MLP', lines: ['gate_up_proj', 'SiLU(gate) × up', 'down_proj'], accent: true },
 ]
@@ -16,7 +16,7 @@ const blocks = [
         <marker id="qwen-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-muted" /></marker>
         <marker id="qwen-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-accent2" /></marker>
       </defs>
-      <text x="40" y="36" class="font-mono text-[12px] fill-accent2!">Qwen3DecoderLayer × N</text>
+      <text x="40" y="36" class="font-mono text-[12px] fill-accent2!">Qwen3DecoderLayer × n_layers</text>
       {blocks.map((block) => {
         const h = block.lines.length > 1 ? 104 : 60
         const y = 120 - h / 2

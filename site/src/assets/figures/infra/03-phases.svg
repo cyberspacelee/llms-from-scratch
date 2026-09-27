@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 43 720 417" role="img" aria-labelledby="title desc">
   <title id="title">推理的两个阶段，以及训练多出来的字节</title>
-  <desc id="desc">Prefill 一次处理整段提示。Decode 每次只生成一个 token。训练在参数之外还要留下梯度、主权重、动量和方差。</desc>
+  <desc id="desc">Prefill 一次处理整段提示。Decode 每次只生成一个 token。训练在参数之外还要留下梯度、主权重、一阶矩和二阶原始矩。</desc>
   <g font-family="PingFang SC, Microsoft YaHei, sans-serif">
     
     <text x="28" y="78" font-size="15" fill="#087f70">Prefill</text>
@@ -39,8 +39,8 @@
       <text x="28" y="328">参数</text>
       <text x="84" y="328">梯度</text>
       <text x="140" y="328">fp32 主权重</text>
-      <text x="252" y="328">动量 m</text>
-      <text x="364" y="328">方差 v</text>
+      <text x="252" y="328">一阶矩 m</text>
+      <text x="364" y="328">二阶原始矩 v</text>
     </g>
     <text x="28" y="378" font-size="15" fill="#1c2926">推理部署通常只留下最左边 2 字节。</text>
     <text x="28" y="406" font-size="15" fill="#1c2926">训练要把整条 16 字节和激活一起放进显存，所以同一模型会先在训练侧超出单卡。</text>

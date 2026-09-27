@@ -1,17 +1,17 @@
 import { useId, useState } from 'react'
 import { Arrow, Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
 
-export const frequencies = Array.from({ length: 4 }, (_, m) => 10000 ** (-2 * m / 8))
+export const frequencies = Array.from({ length: 4 }, (_, r) => 10000 ** (-2 * r / 8))
 
 /** One frequency pair seen two ways: as sin/cos curves over position, and as a point on the unit circle. */
 export default function FrequencyLab() {
-  const [m, setM] = useState(0)
+  const [r, setR] = useState(0)
   const [p, setP] = useState(12)
   const [ref, width] = useWidth<HTMLDivElement>()
   const id = useId().replace(/:/g, '')
   const compact = width < 560
 
-  const omega = frequencies[m]
+  const omega = frequencies[r]
   const [sin, cos] = [Math.sin(p * omega), Math.cos(p * omega)]
   const view = compact ? { w: 360, h: 580 } : { w: 720, h: 340 }
   const plot = compact ? { l: 40, r: 348, t: 40, b: 290 } : { l: 56, r: 470, t: 36, b: 280 }
@@ -24,17 +24,17 @@ export default function FrequencyLab() {
   const vy = circle.y - circle.r * cos
 
   return (
-    <LabFrame title="一个频率对，两种看法" hint="d = 8，四个维度对 m = 0…3">
+    <LabFrame title="一个频率对，两种看法" hint="d = 8，四个维度对 r = 0…3">
       <Controls>
         <label className="block text-sm">
-          <span>维度对 m</span>
+          <span>维度对 r</span>
           <select
-            value={m}
-            onChange={(event) => setM(Number(event.target.value))}
+            value={r}
+            onChange={(event) => setR(Number(event.target.value))}
             className="mt-1 block w-full rounded-sm border border-rule-strong bg-paper px-2 py-1"
           >
             {frequencies.map((value, index) => (
-              <option key={index} value={index}>m = {index} · d{2 * index}/d{2 * index + 1} · ω = {value}</option>
+              <option key={index} value={index}>r = {index} · d{2 * index}/d{2 * index + 1} · ω = {value}</option>
             ))}
           </select>
         </label>
@@ -42,7 +42,7 @@ export default function FrequencyLab() {
       </Controls>
       <div ref={ref}>
         <svg viewBox={`0 0 ${view.w} ${view.h}`} className={pen.canvas} role="img"
-          aria-label={`第 ${m} 对在位置 ${p} 的正弦 ${fmt(sin)}、余弦 ${fmt(cos)}`}>
+          aria-label={`第 ${r} 对在位置 ${p} 的正弦 ${fmt(sin)}、余弦 ${fmt(cos)}`}>
           <defs>
             <clipPath id={`${id}-clip`}><rect x={plot.l} y={plot.t} width={plot.r - plot.l} height={plot.b - plot.t} /></clipPath>
             <Arrow id={`${id}-v`} className="fill-info" />
@@ -84,7 +84,7 @@ export default function FrequencyLab() {
         </svg>
       </div>
       <Readout>
-        PE[{p}, {2 * m}] = sin({fmt(p * omega)}) = {fmt(sin, 6)} · PE[{p}, {2 * m + 1}] = cos({fmt(p * omega)}) = {fmt(cos, 6)}
+        PE[{p}, {2 * r}] = sin({fmt(p * omega)}) = {fmt(sin, 6)} · PE[{p}, {2 * r + 1}] = cos({fmt(p * omega)}) = {fmt(cos, 6)}
       </Readout>
     </LabFrame>
   )

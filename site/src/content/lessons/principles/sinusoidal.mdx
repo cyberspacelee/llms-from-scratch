@@ -19,7 +19,7 @@ import EncodingMatrixLab from '../../../components/labs/EncodingMatrixLab'
 
 ### 尝试一：直接把位置当数值
 
-用 $p$ 或 $p\mathbf 1$ 的确能区分位置，但数值随长度增长，位置部分会改变向量尺度；单一标量也缺少多尺度特征。归一化为 $p/L$ 又引入了对所选长度 $L$ 的依赖。这些方法不是“不可能”，而是有不同的归纳偏置。
+用 $p$ 或 $p\mathbf 1$ 的确能区分位置，但数值随长度增长，位置部分会改变向量尺度；单一标量也缺少多尺度特征。缩放为 $p/T$ 又引入了对所选序列长度 $T$ 的依赖。这些方法不是“不可能”，而是有不同的归纳偏置。
 
 我们尝试寻找这样的函数 $u(p)$：数值有界，而且固定偏移 $\Delta$ 可以通过一个不依赖起点的线性变换表示。
 
@@ -53,7 +53,7 @@ $$
 
 <Figure src="math/04-matrix.svg" alt="正交旋转保持基向量的长度和夹角">两支单位基向量一起转过 90°，长度仍为 1，彼此仍然垂直。矩阵的列记录它们的新坐标，正交性把这个几何事实写成 RᵀR = I。</Figure>
 
-矩阵 $M\in\mathbb R^{m\times d}$ 将 $d$ 维列向量映射为 $m$ 维列向量：$(Ma)_r=\sum_s M_{rs}a_s$。它的第 $s$ 列就是第 $s$ 个标准基向量变换后的结果。标准基 $e_1=(1,0)^\top$ 逆时针转 $\phi$ 后为 $(\cos\phi,\sin\phi)^\top$；$e_2=(0,1)^\top$ 转后为 $(-\sin\phi,\cos\phi)^\top$。将这两个结果作为矩阵的两列，就得到旋转矩阵：
+矩阵 $M\in\mathbb R^{m\times d}$ 将 $d$ 维列向量映射为 $m$ 维列向量：$(Mx)_a=\sum_s M_{as}x_s$，其中 $a$ 是输出行号，$s$ 是输入坐标号。它的第 $s$ 列就是第 $s$ 个标准基向量变换后的结果。标准基 $e_1=(1,0)^\top$ 逆时针转 $\phi$ 后为 $(\cos\phi,\sin\phi)^\top$；$e_2=(0,1)^\top$ 转后为 $(-\sin\phi,\cos\phi)^\top$。将这两个结果作为矩阵的两列，就得到旋转矩阵：
 
 <KeyEq label="二维旋转">
 
@@ -74,7 +74,7 @@ $$
 
 ### 为什么转置乘积能判断保长
 
-若方阵满足 $R^\top R=I$，则称为正交矩阵，并有 $R^{-1}=R^\top$，且 $\|Ra\|^2=a^\top R^\top Ra=a^\top a=\|a\|^2$。若矩阵的两列记作 $u,v$，那么：
+若方阵满足 $R^\top R=I$，则称为正交矩阵，并有 $R^{-1}=R^\top$，且 $\|Ra\|_2^2=a^\top R^\top Ra=a^\top a=\|a\|_2^2$。若矩阵的两列记作 $u,v$，那么：
 
 $$
 R^\top R=
@@ -93,7 +93,7 @@ $$
 
 ### 为什么相对旋转里出现减号
 
-旋转有三条后面反复使用的规则：$R(0)=I$，$R(\phi)^{-1}=R(-\phi)=R(\phi)^\top$，$R(\phi)R(\psi)=R(\phi+\psi)$。最后一条可以用三角加法公式逐项验证，也可以理解为先转 $\psi$ 再转 $\phi$。转置乘积会倒序：$(AB)^\top=B^\top A^\top$。于是两个分别旋转的向量做点积时：
+旋转有三条后面反复使用的规则：$R(0)=I$，$R(\phi)^{-1}=R(-\phi)=R(\phi)^\top$，$R(\phi)R(\psi)=R(\phi+\psi)$。最后一条可以用三角加法公式逐项验证，也可以理解为先转 $\psi$ 再转 $\phi$。转置乘积会倒序：$(AC)^\top=C^\top A^\top$。于是两个分别旋转的向量做点积时：
 
 <KeyEq label="只剩相对转角">
 
@@ -109,7 +109,7 @@ $$
 
 二维旋转彼此可交换，但普通矩阵乘法不可随意交换。学习到的 Q/K 投影矩阵一般不与旋转矩阵交换，所以“先投影再旋转”不能任意改为“先旋转再投影”。
 
-下面的实验固定内容 $q=k=(1,0)^\top$，使用 $\theta=\pi/8$。保持位移不变而改变起点，两个向量一起转，夹角与点积都不变。
+下面的实验固定内容 $q=k=(1,0)^\top$，使用角频率 $\omega=\pi/8$。保持位移不变而改变起点，两个向量一起转，夹角与点积都不变。
 
 <RotationLab client:visible />
 
@@ -234,20 +234,20 @@ $A(\Delta)$ 只依赖偏移，不依赖起点 $p$，满足本章开头的要求�
 <KeyEq label="原始 Transformer 位置编码">
 
 $$
-\mathrm{PE}(p,2m)=\sin(p\omega_m),\qquad
-\mathrm{PE}(p,2m+1)=\cos(p\omega_m),\qquad
-\omega_m=10000^{-2m/d}.
+\mathrm{PE}(p,2r)=\sin(p\omega_r),\qquad
+\mathrm{PE}(p,2r+1)=\cos(p\omega_r),\qquad
+\omega_r=10000^{-2r/d}.
 $$
 
 </KeyEq>
 
-$p$ 是位置，$m=0,\ldots,d/2-1$ 是维度对编号，$d$ 是偶数隐藏维度。不能把维度对编号当成位置索引。
+$p$ 是位置，$r=0,\ldots,d/2-1$ 是维度对编号，$d$ 是偶数隐藏维度。不能把维度对编号当成位置索引。
 
 ### 为什么是几何频率，不是等差频率
 
-希望从快变化到慢变化覆盖多个数量级，可以让对数频率等间隔：$\log\omega_m=-\frac{2m}{d}\log B$，指数化后即 $\omega_m=B^{-2m/d}$。这说明公式如何从“对数尺度均匀覆盖”的选择得到；$B=10000$ 本身是超参数，不是某个定理算出的唯一常数。
+希望从快变化到慢变化覆盖多个数量级，可以让对数频率等间隔：$\log\omega_r=-\frac{2r}{d}\log\beta$，指数化后即 $\omega_r=\beta^{-2r/d}$。这说明公式如何从“对数尺度均匀覆盖”的选择得到；$\beta=10000$ 本身是超参数，不是某个定理算出的唯一常数。
 
-| $d=8$ 的维度对 | 角频率 $\omega_m$ | 波长 $2\pi/\omega_m$，单位 token |
+| $d=8$ 的维度对 | 角频率 $\omega_r$ | 波长 $2\pi/\omega_r$，单位 token |
 |---|---|---|
 | 0、1 | 1 | 约 6.28 |
 | 2、3 | 0.1 | 约 62.83 |
@@ -256,22 +256,22 @@ $p$ 是位置，$m=0,\ldots,d/2-1$ 是维度对编号，$d$ 是偶数隐藏维�
 
 <FrequencyLab client:visible />
 
-移动一步时每对的相位变化为 $\omega_m$。高频对短位移变化大；低频在长距离上变化缓慢。更精确地，每对的欧氏距离满足：
+移动一步时每对的相位变化为 $\omega_r$。高频对短位移变化大；低频在长距离上变化缓慢。更精确地，每对的欧氏距离满足：
 
 $$
-\|u(p+\Delta)-u(p)\|^2=2-2\cos(\Delta\omega)
+\|u(p+\Delta)-u(p)\|_2^2=2-2\cos(\Delta\omega)
 =4\sin^2\!\left(\frac{\Delta\omega}{2}\right).
 $$
 
 当 $|\Delta\omega|\ll1$ 时，距离近似 $|\Delta\omega|$。它解释了“不同频率提供不同分辨尺度”，也说明距离并不单调增长。
 
-原论文在 token embedding 上乘 $\sqrt d$，再加位置向量并施加 dropout：
+原论文在 token 嵌入上乘 $\sqrt d$，再加位置向量并施加 dropout：
 
 $$
-z_p=\operatorname{Dropout}\left(\sqrt d\,e_{\text{token}_p}+\mathrm{PE}(p)\right).
+z_p=\operatorname{Dropout}\left(\sqrt d\,e_{u_p}+\mathrm{PE}(p)\right).
 $$
 
-每对平方长度为 $\sin^2+\cos^2=1$，所以 $\|\mathrm{PE}(p)\|^2=d/2$，不随位置膨胀。有限维度下最大波长为 $2\pi B^{1-2/d}$，不是恰好 $2\pi B$。把所有位置的编码按行堆起来，就得到一张位置 × 维度的矩阵：
+其中 $u_p$ 是位置 $p$ 的 token ID，$e_{u_p}$ 是其嵌入列向量，$\mathrm{PE}(p)$ 表示该位置的完整编码列向量。每对平方长度为 $\sin^2+\cos^2=1$，所以 $\|\mathrm{PE}(p)\|_2^2=d/2$，不随位置膨胀。有限维度下最大波长为 $2\pi\beta^{1-2/d}$，不是恰好 $2\pi\beta$。把所有位置的编码按行堆起来，就得到一张位置 × 维度的矩阵：
 
 <EncodingMatrixLab client:visible />
 
@@ -286,7 +286,7 @@ $$
 &\quad+\cos(i\omega)\cos(j\omega)\\
 &=\cos((i-j)\omega),\\[0.5em]
 &\mathrm{PE}(i)^\top\mathrm{PE}(j)\\
-&=\sum_m\cos((i-j)\omega_m).
+&=\sum_{r=0}^{d/2-1}\cos((i-j)\omega_r).
 \end{aligned}
 $$
 
@@ -352,7 +352,7 @@ $R(\pi/2)(3,4)^\top=(3\cdot0-4\cdot1,\ 3\cdot1+4\cdot0)^\top=(-4,3)^\top$，范�
 <details>
 <summary>5. d = 8 时，第 4、5 维一起构成哪一对？它的波长大约多少个 token？</summary>
 
-第 4、5 维是 $m=2$ 的一对，$\omega_2=10000^{-4/8}=0.01$，波长 $2\pi/0.01\approx628.32$ 个 token。它在几百个 token 的尺度上才明显变化，负责区分远距离位移。
+第 4、5 维是 $r=2$ 的一对，$\omega_2=10000^{-4/8}=0.01$，波长 $2\pi/0.01\approx628.32$ 个 token。它在几百个 token 的尺度上才明显变化，负责区分远距离位移。
 
 </details>
 

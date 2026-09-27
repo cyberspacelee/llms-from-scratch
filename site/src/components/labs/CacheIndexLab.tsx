@@ -31,7 +31,7 @@ export default function CacheIndexLab() {
       </ol>
       <p className="mt-3 mb-0 text-xs text-muted">绿色是缓存里的历史键，橙色是这一步新写入的键，灰色是还不存在的未来位置。</p>
       <Readout>
-        Q: [B, H, 1, D] · K/V: [B, H, {t + 1}, D] · 分数: [B, H, 1, {t + 1}]
+        Q: (B, n_q, 1, d_h) · K/V: (B, n_q, {t + 1}, d_h) · 分数: (B, n_q, 1, {t + 1})
       </Readout>
     </LabFrame>
   )

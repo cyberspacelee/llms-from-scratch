@@ -46,7 +46,7 @@
     <line x1="470" y1="220" x2="387.0" y2="220.0" stroke="#c16b36" stroke-width="3" marker-end="url(#red)"/>
     <text x="347.0" y="208.0" font-size="18" fill="#c16b36" text-anchor="start">Re₂</text>
     <line x1="287" y1="220" x2="333" y2="220" stroke="#263a34" stroke-width="2" marker-end="url(#ink)"/>
-    <text x="320" y="367" font-size="22" fill="#263a34" text-anchor="middle">RᵀR = I   →   ‖Ra‖² = aᵀRᵀRa = ‖a‖²</text>
+    <text x="320" y="367" font-size="22" fill="#263a34" text-anchor="middle">RᵀR = I   →   ‖Ra‖₂² = aᵀRᵀRa = ‖a‖₂²</text>
     <text x="320" y="404" font-size="18" fill="#68726d" text-anchor="middle">基向量的像始终单位长、互相垂直。</text>
   </g>
 </svg>

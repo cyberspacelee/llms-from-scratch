@@ -38,10 +38,10 @@
     <text x="302" y="101" font-size="22" fill="#c16b36" text-anchor="start">b</text>
     <path d="M165 280 A55 55 0 0 0 149 241" fill="none" stroke="#3176b5" stroke-width="2"/>
     <text x="173" y="258" font-size="22" fill="#3176b5" text-anchor="start">θ</text>
-    <text x="135" y="326" font-size="19" fill="#3176b5" text-anchor="start">有符号投影：‖b‖ cos θ</text>
+    <text x="135" y="326" font-size="19" fill="#3176b5" text-anchor="start">有符号投影：‖b‖₂ cos θ</text>
     <text x="358" y="149" font-size="18" fill="#263a34" text-anchor="start">只取 b 沿 a 方向的分量</text>
     <text x="358" y="184" font-size="18" fill="#263a34" text-anchor="start">再乘以 a 的长度</text>
     <rect x="28" y="354" width="584" height="58" rx="4" fill="#f0f3f1" stroke="none"/>
-    <text x="320" y="390" font-size="21" fill="#263a34" text-anchor="middle">aᵀb = ‖a‖ × 投影长度 = ‖a‖ ‖b‖ cos θ</text>
+    <text x="320" y="390" font-size="21" fill="#263a34" text-anchor="middle">aᵀb = ‖a‖₂ × 投影长度 = ‖a‖₂ ‖b‖₂ cos θ</text>
   </g>
 </svg>

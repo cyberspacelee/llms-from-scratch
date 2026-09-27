@@ -74,7 +74,7 @@ result = llm.generate(["解释 PagedAttention"], params)
 | [models/qwen3.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/models/qwen3.py) | 数据面 | Transformer 与权重打包映射 |
 | [layers/attention.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/attention.py) | 数据面 | Triton 写缓存 + FlashAttention |
 | [layers/linear.py](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/layers/linear.py) | 数据面 | 列并行 / 行并行 |
-| `layers/rotary_embedding.py`、`layers/embed_head.py` | 数据面 | RoPE；词表并行与 logits 聚合 |
+| `layers/rotary_embedding.py`、`layers/embed_head.py` | 数据面 | RoPE；词表并行与未归一化分数聚合 |
 | `utils/context.py`、`utils/loader.py` | 工具 | 一次 forward 的隐式元数据；safetensors → 切分后的参数 |
 
 ## 一个 token 的完整往返
@@ -180,15 +180,14 @@ stateDiagram-v2
 
 在 nano-vLLM 里，每条序列看到的是连续 token；`block_table` 把第 0、1、2… 个逻辑块翻译为任意物理块。模型不需要搬动历史 K/V，只要把逻辑位置换算成正确槽位：
 
-记位置为 $p$、块大小为 $b$，逻辑块号为 $\ell$、物理槽位为 $s$；分别对应代码中的 `position`、`block_size`、`logical_block` 和 `slot`。
+记位置为 $p$、块大小为 $T_b$，逻辑块号为 $\ell$、物理槽位为 $s$；分别对应代码中的 `position`、`block_size`、`logical_block` 和 `slot`。以 $a_\ell$ 表示块表 `block_table[logical_block]` 给出的物理块号。
 
 <KeyEq label="逻辑位置到物理槽位">
 
 $$
 \begin{aligned}
-\ell&=\left\lfloor\frac{p}{b}\right\rfloor,\\
-s&=\text{block\_table}[\ell]b\\
-&\quad+(p\bmod b).
+\ell&=\left\lfloor\frac{p}{T_b}\right\rfloor,\\
+s&=a_\ell T_b+(p\bmod T_b).
 \end{aligned}
 $$
 
@@ -217,9 +216,13 @@ kv_cache.shape == (
 
 共享前缀时，只读块可以被多条请求指到同一物理块。nano-vLLM 为每个完整块计算哈希，它同时依赖“前一块哈希”和“本块 token_ids”。因此相同 token 块只有出现在相同前缀链上才命中；命中后还会逐 token 比较，避免仅凭哈希确认。
 
+记第 $i$ 块 token ID 的序列化字节串为 $u_i$，$\mathbin{\Vert}$ 表示字节串拼接，区别于向量范数 $\|x\|_2$。前一块哈希也按实现规则序列化后参与拼接：
+
 $$
-h_0=\operatorname{xxh64}(\text{tokens}_0),\qquad
-h_i=\operatorname{xxh64}(h_{i-1}\,\|\,\text{tokens}_i).
+\begin{aligned}
+h_0&=\operatorname{xxh64}(u_0),\\
+h_i&=\operatorname{xxh64}(h_{i-1}\mathbin{\Vert}u_i).
+\end{aligned}
 $$
 
 <Panels>
@@ -245,7 +248,7 @@ $$
 <details>
 <summary>1. 为什么 prefill 完成后，下一步 decode 的输入是刚采样的 token，而不是 prompt 最后一个 token？</summary>
 
-prefill 已经为 prompt 全部位置写入 KV，并用最后一个 prompt hidden state 采样出第一个输出 token。这个新 token 尚未进入 KV；下一步必须以它作为输入，计算并写入它自己的 K/V，同时让它的查询读取全部历史。
+prefill 已经为 prompt 全部位置写入 KV，并用最后一个 prompt隐藏状态采样出第一个输出 token。这个新 token 尚未进入 KV；下一步必须以它作为输入，计算并写入它自己的 K/V，同时让它的查询读取全部历史。
 
 </details>
 

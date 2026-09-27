@@ -41,6 +41,6 @@
     <text x="465" y="242" font-size="18" fill="#c16b36" text-anchor="start">范数² = 25</text>
     <rect x="28" y="305" width="584" height="65" rx="4" fill="#f0f3f1" stroke="none"/>
     <text x="320" y="345" font-size="22" fill="#263a34" text-anchor="middle">总范数²：5 + 25 = 30，旋转前后相同</text>
-    <text x="320" y="411" font-size="19" fill="#68726d" text-anchor="middle">位置 p → 每对转 pωₘ → 拼回向量 → 各对点积求和</text>
+    <text x="320" y="411" font-size="19" fill="#68726d" text-anchor="middle">位置 p → 每对转 pωᵣ → 拼回向量 → 各对点积求和</text>
   </g>
 </svg>
