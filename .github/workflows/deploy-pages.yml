@@ -34,7 +34,7 @@ jobs:
         run: |
           for script in code/math/probability.py code/math/linear_algebra.py code/math/calculus.py \
                         code/math/neural_network.py code/principles/*.py code/training/*.py \
-                        code/systems/*.py code/advanced/*.py; do
+                        code/gpu/*.py code/systems/*.py code/advanced/*.py; do
             echo "::group::$script"
             python "$script"
             echo "::endgroup::"

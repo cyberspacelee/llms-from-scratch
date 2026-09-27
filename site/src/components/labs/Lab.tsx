@@ -32,13 +32,15 @@ type RangeProps = {
 }
 
 export function Range({ label, value, min, max, step = 1, onChange, format = String }: RangeProps) {
+  const id = useId()
   return (
-    <label className="block text-sm">
+    <label htmlFor={id} className="block text-sm">
       <span className="flex justify-between gap-2">
         {label}
         <output className="font-mono text-xs font-semibold text-accent2">{format(value)}</output>
       </span>
       <input
+        id={id}
         type="range"
         min={min}
         max={max}

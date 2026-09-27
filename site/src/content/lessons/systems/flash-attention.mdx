@@ -11,6 +11,8 @@ code:
 
 FlashAttention 的关键问题是：最终需要的只是每个查询的一行输出，能否在看完一个键块以后，把该块压缩成几个可合并的量？本章先在实数算术中证明可以，再解释 GPU 上如何实现。这里的 CPU 验证不测加速比，正式执行应使用 PyTorch SDPA 或经过验证的 FlashAttention 后端。
 
+具体实现里谁负责一行、如何协作归约与处理边界，回读 [G2 内存与同步](/gpu/memory-and-sync/) 和 [G3 Kernel 设计](/gpu/kernel-design/)。本章只推导在线状态，不重复线程索引与 block 屏障的规则。
+
 ## 显式中间矩阵：为什么正确的公式仍可能低效
 
 只看一个头，查询 $Q\in\mathbb R^{T_q\times d_h}$、键 $K\in\mathbb R^{T_k\times d_h}$、值 $V\in\mathbb R^{T_k\times d_v}$。标准注意力是

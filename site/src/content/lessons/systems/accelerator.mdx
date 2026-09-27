@@ -24,6 +24,8 @@ flowchart LR
 
 权重和 KV 的大头住在 HBM。一次 kernel 如果反复从 HBM 读同一块数据，带宽就被浪费在重复搬运上。Shared memory 和寄存器小得多，但够一个 block 把正在用的 tile 留住，本章后半段专门讲这种留法。线程侧只需要先记住三层：grid 是整次启动，block 是能一起同步、能共享 shared memory 的一组线程，warp 是硬件一起调度的一组线程。定义以 [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/) 为准。
 
+如果 thread、warp、block、grid 与 SM 还没有对应起来，先读 [G1 执行模型](/gpu/execution-model/)；访存与协作的实现条件在 [G2 内存与同步](/gpu/memory-and-sync/)，完整分块例子在 [G3 Kernel 设计](/gpu/kernel-design/)。本章继续用这些结构解释性能上限，测量边界可回读 [G4](/gpu/measurement/)。
+
 ## 屋顶线把两个峰值收成一个脊点
 
 [Williams、Waterman 和 Patterson](https://dl.acm.org/doi/10.1145/1498765.1498785) 的屋顶线说：可达性能不会超过算力峰值，也不会超过「带宽 × 算术强度」。两条线的交点叫脊点。强度在脊点左边，上限贴着带宽斜线；在右边，上限贴着算力平台。

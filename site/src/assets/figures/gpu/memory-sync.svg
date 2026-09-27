@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 260" role="img" aria-label="共享缓冲区循环的装载、发布、读取与回收屏障">
+  <g fill="none" stroke="#68726d" stroke-width="2"><path d="M166 88H228M360 88H422M554 88H614"/><path d="M656 136V220H82V136"/></g>
+  <g fill="#087f70" fill-opacity="0.12" stroke="#087f70"><rect x="16" y="38" width="150" height="100" rx="6"/><rect x="422" y="38" width="132" height="100" rx="6"/></g>
+  <g fill="#c16b36" fill-opacity="0.12" stroke="#c16b36"><rect x="228" y="38" width="132" height="100" rx="6"/><rect x="614" y="38" width="90" height="100" rx="6"/></g>
+  <g fill="#263a34" font-family="sans-serif" font-size="17" text-anchor="middle"><text x="91" y="76">协作装载</text><text x="91" y="106">写 shared</text><text x="294" y="76">发布屏障</text><text x="294" y="106">先写后读</text><text x="488" y="76">协作消费</text><text x="488" y="106">读 shared</text><text x="659" y="76">回收</text><text x="659" y="106">屏障</text><text x="366" y="202">所有旧读取完成后，才能装载下一轮</text></g>
+  <g fill="#68726d"><path d="M222 82L234 88L222 94Z"/><path d="M416 82L428 88L416 94Z"/><path d="M608 82L620 88L608 94Z"/><path d="M76 148L82 136L88 148Z"/></g>
+</svg>

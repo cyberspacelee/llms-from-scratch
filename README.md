@@ -4,17 +4,18 @@
 
 **在线阅读：<https://cyberspacelee.github.io/llms-from-scratch/>**
 
-## 四条主线与进阶模型
+## 主线、GPU 编程与进阶模型
 
 | 路线 | 章节 | 回答的问题 |
 | --- | --- | --- |
 | [数学基础](https://cyberspacelee.github.io/llms-from-scratch/math/) | 导读 + M1–M7 | 统计、分布、矩阵、微积分与反向传播，怎样组成一次完整的神经网络训练 |
 | [模型原理](https://cyberspacelee.github.io/llms-from-scratch/principles/) | 导读 + P1–P10 | 从 token 与目标搭建 Decoder，解释位置、现代结构、生成与完整模型缓存 |
 | [训练与评估](https://cyberspacelee.github.io/llms-from-scratch/training/) | 导读 + T1–T6 | 数据、优化、完整训练恢复、评估、指令微调与 LoRA |
+| [GPU 编程](https://cyberspacelee.github.io/llms-from-scratch/gpu/) | 导读 + G1–G4 | thread/warp/block/grid、SM、访存、同步、CUDA/Triton kernel 与测量 |
 | [推理系统](https://cyberspacelee.github.io/llms-from-scratch/systems/) | 导读 + S1–S10 | 计算账本、内核、调度、分页、量化、投机、多卡与服务指标 |
 | [进阶模型](https://cyberspacelee.github.io/llms-from-scratch/advanced/) | 导读 + A1–A9 | MoE、MLA、DPO、长上下文、推理训练、状态空间、混合与稀疏注意力、多模态 |
 
-42 章正文与 5 篇导读按依赖组织，也可以从首页的捷径进入。适合具备 Python 基础的读者；数学基础不要求先学过深度学习。大纲与逐章设计见 [课程计划](docs/CURRICULUM_PLAN.md) 和 [设计卡](docs/CHAPTER_BLUEPRINTS.md)。
+46 章正文与 6 篇导读按依赖组织，也可以从首页的捷径进入。适合具备 Python 基础的读者；数学基础不要求先学过深度学习。大纲与逐章设计见 [课程计划](docs/CURRICULUM_PLAN.md)、[设计卡](docs/CHAPTER_BLUEPRINTS.md) 和 [GPU 编程规划](docs/GPU_PROGRAMMING_PLAN.md)。
 
 ## 运行验证脚本
 
@@ -27,12 +28,14 @@ python -m venv .venv
 .venv/bin/python code/math/linear_algebra.py
 .venv/bin/python code/math/calculus.py
 .venv/bin/python code/math/neural_network.py
-for script in code/principles/*.py code/training/*.py code/systems/*.py code/advanced/*.py; do
+for script in code/principles/*.py code/training/*.py code/gpu/*.py code/systems/*.py code/advanced/*.py; do
   .venv/bin/python "$script" || exit 1
 done
 ```
 
 脚本核对梯度、分词、标签移位、完整 Decoder 缓存、采样、训练恢复以及系统与进阶算法。T3 包含小语言模型训练、生成和断点恢复，全部教学验证只需 CPU；不复现大型模型的训练质量与 GPU 内核性能。运行 nano-vLLM 所需 GPU 与权重见 S4。
+
+G1–G4 的 CPU 脚本检查索引覆盖、地址段、bank、归约、分块 GEMM、资源账与依赖。`code/gpu/examples/` 是独立的真实 GPU 示例：CUDA C++ 需 NVIDIA GPU 与 `nvcc`，Triton 和 event 计时需相容的 CUDA-enabled PyTorch，安装与运行见各章。无 GPU 的 CI 不运行这些示例，教学图和 CPU 数字不代表 GPU 实测。
 
 ## 本地预览站点
 
@@ -40,7 +43,7 @@ done
 cd site
 pnpm install
 pnpm dev      # 本地预览
-pnpm check    # 类型检查
+pnpm check    # 类型检查与 GPU 教学模型核对（Node 22.18+）
 pnpm build    # 构建并检查所有站内链接与锚点
 ```
 
@@ -50,7 +53,7 @@ pnpm build    # 构建并检查所有站内链接与锚点
 
 ```text
 site/                       Astro 站点，唯一的正文来源
-  src/content/lessons/      讲义正文：math/ principles/ training/ systems/ advanced/
+  src/content/lessons/      讲义正文：math/ principles/ training/ gpu/ systems/ advanced/
   src/components/           Figure、KeyEq、Callout 等正文组件，交互实验与系统图
   src/assets/figures/       SVG 图解；构建时内联并映射到站点配色
   src/styles/global.css     唯一的样式入口：Tailwind 主题 token 与生成内容的规则

@@ -1,4 +1,4 @@
-export type TrackId = 'math' | 'principles' | 'training' | 'systems' | 'advanced'
+export type TrackId = 'math' | 'principles' | 'training' | 'gpu' | 'systems' | 'advanced'
 
 export type Track = {
   id: TrackId
@@ -25,6 +25,10 @@ export const tracks: Track[] = [
   {
     id: 'training', letter: 'T', label: '训练与评估',
     summary: '准备数据，完整训练与恢复小语言模型，再做评估、指令微调和低秩适配。',
+  },
+  {
+    id: 'gpu', letter: 'G', label: 'GPU 编程',
+    summary: '把数组工作映射到线程、warp 与 block，理解访存、同步、分块和可信的性能测量。',
   },
   {
     id: 'systems',

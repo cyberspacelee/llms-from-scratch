@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 262" role="img" aria-labelledby="title desc">
+  <title id="title">提交时间、GPU 区间与端到端时间的边界</title>
+  <desc id="desc">CPU 提交很短，GPU 在队列等待后计算。GPU event 围住计算，端到端计时还包含传输和最终等待。长度仅示意。</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#52645e"/></marker></defs>
+  <g font-family="sans-serif" font-size="16" fill="#263a34">
+    <text x="18" y="46">CPU</text><text x="18" y="117">拷贝</text><text x="18" y="184">GPU</text>
+    <g fill="none" stroke="#d5ddd7"><path d="M90 56H698M90 128H698M90 195H698"/></g>
+    <rect x="108" y="25" width="124" height="29" rx="3" fill="#e1eee9"/><text x="170" y="45" text-anchor="middle">提交操作</text>
+    <rect x="240" y="25" width="210" height="29" rx="3" fill="#f0f3f1"/><text x="345" y="45" text-anchor="middle">CPU 可做其他工作</text>
+    <rect x="455" y="25" width="208" height="29" rx="3" fill="#f7e9da"/><text x="559" y="45" text-anchor="middle">等待结果</text>
+    <rect x="108" y="94" width="145" height="31" rx="3" fill="#e2eaf7"/><text x="180" y="115" text-anchor="middle">H2D</text>
+    <rect x="555" y="94" width="108" height="31" rx="3" fill="#e2eaf7"/><text x="609" y="115" text-anchor="middle">D2H</text>
+    <rect x="275" y="163" width="250" height="30" rx="3" fill="#e1eee9"/><text x="400" y="184" text-anchor="middle">kernel</text>
+    <path d="M253 128L275 163M525 163L555 128" fill="none" stroke="#52645e" marker-end="url(#arrow)"/>
+    <g stroke="#087f70"><path d="M275 152V201M525 152V201"/><path d="M275 211H525"/></g>
+    <text x="400" y="234" text-anchor="middle" fill="#087f70">event 区间</text>
+    <path d="M108 70H663M108 65V75M663 65V75" fill="none" stroke="#c16b36"/>
+    <text x="690" y="254" text-anchor="end" font-size="14" fill="#68726d">位置与长度仅示意；真实时间取自运行记录。</text>
+  </g>
+</svg>

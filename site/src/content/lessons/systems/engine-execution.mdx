@@ -13,6 +13,8 @@ import Checklist from '../../../components/labs/Checklist'
 
 [S4](/systems/engine-runtime/) 与 [S5](/systems/paged-cache/) 决定这一步算谁、K/V 写到哪里。本章进入数据面，看 `ModelRunner` 怎样把这些决定变成张量，以及 CUDA Graph 怎样减少 decode 的启动开销。第一次阅读先沿单卡主线；张量并行段可在 [S9](/systems/cluster/) 的切片与 collective 数值例之后回读。
 
+host/device 异步、stream 与 event 的顺序以及 kernel 计时边界在 [G4 测量与优化](/gpu/measurement/) 展开。Graph 重放减少重复发射开销，仍然要满足这些依赖和存储生命周期约束。
+
 ## 同一个模型，两种批形状
 
 prefill 把多条不等长序列打平为 token 流，用累计长度描述边界；decode 则每条序列只送入最后一个 token，并携带完整上下文长度和 block table。

@@ -4,7 +4,7 @@
 
 ## 路线与章节
 
-- 四条主线与进阶各占一个目录：`math/`（M）、`principles/`（P）、`training/`（T）、`systems/`（S）、`advanced/`（A）。路线元数据在 `site/src/lib/tracks.ts`。
+- 主线、GPU 编程与进阶各占一个目录：`math/`（M）、`principles/`（P）、`training/`（T）、`gpu/`（G）、`systems/`（S）、`advanced/`（A）。路线元数据在 `site/src/lib/tracks.ts`。
 - 每条路线的 `index.mdx` 是导读，`order: 0`；章节 `order` 从 1 连续编号，章节代码（M3、P2、S4）由路线字母和 `order` 生成。新增或调整章节只改 frontmatter，不维护任何目录表。
 - 一章讲清一个问题，篇幅以 5k–9k 字正文为宜。过长就按问题拆开，过短就并入相邻章节；两章不重复推导同一个结论，后出现的一章链接到先出现的那一节。
 
@@ -43,7 +43,7 @@ code:                                # 可选，本章对应的验证脚本
 | `<Figure src="math/04-matrix.svg" alt="…">图注</Figure>` | `src/assets/figures/` 中的 SVG。页面自动编号“图 N”，内联后跟随明暗主题 |
 | `<KeyEq label="…">$$…$$</KeyEq>` | 一章围绕的少数关键公式；普通行间公式不加框 |
 | `<Callout tone="note \| warn" title="…">` | 路线提示、证明边界、运行限制；一般旁注直接用 Markdown 引用块 |
-| `<CodeFile path="code/…py" />` | 从 `code/` 读入完整脚本，正文与文件不会漂移 |
+| `<CodeFile path="code/…py" />` | 从 `code/` 读入完整脚本，正文与文件不会漂移；也支持 `.cu` 示例 |
 | `<Steps>`、`<StatGrid>`、`<Panels>` + `<Panel>` | 横向流程、少量关键数字、并列对比 |
 | `<SourceNote>` | 指向上游源码具体行的锚点 |
 | `<ChapterList track="…" />` | 路线导读中的章节列表，由内容集合生成 |

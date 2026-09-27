@@ -9,7 +9,7 @@ interface Props {
 }
 
 const { path } = Astro.props
-const files = import.meta.glob<string>('../../../../code/**/*.py', { query: '?raw', import: 'default', eager: true })
+const files = import.meta.glob<string>(['../../../../code/**/*.py', '../../../../code/**/*.cu'], { query: '?raw', import: 'default', eager: true })
 const source = files[`../../../../${path}`]
 if (source === undefined) throw new Error(`Code file not found: ${path}`)
 ---
@@ -19,6 +19,6 @@ if (source === undefined) throw new Error(`Code file not found: ${path}`)
     <a href={`${repoUrl}/blob/master/${path}`} class="text-muted hover:text-accent">在 GitHub 查看</a>
   </div>
   <div class="prose prose-lesson max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
-    <Code code={source.trimEnd()} lang="python" themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} />
+    <Code code={source.trimEnd()} lang={path.endsWith('.cu') ? 'cpp' : 'python'} themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} />
   </div>
 </div>

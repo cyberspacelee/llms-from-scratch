@@ -27,7 +27,7 @@ const label = (item: Lesson) => (item.isIntro ? '导读' : item.code)
       aria-label="章节目录"
       class="invisible fixed top-header bottom-0 left-0 z-30 w-[min(20rem,88vw)] -translate-x-full overflow-y-auto overscroll-contain border-r border-rule bg-paper p-5 transition-[transform,visibility] duration-200 motion-reduce:transition-none data-open:visible data-open:translate-x-0 lg:visible lg:sticky lg:top-header lg:z-auto lg:max-h-[calc(100dvh-var(--spacing-header))] lg:w-auto lg:translate-x-0 lg:self-start lg:border-r-0 lg:bg-transparent lg:px-0 lg:py-8"
     >
-      <nav aria-label="学习路线" class="mb-5 flex gap-1 border-b border-rule pb-4 sm:hidden">
+      <nav aria-label="学习路线" class="mb-5 flex flex-wrap gap-1 border-b border-rule pb-4 xl:hidden">
         {tracks.map((track) => (
           <a
             href={url(track.id)}

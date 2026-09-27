@@ -14,13 +14,18 @@ const find = (path: string) => {
 const routes: { title: string; detail: string; steps: Lesson[] }[] = [
   {
     title: '完整路线',
-    detail: '从数学搭起模型，完成训练与评估，再进入推理系统与进阶结构。选读段落单独标出。',
+    detail: '从数学搭起模型，完成训练与评估，再理解 GPU 编程、推理系统与进阶结构。',
     steps: tracks.map((track) => find(track.id)),
   },
   {
     title: '只为弄懂 RoPE',
     detail: '先补点积、范数与转置，再进入位置编码的三章。',
     steps: [find('math/linear-algebra'), find('principles/attention-order'), find('principles/rope')],
+  },
+  {
+    title: '开始写 GPU kernel',
+    detail: '从数组索引进入线程组织，接着理解访存、同步、分块与测量。',
+    steps: [find('gpu/execution-model'), find('gpu/memory-and-sync'), find('gpu/kernel-design'), find('gpu/measurement')],
   },
   {
     title: '关心推理性能',
@@ -59,7 +64,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
     </section>
 
     <section aria-labelledby="tracks-heading" class="py-14">
-      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">四条主线与进阶模型</h2>
+      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">主线、GPU 编程与进阶模型</h2>
       <div class="grid gap-6 lg:grid-cols-3">
         {tracks.map((track) => {
           const items = byTrack(track.id)

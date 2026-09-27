@@ -15,6 +15,8 @@ order: 0
 
 已经熟悉某一层可以从对应章节进入，但调度之前应读完 [P9 生成](/principles/generation/) 与 [P10 KV cache](/principles/kv-cache/)，量化质量沿用 [T4 评估](/training/evaluation/) 的固定协议。S6 首次阅读以单卡为主，多卡段在 S9 之后回读，避免 collective 概念在数值意义尚未定义时抢先出现。
 
+GPU 编程是并行的基础支线：[G1–G4](/gpu/) 从 thread、warp、block、grid 讲到访存、同步、kernel 与测量。尚未接触这些概念时，建议 S2 → G1–G3 → S3；需要解释发射时间与 CUDA Graph 时，先读 G4 再进入 S6。
+
 ## 每章读完要能手算的事
 
 | 章 | 新出现的量 | 读完要能手算的事 |

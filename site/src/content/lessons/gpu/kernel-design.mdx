@@ -1,0 +1,264 @@
+---
+title: 分块与融合 kernel
+question: 怎样把数学算子变成可核对的 GPU 程序，并减少重复搬运
+description: 对照 CUDA 与 Triton 的工作划分，从稳定 softmax 和非整除矩阵乘理解边界、共享内存复用、融合与 Tensor Core。
+order: 3
+code:
+  - code/gpu/kernel_design.py
+---
+
+import TileReuseLab from '../../../components/labs/TileReuseLab'
+import FigureShell from '../../../components/FigureShell.astro'
+import matrixTiles from '../../../assets/figures/gpu/matrix-tiles.png'
+
+给定两个矩阵 $A\in\mathbb R^{5\times7}$、$B\in\mathbb R^{7\times6}$，计算 $C=AB$，只有 30 个输出。CPU 上一句 `A @ B` 就能完成；写 GPU kernel 时，却需要回答：哪些线程负责输出，如何找到输入，边缘不足一块怎么办，能否复用邻居需要的数值？这些问题不改变矩阵乘的定义，却决定程序是否正确以及数据怎样移动。
+
+先修是 [G1 执行模型](/gpu/execution-model/) 和 [G2 内存与同步](/gpu/memory-and-sync/)。矩阵乘的求和定义可回读 [M3 向量与矩阵](/math/linear-algebra/)，softmax 的概率含义可回读 [P3 注意力](/principles/attention/)。本章把重点放在“数学与工作划分之间的翻译”：先写输入契约，再建立唯一写入与同步，最后讨论分块和融合。配套 CPU 脚本在 float64 下验证结果；CUDA 与 Triton 文件是可选 GPU 示例，本次没有 GPU 环境，未编译或运行，不提供速度数字。
+
+## 输入契约：正确性从地址与形状开始
+
+一个算子的数学公式只描述数值关系，接口还必须描述数值在哪里。矩阵可以是连续数组，也可以是更大数组的切片。设元素为 float32，每元素占 4 字节；二维视图的元素步长为 $s_0,s_1$，则相对首元素的地址为：
+
+$$
+\operatorname{addr}(i,j)=\operatorname{base}+4(is_0+js_1).
+$$
+
+代码中的 `stride` 通常以元素为单位，已经加上 `float*` 的指针会按元素宽度移动，不能再次乘 4。连续行主序的 $5\times7$ 矩阵有 $(s_0,s_1)=(7,1)$；如果它来自一个 $5\times14$ 数组的隔列切片，步长变成 $(14,2)$。两者形状完全相同，用 `i*7+j` 寻址只对第一种有效。
+
+因此，在设计 launch 前先约定五件事：形状轴分别表示什么；输入与累计的 dtype；支持哪些步长；尾部如何处理；输出是否与输入共享存储。最后一项称为别名（aliasing）。本章所有 GPU 接口都新分配输出，输入与输出互不覆盖。这让程序能证明“读取的数值不会在读取前被另一个线程改写”。若允许原地更新，就必须重新分析依赖，不能只是去掉一次分配。
+
+| 示例 | 输入布局 | 数值与边界契约 |
+| --- | --- | --- |
+| Triton 向量加法 | 同设备、连续的一维 float32 | 两向量等长，允许空向量，越界位置不读不写 |
+| Triton 行 softmax | 二维 float32 与同形状 bool mask，正步长 | 宽度 1–4096，输入有限，全屏蔽行返回零 |
+| CUDA 分块 GEMM | 连续行主序 float32 | 固定入口使用正维度，输出独立，边缘输入补零 |
+| CPU 核对 | NumPy float64 | 用高精度参考检查分块与 mask，不能代表 GPU 调度 |
+
+softmax 接口支持行、列切片产生的正步长视图，输出总是连续。它拒绝零步长广播视图、负步长和非有限 logits。这是本示例的范围，不是 Triton 的普遍能力限制。入口中的有限性检查会触发 host 等待，适合教学核对；生产路径若由上游保证这一契约，应将检查纳入统一的数据验证与测量边界。不能把它隐去后宣称同一段端到端代码更快。
+
+## CUDA 与 Triton：标量线程和数据块如何对应
+
+在 G1 的 CUDA 向量加法中，一个线程先算编号 $i$，再计算一个标量 `out[i]=x[i]+y[i]`。逻辑工作划分由程序员显式写出，block 的线程数通过 `blockDim.x` 表达。Triton 中，一个程序实例（program instance）先领取一段元素，编译器再把这一段的运算分配到线程与 lane。
+
+例如 `BLOCK_SIZE=256`，第 $p$ 个程序实例的偏移向量为：
+
+$$
+o=p\cdot256+(0,1,\ldots,255).
+$$
+
+`tl.arange(0, BLOCK_SIZE)` 构造的是编译期确定长度的数据块；`tl.program_id(0)` 是第一个 grid 轴上的程序实例编号。若长度为 1003，grid 是 $\lceil1003/256\rceil=4$。前三段各处理 256 个元素，最后一段覆盖逻辑偏移 768–1023，其中 1003–1023 共 21 个位置被 mask 排除。load 和 store 都要加边界，不能只防止输出写越界。
+
+这里 `BLOCK_SIZE` 表示每个程序处理的元素数，**不是 CUDA 的 threads per block**。示例同时传入 `num_warps=4`，在 NVIDIA 后端通常对应一个程序使用 4 个 warp，也就是 128 个线程；256 个元素可由这些线程各处理多个值。编译器如何分配值还取决于布局、指令和目标硬件，不能从 `arange` 的长度直接推出 lane 的逐元素映射。[Triton 官方向量加法教程](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html) 给出了这种程序实例与数据偏移的入口。
+
+把数据块改为 1024、保持 `num_warps=4`，意味着每个程序领取更多元素，并不意味着突然启动 1024 个硬件线程。更多每线程数据可能改善 amortization，也可能增加寄存器使用。相反，把 `num_warps` 从 4 改为 8，并不会改变向量加法的数学输入输出；它改变线程参与方式，需要重新测量。
+
+读 Triton kernel 时，可以依次问：每个 program 领取什么范围，`arange` 表示哪条数据轴，load 的指针有没有正确 stride，归约发生在哪个轴，最后 store 覆盖哪些有效位置。读 CUDA kernel 时，则问：每个 thread 负责什么，block 内哪些数据共享，哪些屏障建立依赖。两种读法在数学层面汇合，但调度表达不必一一对应。
+
+## 稳定 softmax：把一行的依赖放在同一程序里
+
+每行 softmax 需要整行的信息：某个位置的概率不仅由自己决定，还由全行分母决定。如果一个线程计算一个概率却各自重新求最大值和分母，就会重复读取整行。更自然的划分是让一个协作组负责一行，把需要共同使用的中间量保留在片上。
+
+设一行有限分数为 $x_j$，有效位置集合为 $\mathcal V$。非空时定义：
+
+<KeyEq label="一行的稳定 softmax">
+$$
+a=\max_{j\in\mathcal V}x_j,\qquad
+u_j=\begin{cases}\exp(x_j-a),&j\in\mathcal V,\\0,&j\notin\mathcal V,\end{cases}
+\qquad
+y_j=\frac{u_j}{\sum_r u_r}.
+$$
+</KeyEq>
+
+最大值 $a$ 是整行公共平移；分子、分母都乘同一因子，所以结果不变。平移后有效指数的输入不大于零，避免大正数指数溢出。取 $(1000,1001,1002)$，直接求指数会越过常用浮点范围；平移得到 $(-2,-1,0)$，指数约 $(0.135335,0.367879,1)$，归一化约 $(0.090031,0.244728,0.665241)$。最大分数的概率仍小于 1，因为另外两个位置也参与分母。
+
+假设一行宽度为 7，示例取 `BLOCK_SIZE=8`。第 8 个逻辑位置没有数据，load 用边界 mask 防止访问，归约用 $-\infty$ 让它不影响最大值，用零让它不影响指数和。这里有两个不同的 mask：`offsets < cols` 是地址边界；输入 bool mask 是语义屏蔽。一个位置地址有效却被语义屏蔽时，其输出仍要写零。不能把两者混成一个 store mask，否则某些有效输出会保留未初始化数据。
+
+### 全屏蔽行为什么要单独定义
+
+如果 $\mathcal V$ 为空，就不存在概率分布；普通 softmax 也不能把分母零变成合法的概率和。把所有 logits 换成 $-\infty$ 后，最大值仍是 $-\infty$，于是 $-\infty-(-\infty)$ 产生 NaN。稳定公式解决大正数溢出，并没有自动解决这一情况。
+
+本章选择“全屏蔽行输出全零”作为算子契约。它表示该行不贡献加权输出，**不表示该行是概率和为 1 的分布**。代码先归约有效位置数得到 `has_values`，空行的最大值设为 0，指数分子为零，分母改为 1。这样计算过程中就有定义，而不是最终对 NaN 做一次遮盖。其他模型也可能选择拒绝空行、补一个有效位置等策略；这些会改变算子，训练和推理必须保持一致。
+
+示例只接受有限输入，包括被 mask 的位置。这样语义屏蔽由独立 bool 数组表达，避免混用 NaN、正无穷和负无穷作为标记。单个有效位置得到概率 1；$( -2,0,2)$ 中屏蔽中间位置，则剩余输出约 $(0.017986,0,0.982014)$。
+
+### 一行融合的收益与范围
+
+该 Triton kernel 在一个程序内完成 load、max、减法、exp、sum 和归一化，最后一次 store。中间结果由编译器安排在寄存器或其他片上资源中；不要把所有 `tl` 张量都想成一整块手动申请的 shared memory。程序里的归约也可能需要线程协作，具体实现由编译器与目标布局决定。
+
+忽略 bool mask 与缓存，仅统计 float32 输入输出，大行的最低逻辑流量是每元素读 4 字节、写 4 字节，合计 $8N$ 字节。如果分步实现把每个中间矩阵写回再读回，会增加完整行的往返。[Triton 官方 softmax 教程](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html) 展示了融合的这种动机。本章示例另有 mask 的读流量；理论字节不等于 DRAM 实测字节，也不能直接当作加速倍数。
+
+整个长行放入一个程序会增加每线程的暂存与归约工作。因此示例把宽度限制为 4096，这是教学范围。更宽的行需要分段归约或其他工作划分，不能无限增加 `BLOCK_SIZE`。注意力中把 softmax 与后续乘值向量一起分块时，还会遇到跨块更新最大值和分母，参见 [S3 FlashAttention](/systems/flash-attention/)，本章不重新推导在线公式。
+
+## 分块 GEMM：输入怎样被一组输出复用
+
+矩阵乘定义是：
+
+$$
+C_{ij}=\sum_{q=0}^{K-1}A_{iq}B_{qj},
+\qquad A\in\mathbb R^{M\times K},\ B\in\mathbb R^{K\times N}.
+$$
+
+一个朴素线程负责一个 $C_{ij}$，沿 $K$ 做循环，累计量放在寄存器。它每步读取两个输入；邻列线程会再次读取同一 $A_{iq}$，邻行线程会再次读取同一 $B_{qj}$。缓存可能吸收一部分重复，但程序本身没有明确建立共享复用。
+
+考虑边长为 $t$ 的输出 tile。处理某段 $K$ 时，需要一个 $t\times t$ 的 A tile 和一个 $t\times t$ 的 B tile。装载 $2t^2$ 个输入后，形成 $t^2$ 个输出各自的 $t$ 次乘加，也就是约 $2t^3$ FLOP。A 中同一个元素被这个 tile 的 $t$ 个输出列使用，B 中同一个元素被 $t$ 个输出行使用。这就是分块的具体收益来源，不是把公式换成了另一种矩阵乘。
+
+在完整内部 tile 中，只计 float32 输入搬运、暂不计输出和缓存，算术强度为：
+
+$$
+I_{\mathrm{input}}=\frac{2t^3}{4\cdot2t^2}=\frac{t}{4}\ \mathrm{FLOP/byte}.
+$$
+
+边长 16 时，这个局部计数为 4 FLOP/byte。增大 tile 会增加输入复用，但输出累计、共享缓冲区和线程资源也增大。[S2 单卡的上限](/systems/accelerator/) 的屋顶线说明为什么复用有价值；G4 会说明资源约束为什么阻止“越大越好”。这个公式不是整个 kernel 的实测速率，也没把所有开销算进去。
+
+<FigureShell label="5×7 与 7×6 的真实矩阵及其乘积">
+  <img src={import.meta.env.DEV ? import.meta.env.BASE_URL.replace(/\/$/, '') + matrixTiles.src : matrixTiles.src} width={matrixTiles.width} height={matrixTiles.height} alt="三幅逐格标数的矩阵热力图：A 为 5×7，B 为 7×6，C 为 5×6；绿色边框标出第一组四乘四分块" class="block h-auto w-full min-w-176" loading="lazy" />
+  <span slot="caption">固定种子生成的小整数矩阵。红蓝仅表示每幅矩阵内的正负与相对大小，格中数字才是实际数值；绿色框选第一组 tile，C 已累计全部七个 K 位置。</span>
+</FigureShell>
+
+图中的输入与输出可直接手算核对，不是性能热力图。输出第一块覆盖行 0–3、列 0–3；第一段 K 是 0–3，第二段是 4–6。第一次只累计四项，第二次补上三项，最后才能写完整结果。不能把 K 的分块编号当作输出编号，否则会让多个 block 同时覆盖同一输出。
+
+<TileReuseLab client:visible />
+
+交互固定观察第一块输出，绿色表示当前装载的 A 列段与 B 行段，蓝色输出块一直保持不变。公式中冒号使用左闭右开的切片约定，如 $0:4$ 对应索引 0、1、2、3。底部读取数覆盖整个矩阵，包含所有输出 tile，排除了越界补零，不统计 shared 内的重复读取。
+
+### 非整除边缘要怎样补零
+
+用 $t=4$ 处理 $5\times7$ 乘 $7\times6$，输出 grid 是 $\lceil6/4\rceil\times\lceil5/4\rceil=2\times2$，沿 K 共两轮。右下输出 tile 的 16 个逻辑位置只有 $1\times2=2$ 个有效输出。剩余线程没有输出可写，却可能负责装载别的有效线程需要的 A 或 B 元素，因此不能在 kernel 开头按输出有效性直接 `return`。
+
+第一步由所有线程协作填充缓冲区：每个 thread 对应一个 tile 位置，A 的边界判断看输出行和 K 列，B 的边界判断看 K 行和输出列。越界元素赋零。零是乘加的中性填充值，所以对有效 $C_{ij}$ 的结果没有影响。然后所有线程参加屏障，再计算，最后只有有效输出执行 store。
+
+这样边界条件分别对应三个矩阵，不能只用 `row<M && col<N` 来保护两种 load。比如一个输出列越界的线程，仍可能负责装载 A 的有效列；输出行越界的线程也可能装载 B 的有效行。判断依据应来自实际要访问的地址，不来自线程有没有最终结果。
+
+## 共享缓冲区：装载和复用各需要一道边界
+
+CUDA 教学实现使用两个 `TILE×TILE` shared 数组，每个线程累计一个输出标量。两道 `__syncthreads()` 都在整个 block 一致执行的 K 循环里。第一道保证当前两个输入 tile 填好，再允许读取；第二道保证所有线程消费完本轮数据，再允许快线程进入下一轮覆盖缓冲区。
+
+<Figure src="gpu/kernel-pipeline.svg" alt="分块矩阵乘的一轮：全局装载、第一道屏障、共享数据乘加、第二道屏障，然后重复 K 或写回" minWidth="42rem">沿箭头追踪同一个 shared 缓冲区。第一道屏障保护先写后读，第二道保护上一轮读完再覆盖；全部 K 完成后才写回。</Figure>
+
+没有第二道屏障时，一个 warp 可能已经进入下一轮，而另一个 warp 仍读取上一轮 A tile。即使每次装载后都有第一道屏障，也阻止不了这个覆盖，因为破坏发生在下一次屏障之前。通过显式维护缓冲区生命周期，可以从代码结构解释安全性，而不是依赖“warp 应该差不多同时结束”。
+
+唯一写入来自二维索引：`row=blockIdx.y*TILE+threadIdx.y`，`col=blockIdx.x*TILE+threadIdx.x`。grid 的 x 轴对应列 tile，y 轴对应行 tile。每个有效坐标只有一个对应 block 和 thread；它在 K 循环中使用自己的寄存器累加，最后赋值一次。这个实现不需要原子加法。如果把 K 拆给多个 block，就需要额外的部分结果归约或其他并发累加策略，已经是另一种算法划分。
+
+完整 CUDA 示例固定 `TILE=16`，一个 block 启动 $16\times16=256$ 个线程。x 维最快变化，所以一个 warp 跨两个 16 元素的半行；这种协作读取并不保证所有形状都恰好充分利用四个访存段。5×7 的算例仍能验证补零，却只有一个输出 block，利用率很低；它的目标是看清依赖与边界。入口查询设备是否支持所需线程维度、线程总数与 shared 大小，另外核对 17×19 乘 19×13 和 32×32 乘 32×32，分别覆盖尾部与整除情形。参考结果用输入 float32 值转换为 double 累加，检查绝对误差加相对误差，避免近零项只用相对容差。
+
+<CodeFile path="code/gpu/examples/tiled_gemm.cu" />
+
+有 CUDA 工具链和兼容 GPU 时，在仓库根运行：
+
+```bash
+nvcc -O2 code/gpu/examples/tiled_gemm.cu -o /tmp/tiled_gemm
+/tmp/tiled_gemm
+compute-sanitizer --tool memcheck /tmp/tiled_gemm
+compute-sanitizer --tool synccheck /tmp/tiled_gemm
+```
+
+编译器检查不替代运行时检查，数值相等也不证明不存在越界或同步问题。入口检查 launch 的即时错误和同步时的异步错误；成功后复制结果、核对数值、释放设备内存。本次没有运行这些 GPU 命令，读者应在自己的设备上完成数值与 Sanitizer 两种检查后再计时。
+
+## 验证与访问计数：CPU 能证明哪些事
+
+CPU 模型使用同样的输出分块和 K 分块，但通过 NumPy 数组模拟 tile，边缘先补零再乘。它不会模拟 warp、共享内存银行或屏障；能核对的是分块索引、数学结果和全屏蔽策略。验证不是把 NumPy 计时当作 GPU 性能。
+
+朴素模型对 $5\times7$ 乘 $7\times6$ 的输入逻辑读取为 $2MKN=420$ 个元素。分块模型中，A 的每个有效元素被每个输出列 tile 读取一次，B 的每个有效元素被每个输出行 tile 读取一次，因此：
+
+$$
+R_{\mathrm{tile}}=MK\left\lceil\frac Nt\right\rceil+KN\left\lceil\frac Mt\right\rceil.
+$$
+
+$t=4$ 时得到 $35\cdot2+42\cdot2=154$。它统计指令层面的有效输入元素访问，边缘逻辑零不形成 global load。输出仍写 30 个元素，数学运算量按 $2MKN$ 约为 420 FLOP；CUDA 会对 padding 做额外乘加。这进一步说明“读取少了”和“总执行成本少了”不是同一结论。真实 DRAM 流量还受缓存、合并访问和事务粒度影响。
+
+<CodeFile path="code/gpu/kernel_design.py" />
+
+脚本固定种子 7、float64，检查 softmax 的大数平移不变性、mask 零值与空行策略，也对多个 tile 边长和非整除形状核对 `A @ B`。在仓库根运行 `python code/gpu/kernel_design.py`，预期输出 `G3 CPU checks passed`。GPU float32 的归约和乘加顺序不同，不承诺逐位相等；示例的容差仅用于当前小算例，应按 dtype、K 长度和应用误差预算调整。
+
+Triton 完整入口同样检查尾部向量、非连续行列切片、1/7/781/4096 列与全屏蔽行。输出与 GPU 上的 float64 参考比较；exp 是近似计算，检查数值容差而不是字符串表示。
+
+<CodeFile path="code/gpu/examples/triton_kernels.py" />
+
+GPU 环境已有兼容 PyTorch 与 Triton 时运行 `python code/gpu/examples/triton_kernels.py`。CPU 教学脚本不导入这两个可选依赖，站点也不要求读者安装它们才能阅读。不能把“CPU 验证通过”写成“Triton kernel 已经通过 GPU 测试”。
+
+## 融合与 Tensor Core：减少中间结果和改变指令
+
+融合（fusion）把连续算子的中间结果留在同一个 kernel 内。设矩阵乘之后有偏置和 ReLU：$D_{ij}=\max(C_{ij}+b_j,0)$。当线程已经拥有完整 $C_{ij}$ 的寄存器累计值时，可以加偏置、做 ReLU 后直接写 D。这个写回尾段通常称为 epilogue。必须等全部 K 贡献累计完再做非线性，不能每个 K tile 做一次 ReLU，因为 $\max(u+v,0)$ 一般不等于 $\max(u,0)+\max(v,0)$。
+
+若 GEMM、偏置、ReLU 三个 kernel 分别把完整矩阵写回，忽略偏置本身、缓存与输入读取，C/D 的逻辑流量依次为：GEMM 写 $4MN$；偏置读写 $8MN$；ReLU 读写 $8MN$。共 $20MN$ 字节。融合成一个写回则为 $4MN$，节省 $16MN$ 字节。若原实现已经把偏置和 ReLU 合并为一个 kernel，剩余节省为 $8MN$。必须先说明比较基线，不能任意挑最大节省数字。
+
+融合也使更多变量在同一程序中同时存活，可能增加寄存器压力、减少可驻留 warp，甚至发生 spill。因此“少启动一个 kernel”是可检查的事实，“一定更快”仍要测量。小 tensor 的 launch 开销、大 tensor 的内存流量、计算密集 GEMM 的指令吞吐，可能分别决定优化方向。
+
+Tensor Core 是执行矩阵乘累加类运算的硬件资源，不是 CUDA `TILE` 的另一种拼写。上述教学 CUDA kernel 使用普通 float32 标量乘加；仅把边长改为 16 不会让它自动成为 Tensor Core GEMM。要使用对应矩阵指令，需要遵守输入 dtype、fragment 形状、布局、参与线程和对齐等约束，具体支持随 GPU 架构变化。输入使用低精度、累计使用较高精度也不等于原始 float64 算子的逐位结果。
+
+通常先调用成熟库获取可靠基线，再决定是否需要自定义。对 LLM 的大线性层，库的布局、流水线和专用矩阵指令利用比本章同步分块教学结构更复杂；对特殊形状或可融合的归一化，Triton 可能便于表达。一开始就把全部 GEMM 优化手工重写，往往会遗漏精度、边界或调度条件。
+
+| 入口 | 适合的起点 | 继续向下的条件 |
+| --- | --- | --- |
+| 框架或 cuBLAS/cuBLASLt | 标准矩阵乘，先得到数值和性能基线 | 特殊布局、融合或形状有明确未满足需求 |
+| Triton | 逐元素、行归约、数据 tile 与自定义融合 | 已核对精度，性能报告显示有优化空间 |
+| CUDA C++ | 明确线程协作、共享内存与底层接口 | 需要这些控制且能承担同步与布局验证 |
+| CUTLASS 等模板库 | 研究高性能 GEMM 的配置与 epilogue | 已理解硬件与工具报告，需要专门优化 |
+
+更深的 TMA、warpgroup、thread-block cluster 和异步流水线属于特定架构与接口约束，应读对应文档后建立新验证。先把本章的地址、所有权和缓冲区生命周期说清楚，再学习这些机制，能减少把“换了一种 load”误当成完整优化的情况。
+
+## 常见误区
+
+- `BLOCK_SIZE=1024` 不说明有 1024 个线程；数据块元素数和执行线程数需要分别阅读。
+- 地址边界 mask 与模型的语义 mask 作用不同；被语义屏蔽的有效输出仍应初始化。
+- 稳定 softmax 防溢出，但全屏蔽行需要单独的数学或接口约定。
+- 边缘线程没有输出，不表示它不参与装载或屏障；提前退出会破坏协作结构。
+- 分块减少重复逻辑读取，不自动意味着同样比例的 DRAM 减少或速度提升。
+- 融合非线性的位置必须保持数学等价；把 ReLU 放进 K 循环会改算子。
+- 教学 GEMM 不代表 cuBLAS 性能，CPU 参考通过不代表 GPU 同步与内存安全通过。
+
+## 练习与核对
+
+<details>
+<summary>5×7 乘 7×6，tile 边长 4，右下输出块有几个有效输出？最后一段 K 如何填充？</summary>
+
+右下覆盖行 4–7、列 4–7，其中行 4 和列 4、5 有效，所以两个输出。最后一段 K 覆盖 4–7，只有 4、5、6 有效，K=7 的 A 列和 B 行填零。其余参与线程仍按各自输入地址装载并经过两次屏障，仅最终 store 受输出边界控制。
+
+</details>
+
+<details>
+<summary>为什么删除 K 循环结尾的屏障，即使每轮装载后同步也可能出错？</summary>
+
+较快 warp 可以完成本轮乘加并开始下一轮装载，覆盖 shared 中仍被较慢 warp 读取的数据。下一轮装载后的屏障只保证新数据完整，不能修复上一轮已经发生的错误读取。结尾屏障建立“全部读取结束，才能复用缓冲区”的依赖。
+
+</details>
+
+<details>
+<summary>三个 1000、1001、1002 分数得到什么概率？全部被屏蔽后又是什么？</summary>
+
+减最大值 1002，指数为 $e^{-2},e^{-1},1$，归一化约为 0.090031、0.244728、0.665241，概率和为 1。全屏蔽时本章返回三个零，这是明确的空行策略，概率和为零，不能称为普通概率分布。
+
+</details>
+
+<details>
+<summary>连续行主序 A 的形状为 5×7，却传入一个隔列视图，形状仍是 5×7。只检查形状够吗？</summary>
+
+不够。视图的列 stride 可能为 2，行 stride 可能为 14。CUDA GEMM 以连续布局寻址，因此该视图违背契约，需要显式复制或改 kernel 支持 stride；本章 Triton softmax 传入两条 stride，所以支持这种正步长视图。布局支持应由接口声明并验证。
+
+</details>
+
+<details>
+<summary>若矩阵乘后还有偏置和 ReLU，为什么不能对每个 K tile 的贡献分别做 ReLU 再相加？</summary>
+
+取两段贡献 2 与 -3，最终 ReLU 为 $\max(2-3,0)=0$，分段后相加却为 $\max(2,0)+\max(-3,0)=2$。非线性必须等全部 K 贡献完成，再与偏置一起应用于完整累计值。
+
+</details>
+
+<details>
+<summary>Triton 数据块 1024 元素、num_warps=4，是否意味着 1024 个 CUDA 线程？</summary>
+
+否。1024 表示每个程序领取的逻辑元素数，4 表示程序使用的 warp 配置。在 NVIDIA 的常见映射下是 128 个线程，每线程处理多个元素；具体 lane 布局仍由编译器决定。两参数独立影响资源与调度，改变后需要重新核对和测量。
+
+</details>
+
+下一步读 [G4 测量与优化](/gpu/measurement/)，用明确的 GPU 时间边界和资源报告判断这些优化是否在实际设备上成立。
+
+## 原始资料
+
+资料核对日期：2026-09-27。代码为本讲义独立编写的教学示例；图中数值来自固定种子，读取计数来自显式模型，没有引用或伪造 GPU 实测数据。
+
+- [Triton Vector Addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html)：program、元素偏移、mask 与 launch 的官方示例。
+- [Triton Fused Softmax](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html)：融合动机、归约、近似 exp 与不规则宽度。本章额外定义 bool mask、正步长与全屏蔽行策略。
+- [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)：共享内存复用、矩阵乘访问与性能验证。正文的 5×7 数值和读取计数为教学推算。
+- [cuBLAS 官方文档](https://docs.nvidia.com/cuda/cublas/index.html)：库调用的类型、布局与接口契约。
+- [CUTLASS 官方文档](https://docs.nvidia.com/cutlass/latest/overview.html)：高性能矩阵乘与 epilogue 的延伸入口；具体架构能力应查所用版本。
