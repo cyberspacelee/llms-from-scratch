@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Formula from './Formula'
 import { Controls, LabFrame, Range, Readout } from './Lab'
 
 /** Which keys the query at decode position t reads, and at what relative offset. */
@@ -31,7 +32,7 @@ export default function CacheIndexLab() {
       </ol>
       <p className="mt-3 mb-0 text-xs text-muted">绿色是缓存里的历史键，橙色是这一步新写入的键，灰色是还不存在的未来位置。</p>
       <Readout>
-        Q: (B, n_q, 1, d_h) · K/V: (B, n_q, {t + 1}, d_h) · 分数: (B, n_q, 1, {t + 1})
+        Q: <Formula>{'(B, n_q, 1, d_h)'}</Formula> · K/V: <Formula>{`(B, n_q, ${t + 1}, d_h)`}</Formula> · 分数: <Formula>{`(B, n_q, 1, ${t + 1})`}</Formula>
       </Readout>
     </LabFrame>
   )

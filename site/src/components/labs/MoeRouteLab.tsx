@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import Formula from './Formula'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 export default function MoeRouteLab() {
@@ -28,6 +29,6 @@ export default function MoeRouteLab() {
       </g>)}
       <line x1="20" y1="150" x2="426" y2="150" className={pen.axis} />
     </svg>
-    <Readout>输入 (1,2) · 专家 F_e(x)=(e+1)x · 输出 ({scale.toFixed(6)}, {(2 * scale).toFixed(6)}) · 权重和 {weights.reduce((a, b) => a + b, 0).toFixed(6)}</Readout>
+    <Readout>输入 (1,2) · 专家 <Formula>{'F_e(x)=(e+1)x'}</Formula> · 输出 ({scale.toFixed(6)}, {(2 * scale).toFixed(6)}) · 权重和 {weights.reduce((a, b) => a + b, 0).toFixed(6)}</Readout>
   </LabFrame>
 }

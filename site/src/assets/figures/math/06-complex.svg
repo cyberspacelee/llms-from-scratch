@@ -39,6 +39,6 @@
     <text x="320" y="88" font-size="19" fill="#c16b36" text-anchor="middle">× i：逆时针转 90°</text>
     <text x="479" y="217" font-size="16" fill="#68726d" text-anchor="start">实轴</text>
     <text x="330" y="161" font-size="16" fill="#68726d" text-anchor="start">虚轴</text>
-    <text x="320" y="402" font-size="21" fill="#263a34" text-anchor="middle">一般旋转：z × eⁱᵠ，单位复数的模为 1</text>
+    <text x="320" y="402" font-size="21" fill="#263a34" text-anchor="middle">一般旋转：z × e<tspan baseline-shift="super" font-size="70%">iφ</tspan>，单位复数的模为 1</text>
   </g>
 </svg>

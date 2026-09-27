@@ -39,7 +39,7 @@
     <text x="356" y="183" font-size="20" fill="#087f70" text-anchor="start">偶次幂 → cos φ · I</text>
     <text x="356" y="225" font-size="20" fill="#c16b36" text-anchor="start">奇次幂 → sin φ · S</text>
     <line x1="357" y1="247" x2="586" y2="247" stroke="#d5ddd7" stroke-width="1"/>
-    <text x="356" y="282" font-size="19" fill="#263a34" text-anchor="start">eᵠˢ = cos φ I + sin φ S</text>
+    <text x="356" y="282" font-size="19" fill="#263a34" text-anchor="start">e<tspan baseline-shift="super" font-size="70%">φS</tspan> = cos φ I + sin φ S</text>
     <text x="356" y="320" font-size="17" fill="#68726d" text-anchor="start">连续合成 → 有限角度旋转</text>
     <text x="28" y="409" font-size="18" fill="#263a34" text-anchor="start">瞬时变化垂直于当前位置，因此长度的一阶变化为零。</text>
   </g>

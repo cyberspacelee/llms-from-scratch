@@ -238,7 +238,7 @@ print(x.grad)
 
 ## 选读：复数用一次乘法完成旋转
 
-<Figure src="math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转">从 z = 1 + i 出发，反复乘 i，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 e^(iφ) 表示。</Figure>
+<Figure src="math/06-complex.svg" alt="复数乘虚数单位对应四分之一圈旋转">从 $z = 1 + i$ 出发，反复乘 $i$，每次逆时针转 90°，四次后回到原来的向量。一般角度用单位复数 $e^{i\varphi}$ 表示。</Figure>
 
 RoPE 论文用复数书写旋转，推导也更短。将 $(x,y)^\top$ 对应到复数 $z=x+\mathrm{i}y$，其中 $\mathrm{i}^2=-1$；不要将虚数单位 $\mathrm{i}$ 与位置下标 $i$ 混淆。复数的模 $|z|=\sqrt{x^2+y^2}$ 对应向量范数。欧拉公式把 [P6](/principles/sinusoidal/) 的极坐标和指数连接起来：
 
