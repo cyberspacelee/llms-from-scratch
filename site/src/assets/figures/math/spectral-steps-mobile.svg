@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 580" fill="none">
+  <g fill="#263a34" font-size="17"><text x="16" y="28">同一方向，不同步长</text><text x="16" y="67">η = 0.1：收敛，每步 × 0.1</text><text x="16" y="298">η = 0.25：发散，每步 × −1.25</text></g>
+  <g stroke="#d5ddd7" stroke-width="1.5"><path d="M44 175H326M44 90V236M44 410H326M44 318V521"/></g>
+  <g fill="#68726d" font-size="14"><text x="20" y="105">y₂</text><text x="20" y="335">y₂</text><text x="44" y="255">0</text><text x="129" y="255">1</text><text x="214" y="255">2</text><text x="299" y="255">3</text><text x="44" y="543">0</text><text x="129" y="543">1</text><text x="214" y="543">2</text><text x="299" y="543">3</text></g>
+  <path d="M50 124L135 170L220 174.5L305 174.95" stroke="#087f70" stroke-width="3"/>
+  <path d="M50 359L135 473.75L220 330L305 509" stroke="#c16b36" stroke-width="3"/>
+  <g fill="#087f70"><circle cx="50" cy="124" r="5"/><circle cx="135" cy="170" r="5"/><circle cx="220" cy="174.5" r="5"/><circle cx="305" cy="174.95" r="5"/></g>
+  <g fill="#c16b36"><circle cx="50" cy="359" r="5"/><circle cx="135" cy="473.75" r="5"/><circle cx="220" cy="330" r="5"/><circle cx="305" cy="509" r="5"/></g>
+  <g fill="#68726d" font-size="14"><text x="16" y="278">1 → 0.1 → 0.01 → 0.001</text><text x="16" y="570">1 → −1.25 → 1.563 → −1.953</text></g>
+</svg>

@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 280" fill="none">
+  <g fill="#263a34" font-size="18"><text x="20" y="30">同一向量，先换基，再按特征值缩放</text></g>
+  <g stroke="#d5ddd7" stroke-width="1.5">
+    <path d="M40 142H290M165 42V242M370 142H620M495 42V242"/>
+  </g>
+  <g stroke="#3176b5" stroke-width="2" stroke-dasharray="5 5">
+    <path d="M85 202L245 82M105 62L225 222M415 202L575 82M435 62L555 222"/>
+  </g>
+  <g fill="#3176b5" font-size="15"><text x="244" y="82">q₁</text><text x="226" y="232">q₂</text><text x="574" y="82">q₁</text><text x="556" y="232">q₂</text></g>
+  <g stroke="#087f70" stroke-width="4" stroke-linecap="round"><path d="M165 142L192 142"/></g>
+  <circle cx="192" cy="142" r="5" fill="#087f70"/>
+  <g stroke="#c16b36" stroke-width="4" stroke-linecap="round"><path d="M495 142L600 246"/></g>
+  <circle cx="600" cy="246" r="5" fill="#c16b36"/>
+  <g fill="#263a34" font-size="16"><text x="44" y="265">输入 x = (1, 0)</text><text x="374" y="265">输出 Ax = (3.88, −3.84)</text></g>
+  <g fill="#68726d" font-size="15"><text x="20" y="53">Qᵀx = (0.8, −0.6)</text><text x="350" y="53">ΛQᵀx = (0.8, −5.4)</text></g>
+  <path d="M296 142H354m-9 -7 9 7 -9 7" stroke="#263a34" stroke-width="2"/>
+  <text x="325" y="127" text-anchor="middle" font-size="14" fill="#68726d">RΛRᵀ</text>
+  <text x="495" y="126" text-anchor="middle" font-size="14" fill="#68726d">0</text>
+  <text x="165" y="126" text-anchor="middle" font-size="14" fill="#68726d">0</text>
+</svg>
