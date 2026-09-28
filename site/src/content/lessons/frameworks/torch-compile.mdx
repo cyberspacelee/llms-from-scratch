@@ -7,7 +7,7 @@ code:
   - code/frameworks/torch_compile.py
 ---
 
-你已经会用张量计算和 `backward()`，但一个新问题出现了：两份实现返回同样的值与梯度，为什么把其中一份交给 `torch.compile` 后，第一次特别慢，后面却可能更快？又为什么换一个批大小，迟缓会重新出现？这些现象来自程序捕获、编译和缓存的不同阶段，需要逐层解释。
+两份程序返回相同的值和梯度，其中一份经过 `torch.compile` 后，首次调用却很慢，随后可能加速；换一个批大小，还可能再次编译。本章沿着捕获、编译和缓存三个阶段解释这些现象。
 
 先修是 [F3 张量](/frameworks/torch-tensors/)、[F4 自动微分](/frameworks/autograd/) 与 [F5 模块](/frameworks/modules-and-losses/)。本章先在 CPU 上核对捕获、缓存与梯度；讨论融合和计时的时候，结合 [G3 kernel](/gpu/kernel-design/) 与 [G4 测量](/gpu/measurement/)。不需要先写出编译器，但要始终分清：Python 程序、编译器计算图、自动微分图和设备执行图并非同一个对象。
 

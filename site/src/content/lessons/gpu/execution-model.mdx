@@ -14,7 +14,7 @@ import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
 import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
 import BlockScheduleLab from '../../../components/labs/BlockScheduleLab'
 
-两个长度为 100 的数组相加，Python 可以写 `c = a + b`，C++ 可以写一个从 0 到 99 的循环。换到 GPU 上，最先需要解决的问题并不是“用多少个核心”，而是：许多执行者拿到同一段程序后，怎样知道自己该写哪个位置？如果大家都写 `c[0]`，并行只会带来争抢；如果遗漏 `c[99]`，再高的吞吐也没有意义。
+两个长度为 100 的数组相加，Python 可以写 `c = a + b`，C++ 可以循环处理下标 0 到 99。在 GPU 上运行时，每个线程都执行同一段程序，必须根据自己的编号确定输出位置。若多个线程写 `c[0]`，会互相争抢；若没有线程写 `c[99]`，结果就不完整。
 
 本章只要求你知道数组下标和循环。我们用 NVIDIA CUDA 建立一个可手算的执行模型：主机发起工作，grid 描述所有任务，block 描述协作组，thread 用编号确定职责，warp 解释一组线程怎样推进，SM 解释工作由哪些硬件承载。最后给出独立的 CPU 核对脚本和完整的 CUDA 入口。这里的 32-lane warp 是 NVIDIA CUDA 的具体约定，迁移到其他厂商时必须核对其执行宽度与同步规则。
 

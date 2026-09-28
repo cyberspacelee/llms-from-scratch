@@ -13,7 +13,7 @@ import TransposeLab from '../../../components/labs/TransposeLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import memoryAddresses from '../../../assets/figures/gpu/memory-addresses.png'
 
-把一个长度为 1024 的向量加起来，数学上只需要 1023 次加法。为什么两个做着相同加法的 GPU 程序，可能产生很不一样的数据搬运？为什么一个线程刚把数写进共享数组，另一个线程仍不能直接使用它？这两个问题其实连在一起：**先知道谁访问哪个地址，再知道哪一次写入必须先于哪一次读取。**
+长度为 1024 的向量求和需要 1023 次加法，但不同 GPU 程序可能为此搬运不同数量的数据。线程访问的地址决定访存方式；共享数组中的值还需要正确同步，才能交给其他线程读取。本章从地址表走到协作读写。
 
 先读 [G1 执行模型](/gpu/execution-model/)，理解 thread、warp、block 和 grid。本章使用 NVIDIA CUDA 的具体语义，数值例子固定为 `float32`，每个元素占 4 字节。我们将手算地址段，给共享缓冲区安排生命周期，最后完成矩阵转置和两阶段求和。地址计数是教学模型，真实运行时间留到 [G4 测量](/gpu/measurement/) 验证。
 

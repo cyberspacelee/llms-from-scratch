@@ -7,7 +7,7 @@ code:
   - code/advanced/mla.py
 ---
 
-[P10](/principles/kv-cache/) 保留每层历史 K/V，[P8](/principles/modern-decoder/) 用 GQA 减少 KV 头。还能把每个位置的状态存成一个更短向量吗？如果 K/V 原本就由这个向量生成，就可以重新组织计算，避免在 decode 时恢复整段历史的所有 K/V。多头潜在注意力（multi-head latent attention，MLA）采用这样的参数化。
+[P10](/principles/kv-cache/) 保存每层的历史 K/V，[P8](/principles/modern-decoder/) 用 GQA 减少 KV 头。多头潜在注意力（multi-head latent attention，MLA）进一步让内容 K/V 从较短的潜变量生成，缓存改为潜变量和位置键。decode 时重组计算，无需恢复整段历史的完整 K/V。
 
 先修是 [M3](/math/linear-algebra/) 的矩阵乘法结合律、P7 的旋转和 P10 的缓存逻辑。这里证明同一组 MLA 参数的两种计算相等，不能由此推出任何预训练 MHA 都能无损转换为 MLA。
 

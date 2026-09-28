@@ -9,7 +9,7 @@ code:
 
 import TorchStrideLab from '../../../components/labs/TorchStrideLab'
 
-你已经有一个 NumPy 数组，形状是两行三列。把它交给 PyTorch 后，数值可能不变，但后续修改是否影响原数组、转置是否真的搬动数据、模型需要的索引类型是什么，都不能只靠打印出的六个数字判断。一个张量同时携带数值、轴、类型、设备与存储关系；先读懂这几项，才容易发现那些“形状没有报错，答案却错了”的程序。
+把一个两行三列的 NumPy 数组交给 PyTorch，六个数值可能保持不变，但修改是否传回原数组，取决于两者是否共享存储。转置通常改变 stride，索引操作还要求合适的类型。读张量时，要同时检查数值、轴、dtype、设备与存储关系。
 
 先读 [F1 数组](/frameworks/numpy-arrays/) 与 [F2 批量计算](/frameworks/numpy-computation/)。本章沿用 `arange(6).reshape(2,3)`，再进入注意力常见的四维轴重排。所有运行核对使用 CPU、float64；整数索引用 int64。实际验证版本为 NumPy 2.5.2、PyTorch 2.14.0+cpu，使用的是 PyTorch 2.x 的基础 API。这里不假设已经安装 CUDA，也不把双精度当作大型模型训练的默认精度。
 

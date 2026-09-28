@@ -8,7 +8,7 @@ code:
   - code/training/text_pretraining.py
 ---
 
-已经有了下一 token 的损失和一个完整 Decoder，现在把它们接起来似乎只需要几行训练循环。真正容易出错的是循环周围：验证时有没有意外记录梯度，保存时是否留下了 AdamW 的矩状态，中断后下一批是否还是同一批，生成时是否用了同一个词表。这些细节决定实验是否可以解释和复现。
+下一 token 损失和 Decoder 接上训练循环后，还要检查验证阶段是否记录梯度、checkpoint 是否包含 AdamW 的矩状态、恢复后是否读取同一批数据、生成时是否使用原词表。这些状态决定中断前后的实验能否对齐。
 
 先修是 [T1 数据](/training/data/)、[T2 优化](/training/optimization/) 与 [P4 Decoder](/principles/decoder/)。生成和缓存分别参见 [P9](/principles/generation/)、[P10](/principles/kv-cache/)。本章使用同一个 `Decoder` 和 `sequence_loss`，完整脚本在 CPU 上训练、评估、生成并验证恢复轨迹，不下载 checkpoint。我们先把一个可审计的小实验做完整，再讨论怎样扩大规模。
 

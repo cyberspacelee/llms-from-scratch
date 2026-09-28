@@ -9,7 +9,7 @@ code:
 
 import AutogradBranchLab from '../../../components/labs/AutogradBranchLab'
 
-同一段代码 `y=x*x+3*x`，当 x 为 2 时，y 是 10，导数是 7。为什么调用两次 `backward()` 后，x 的梯度有时变成 14，有时却直接报错？为什么 `clone()` 复制了数据却仍把梯度传回原变量，而 `detach()` 没复制数据却让某条求导路径停止？这些现象来自三个相互独立的关系：数值与存储关系、计算历史、梯度缓冲区。
+对 `y=x*x+3*x`，当 x 为 2 时，y 是 10，导数是 7。调用两次 `backward()`，梯度可能累积为 14，也可能因计算图已释放而报错。`clone()` 复制数据仍保留求导关系，`detach()` 切断求导关系却可能共享存储。理解这些结果，要分别追踪存储、计算历史和梯度缓冲区。
 
 先读 [F3 张量与轴](/frameworks/torch-tensors/) 与 [M6 反向传播](/math/backprop/)。数学章解释链式法则，本章将它对应到 PyTorch API：谁参与记录、反向从哪个种子开始、结果放在哪里、哪些状态在一次迭代后仍存活。CPU 脚本使用 float64，验证版本为 PyTorch 2.14.0+cpu；不依赖 GPU，不涉及自定义求导函数或高阶自动微分。
 

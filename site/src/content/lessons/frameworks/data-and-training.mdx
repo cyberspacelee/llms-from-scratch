@@ -9,9 +9,9 @@ code:
 
 import BatchStreamLab from '../../../components/labs/BatchStreamLab'
 
-五个样本，`batch_size=2`，到底会执行几次参数更新？最后一个样本只有半个批次，是否应丢掉？如果把三个批次各自的平均损失再平均，得到的数字是否代表这五个样本？如果保存了模型权重，第二天是否能从同一步继续训练？这些问题都不能由一个 `.backward()` 回答。
+五个样本按 `batch_size=2` 读取，会得到大小为 2、2、1 的三批。末批是否参与更新、各批损失怎样合成五个样本的平均值，都要在训练循环里明确决定。保存模型权重也只是恢复的一部分：要从同一步继续，还需保存优化器和数据顺序等状态。
 
-本章接续 [F4 自动求导](/frameworks/autograd/) 和 [F5 模块与损失](/frameworks/modules-and-losses/)，只需理解小批量的前向、标量损失与参数梯度。我们用一个 CPU 线性模型把 `Dataset`、`DataLoader`、优化器和 checkpoint 连起来。目标是看清每个对象负责哪段状态，再去 [T2](/training/optimization/) 学更新算法、去 [T3](/training/pretraining/) 做完整语言模型实验。这里的小模型可验证接口契约，不用于证明模型质量或 GPU 性能。
+接续 [F4 自动求导](/frameworks/autograd/) 和 [F5 模块与损失](/frameworks/modules-and-losses/)，本章用 CPU 线性模型连接 `Dataset`、`DataLoader`、优化器和 checkpoint，核对各对象负责的状态。更新算法见 [T2](/training/optimization/)，完整语言模型实验见 [T3](/training/pretraining/)。这个小模型只验证接口行为，不用于评价模型质量或 GPU 性能。
 
 ## 数据集与批次：一个元素和一批元素分别是什么
 

@@ -11,7 +11,7 @@ import TransformerFlowLab from '../../../components/labs/TransformerFlowLab'
 import CachedAttentionLab from '../../../components/labs/CachedAttentionLab'
 import SoftmaxLossLab from '../../../components/labs/SoftmaxLossLab'
 
-分别运行 RMSNorm、RoPE 和 GQA 都得到正确数字，不代表把它们放在一起就会得到正确模型。最容易出错的地方恰好在模块之间：查询总宽度不一定等于隐藏宽度，旋转后的键才进入缓存，第二个解码块的位置从历史长度开始，绑定词表权重后参数不能计算两次。
+RMSNorm、RoPE 和 GQA 单独通过数值检查后，还要核对它们之间的连接：查询总宽度可以不同于隐藏宽度，缓存要存旋转后的键，第二个解码块的位置从历史长度开始，绑定词表权重时参数只计一次。
 
 先修是 [P4 基础 Decoder](/principles/decoder/)、[P7 RoPE](/principles/rope/)、[P8 现代模块](/principles/modern-decoder/) 与 [P10 缓存](/principles/kv-cache/)。本章给出一个完整现代 **decoder-only** 语言模型。它包含训练前向、自动微分、增量前向和文本生成，不含原论文的 encoder 与 cross-attention，也不宣称与某个公开 checkpoint 兼容。
 

@@ -1,6 +1,6 @@
 # LLMs From Scratch
 
-一组理解大语言模型原理与推理实现的中文讲义：每个结论先推导，再给能手算的小算例、图解或交互实验，最后用只需 CPU 的 PyTorch / NumPy 脚本核对。
+这套中文讲义从数学、数组和模型结构讲到训练、GPU 编程与推理系统。关键结论配有推导、可手算的例子和 CPU 上可运行的 NumPy / PyTorch 核对脚本。
 
 **在线阅读：<https://cyberspacelee.github.io/llms-from-scratch/>**
 
@@ -16,7 +16,7 @@
 | [推理系统](https://cyberspacelee.github.io/llms-from-scratch/systems/) | 导读 + S1–S10 | 计算账本、内核、调度、分页、量化、投机、多卡与服务指标 |
 | [进阶模型](https://cyberspacelee.github.io/llms-from-scratch/advanced/) | 导读 + A1–A9 | MoE、MLA、DPO、长上下文、推理训练、状态空间、混合与稀疏注意力、多模态 |
 
-58 章正文与 7 篇导读按依赖组织，也可以从首页的捷径进入。适合具备 Python 基础的读者；数学基础不要求先学过深度学习。大纲与逐章设计见 [课程计划](docs/CURRICULUM_PLAN.md)、[设计卡](docs/CHAPTER_BLUEPRINTS.md)、[CS336 对照与补充](docs/COURSE_GAP_PLAN.md)、[数组与框架规划](docs/ARRAY_FRAMEWORK_PLAN.md)、[GPU 编程规划](docs/GPU_PROGRAMMING_PLAN.md) 和 [torch.compile 规划](docs/TORCH_COMPILE_PLAN.md)。
+58 章正文与 7 篇导读按先修关系排列，也可以从首页直接进入感兴趣的章节。读者需要具备 Python 基础，无需预先学过深度学习。课程设计见 [课程计划](docs/CURRICULUM_PLAN.md)、[设计卡](docs/CHAPTER_BLUEPRINTS.md)、[CS336 对照与补充](docs/COURSE_GAP_PLAN.md)、[数组与框架规划](docs/ARRAY_FRAMEWORK_PLAN.md)、[GPU 编程规划](docs/GPU_PROGRAMMING_PLAN.md) 和 [torch.compile 规划](docs/TORCH_COMPILE_PLAN.md)。
 
 ## 运行验证脚本
 
