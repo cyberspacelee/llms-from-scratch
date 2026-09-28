@@ -9,7 +9,7 @@ code:
 
 [A7](/advanced/hybrid-attention/) 用固定大小状态汇总历史。本章保留 [P3](/principles/attention/) 的逐位置键和值，却让当前查询只读其中几项。这样做能减少主注意力读取的历史，但先要回答两个问题：**读取集合从哪里来，漏读的位置会怎样改变输出？**
 
-先修是 P3 的 softmax 注意力、[P10](/principles/kv-cache/) 的历史 K/V、[A2](/advanced/mla/) 的缓存布局和 [S3](/systems/flash-attention/) 的精确注意力实现。下文始终使用一个查询、八个可见历史位置和标量键值；标量只为便于手算，一般向量公式随后给出。
+阅读前建议掌握 P3 的 softmax 注意力、[P10](/principles/kv-cache/) 的历史 K/V、[A2](/advanced/mla/) 的缓存布局和 [S3](/systems/flash-attention/) 的精确注意力实现。下文始终使用一个查询、八个可见历史位置和标量键值；标量只为便于手算，一般向量公式随后给出。
 
 ## 全部读取：建立可比较的基准
 

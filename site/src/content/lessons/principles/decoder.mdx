@@ -1,5 +1,5 @@
 ---
-title: 从注意力到完整 Decoder
+title: 从注意力到基础 Decoder
 question: 怎样把注意力组成可以前向、反向和预测词表的模型
 description: 沿一段四 token 文档追踪 embedding、位置、注意力、FFN、LM head、损失与梯度，组装可训练的 Decoder。
 order: 4
@@ -7,7 +7,7 @@ code:
   - code/principles/decoder.py
 ---
 
-在 [P2](/principles/language-modeling/) 中，`[BOS,A,B,EOS]` 变成了三个下一 token 分类问题；[P3](/principles/attention/) 已算出一个位置如何读取先前位置。现在缺的是把读取结果变成词表上的 logits，并让三个目标的 loss 能传回所有参数。我们仍用同一段文档，先做一次完整前向，再沿一条梯度路径反向检查。先修是 [M6](/math/backprop/) 的链式法则。
+在 [P2](/principles/language-modeling/) 中，`[BOS,A,B,EOS]` 变成了三个下一 token 分类问题；[P3](/principles/attention/) 已算出一个位置如何读取先前位置。现在缺的是把读取结果变成词表上的 logits，并让三个目标的 loss 能传回所有参数。我们仍用同一段文档，先做一次完整前向，再沿一条梯度路径反向检查。阅读前建议掌握 [M6](/math/backprop/) 的链式法则。
 
 本章的基础教学 Decoder 采用学习式位置表、Pre-LayerNorm、普通多头注意力和 GELU FFN。这是一种明确的配置；[P8](/principles/modern-decoder/) 才比较 RMSNorm、RoPE 后的模块和 GQA，[P11](/principles/complete-transformer/) 才组装带缓存的现代实现。
 
@@ -190,7 +190,7 @@ $$
 
 若 $d$ 不能被 $n_q$ 整除，这个普通 MHA 拆法不成立。注意力 mask 的形状针对查询和键位置；loss mask 的形状针对预测位置，两者解决不同问题。
 
-## 参数账：手算模型有多少可训练数
+## 参数数量：手算模型有多少可训练数
 
 手算时把不少权重设为零，**零值仍然占一个可训练参数**。按照本章的独立输入 embedding、独立带偏置 LM head、全部线性层带偏置、三个 LayerNorm 各有缩放与平移，$n_{\mathrm{vocab}}=4,d=2,d_{\mathrm{ff}}=2,T_{\max}=3$ 的账是：
 

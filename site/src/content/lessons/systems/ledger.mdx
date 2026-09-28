@@ -1,7 +1,7 @@
 ---
-title: 一次生成的资源账
+title: 一次 prefill 与 decode 的资源估算
 question: 给定模型形状和请求长度，怎样估算权重、KV cache、运算量与数据搬移
-description: 用一台两层小型 Decoder 逐项计算参数、prefill 与 decode，再把同一套账代入 Llama 3 8B，分清容量、运算和实际流量。
+description: 用一台两层小型 Decoder 逐项计算参数、prefill 与 decode，再把同一套估算代入 Llama 3 8B，分清容量、运算和实际流量。
 order: 1
 code:
   - code/systems/ledger.py
@@ -22,7 +22,7 @@ code:
 
 读到第五个 token 之前，虽然它已被采样出来，缓存仍只有前四个位置；这个时序在 [P10](/principles/kv-cache/#prefill-后为什么只保存-kv) 中有逐位置核对。
 
-## 参数账：先列矩阵，再去重
+## 参数数量：先列矩阵，再去重
 
 按行输入的 $XW$ 记法，一层中 Q、K、V、O 四个投影与 SwiGLU 的三块矩阵分别是：
 
@@ -142,7 +142,7 @@ $$
 - KV 的**容量**按已缓存位置算，**流量**按本步访问算。GQA 改变 KV 宽度，不等于改变查询头数；滑动窗口、量化 KV、分页管理或缓存命中会改写某些项，见 [S5](/systems/paged-cache/) 与 [S7](/systems/quantization/)。
 - 只统计可见对的注意力 FLOP 是算法下界形状。完整分数矩阵的计算、softmax、分数写回、融合、padding 和 kernel 调度都会让执行账不同。MoE/MLA 不满足这里的稠密 GQA 前提，见 [A1](/advanced/moe/) 与 [A2](/advanced/mla/)。
 
-## 用脚本核对同一张账
+## 用脚本核对同一组估算
 
 脚本先核对模型 S 的绑定参数与四加一负载，再核对 Llama 3 8B 的公开形状；断言只覆盖上述结构与算式，不声称 CPU 运行测得 GPU 性能。
 

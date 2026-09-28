@@ -11,7 +11,7 @@ order: 0
 
 ## 先算清一次前向
 
-[S1 资源账](/systems/ledger/)从模型权重和 KV cache 算起，区分显存容量、运算量与每一步实际搬移的字节。同一请求进入 [S2 单卡上限](/systems/accelerator/)后，把这张账与设备带宽、算力比较，得到有条件的理想下界，而非真实耗时。[S3 FlashAttention](/systems/flash-attention/)接着处理注意力的中间数据：分块更新 softmax，核对输出不变，再解释为什么能减少对设备内存的读写。
+[S1 资源估算](/systems/ledger/)从模型权重和 KV cache 算起，区分显存容量、运算量与每一步实际搬移的字节。同一请求进入 [S2 单卡上限](/systems/accelerator/)后，把这些估算值与设备带宽、算力比较，得到有条件的理想下界，而非真实耗时。[S3 FlashAttention](/systems/flash-attention/)接着处理注意力的中间数据：分块更新 softmax，核对输出不变，再解释为什么能减少对设备内存的读写。
 
 这里需要知道 GPU 的 thread 怎样负责输出、分块为何能复用数据，以及怎样测量异步执行；这些先修在 [G1–G4 GPU 路线](/gpu/) 中逐步建立。读过 S2 后再看 S3，就能把“算得一样”和“可能搬得更少”分开判断。
 

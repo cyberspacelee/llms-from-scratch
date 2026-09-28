@@ -1,7 +1,7 @@
 ---
-title: 组装完整现代 Decoder
+title: 组装一种可训练、可缓存的 Decoder
 question: 同一个模型怎样完成训练前向与缓存生成
-description: 沿一段五 token 文本追踪 embedding、现代 Decoder 块、logits、训练更新和逐层缓存，并用运行结果核对形状、参数账与生成。
+description: 沿一段五 token 文本追踪 embedding、Decoder 块、logits、训练更新和逐层缓存，并用运行结果核对形状、参数数量与生成。
 order: 11
 code:
   - code/principles/complete_transformer.py
@@ -11,7 +11,7 @@ import TransformerFlowLab from '../../../components/labs/TransformerFlowLab'
 
 用 `[BOS,春,风,来,EOS]` 训练下一 token 预测器：输入前四个 token，模型一次给出四行词表分数；随后只给它 `[BOS,春]`，让同一个模型逐步生成余下文本。本章要核对这两种调用是否沿着同一组参数和同一条因果计算路径。
 
-先修是 [P4 基础 Decoder](/principles/decoder/)、[P8 现代结构](/principles/modern-decoder/)、[P9 生成](/principles/generation/) 和 [P10 KV cache](/principles/kv-cache/)。本章复用已推导的模块来组装 **decoder-only** 语言模型；模型是教学配置，并非某个公开模型的 checkpoint。
+阅读前建议掌握 [P4 基础 Decoder](/principles/decoder/)、[P8 常见结构](/principles/modern-decoder/)、[P9 生成](/principles/generation/) 和 [P10 KV cache](/principles/kv-cache/)。本章复用已推导的模块来组装 **decoder-only** 语言模型；模型是教学配置，并非某个公开模型的 checkpoint。
 
 ## 训练目标：一段文本对应哪四次预测
 
@@ -69,7 +69,7 @@ flowchart LR
 
 本例 `embedding([[0,1,2,3]])` 得到 $(1,4,12)$。查出的四行使用同一张表，却随后沿各自可见的前缀更新；第 3 行经历两个注意力块后，已不只是“来”的词向量。
 
-PyTorch 的 `Linear(d,k).weight` 存为 $(k,d)$，前向是 $XW^\top$。下文参数账按这个实际存储形状计数。
+PyTorch 的 `Linear(d,k).weight` 存为 $(k,d)$，前向是 $XW^\top$。下文按这个实际存储形状计算参数数量。
 
 ## 两次残差更新：每层怎样读前缀并保留宽度
 
@@ -110,7 +110,7 @@ $$
 
 固定随机种子 13，脚本测得初始平均损失 **2.127761**；对这个教学样本做 70 次 AdamW 更新后为 **0.002233**。这说明从损失到参数的链条能工作，不能把训练样本过拟合当作泛化证据。正式训练的数据划分、优化状态与评估分别在 [T1](/training/data/)、[T2](/training/optimization/) 和 [T3](/training/pretraining/) 展开。
 
-## 参数账：绑定和 GQA 究竟省在哪里
+## 参数与缓存：权重绑定和 GQA 究竟省在哪里
 
 先按实际矩阵尺寸计一层。Q 和输出投影各有 $12\times(4\times4)=192$ 个权重；K、V 各有 $12\times(2\times4)=96$，所以注意力为 $576$。SwiGLU 的 gate、up、down 各有 $12\times20=240$，共 $720$。两个 RMSNorm 各有 12 个缩放参数，共 24；一层合计 **1320**。
 

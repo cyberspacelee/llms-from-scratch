@@ -14,7 +14,7 @@ import StreamTimelineLab from '../../../components/labs/StreamTimelineLab'
 
 [G3](/gpu/kernel-design/) 用共享内存分块计算 $C=AB$。它证明了分块能复用输入，却没有证明 tile 越大越快。本章始终比较**同一个**连续 float32 矩阵乘：A、B、C 都是 $1024\times1024$，先考虑 G3 CUDA kernel 的 $t=16$，再考虑只改变 tile 边长的 $t=32$ 候选。仓库的 CUDA 示例只实现并验证了 $t=16$，下文对 $t=32$ 的资源分析是待设备实验检验的预测。两者必须输出同一个 C，使用同一设备、编译选项和计时区间。没有 GPU 时，我们只核对资源与依赖的教学模型，不给出虚构的加速比。
 
-先修是 [G1 的 block/warp](/gpu/execution-model/)、[G2 的 shared memory 与屏障](/gpu/memory-and-sync/) 和 [G3 的 tile](/gpu/kernel-design/#一个-tile-怎样累计沿-k-分段复用输入)。读完后，应能解释：大 tile 少搬了哪些逻辑数据，又多占了哪些资源；两个 kernel 能否并发；一个时间数字究竟包住了哪些工作。
+阅读前建议掌握 [G1 的 block/warp](/gpu/execution-model/)、[G2 的 shared memory 与屏障](/gpu/memory-and-sync/) 和 [G3 的 tile](/gpu/kernel-design/#一个-tile-怎样累计沿-k-分段复用输入)。读完后，应能解释：大 tile 少搬了哪些逻辑数据，又多占了哪些资源；两个 kernel 能否并发；一个时间数字究竟包住了哪些工作。
 
 ## 从 G3 的 tile 得到一个待检验的假设
 
@@ -30,7 +30,7 @@ Occupancy 指一个 SM 中**已驻留 warp 数**占可驻留 warp 上限的比�
 
 用一台**假想** SM 手算：最多 64 个 warp、65,536 个寄存器、96 KiB shared memory、32 个 block。假定两个版本编译后都使用每 thread 32 个寄存器。G3 的两份 float32 输入 tile 共占每 block $8t^2$ 字节。
 
-| 资源账 | $t=16$ | $t=32$ |
+| 资源用量估算 | $t=16$ | $t=32$ |
 | --- | ---: | ---: |
 | Threads / warps per block | 256 / 8 | 1024 / 32 |
 | Registers per block，按假设 | 8192 | 32768 |
@@ -42,7 +42,7 @@ Occupancy 指一个 SM 中**已驻留 warp 数**占可驻留 warp 上限的比�
 
 同样是理论 occupancy 100%，大 tile 每 SM 却只有两个独立 block；若 grid 很小或某块结束较晚，尾部工作可能让更多 SM 空闲。若 $t=32$ 的实际编译结果是每 thread 64 个寄存器，寄存器上限就只容一个 block，理论 occupancy 降至 50%。降低寄存器数可能引入 spill 到 local memory；这些情况都不能从源码中一个累计变量的数量推断。
 
-<KeyEq label="教学资源账">
+<KeyEq label="资源用量估算">
 $$
 k=\min\!\left(
 \left\lfloor\frac{W_{\max}}{\lceil n_{\mathrm{th}}/32\rceil}\right\rfloor,
@@ -122,7 +122,7 @@ Nsight Compute 可能为了收集计数器重放 kernel、序列化执行、清�
 
 ## 本仓库能验证什么
 
-CPU 脚本核对上面的简化资源账、event 依赖时间线和单位换算；它没有读取设备属性，也没有测 GPU：
+CPU 脚本核对上面的简化资源用量、event 依赖时间线和单位换算；它没有读取设备属性，也没有测 GPU：
 
 ```sh
 python code/gpu/measurement.py

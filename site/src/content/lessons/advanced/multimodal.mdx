@@ -7,7 +7,7 @@ code:
   - code/advanced/multimodal.py
 ---
 
-设用户上传一张灰度图，问“上半部还是下半部更亮？”。文本 Decoder 已经会根据前面的 token 预测下一个 token，却没有把像素读入文本词表的办法。本章要构造一条输入路径，让它在回答“下半部”时能够利用图像。先修是 [P4 Decoder](/principles/decoder/) 的因果注意力、[P9 生成](/principles/generation/) 的逐 token 预测；训练部分用到 [T5 指令微调](/training/instruction-tuning/) 的响应损失。
+设用户上传一张灰度图，问“上半部还是下半部更亮？”。文本 Decoder 已经会根据前面的 token 预测下一个 token，但文本 token 的 embedding 不包含这张图像的像素信息。本章要将视觉特征接入输入序列，让模型在回答“下半部”时能够利用图像。阅读前建议掌握 [P4 Decoder](/principles/decoder/) 的因果注意力、[P9 生成](/principles/generation/) 的逐 token 预测；训练部分用到 [T5 指令微调](/training/instruction-tuning/) 的回复位置损失。
 
 我们沿用 [LLaVA 原论文](https://arxiv.org/html/2304.08485v2) 的三段结构：视觉编码器提取图像特征，连接器把特征送进语言模型的隐藏空间，文本 Decoder 读取图像和问题后生成回答。下面的数字是可复算的教学尺寸，不是 LLaVA 的参数配置。
 
@@ -65,7 +65,7 @@ USER、QUESTION、ASSISTANT、ANSWER、EOS 来自 tokenizer 查表；中间四�
 
 图像在视觉编码器中先按二维 patch 排列；进入本例的文本 Decoder 后，它们按 1–4 的一维顺序参与因果注意力。LLaVA 的视觉编码器已经有空间位置表示。本例的线性编码器只保留切块顺序，不能据此声称它会理解任意二维关系。
 
-## 文本损失：没有视觉标签，梯度从哪里来
+## 文本损失：只有回答文本监督时，视觉参数怎样收到梯度
 
 令 $P_6(\text{ANSWER})$ 表示位置 6 的 softmax 给“下半部”的概率，$P_7(\text{EOS})$ 表示位置 7 给结束 token 的概率。只监督这两个回复目标，损失是
 

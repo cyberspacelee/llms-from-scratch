@@ -9,7 +9,7 @@ code:
 
 预训练模型已经能按 [P2](/principles/language-modeling/) 的目标续写下一个 token。现在希望它在看见 system 规则和 user 请求后，按 assistant 身份回复：训练序列应怎样构造，哪些预测要计分？监督式微调（supervised fine-tuning，SFT）仍使用下一 token 交叉熵；真正要确定的是输入协议和损失位置。
 
-先修是 [T3 训练闭环](/training/pretraining/)、[T4 评估](/training/evaluation/) 与 [P9 生成](/principles/generation/)。我们沿一段两轮短对话走完序列化、移位、mask、反向传播和一次 SFT 实验，最后在同样的位置引入蒸馏。
+阅读前建议掌握 [T3 训练与恢复](/training/pretraining/)、[T4 评估](/training/evaluation/) 与 [P9 生成](/principles/generation/)。我们沿一段两轮短对话完成序列化、移位、mask、反向传播和一次 SFT 实验，最后在同样的位置引入蒸馏。
 
 ## 固定会话：角色消息怎样变成模型输入
 

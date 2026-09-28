@@ -1,6 +1,6 @@
 ---
 title: 多头潜在注意力 MLA
-question: 把历史 K/V 换成短向量后，怎样算出同一注意力结果
+question: 同一组 MLA 参数下，只缓存短向量怎样得到与显式恢复 K/V 相同的结果
 description: 沿三个位置、两个头推导共享潜变量、投影吸收、解耦 RoPE 和缓存字节，并用代码核对两种执行方式。
 order: 2
 code:

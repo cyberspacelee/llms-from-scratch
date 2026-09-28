@@ -1,6 +1,6 @@
 ---
 title: 数据与样本构造
-question: 原始文本怎样成为没有泄漏、边界明确的训练样本
+question: 原始文本怎样成为划分和可见范围明确的训练样本
 description: 用一组短文走通文档划分、训练集拟合 tokenizer、移位目标、窗口、packing、mask 和有效 token 计数。
 order: 1
 code:
@@ -106,7 +106,7 @@ $$
 
 ## 在 CPU 上核对整条路径
 
-脚本使用上面四条记录：精确去重、按预定来源组固定划分、只用训练文档拟合字符词表、编码验证文档，再对 A、B 核对五行输入、目标、允许矩阵、位置和有效损失。它只验证数据契约，没有假装 [P11 的教学模型](/principles/complete-transformer/) 已经支持任意分块 attention mask；[T3](/training/pretraining/) 将从单文档样本开始训练。
+脚本使用上面四条记录：精确去重、按预定来源组固定划分、只用训练文档拟合字符词表、编码验证文档，再对 A、B 核对五行输入、目标、允许矩阵、位置和有效损失。它只验证本例的划分、输入与目标，没有假装 [P11 的教学模型](/principles/complete-transformer/) 已经支持任意分块 attention mask；[T3](/training/pretraining/) 将从单文档样本开始训练。
 
 <CodeFile path="code/training/data.py" />
 

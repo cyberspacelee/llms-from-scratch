@@ -9,9 +9,9 @@ code:
 
 import BatchStreamLab from '../../../components/labs/BatchStreamLab'
 
-五个样本组成 `2+2+1` 三批。训练到第二批后暂停，怎样保证恢复时读到同一个第五个样本、算出同一个梯度，并做出同一次参数更新？本章沿这个问题连接数据顺序、损失分母、梯度与 checkpoint。
+五个样本组成 `2+2+1` 三批。训练到第二批后暂停，怎样保证恢复时读到本轮排列中剩余的同一个样本、算出同一个梯度，并做出同一次参数更新？本章沿这个问题连接数据顺序、损失分母、梯度与 checkpoint。
 
-先修是 [F4 自动求导](/frameworks/autograd/) 的梯度累计和 [F5 模块与损失](/frameworks/modules-and-losses/) 的参数登记。本章始终使用 $x_i=i-2$、$y_i=2x_i+1$ 的五个样本和一个 $\hat y=wx+b$ 模型。先在固定顺序下手算，再为同一组样本生成一次随机顺序，最后精确对比连续训练与暂停恢复。优化器公式在 [T2](/training/optimization/) 推导，语言模型的完整实验见 [T3](/training/pretraining/)。
+阅读前建议掌握 [F4 自动求导](/frameworks/autograd/) 的梯度累计和 [F5 模块与损失](/frameworks/modules-and-losses/) 的参数登记。本章始终使用 $x_i=i-2$、$y_i=2x_i+1$ 的五个样本和一个 $\hat y=wx+b$ 模型。先在固定顺序下手算，再为同一组样本生成一次随机顺序，最后精确对比连续训练与暂停恢复。优化器公式在 [T2](/training/optimization/) 推导，语言模型的完整实验见 [T3](/training/pretraining/)。
 
 ## 数据集与批次：一个元素和一批元素分别是什么
 

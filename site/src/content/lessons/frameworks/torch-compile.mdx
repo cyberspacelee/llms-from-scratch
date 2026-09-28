@@ -1,6 +1,6 @@
 ---
 title: torch.compile：编译并复用张量计算
-question: 同一个 PyTorch 函数为何首次调用慢，换输入后又可能重新编译
+question: 同一个 PyTorch 函数为何首次调用可能有编译开销，换输入后又可能重新编译
 description: 用一个多项式追踪 eager 执行、图捕获、梯度、guards、图中断和后端执行，再判断编译成本何时值得付出。
 order: 7
 code:

@@ -1,6 +1,6 @@
 ---
 title: 从朴素注意力到 FlashAttention
-question: 不保存完整分数矩阵，怎样仍算出同一个注意力输出
+question: 不保存完整分数矩阵，怎样仍计算数学上相同的注意力输出
 description: 用六个键的同一组 Q/K/V，手算分块 softmax 与输出合并，再解释 GPU IO、causal mask、反向重算和 SDPA 后端边界。
 order: 3
 code:
@@ -103,7 +103,7 @@ flowchart LR
   U --> O["遍历完键块后写 O"]
 ```
 
-图中 $Q_b$ 与每个 $K_b$ 配对，局部分数只活到状态更新完成；它没有作为全长 $S$ 或 $A$ 写入全局显存。Q/K/V 的读取和 O 的写出仍不可省，查询块之间也可能重复读取 K/V。片上 shared memory 与寄存器容量限制 tile 大小；tile 太大可能降低可并行的工作单元数，tile 太小则增加重复加载和循环开销。详见 [G3 的分块资源账](/gpu/kernel-design/) 与 [S2 的执行上限](/systems/accelerator/)。
+图中 $Q_b$ 与每个 $K_b$ 配对，局部分数只活到状态更新完成；它没有作为全长 $S$ 或 $A$ 写入全局显存。Q/K/V 的读取和 O 的写出仍不可省，查询块之间也可能重复读取 K/V。片上 shared memory 与寄存器容量限制 tile 大小；tile 太大可能降低可并行的工作单元数，tile 太小则增加重复加载和循环开销。详见 [G3 的分块资源用量](/gpu/kernel-design/) 与 [S2 的执行上限](/systems/accelerator/)。
 
 基础的 dense FlashAttention **没有删掉允许的查询键配对**，主要注意力计算仍随 $T_qT_k$ 增长；它减少的是中间张量的显存占用及相关读写。原论文还讨论一个单独的 block-sparse 扩展，那会改变可见配对集合，不能把它和本节的 dense 精确算法混为一谈。[FlashAttention-2](https://arxiv.org/abs/2307.08691) 主要改变 GPU 的工作划分、并行与非矩阵乘开销，仍计算相同的 dense 注意力。
 

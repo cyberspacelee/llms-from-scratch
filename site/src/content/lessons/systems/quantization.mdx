@@ -7,7 +7,7 @@ code:
   - code/systems/quantization.py
 ---
 
-[S1 的资源账](/systems/ledger/)把权重容量写成“参数个数 × 每个参数的字节数”。若把 bf16 权重换成 4 bit 整数，**编码本身**从每个 2 字节变为半字节；但整数还需要 scale，计算时也需要能消费这种格式的 kernel。本章要沿同一块权重回答三个问题：实际存多少、输出改了多少、请求执行是否可能获益。需要 [M3 矩阵乘法](/math/linear-algebra/)、[S2 带宽与算力](/systems/accelerator/)；任务质量的对照方法见 [T4](/training/evaluation/)。
+[S1 资源估算](/systems/ledger/)把权重容量写成“参数个数 × 每个参数的字节数”。若把 bf16 权重换成 4 bit 整数，**编码本身**从每个 2 字节变为半字节；但整数还需要 scale，计算时也需要能消费这种格式的 kernel。本章要沿同一块权重回答三个问题：实际存多少、输出改了多少、请求执行是否可能获益。阅读前建议掌握 [M3 矩阵乘法](/math/linear-algebra/) 和 [S2 带宽与算力](/systems/accelerator/)；任务质量的对照方法见 [T4](/training/evaluation/)。
 
 固定一层 $y=Wx$，采用列向量记法：
 

@@ -9,7 +9,7 @@ code:
 
 import ScalingBudgetLab from '../../../components/labs/ScalingBudgetLab'
 
-固定训练预算，模型参数多一倍、训练目标少一半，或反过来，哪个验证损失更低？[T3 预训练](/training/pretraining/) 建立了训练闭环，[T4 评估](/training/evaluation/) 给出验证 NLL 的统计口径。本章再用粗略训练计算账 $C\approx6ND$ 和一组可复算的观测把两者接起来：先拟合损失怎样随模型量 $N$ 和训练量 $D$ 变化，再在固定 $C$ 下选择候选。用到的数学只有 [M4 导数](/math/calculus/) 和 [M3 矩阵](/math/linear-algebra/)；拟合的数值敏感性可回读 [M8](/math/spectral/)。
+固定训练预算，模型参数多一倍、训练目标少一半，或反过来，哪个验证损失更低？[T3 预训练](/training/pretraining/) 建立了可恢复的训练过程，[T4 评估](/training/evaluation/) 定义了验证 NLL 的计算方式。本章再用粗略计算量估算式 $C\approx6ND$ 和一组可复算的观测把两者接起来：先拟合损失怎样随模型参数量 $N$ 和训练目标数 $D$ 变化，再在固定 $C$ 下选择候选。用到的数学只有 [M4 导数](/math/calculus/) 和 [M3 矩阵](/math/linear-algebra/)；拟合的数值敏感性可回读 [M8](/math/spectral/)。
 
 ## 一张观测表：预算里到底数什么
 

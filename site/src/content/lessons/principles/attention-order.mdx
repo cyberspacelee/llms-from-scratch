@@ -7,7 +7,7 @@ code:
   - code/principles/attention_order.py
 ---
 
-在 [P3](/principles/attention/) 中，注意力按内容读取 token；[P4](/principles/decoder/) 在输入中加入位置表，又用 causal mask 限制可见范围。为什么同时需要这两种结构？我们沿用 P4 的 `[BOS, A, B]`，每次只改变一项条件，观察交换 BOS 与 A 后输出发生什么。最后再看位置表的作用与限制。需要的先修只是 [M3](/math/linear-algebra/) 的矩阵乘法和 P3 的逐行 softmax。
+在 [P3](/principles/attention/) 中，注意力按内容读取 token；[P4](/principles/decoder/) 在输入中加入位置表，又用 causal mask 限制可见范围。为什么同时需要这两种结构？我们沿用 P4 的 `[BOS, A, B]`，每次只改变一项条件，观察交换 BOS 与 A 后输出发生什么。最后再看位置表的作用与限制。阅读前只需掌握 [M3](/math/linear-algebra/) 的矩阵乘法和 P3 的逐行 softmax。
 
 ## 受控对照：同一段输入，先去掉位置和 mask
 

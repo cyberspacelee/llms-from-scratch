@@ -1,5 +1,5 @@
 ---
-title: 现代 Decoder 的结构选择
+title: 常见 Decoder 结构选择
 question: 从基础 Decoder 换到现代结构时，数据流和成本怎样变化
 description: 沿一段两 token 输入算完 RMSNorm、RoPE、GQA、SwiGLU 和共享词表权重，再检查 QK Norm 与真实配置的边界。
 order: 8
@@ -75,7 +75,7 @@ SiLU 的输出可以为负；SwiGLU 不是简单的 `sigmoid(gate) * up`。它�
 
 共享的是参数对象，而非运算：输入按 ID 查 $E$ 的行，输出对 $E$ **所有行**做点积。若目标是 EOS，损失对未出现在输入中的 EOS 行通常也有梯度；输入查表那条路径没有这份贡献。绑定节省 $n_{\mathrm{vocab}}d$ 个独立输出权重，但必须在训练时按共享参数更新；不能把一个已经用独立 head 训练好的模型直接改绑并期望 logits 不变。
 
-## 逐项核算：参数、缓存与比较口径
+## 逐项核算：参数、缓存与比较条件
 
 本例 $d=2,n_q=2,n_{\mathrm{kv}}=1,d_h=2,d_{\mathrm{ff}}=2,n_{\mathrm{vocab}}=3$，且线性层无偏置。Q/O 各有 $d n_qd_h=8$ 个权重，K/V 各有 $d n_{\mathrm{kv}}d_h=4$ 个，注意力共 **24** 个；若改回两个 KV 头则是 **32** 个。两处 Pre-RMSNorm 和最终 RMSNorm 各有 $d=2$ 个缩放参数，共 **6** 个。SwiGLU 有 $3dd_{\mathrm{ff}}=12$ 个；同宽的普通 FFN 为 $2dd_{\mathrm{ff}}=8$ 个。绑定词表只存 $n_{\mathrm{vocab}}d=6$ 个，独立输出 head 则再加 6 个。因此这一块加输出层的示例总数为 $24+6+12+6=48$，这里未计其他块、偏置或任何位置表。
 

@@ -9,7 +9,7 @@ code:
 
 import SchedulerLab from '../../../components/labs/SchedulerLab'
 
-[P9 生成](/principles/generation/)解释从 logits 选下一个 token，[P10 KV cache](/principles/kv-cache/)证明已经计算的历史可以复用。[S1 资源账](/systems/ledger/)则告诉我们，每条请求的 KV 都会占显存。现在假设 A、B 两条请求同时到达，C 稍后加入：**每轮只允许处理 4 个输入 token，调度器该交给模型哪些位置？** 回答这个问题，需要同时跟踪请求的输出和真正写入的 KV。
+[P9 生成](/principles/generation/)解释从 logits 选下一个 token，[P10 KV cache](/principles/kv-cache/)证明已经计算的历史可以复用。[S1 资源估算](/systems/ledger/)则说明每条请求的 KV 占用多少显存。现在假设 A、B 两条请求同时到达，C 稍后加入：**每轮只允许处理 4 个输入 token，调度器该交给模型哪些位置？** 回答这个问题，需要同时跟踪请求的输出和真正写入的 KV。
 
 本章把 KV 容量当作抽象资源：调度器先保留、前向写入、结束后释放。[S5](/systems/paged-cache/)再解释这些位置如何映射到物理块，[S6](/systems/engine-execution/)解释一轮清单如何变成 GPU 张量。
 

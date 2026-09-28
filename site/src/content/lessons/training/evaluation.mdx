@@ -8,7 +8,7 @@ code:
   - code/training/ablation.py
 ---
 
-[T3 训练闭环](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。先修是 [M1 概率与抽样](/math/probability/)、[M2 负对数似然](/math/distributions/) 和 [P9 生成](/principles/generation/)；不要求亲自训练模型。
+[T3 训练、保存与恢复](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。阅读前建议掌握 [M1 概率与抽样](/math/probability/)、[M2 负对数似然](/math/distributions/) 和 [P9 生成](/principles/generation/)；不要求亲自训练模型。
 
 ## 固定比较对象：四篇文档和两个 checkpoint
 

@@ -13,13 +13,13 @@ order: 0
 
 [P1 文本、token 与 embedding](/principles/tokenization/) 把字符串切分、编号，再通过可训练的 embedding 查表变成向量。[P2 下一 token 预测](/principles/language-modeling/) 用 `[BOS,A,B,EOS]` 说明标签为什么要错开一位，以及每个位置的预测如何汇成一次损失。到这里，问题已经明确，但最小的 bigram 模型只能根据当前 token 查表，不能利用更早的上下文。
 
-[P3 注意力与多头](/principles/attention/) 解决“当前的位置怎样读取已有历史”，同时用 causal mask 排除未来位置。[P4 从注意力到完整 Decoder](/principles/decoder/) 将 embedding、位置、注意力、前馈网络和输出层接起来，沿同一段输入算到词表 **logits**（softmax 前的分数）、损失和梯度。这是第一个可以训练的完整模型；它故意采用容易手算的尺寸和学习式位置表。
+[P3 注意力与多头](/principles/attention/) 解决“当前的位置怎样读取已有历史”，同时用 causal mask 排除未来位置。[P4 基础 Decoder](/principles/decoder/) 将 embedding、位置、注意力、前馈网络和输出层接起来，沿同一段输入算到词表 **logits**（softmax 前的分数）、损失和梯度。这是本路线第一个具备完整训练计算的模型；它故意采用容易手算的尺寸和学习式位置表。
 
 ## 顺序与生成：模型怎样用于真实文本
 
 [P5 注意力从哪里得到顺序](/principles/attention-order/) 区分两件常混淆的事：不带位置信息的双向注意力如何随输入重排，以及固定的 causal mask 如何改变可见历史。[P6 多频率 sin/cos 位置编码](/principles/sinusoidal/) 从二维旋转推到不同频率的位置向量；[P7 相对位置与 RoPE](/principles/rope/) 再把旋转放到查询和键上，使位置对分数的显式影响取决于相对位移。P6 的矩阵指数和 P7 的复数写法都放在选读部分，不妨碍实数主线。
 
-[P8 现代 Decoder 的结构选择](/principles/modern-decoder/) 在 P4 的模型上逐项替换归一化、注意力头和前馈计算，弄清 RMSNorm、GQA、SwiGLU 与权重绑定改变了什么。[P9 生成、采样与对话格式](/principles/generation/) 把一次预测接成可停止的生成循环；[P10 KV cache](/principles/kv-cache/) 证明只计算新增 token 时，怎样保持与整段重算相同的结果。最后，[P11 组装完整现代 Decoder](/principles/complete-transformer/) 用一个更接近现代结构的两层模型，将前面分别推导的模块放到同一条训练和缓存生成路径中。P4 解决基础计算能否闭合，P11 检查现代组合能否仍然闭合。
+[P8 常见 Decoder 结构选择](/principles/modern-decoder/) 在 P4 的模型上逐项替换归一化、注意力头和前馈计算，弄清 RMSNorm、GQA、SwiGLU 与权重绑定改变了什么。[P9 生成、采样与对话格式](/principles/generation/) 把一次预测接成可停止的生成循环；[P10 KV cache](/principles/kv-cache/) 证明只计算新增 token 时，怎样保持与整段重算相同的结果。最后，[P11 可训练、可缓存的 Decoder](/principles/complete-transformer/) 用一个采用上述结构的两层教学模型，将前面分别推导的模块放到同一条训练和缓存生成路径中。P4 完成基础模型的训练计算，P11 检查组合后的训练与生成。
 
 ## 按问题选择入口
 

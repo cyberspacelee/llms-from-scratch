@@ -1,7 +1,7 @@
 ---
 title: 单卡的计算与带宽上限
 question: 同一张 GPU 为什么处理长提示和逐 token 生成时表现不同
-description: 把 S1 的 8B 模型账单代入 H100 SXM 的屋顶线，分别计算 decode 与 prefill 的理想下界，再设计能检验瓶颈的测量。
+description: 把 S1 对 8B 模型的运算量和字节数代入 H100 SXM 的屋顶线，分别计算 decode 与 prefill 的理想下界，再设计能检验瓶颈的测量。
 order: 2
 code:
   - code/systems/accelerator.py
@@ -41,7 +41,7 @@ $$
 
 <Figure src="infra/04-roofline.svg" alt="H100 SXM 的理论屋顶线在约 295 FLOP/byte 转平，1 与 4 FLOP/byte 两点位于放大的带宽斜线上">主图的脊点约为 295；右侧放大 0–10 FLOP/byte，才能看清 S1 中单请求线性层的 1 与 decode 注意力的 4。这两个点是分别计费的子计算，不代表整步 decode 的强度。</Figure>
 
-## 一次 decode：把线性层与 KV 放进同一张账
+## 一次 decode：合并线性层与 KV 的运算和搬移量
 
 沿用 S1 的 Llama 3 8B 公开形状、bf16 权重、batch size $B=1$、KV 长度 $T=8192$。S1 算出本步实际执行的稠密矩阵权重数 $N_{\mathrm{linear}}=7504658432$，其中包含输出头；词 embedding 只查一行。总参数 $8030261248$ 用于常驻容量，不能全按矩阵乘读一次。假设线性权重从 HBM 各读一次，而本步注意力读完已有 KV，得到：
 
@@ -51,7 +51,7 @@ $$
 | 32 层 decode 注意力的 $QK^\top$ 与 $AV$ | $2^{32}=4.295$ GFLOP | KV 为 $2^{30}=1.074$ GB | 4 FLOP/byte |
 | 两项合计 | 19.304 GFLOP | 16.083 GB | 约 1.20 FLOP/byte |
 
-第三行才是这一份**简化账单**的合计强度。它仍远低于 295.37，所以按规格计算的带宽上限为 $3.35\times1.20\approx4.02$ TFLOP/s，时间下界是
+第三行才是这一组**简化估算**的合计强度。它仍远低于 295.37，所以按规格计算的带宽上限为 $3.35\times1.20\approx4.02$ TFLOP/s，时间下界是
 
 $$
 t_{\mathrm{decode}}\ge
@@ -92,7 +92,7 @@ Tensor Core 路径 | 提高适配矩阵乘的实际计算吞吐 | 规格峰值�
 
 先固定同一 checkpoint、GPU 形态、dtype、提示和输出长度、batch、框架与 kernel 版本。预热后分开记录 prefill、稳态 decode、端到端 TTFT 与输出间隔；GPU 异步运行，计时区间必须同步或用设备事件。对照输出要在约定的 dtype 容差内一致。[G4](/gpu/measurement/) 给出具体计时和 profiler 用法。
 
-想检验“单请求 decode 主要受 HBM 搬运限制”，先记录实际 HBM 读写字节与 kernel 时间，再计算 $F/t$ 和 $D/t$。若时间主要落在 kernel 之间的发射空档，改内核带宽不会等比例改善用户延迟。若同一个 kernel 的实际 HBM 字节明显高于账单，应查重复读取、临时张量或内存访问；明显低于账单，应查缓存命中和测量范围。然后只改一个结构，重新测相同请求分布。
+想检验“单请求 decode 主要受 HBM 搬运限制”，先记录实际 HBM 读写字节与 kernel 时间，再计算 $F/t$ 和 $D/t$。若时间主要落在 kernel 之间的发射空档，改内核带宽不会等比例改善用户延迟。若同一个 kernel 的实际 HBM 字节明显高于估算值，应查重复读取、临时张量或内存访问；明显低于估算值，应查缓存命中和测量范围。然后只改一个结构，重新测相同请求分布。
 
 三个常被混在一起的指标回答不同问题：**occupancy** 是 SM 上活跃 warp 相对其可驻留上限的比例；**GPU utilization** 常反映采样区间内 GPU 是否有任务活动；**屋顶线达成率** 才把同一边界的实测速率 $F/t$ 与 $\min(\pi,\beta I)$ 比较。前两个高，不说明 Tensor Core 峰值或 HBM 峰值已接近；达成率使用实际 HBM 字节与对应的 FLOP 计数，不能把上表的简化逻辑字节当作 profiler 读数。[NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#bandwidth) 也区分理论带宽、有效带宽和实际搬运。
 
@@ -121,7 +121,7 @@ Tensor Core 路径 | 提高适配矩阵乘的实际计算吞吐 | 规格峰值�
 <details>
 <summary>Prefill 的输出头若改为每个位置都计算 logits，哪项公式变了？</summary>
 
-线性主项从 $2TN_{\mathrm{blocks}}+2N_{\mathrm{head}}$ 变成 $2T(N_{\mathrm{blocks}}+N_{\mathrm{head}})$；注意力的 $T(T+1)$ 项不因这个选择改变。训练或逐位置评估可能需要全部 logits，生成首 token 的执行器则可以只投影最后位置。两种策略不能共用同一个 FLOP 账单。
+线性主项从 $2TN_{\mathrm{blocks}}+2N_{\mathrm{head}}$ 变成 $2T(N_{\mathrm{blocks}}+N_{\mathrm{head}})$；注意力的 $T(T+1)$ 项不因这个选择改变。训练或逐位置评估可能需要全部 logits，生成首 token 的执行器则可以只投影最后位置。两种策略的 FLOP 估算不同。
 
 </details>
 
@@ -131,4 +131,4 @@ Tensor Core 路径 | 提高适配矩阵乘的实际计算吞吐 | 规格峰值�
 - [Roofline 原论文](https://dl.acm.org/doi/10.1145/1498765.1498785)：用算术强度比较计算与带宽上限。
 - [NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)：区分理论带宽、有效带宽及访存优化；数值核对不能替代设备 profiler。
 
-本页没有 H100 实测记录；图线、脚本和毫秒数只是在明确假设下的理论账单。遇到量化权重、不同缓存命中率、另一种硬件或不同输出头执行策略时，先重算 $F$ 与实际层级的 $D$，再讨论优化。
+本页没有 H100 实测记录；图线、脚本和毫秒数只是在明确假设下的理论估算。遇到量化权重、不同缓存命中率、另一种硬件或不同输出头执行策略时，先重算 $F$ 与实际层级的 $D$，再讨论优化。

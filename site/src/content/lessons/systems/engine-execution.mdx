@@ -1,6 +1,6 @@
 ---
 title: 引擎执行器与 CUDA Graph
-question: 一轮请求清单怎样变成正确且可重复执行的 GPU 前向
+question: 一轮请求清单怎样变成正确的 GPU 前向，并在满足图重放条件时复用
 description: 用三条请求追踪 packed token、绝对位置、KV 槽位和注意力边界，再核对 nano-vLLM 的 eager 路径与 CUDA Graph 重放。
 order: 6
 code:

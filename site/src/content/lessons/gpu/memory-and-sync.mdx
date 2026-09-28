@@ -1,6 +1,6 @@
 ---
 title: 内存与同步
-question: 矩阵转置怎样让读写都连续，同时保证线程交换数据正确
+question: 矩阵转置怎样合并全局内存访问，并正确交换线程负责的数据
 description: 用同一块矩阵追踪 warp 的全局地址、shared memory 的 bank、block 屏障与边缘 tile，再将方法迁移到归约。
 order: 2
 code:
@@ -13,7 +13,7 @@ import TransposeLab from '../../../components/labs/TransposeLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import memoryAddresses from '../../../assets/figures/gpu/memory-addresses.png'
 
-已知 [G1](/gpu/execution-model/) 中的 thread、warp 和 block，可以给矩阵的每个元素安排负责人。但把 $A_{r,c}$ 写到转置结果 $B_{c,r}$ 时，按输入行排列线程会让读取连续、写入分散；按输出行排列则相反。本章要让两端都按行访问。我们会先数清一条 warp 指令的地址，再用 block 内的 shared memory 交换数据，并证明什么时候可以读取交换后的值。只需先会行主序下标 $rC+c$。
+已知 [G1](/gpu/execution-model/) 中的 thread、warp 和 block，可以给矩阵的每个元素安排负责人。但把 $A_{r,c}$ 写到转置结果 $B_{c,r}$ 时，按输入行排列线程会让读取连续、写入分散；按输出行排列则相反。本章要让一个 warp 读取 A、写入 B 时都访问相邻的全局内存地址。我们会先数清一条 warp 指令的地址，再用 block 内的 shared memory 交换数据，并证明什么时候可以读取交换后的值。只需先会行主序下标 $rC+c$。
 
 全章固定 float32（每元素 4 字节）、输入 $A\in\mathbb R^{35\times67}$、输出 $B\in\mathbb R^{67\times35}$，满足 $B_{c,r}=A_{r,c}$。一个 block 处理 $32\times32$ 的数据 tile，使用 `dim3(32, 8)` 的 256 个 thread；`threadIdx.x` 从 0 到 31，刚好让同一 warp 沿一行排列。起初只看左上完整 tile，最后处理右下只有 $3\times3$ 个有效元素的 tile。下面的地址段与 bank 数量是 NVIDIA CUDA 的教学模型，不是计时结果。
 

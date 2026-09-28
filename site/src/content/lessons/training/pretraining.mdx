@@ -1,6 +1,6 @@
 ---
 title: 从零训练一个小语言模型
-question: 怎样完成一个可评估、可保存、可恢复的训练闭环
+question: 怎样完成训练、评估、保存与恢复
 description: 用三篇四 ID 文档贯穿 330 个下一 token 目标、验证、AdamW 更新、checkpoint 恢复与生成，再迁移到自编文本。
 order: 3
 code:
@@ -8,9 +8,9 @@ code:
   - code/training/text_pretraining.py
 ---
 
-`Decoder` 能算 logits，`sequence_loss` 能算下一 token 损失，但这还不是一次可复现的训练。我们要完成一项可以独立核对的实验：同一批文档训练 30 次参数更新，中断于第 18 次后恢复，检查剩下 12 次是否与连续运行完全相同。先修是 [T1 样本构造](/training/data/)、[T2 AdamW 与梯度裁剪](/training/optimization/) 和 [P4 Decoder](/principles/decoder/)；生成调用见 [P9](/principles/generation/)。
+`Decoder` 能算 logits，`sequence_loss` 能算下一 token 损失，但这还不是一次可复现的训练。我们要完成一项可以独立核对的实验：同一批文档训练 30 次参数更新，中断于第 18 次后恢复，检查剩下 12 次是否与连续运行完全相同。阅读前建议掌握 [T1 样本构造](/training/data/)、[T2 AdamW 与梯度裁剪](/training/optimization/) 和 [P4 Decoder](/principles/decoder/)；生成调用见 [P9](/principles/generation/)。
 
-## 数据契约：一次更新恰好监督 11 个目标
+## 输入与目标：一次更新恰好监督 11 个位置
 
 这里的 tokenizer 是固定映射 `a=0, b=1, c=2, EOS=3`。三篇训练文档各有 11 个字符，末尾添加 EOS；第一篇的完整 ID 是 `[0,1,2,0,1,2,0,1,2,0,1,3]`，另外两篇分别从 `b`、`c` 开始，同样遵循 `a→b→c→a`。两篇验证文档各有 9 个字符和 EOS，与训练文档没有逐字相同，但共享刻意设计的循环规则。这个划分只能检验新长度上的同规则预测，不能代表开放领域泛化。
 

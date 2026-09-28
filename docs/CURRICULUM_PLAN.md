@@ -178,9 +178,9 @@ flowchart LR
 | A2 潜在注意力 MLA | P7、P10、M3 | 压缩潜变量、解耦 RoPE 与投影吸收；DeepSeek-V2/V3 | 显式展开与潜在计算对照；缓存量不能只替换 GQA 头数 |
 | A3 偏好优化 DPO | T4、T5、M2 | 成对偏好、参考策略、序列 log-prob 与 DPO 损失 | 两条响应手算与自动微分，区别于 SFT 与在线 RL |
 | A4 长上下文与窗口 | P7、P10、T4 | 位置插值、YaRN、局部/全局层；Mistral/Gemma 3 作结构例 | 位置与物理槽位、窗口逐层缓存、长距任务，区分可计算长度与有效能力 |
-| A5 推理模型与 RLVR | T5、A3、M1/M2 | 奖励、策略梯度、group baseline、GRPO/RLVR；R1 与 Qwen3 后训练 | 小型可验证任务与组内优势值，奖励作弊、采样预算；不声称复现大规模 RL |
+| A5 用可验证奖励训练生成策略 | T5、A3、M1/M2 | 奖励、策略梯度、group baseline、GRPO/RLVR；R1 与 Qwen3 后训练 | 小型可验证任务与组内优势值，奖励作弊、采样预算；不声称复现大规模 RL |
 | A6 状态空间与递归模型 | P2、P4、M3 | 从标量递推到选择性状态空间；Mamba/Mamba-2 | 串行递推与等价小型并行计算，状态尺寸、训练/推理差别 |
-| A7 混合与线性注意力 | P3、A6，MoE 分支需 A1 | Gated DeltaNet 与全注意力混合；Qwen3.5 的固定配置例 | 非 softmax 算子和有限状态实验，逐层状态账，不能沿用普通 KV 公式 |
+| A7 递归式线性注意力与混合层 | P3、A6，MoE 分支需 A1 | Gated DeltaNet 与全注意力混合；Qwen3.5 的固定配置例 | 非 softmax 算子和有限状态实验，逐层状态账，不能沿用普通 KV 公式 |
 | A8 稀疏注意力 | P3、P10、A2、S3 | token 选择与稀疏执行；DeepSeek-V3.2 DSA | 固定选择后的稀疏计算与 dense+mask 对照，选择开销与质量另测 |
 | A9 视觉语言模型 | P4、P9、T5 | 图像 patch、编码器/投影、混合 token；LLaVA，Qwen VL 作对照 | 小型图像输入到 token 的形状追踪、位置和损失 mask，不要求下载大权重 |
 
