@@ -7,34 +7,40 @@ code:
   - code/math/linear_algebra.py
 ---
 
-上一章已经说明一个数的导数怎样度量局部变化。训练线性层时，待调整的却不是一个数，而是整张权重表：哪一项应该增加，哪一项应该减少，同一个参数被多个样本使用时又怎样累计影响？矩阵求导就是把这些标量偏导数组织成可执行的数组运算。
-
-本章以平方误差线性层为贯穿算例，从一个元素的变化开始，推到整个小批量（mini-batch）的梯度。读者需要熟悉 [向量与矩阵](/math/linear-algebra/)，以及 [微积分与梯度](/math/calculus/) 中的偏导数和链式法则。最终公式与 `torch.nn.Linear` 的权重布局完全一致，可以直接交给自动微分（automatic differentiation）核对。
+线性层有一整张权重矩阵，同一参数还被多个样本共同使用。损失对每个元素的影响怎样排成可计算的梯度？本章用一个平方误差算例，从单元素偏导推到小批量矩阵梯度。先修为[向量与矩阵](/math/linear-algebra/)和[微积分与梯度](/math/calculus/)。
 
 ## 梯度与雅可比矩阵：先明确谁对谁求导
 
-训练最终优化一个标量损失 $L$。偏导数 $\partial L/\partial W_{kj}$ 表示：保持其他参数不变，微调这一项时，损失在当前位置的变化率。把所有偏导数按参数原来的位置排列，就得到梯度矩阵：
+训练最终优化一个标量损失 $L$。偏导数 $\partial L/\partial W_{kj}$ 表示：保持其他参数不变，微调这一项时，损失在当前位置的变化率。
+
+<Definition term="矩阵参数的梯度" source="https://zh.wikipedia.org/wiki/梯度">
+  把标量损失对每个参数的偏导数按参数原位置排列，就得到梯度。对于 $W\in\mathbb R^{m\times d}$，梯度同形状：
 
 $$
 (\nabla_W L)_{kj}=\frac{\partial L}{\partial W_{kj}},\qquad
 W,\nabla_W L\in\mathbb R^{m\times d}.
 $$
+</Definition>
 
 正偏导数意味着在当前位置略微增加该参数会增加损失；梯度下降向相反方向走。但这是局部一阶判断，步长过大不保证下降。
 
-若输出也是向量 $f(x)\in\mathbb R^m$，需要用雅可比矩阵记录每个输出对每个输入的偏导数：
+<Definition term="雅可比矩阵" source="https://zh.wikipedia.org/wiki/雅可比矩阵">
+  若 $f:\mathbb R^d\to\mathbb R^m$，雅可比矩阵的第 $k$ 行、第 $j$ 列记录输出 $f_k$ 对输入 $x_j$ 的偏导数：
 
 $$
 J_{kj}=\frac{\partial f_k}{\partial x_j},\qquad J\in\mathbb R^{m\times d}.
 $$
+</Definition>
 
 两者含义不同。$\nabla_W L$ 是一个标量函数对矩阵参数的梯度；$J$ 是一个向量函数对向量输入的导数。把矩阵参数展平当然也能写雅可比，但本章保留参数原形状，避免不必要的展平。
+
+### 手算：两个参数的梯度
 
 以 $L(w_1,w_2)=w_1^2+3w_2^2$ 为例，在 $(1,2)$ 处梯度是 $(2,12)^\top$。它不是两个独立损失，而是同一个损失分别沿两条坐标轴的变化率。对方向 $\Delta w=(0.1,-0.1)^\top$，一阶预测变化为 $2\cdot0.1+12\cdot(-0.1)=-1$。实际变化还包含二阶项，所以梯度既不是新参数，也不是有限步长下的精确损失差。
 
 如果改看 $f(w)=(w_1^2,3w_2^2)^\top$，输出有两项，雅可比矩阵则有两行。在同一点它是 $\left[\begin{smallmatrix}2&0\\0&12\end{smallmatrix}\right]$；只有指定如何把两个输出组合成标量损失，才知道该把它们的影响如何合并成一个梯度。
 
-## 微分与迹：把逐元素变化写成一个式子
+## 选读：微分与迹怎样压缩逐元素表达
 
 假设 $L$ 在当前位置可微。给参数加一个小扰动 $\Delta W$，一阶变化为
 
@@ -72,7 +78,7 @@ $$
 
 这个表达也给梯度下降一个矩阵版本的解释。若选择扰动 $\Delta W=-\eta\nabla_WL$，其中学习率 $\eta>0$，一阶变化就是 $-\eta\|\nabla_WL\|_F^2$。只要梯度非零，这个线性项为负；但实际损失还有余项，所以“沿负梯度走”必须配合足够小的步长。反过来，若某个扰动与梯度的 Frobenius 内积为零，它的一阶影响消失，不能据此断言实际损失完全不变。
 
-## 单样本线性层：三个梯度一次推导
+## 单样本线性层：从一个参数推到三个梯度
 
 沿用 $z=Wx+b$，其中 $x\in\mathbb R^d,W\in\mathbb R^{m\times d},b,z\in\mathbb R^m$。设后续计算传来 $g=\nabla_z\ell\in\mathbb R^m$。这称为上游梯度，表示损失对本层输出的敏感程度。
 
@@ -146,7 +152,9 @@ print(loss, weight_grad, input_grad)
 
 ## 批量均方误差：先说清平均哪些轴
 
-批大小（batch size）为 $B$，输入 $X\in\mathbb R^{B\times d}$、目标 $Y\in\mathbb R^{B\times m}$。本章定义
+批大小（batch size）为 $B$，输入 $X\in\mathbb R^{B\times d}$、目标 $Y\in\mathbb R^{B\times m}$。
+
+本章先对每个样本的输出坐标求平方和，再对样本取平均，约定保留系数 $1/2$。具体目标为
 
 $$
 \begin{aligned}
@@ -229,6 +237,10 @@ print(f"{half_batch.item():.6f}, {element_mean.item():.6f}")
 ```
 
 ## 雅可比与向量积：不必构造巨大矩阵
+
+<Definition term="向量—雅可比积" source="https://en.wikipedia.org/wiki/Automatic_differentiation#Reverse_accumulation">
+  给定输出侧的列梯度 $g$ 和函数的雅可比矩阵 $J$，输入侧的梯度为 $J^\top g$。计算时可以逐个局部操作传播，无须构造整张计算图的雅可比矩阵。
+</Definition>
 
 单样本仿射函数 $f(x)=Wx+b$ 的雅可比就是 $J=W$。若后续损失对输出的梯度为 $g$，链式法则给出
 

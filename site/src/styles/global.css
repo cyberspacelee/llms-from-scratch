@@ -146,6 +146,10 @@
     content: counter(section, decimal-leading-zero);
   }
 
+  .math-lesson h2 { @apply mt-12 border-t border-rule pt-6; }
+  .math-lesson h3 { @apply text-accent-strong; }
+  .math-lesson > p { @apply leading-8; }
+
   .prose-lesson blockquote {
     @apply rounded-r-lg bg-accent-soft px-4 py-3 font-normal not-italic;
   }

@@ -7,15 +7,15 @@ code:
   - code/math/linear_algebra.py
 ---
 
-一个线性层可以把每个词的 5 个特征变成 3 个新特征；当一次处理 8 个词时，怎样保证每个词都使用同一套参数，而不会把词和特征混到一起？这个问题既需要理解向量代表什么，也需要知道矩阵乘法沿哪个轴求和。
-
-本章从二维箭头出发，把坐标、点积和线性组合连起来，最后写出与 `torch.nn.Linear` 相同的计算。读者只需掌握实数运算；读完应能手算一层输出，并解释每个数组的形状。[统一记号见数学导读](/math/)。
+同一个线性层怎样把每个词的 5 个特征变成 3 个新特征，同时处理 8 个词又不混淆样本轴？从二维向量、点积与矩阵乘法出发，本章逐步写出与 `torch.nn.Linear` 一致的单样本和批量计算。先修只需实数运算；统一记号见[数学导读](/math/)。
 
 ## 向量、矩阵与张量：先标注形状
 
-如果对 NumPy 的 `shape`、切片、`reshape` 或广播还不熟悉，可就近读 [F1 数组](/frameworks/numpy-arrays/) 与 [F2 批量计算](/frameworks/numpy-computation/)。本章解释数学关系，F 路线逐项核对 API 的输入、输出和存储行为。
+<Definition term="向量与矩阵" source="https://zh.wikipedia.org/wiki/矩阵">
+  标量是一个数；向量在选定基后可用一组有序坐标表示；矩阵是按行、列排列的数表，可表示线性映射。深度学习中的“张量”在本章专指多维数组。
+</Definition>
 
-标量是一个数；向量是一组有序坐标；矩阵把数排成两个轴；深度学习中的张量通常指有任意个轴的多维数组。这里采用数值计算语境，不讨论几何学中的张量变换定义。
+这个张量用法属于数值计算语境；几何学中的张量另有变换定义。
 
 单样本写成列向量 $x\in\mathbb R^d$，小批量（mini-batch）输入写成 $X\in\mathbb R^{B\times d}$，每行是一个样本的转置。$B$ 是批大小（batch size），即本次一起计算的样本数，$d$ 是输入特征数；例如三个样本、每个两个特征：
 
@@ -39,12 +39,16 @@ $$
 
 ## 长度与方向：范数、点积和投影
 
-向量的 $L_1$ 范数与 $L_2$ 范数分别是
+<Definition term="向量范数" source="https://zh.wikipedia.org/wiki/范数">
+  范数给向量指定非负长度，并满足齐次性与三角不等式。常用的 $L_1$ 与 $L_2$ 范数分别是
 
 $$
 \|x\|_1=\sum_{j=1}^d|x_j|,\qquad
 \|x\|_2=\sqrt{\sum_{j=1}^d x_j^2}.
 $$
+</Definition>
+
+### 手算：同一向量的两种长度
 
 对于 $x=(3,4)^\top$，它们是 7 和 5。两个向量间的欧氏距离是 $\|x-y\|_2$，而不是两个范数之差。矩阵的 Frobenius 范数 $\|W\|_F=\sqrt{\sum_{k,j}W_{kj}^2}$ 是所有元素平方和的平方根；这与矩阵谱范数不是一回事。
 
@@ -106,11 +110,13 @@ print(unit, projection)
 
 ## 矩阵乘法：把线性组合组织起来
 
-若 $A\in\mathbb R^{p\times q}$、$C\in\mathbb R^{q\times r}$，则
+<Definition term="矩阵乘法" source="https://zh.wikipedia.org/wiki/矩陣乘法">
+  若 $A\in\mathbb R^{p\times q}$、$C\in\mathbb R^{q\times r}$，内侧维度相同才有乘积；结果属于 $\mathbb R^{p\times r}$，第 $(i,j)$ 项为
 
 $$
 (AC)_{ij}=\sum_{k=1}^{q}A_{ik}C_{kj},\qquad AC\in\mathbb R^{p\times r}.
 $$
+</Definition>
 
 内侧轴 $q$ 相同，才能逐项相乘后求和；外侧轴决定结果形状。例如
 
@@ -186,7 +192,11 @@ $$
 
 ## 秩与正交：哪些信息被保留
 
-矩阵的秩是其列空间的维数，也等于最大线性无关列数。若二维矩阵的两列成比例，它把平面压到一条直线上，无法从输出唯一恢复任意输入。对于 $W\in\mathbb R^{m\times d}$，秩不超过 $\min(m,d)$。
+<Definition term="矩阵的秩" source="https://zh.wikipedia.org/wiki/矩阵的秩">
+  矩阵的秩是其列空间的维数，也等于最大线性无关列数。对于 $W\in\mathbb R^{m\times d}$，秩不超过 $\min(m,d)$。
+</Definition>
+
+若二维矩阵的两列成比例，它把平面压到一条直线上，无法从输出唯一恢复任意输入。
 
 具体看 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$。第二列是第一列的两倍，任意输入 $(u,v)^\top$ 都被映射成 $(u+2v)(1,2)^\top$，输出只能落在一条直线上，所以秩为 1。输入 $(2,-1)^\top$ 被映成零，与零输入无法区分；一旦这个方向的信息被压掉，后续层仅凭输出就无法恢复它。
 

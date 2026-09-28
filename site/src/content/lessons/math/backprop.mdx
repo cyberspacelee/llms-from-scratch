@@ -9,19 +9,23 @@ code:
 
 import SharedNodeLab from '../../../components/labs/SharedNodeLab'
 
-一个预测值可能经过数十层运算才得到损失。如果每修改一个参数都重新运行模型，再比较损失变化，数百万个参数会带来巨大的成本。反向传播利用计算图共享中间结果，只需沿局部求导规则把损失的影响传回去。
-
-本章接续 [微积分与梯度](/math/calculus/) 与 [矩阵求导](/math/matrix-calculus/)。我们先手算只有几个节点的图，再算两个连续线性层，最后对照 PyTorch 的自动微分（automatic differentiation）。重点不是背 API，而是能解释每个梯度从哪条路径来、具有何种形状、何时应该累加。
+预测值经过多层运算才形成损失，参数可能影响多条路径。怎样一次算出各参数的梯度并正确合并贡献？接续[微积分与梯度](/math/calculus/)和[矩阵求导](/math/matrix-calculus/)，本章先手算共享节点，再推到两层网络与批量计算。
 
 ## 标量链式法则：局部变化为何沿路径相乘
 
 手算之后，`requires_grad`、叶子张量、`.grad`、`detach` 和 `no_grad` 的使用边界可回读 [F4 自动求导](/frameworks/autograd/)；它把本章的梯度关系对应到可运行的 PyTorch 对象。
+
+<Definition term="反向传播" source="https://zh.wikipedia.org/wiki/反向传播算法">
+  反向传播从标量损失出发，按计算依赖的逆序应用链式法则，求出损失对各输入和参数的梯度。共享节点要把不同路径返回的贡献相加；参数更新是随后执行的步骤。
+</Definition>
 
 设 $a=3x+1$、$\ell=a^2$。想知道 $x$ 变化一点时最终损失如何变化，必须同时考虑 $x$ 对 $a$ 的影响以及 $a$ 对损失的影响。若相关函数可导，链式法则写成：
 
 $$
 \frac{d\ell}{dx}=\frac{d\ell}{da}\frac{da}{dx}.
 $$
+
+### 手算：前向求值、反向求导
 
 在 $x=2$，前向先得到 $a=7$，再得到 $\ell=49$。反向先求外层导数 $d\ell/da=2a=14$，再乘内层导数 $da/dx=3$，所以 $d\ell/dx=42$。
 
@@ -65,6 +69,10 @@ $$
 前向保存什么也由局部规则决定。平方的反向需要输入值，乘法对一个输入的导数需要另一个输入值；有些操作可以用输出值计算导数。自动微分系统不必保存人类手写推导中的每一步符号，但必须能够获得局部反向所需的信息。随意原地修改这些值，可能触发版本检查报错，或者在不恰当的手动实现中导致错误梯度。
 
 ## 向量链式法则：逐分量推出雅可比转置
+
+<Definition term="向量反向规则" source="https://en.wikipedia.org/wiki/Automatic_differentiation#Reverse_accumulation">
+  向量函数 $z=f(x)$ 的雅可比矩阵为 $J$，损失对输出的列梯度为 $g$ 时，传回输入的梯度为 $J^\top g$。每个输入坐标都收集所有输出路径的贡献。
+</Definition>
 
 当一个节点输出向量 $z=f(x)$，输入 $x\in\mathbb R^d$，输出 $z\in\mathbb R^m$，为什么传回来的不是简单乘一个数？因为每个输入坐标都可能影响多个输出坐标。
 

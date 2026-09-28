@@ -12,35 +12,26 @@ import LowRankLab from '../../../components/labs/LowRankLab'
 
 两个参数都改变百万分之一，为什么某个预测几乎不变，另一个却改变百分之一？问题不只在“扰动有多小”，还在矩阵怎样放大不同方向，以及计算机能保留多少有效数字。
 
+本章接在 [M3 矩阵](/math/linear-algebra/) 与 [M4 曲率](/math/calculus/) 之后，补齐 [T2 优化](/training/optimization/)、[T6 LoRA](/training/lora/) 中的数学连接。M1-M7 的训练主线可以独立完成；本章是数值与低秩专题的分支先修，不需要为了分词先学完所有分解算法。
+
+## 特征方向：哪些向量经过变换仍朝原来的方向
+
+<Definition term="特征值与特征向量" source="https://zh.wikipedia.org/wiki/特征值和特征向量">
+  对方阵 $A\in\mathbb R^{d\times d}$，若非零向量 $v$ 满足 $Av=\lambda v$，则 $v$ 是特征向量，$\lambda$ 是对应特征值。
+</Definition>
+
+$v$ 不能是零向量，否则任意 $\lambda$ 都满足等式，定义就失去意义。正特征值保留方向，负特征值反向，零特征值将整个方向压到零。
+
+### 手算：哪些方向只被伸缩
+
+取 $A=\operatorname{diag}(1,9)$。向量 $(1,0)^\top$ 被放大一倍，$(0,1)^\top$ 放大九倍，而 $(1,1)^\top$ 变成 $(1,9)^\top$，方向改变。特征方向描述的是整套线性变换中的特殊轴，不代表任意向量都是某个特征向量。
+
 <div className="sm:hidden">
 <Figure src="math/spectral-axes-mobile.svg" alt="输入向量沿特征方向分解，经不同倍率缩放后变为输出向量" minWidth="0">同一矩阵 $A=R\operatorname{diag}(1,9)R^\top$。虚线为特征轴，两幅图采用同一比例。</Figure>
 </div>
 <div className="hidden sm:block">
 <Figure src="math/spectral-axes.svg" alt="输入向量沿特征方向分解，经不同倍率缩放后变为输出向量" minWidth="37rem">同一矩阵 $A=R\operatorname{diag}(1,9)R^\top$。虚线为特征轴，两幅图采用同一比例。</Figure>
 </div>
-
-本章接在 [M3 矩阵](/math/linear-algebra/) 与 [M4 曲率](/math/calculus/) 之后，补齐 [T2 优化](/training/optimization/)、[T6 LoRA](/training/lora/) 中的数学连接。M1-M7 的训练主线可以独立完成；本章是数值与低秩专题的分支先修，不需要为了分词先学完所有分解算法。
-
-## 从一个线性层出发：本章要回答的四个问题
-
-在 [M3](/math/linear-algebra/) 中，矩阵是“输入向量到输出向量的映射”。这里继续问：输入空间中有没有特殊方向？保留少数方向能否近似整个映射？反向求解为什么会放大误差？数学公式完全等价时，计算机为什么仍会算出不同结果？这四个问题分别引出特征分解、SVD、条件数和浮点稳定性。
-
-先统一记号。向量默认写成列向量，长度用 $\|x\|_2=\sqrt{\sum_i x_i^2}$。矩阵 $W$ 的 Frobenius 范数是 $\|W\|_F=\sqrt{\sum_{ij}W_{ij}^2}$，相当于把所有元素摊平后算长度。下标 2 的矩阵范数则衡量“最容易被放大的输入方向”，不是把元素平方后求和；后文会推导它。
-
-| 数学对象 | 要回答的问题 | 训练中的对应位置 |
-| --- | --- | --- |
-| 特征值、特征向量 | 哪些方向只伸缩、不转向？ | Hessian 的曲率方向与步长 |
-| 奇异值、左右奇异向量 | 输入方向怎样映到另一个空间？ | 矩形线性层、低秩更新 |
-| 条件数 | 很小的输入误差能放大多少？ | 拟合与近奇异问题 |
-| 浮点误差、稳定表达式 | 算法会额外丢掉多少精度？ | RMSNorm、softmax、归约 |
-
-这也是阅读顺序：先看变换的几何意义，再用它分析训练和数值计算。
-
-## 特征方向：哪些向量经过变换仍朝原来的方向
-
-对方阵 $A\in\mathbb R^{d\times d}$，非零向量 v 若满足 $Av=\lambda v$，称 v 为特征向量，$\lambda$ 为特征值。v 不能是零向量，否则任意 $\lambda$ 都满足等式，定义就失去意义。正特征值保留方向，负特征值反向，零特征值将整个方向压到零。
-
-取 $A=\operatorname{diag}(1,9)$。向量 $(1,0)^\top$ 被放大一倍，$(0,1)^\top$ 放大九倍，而 $(1,1)^\top$ 变成 $(1,9)^\top$，方向改变。特征方向描述的是整套线性变换中的特殊轴，不代表任意向量都是某个特征向量。
 
 若改变坐标基，令正交旋转
 
@@ -133,11 +124,11 @@ Hessian H 的元素是二阶偏导。在足够光滑时它对称，因此能用�
 
 ## 奇异值分解：矩形矩阵也有放大方向
 
-线性层常是矩形的，$W\in\mathbb R^{m\times d}$ 不一定能用方阵特征分解。奇异值分解（singular value decomposition，SVD）写作
+线性层常是矩形的，$W\in\mathbb R^{m\times d}$ 不一定能用方阵特征分解。
 
-$$
-W=U\Sigma V^\top.
-$$
+<Definition term="奇异值分解" source="https://zh.wikipedia.org/wiki/奇异值分解">
+  任意实矩阵 $W$ 都可写为 $W=U\Sigma V^\top$，其中 $U,V$ 的列为正交方向，$\Sigma$ 的对角元是非负奇异值。
+</Definition>
 
 V 的列是输入空间方向，U 的列是输出空间方向，非负奇异值 $s_i$ 是对应放大量。精简形式取 $k=\min(m,d)$，$U\in\mathbb R^{m\times k}$、$\Sigma\in\mathbb R^{k\times k}$、$V^\top\in\mathbb R^{k\times d}$。零奇异值不贡献变换；非零奇异值数量等于秩。
 
@@ -210,11 +201,15 @@ $$
 
 ## 算子范数与条件数：相对误差怎样被放大
 
-矩阵谱范数定义为 $\|A\|_2=\max_{\|x\|_2=1}\|Ax\|_2$，等于最大奇异值。对可逆方阵，二范数条件数为
+矩阵谱范数定义为 $\|A\|_2=\max_{\|x\|_2=1}\|Ax\|_2$，等于最大奇异值。
+
+<Definition term="二范数条件数" source="https://zh.wikipedia.org/wiki/条件数">
+  对可逆方阵，条件数比较最大与最小的伸缩倍率，描述线性求解对输入扰动的敏感上界：
 
 $$
 \kappa_2(A)=\|A\|_2\|A^{-1}\|_2=\frac{s_{\max}}{s_{\min}}.
 $$
+</Definition>
 
 在精确数学里求解 $Ax=b$。若只有右端改为 $b+\delta b$，解改变为 $\delta x=A^{-1}\delta b$。由范数不等式与 $\|b\|\le\|A\|\|x\|$ 得
 

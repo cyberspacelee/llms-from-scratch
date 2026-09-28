@@ -89,7 +89,7 @@ const label = (item: Lesson) => (item.isIntro ? '导读' : item.code)
         </ul>
       </header>
 
-      <article class="prose prose-lesson max-w-none text-base prose-headings:font-semibold prose-h2:mt-16 prose-h2:mb-4 prose-h2:text-xl prose-h3:mt-8 prose-h3:mb-3 prose-h3:text-lg prose-a:font-normal prose-a:decoration-1 prose-a:underline-offset-[0.2em] hover:prose-a:decoration-2 prose-li:my-1.5 prose-img:my-0 prose-hr:my-12">
+      <article class:list={['prose prose-lesson max-w-none text-base prose-headings:font-semibold prose-h2:mt-16 prose-h2:mb-4 prose-h2:text-xl prose-h3:mt-8 prose-h3:mb-3 prose-h3:text-lg prose-a:font-normal prose-a:decoration-1 prose-a:underline-offset-[0.2em] hover:prose-a:decoration-2 prose-li:my-1.5 prose-img:my-0 prose-hr:my-12', lesson.track.id === 'math' && 'math-lesson']}>
         <slot />
       </article>
 
