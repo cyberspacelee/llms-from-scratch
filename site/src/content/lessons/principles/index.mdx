@@ -1,39 +1,30 @@
 ---
 title: 模型原理导读
-question: 文本怎样经过完整 Decoder 变成下一 token
-description: 十一章从分词和预测目标搭起基础网络，推导位置、现代结构、生成与缓存，再组装完整现代 Transformer。
+question: 一段文本怎样用于预测下一 token，并继续生成文本
+description: 从文本编码和预测目标出发，搭起基础 Decoder，解决位置与生成问题，再组装可训练、可缓存的现代模型。
 order: 0
-code:
-  - code/principles/position_encoding.py
-  - code/principles/kv_cache.py
 ---
 
-数学路线已经训练过一个分类器。语言模型的输入是文本，每个位置都要预测下一 token。本路线从分词搭起 Decoder，再研究位置、现代结构、生成与缓存。无位置的双向注意力具有置换等变性；因果遮罩带来的顺序约束在 P5 单独分析。
+数学路线已经训练过分类器：输入一个向量，输出各类别的分数，再用损失更新参数。语言模型面对的是一段文本。它要根据已有内容预测下一个 **token**（文本切分后的单位）；生成一段话，则要把这次预测反复接到新的输入后面。本路线沿着这一个任务，先建出能训练的模型，再弄清顺序、现代结构与逐步生成。
 
-## 十一章：基础 Decoder 到完整现代 Transformer
+## 主线：从文本到下一 token
 
 <ChapterList track="principles" />
 
-P1–P4 从离散输入、任务目标与注意力建立完整教学 Decoder。先使用学习式位置表；P5 再分析哪些算子携带顺序，P6/P7 推导 sin/cos 与 RoPE。P8 对照现代结构选择，P9 建立生成循环，P10 验证逐层缓存保持相同 logits。[P11](/principles/complete-transformer/) 将 RoPE、GQA、RMSNorm 与 SwiGLU 组装为同一个可训练可缓存模型，供文本训练、分布式更新与 RL 实验复用。首次阅读按顺序；只研究位置时可先读 P3，再进入 P5–P7。
+[P1 文本、token 与 embedding](/principles/tokenization/) 把字符串切分、编号，再通过可训练的 embedding 查表变成向量。[P2 下一 token 预测](/principles/language-modeling/) 用 `[BOS,A,B,EOS]` 说明标签为什么要错开一位，以及每个位置的预测如何汇成一次损失。到这里，问题已经明确，但最小的 bigram 模型只能根据当前 token 查表，不能利用更早的上下文。
 
-## 先修与记号
+[P3 注意力与多头](/principles/attention/) 解决“当前的位置怎样读取已有历史”，同时用 causal mask 排除未来位置。[P4 从注意力到完整 Decoder](/principles/decoder/) 将 embedding、位置、注意力、前馈网络和输出层接起来，沿同一段输入算到词表 **logits**（softmax 前的分数）、损失和梯度。这是第一个可以训练的完整模型；它故意采用容易手算的尺寸和学习式位置表。
 
-不熟悉 NumPy/PyTorch API 时，先读 [数组与框架 F 路线](/frameworks/)，尤其是 F3 的轴重排、F4 的求导边界和 F5 的模块、嵌入与交叉熵。已有框架经验的读者可直接进入本路线。
+## 顺序与生成：模型怎样用于真实文本
 
-需要 [M3 向量与矩阵](/math/linear-algebra/) 中的点积、范数、转置和矩阵乘法，以及 [M7](/math/training/) 的预测与更新闭环。P7 的训练一节用到 [M6](/math/backprop/) 的雅可比转置。P6 的矩阵指数和 P7 的复数写法都是选读；M4 提供导数与有限阶 Taylor，无限级数所需条件在选读处补充，不是实矩阵主线的先修。
+[P5 注意力从哪里得到顺序](/principles/attention-order/) 区分两件常混淆的事：不带位置信息的双向注意力如何随输入重排，以及固定的 causal mask 如何改变可见历史。[P6 多频率 sin/cos 位置编码](/principles/sinusoidal/) 从二维旋转推到不同频率的位置向量；[P7 相对位置与 RoPE](/principles/rope/) 再把旋转放到查询和键上，使位置对分数的显式影响取决于相对位移。P6 的矩阵指数和 P7 的复数写法都放在选读部分，不妨碍实数主线。
 
-这条路线沿用注意力论文的写法：内容向量 $x_i\in\mathbb R^d$ 是列向量，按行堆成 $X\in\mathbb R^{T\times d}$，投影写作 $Q=XW_Q$，其中 $W_Q\in\mathbb R^{d\times d_h}$。它是数学基础里线性层权重 $W\in\mathbb R^{m\times d}$ 的转置布局；换算时先对齐形状，不要因为都叫 $W$ 就直接套用公式。位置下标用 $i,j,p$，虚数单位写作正体 $\mathrm i$。
+[P8 现代 Decoder 的结构选择](/principles/modern-decoder/) 在 P4 的模型上逐项替换归一化、注意力头和前馈计算，弄清 RMSNorm、GQA、SwiGLU 与权重绑定改变了什么。[P9 生成、采样与对话格式](/principles/generation/) 把一次预测接成可停止的生成循环；[P10 KV cache](/principles/kv-cache/) 证明只计算新增 token 时，怎样保持与整段重算相同的结果。最后，[P11 组装完整现代 Decoder](/principles/complete-transformer/) 用一个更接近现代结构的两层模型，将前面分别推导的模块放到同一条训练和缓存生成路径中。P4 解决基础计算能否闭合，P11 检查现代组合能否仍然闭合。
 
-沿用 [数学导读的跨路线记号](/math/#公式约定每个符号都有形状)：序列长 $T$，历史缓存长 $T_{\mathrm{past}}$，头维度 $d_h$，频率底数 $\beta$，第 $r$ 个二维分块的角频率 $\omega_r$。查询（query）、键（key）、值（value）向量分别写作 $q,k,v$，按行堆成矩阵 $Q,K,V$。未归一化分数（logits）经 softmax 变成权重；token 是分词器产生的基本单位，可以是词、子词或其他片段。键值缓存（KV cache）保存历史键和值；预填充（prefill）处理提示，解码（decode）逐步处理新 token。
+## 按问题选择入口
 
-## 怎样核对
+首次学习按章节顺序走。已有注意力基础，只想弄清位置时，从 [P3](/principles/attention/) 核对 causal mask 和分数的定义，再读 P5–P7；只想实现生成，先确认 [P2](/principles/language-modeling/) 的训练目标和 [P4](/principles/decoder/) 的前向过程，再读 P9–P10。要对照现代模型的结构与代码，则继续读 P8 和 P11。各章的手算和脚本检验同一个问题的不同部分，数值断言能核对案例，普遍结论仍要看推导的条件。
 
-每个等式都区分两种依据：可以证明的性质，以及人为选择的设计。证明写在正文里；有限数值上的核对交给两个只需 CPU 的脚本。
+进入 P1 前，需要 [M3 向量与矩阵](/math/linear-algebra/) 中的矩阵、轴和索引，以及 [M7 神经网络训练](/math/training/) 中预测与参数更新的关系。[M2 分布与信息量](/math/distributions/) 的 softmax 和交叉熵会在 P2 用到；[M6 反向传播](/math/backprop/) 帮助理解 P4 的梯度。不熟悉数组轴、PyTorch 的自动求导或模块 API，可按遇到的障碍回读 [数组与框架路线](/frameworks/)。
 
-```sh
-python code/principles/position_encoding.py
-python code/principles/kv_cache.py
-python code/principles/modern_decoder.py
-```
-
-前四章还有分词往返、标签移位、有效位置损失、完整模型因果性与参数计数的验证。位置脚本检查置换、相对核与梯度；缓存脚本既比较 RoPE 单层，也比较完整三层 Decoder 的词表 logits。断言核对有限算例，正文证明交代一般关系的假设。读完可进入 [训练与评估](/training/) 建立完整训练与 checkpoint，或进入 [推理系统](/systems/) 给生成记账。
+读完 P11，可以进入 [训练与评估](/training/) 处理语料、优化和模型评估，或进入 [推理系统](/systems/) 估算生成成本并研究服务实现。

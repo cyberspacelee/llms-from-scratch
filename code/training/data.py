@@ -1,34 +1,28 @@
 """Document splitting and next-token packing, with CPU self-checks."""
 
 import hashlib
-import random
 
 import torch
 
 
-def unique_documents(documents):
-    seen = set()
+def unique_documents(records):
+    seen = {}
     result = []
-    for text in documents:
+    for source, text, assignment in records:
         identity = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        if identity not in seen:
-            seen.add(identity)
-            result.append((identity, text))
+        if identity in seen:
+            if seen[identity] != assignment:
+                raise ValueError("Identical text appears in different splits")
+            continue
+        seen[identity] = assignment
+        result.append((identity, source, text, assignment))
     return result
-
-
-def split_documents(documents, validation_count, seed=7):
-    unique = unique_documents(documents)
-    if not 0 < validation_count < len(unique):
-        raise ValueError("Both splits must contain at least one unique document")
-    random.Random(seed).shuffle(unique)
-    return unique[validation_count:], unique[:validation_count]
 
 
 def fit_character_vocabulary(training_documents):
     return {character: index for index, character in enumerate(sorted(
         set("".join(text for _, text in training_documents))
-    ))}
+    ), start=1)}
 
 
 def pack_documents(documents, eos_id, isolate=True):
@@ -59,30 +53,47 @@ def pack_documents(documents, eos_id, isolate=True):
 
 
 def verify():
-    documents = ["red cat", "blue dog", "green bird", "red cat", "white fish",
-                 "black horse", "orange fox", "pink rabbit", "blue dog", "gray wolf"]
-    train, validation = split_documents(documents, 2)
-    assert len(train) == 6 and len(validation) == 2
+    records = [("s1", "ab", "train"), ("s1", "ab", "train"),
+               ("s2", "cd", "train"), ("s3", "az", "validation")]
+    unique = unique_documents(records)
+    train = [(identity, text) for identity, _, text, split in unique if split == "train"]
+    validation = [(identity, text) for identity, _, text, split in unique
+                  if split == "validation"]
+    assert [text for _, text in train] == ["ab", "cd"]
+    assert [text for _, text in validation] == ["az"]
     assert set(i for i, _ in train).isdisjoint(i for i, _ in validation)
-    # A character vocabulary is fitted using the training split only.
+    assert {source for _, source, _, split in unique if split == "train"}.isdisjoint(
+        {source for _, source, _, split in unique if split == "validation"}
+    )
+    try:
+        unique_documents([("s1", "ab", "train"), ("s4", "ab", "validation")])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Cross-split duplicates must be rejected")
     vocabulary = fit_character_vocabulary(train)
-    assert set(vocabulary) == set("".join(text for _, text in train))
-    assert "Z" not in fit_character_vocabulary([("training", "abc")])
-    assert "Z" in fit_character_vocabulary([("training", "abc"), ("validation", "Z")])
-    windows = ["abcdef"[:4], "abcdef"[2:]]
-    assert set(windows[0]) & set(windows[1]) == {"c", "d"}
-    x, y, mask, valid, positions = pack_documents([[1, 2], [3, 4]], eos_id=5)
+    assert vocabulary == {"a": 1, "b": 2, "c": 3, "d": 4}
+    unk_id, eos_id = 0, len(vocabulary) + 1
+    encode = lambda text: [vocabulary.get(char, unk_id) for char in text]
+    assert encode(validation[0][1]) + [eos_id] == [1, 0, 5]
+    x, y, mask, valid, positions = pack_documents(
+        [encode(text) for _, text in train], eos_id=eos_id
+    )
     assert x.tolist() == [1, 2, 5, 3, 4]
     assert y.tolist() == [2, 5, 3, 4, 5]
     assert valid.tolist() == [True, True, False, True, True]
     assert positions.tolist() == [0, 1, 2, 0, 1]
     assert not mask[3, :3].any() and mask.diag().all()
-    _, _, continuous_mask, continuous_valid, _ = pack_documents(
-        [[1, 2], [3, 4]], eos_id=5, isolate=False
+    _, _, continuous_mask, continuous_valid, continuous_positions = pack_documents(
+        [encode(text) for _, text in train], eos_id=eos_id, isolate=False
     )
     assert continuous_valid.all() and continuous_mask[3, 0]
+    assert continuous_positions.tolist() == [0, 1, 2, 3, 4]
     assert valid.sum().item() == 4
-    print("data: 10 records -> 8 unique documents -> 6 train / 2 validation")
+    losses = torch.tensor([1., 2., 9., 3., 4.], dtype=torch.float64)
+    assert losses[valid].mean().item() == 2.5
+    assert (losses * valid).mean().item() == 2.0
+    print("data: 4 records -> 3 unique documents -> 2 train / 1 validation")
     print("isolated packing: inputs", x.tolist(), "targets", y.tolist())
 
 

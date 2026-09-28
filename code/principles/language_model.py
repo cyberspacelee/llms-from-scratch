@@ -64,6 +64,32 @@ def verify():
     sequence_loss(logits, targets).backward()
     close(logits.grad, expected_gradient)
 
+    hand_model = BigramLM(4).double()
+    with torch.no_grad():
+        hand_model.table.weight.zero_()
+    hand_optimizer = torch.optim.SGD(hand_model.parameters(), lr=1.0)
+    hand_loss = sequence_loss(hand_model(inputs), targets)
+    close(hand_loss, torch.tensor(math.log(4), dtype=torch.float64))
+    hand_loss.backward()
+    close(hand_model.table.weight.grad[0],
+          torch.tensor([1 / 12, -1 / 4, 1 / 12, 1 / 12],
+                       dtype=torch.float64))
+    hand_optimizer.step()
+    close(hand_model.table.weight[0].detach(),
+          torch.tensor([-1 / 12, 1 / 4, -1 / 12, -1 / 12],
+                       dtype=torch.float64))
+    close(hand_model.table.weight[1].detach(),
+          torch.tensor([-1 / 12, -1 / 12, 1 / 4, -1 / 12],
+                       dtype=torch.float64))
+    close(hand_model.table.weight[2].detach(),
+          torch.tensor([-1 / 12, -1 / 12, -1 / 12, 1 / 4],
+                       dtype=torch.float64))
+    close(hand_model.table.weight[3].detach(), torch.zeros(4, dtype=torch.float64))
+    expected_probability = math.exp(1 / 3) / (math.exp(1 / 3) + 3)
+    close(hand_model(inputs).softmax(-1)[0, 0, 1].detach(),
+          torch.tensor(expected_probability, dtype=torch.float64))
+    assert sequence_loss(hand_model(inputs), targets) < hand_loss
+
     model = BigramLM(4).double()
     optimizer = torch.optim.SGD(model.parameters(), lr=1.0)
     initial = sequence_loss(model(inputs), targets).item()
@@ -80,7 +106,7 @@ def verify():
         pass
     else:
         raise AssertionError("an empty loss mask was silently accepted")
-    print("PASS: shifted labels, hand NLL, padding invariance, CE gradients")
+    print("PASS: shifted labels, hand NLL, padding invariance, CE gradients, one SGD step")
     print(f"PASS: bigram fitted one document; NLL {initial:.6f} -> {final:.6f}")
     print("This fit checks the training loop, not held-out language quality.")
 

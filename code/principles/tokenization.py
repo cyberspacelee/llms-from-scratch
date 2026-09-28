@@ -128,6 +128,27 @@ class PreSplitBPE(ByteBPE):
 
 def verify():
     torch.manual_seed(7)
+    main = ByteBPE(["<bos>", "<eos>"]).fit(["猫 sat"] * 4, 2)
+    assert main.merges == [((32, 115), 256), ((97, 116), 257)]
+    main_ids = [231, 140, 171, 256, 257]
+    assert main.encode("猫 sat") == main_ids
+    assert main.encode("猫 sat!") == main_ids + [33]
+    assert main.decode(main_ids) == "猫 sat"
+    assert main.special_ids == {"<bos>": 258, "<eos>": 259}
+    assert main.vocab_size == 260
+    assert main.encode("<eos>") != [259]
+    assert main.encode("<eos>", allowed_special=True) == [259]
+    main_batch = torch.tensor([main_ids, main_ids])
+    main_embedding = nn.Embedding(main.vocab_size, 2).double()
+    main_selected = main_embedding(main_batch)
+    assert main_selected.shape == (2, 5, 2)
+    torch.testing.assert_close(main_selected, torch.nn.functional.one_hot(main_batch, main.vocab_size).double() @ main_embedding.weight)
+    upstream = torch.zeros_like(main_selected)
+    upstream[0, 3] = torch.tensor([1.0, 2.0])
+    upstream[1, 3] = torch.tensor([3.0, -1.0])
+    main_selected.backward(upstream)
+    torch.testing.assert_close(main_embedding.weight.grad[256], torch.tensor([4.0, 1.0], dtype=torch.float64))
+    assert torch.count_nonzero(main_embedding.weight.grad).item() == 2
     tokenizer = ByteBPE().fit(["aba"] * 4 + ["abb"] * 2 + ["bab"], 2)
     assert tokenizer.merges == [((97, 98), 256), ((256, 97), 257)]
     assert tokenizer.encode("aba") == [257]
@@ -144,18 +165,8 @@ def verify():
     assert [split.pieces[i] for i in split.encode("a b")] == [b"a", b" b"]
     assert all(b" " not in piece[1:] for piece in split.pieces.values())
     assert split.decode(split.encode("Hi, a b 42!")) == "Hi, a b 42!"
-    ids = torch.tensor([[1, 2, 1], [3, 1, 0]])
-    embedding = nn.Embedding(8, 4).double()
-    selected = embedding(ids)
-    one_hot = torch.nn.functional.one_hot(ids, 8).to(torch.float64)
-    torch.testing.assert_close(selected, one_hot @ embedding.weight)
-    selected.sum().backward()
-    counts = torch.bincount(ids.flatten(), minlength=8).double()
-    torch.testing.assert_close(embedding.weight.grad, counts[:, None].expand(8, 4))
-    assert ids[0, 0] == ids[0, 2]
-    torch.testing.assert_close(selected[0, 0], selected[0, 2])
+    print("PASS: 猫 sat byte BPE, encode/decode, special IDs, embedding lookup and repeated-ID gradients")
     print("PASS: BPE weighted pairs, merge order, overlap, UTF-8 round trips, pre-split boundaries")
-    print("PASS: embedding lookup equals one-hot selection; repeated IDs sum gradients")
     import tempfile
 
     for cls in (ByteBPE, PreSplitBPE):

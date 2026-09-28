@@ -145,8 +145,48 @@ def verify():
         model.head.bias.zero_()
     expected = (torch.arange(1., 5., dtype=torch.float64) - 2.5) / math.sqrt(1.25 + 1e-5)
     torch.testing.assert_close(model(torch.tensor([[0]]))[0, 0, :4], expected)
+    verify_hand_path(sequence_loss)
     print("PASS: complete forward/backward, 268 parameters, causal and batch isolation")
     print("PASS: loop vs multihead matrix attention; residual stream sum; hand LayerNorm-to-logits example")
+
+
+def verify_hand_path(sequence_loss):
+    model = Decoder(4, width=2, heads=1, ff_width=2, layers=1, max_length=3).double()
+    assert sum(p.numel() for p in model.parameters()) == 74
+    block = model.blocks[0]
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        for norm in (block.norm_attention, block.norm_ff, model.norm):
+            norm.weight.fill_(1)
+            norm.eps = 1
+        model.embedding.weight.copy_(torch.tensor([[2, 0], [1, 2], [1, 3], [0, 0]], dtype=torch.float64))
+        model.position.weight.copy_(torch.tensor([[0, 0], [-1, 0], [1, 1]], dtype=torch.float64))
+        block.attention.qkv.weight[4:6] = torch.eye(2, dtype=torch.float64)
+        block.attention.output.weight.copy_(torch.eye(2, dtype=torch.float64))
+        block.ff[0].bias[0] = 1
+        block.ff[2].weight[0, 0] = 1
+        model.head.weight[1, 0] = 1
+        model.head.weight[2, 1] = 1
+
+    ids = torch.tensor([[0, 1, 2]])
+    targets = torch.tensor([[1, 2, 3]])
+    logits = model(ids)
+    s = 1 / math.sqrt(2)
+    g = (1 + math.erf(1 / math.sqrt(2))) / 2
+    differences = [2 + 2 * s + g, g - 2, g - 2 - 2 * s / 3]
+    r = torch.tensor([delta / math.sqrt(delta * delta + 4) for delta in differences], dtype=torch.float64)
+    expected_logits = torch.stack((torch.zeros_like(r), r, -r, torch.zeros_like(r)), -1)[None]
+    torch.testing.assert_close(logits, expected_logits)
+    loss = sequence_loss(logits, targets)
+    torch.testing.assert_close(loss, torch.tensor(1.0370171040287348, dtype=torch.float64))
+    logit_grad = torch.autograd.grad(loss, logits, retain_graph=True)[0]
+    torch.testing.assert_close(logit_grad[0, 0, 1], (logits[0, 0].softmax(-1)[1] - 1) / 3)
+    loss.backward()
+    assert model.embedding.weight.grad[0].abs().sum() > 0
+    assert block.attention.qkv.weight.grad[4:6].abs().sum() > 0
+    assert block.ff[2].weight.grad.abs().sum() > 0
+    print("PASS: one BOS,A,B path through embedding, attention, FFN, logits, loss and backward")
 
 
 if __name__ == "__main__":

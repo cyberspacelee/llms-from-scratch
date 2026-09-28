@@ -1,16 +1,17 @@
-"""A frozen linear base with a low-rank update and exact merge check."""
+"""One supervised token through a frozen full-rank 6-by-4 layer."""
 
 import io
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class LoRALinear(nn.Module):
     def __init__(self, base, rank=2, alpha=2):
         super().__init__()
         if rank <= 0 or alpha <= 0:
-            raise ValueError("Rank and alpha must be positive")
+            raise ValueError("rank and alpha must be positive")
         self.base = base
         self.base.requires_grad_(False)
         self.scale = alpha / rank
@@ -28,29 +29,58 @@ class LoRALinear(nn.Module):
 
 def verify():
     torch.manual_seed(23)
-    layer = LoRALinear(nn.Linear(4, 6, bias=False).double())
-    x = torch.randn(5, 4, dtype=torch.float64)
-    target = torch.randn(5, 6, dtype=torch.float64)
+    base = nn.Linear(4, 6, bias=False).double()
+    with torch.no_grad():
+        base.weight.copy_(torch.tensor([
+            [1., 0., 0., 0.],
+            [0., 0.5, 0., 0.],
+            [0., 0., 1. / 3., 0.],
+            [0., 0., 0., 0.25],
+            [0., 0., 0., 0.],
+            [0., 0., 0., 0.],
+        ], dtype=torch.float64))
+    layer = LoRALinear(base)
+    with torch.no_grad():
+        layer.A.copy_(torch.tensor([
+            [1., 0., 1., 0.],
+            [0., 1., 0., 1.],
+        ], dtype=torch.float64))
+    x = torch.tensor([1., 2., 3., 4.], dtype=torch.float64)
+    target = torch.tensor([2])
     frozen = layer.base.weight.detach().clone()
+    initial_A = layer.A.detach().clone()
+    assert torch.linalg.matrix_rank(frozen) == 4
+    torch.testing.assert_close(layer.A @ x, torch.tensor([4., 6.], dtype=torch.float64))
     torch.testing.assert_close(layer(x), layer.base(x))
-    optimizer = torch.optim.SGD([layer.A, layer.B], lr=0.05)
-    ((layer(x) - target).square().mean()).backward()
-    assert layer.A.grad.count_nonzero() == 0
-    assert layer.B.grad.abs().sum() > 0 and layer.base.weight.grad is None
+    torch.testing.assert_close(layer(x), torch.tensor([1., 1., 1., 1., 0., 0.], dtype=torch.float64))
+    initial_loss = F.cross_entropy(layer(x).unsqueeze(0), target)
+    assert abs(initial_loss.item() - 1.555142) < 1e-6
+    optimizer = torch.optim.SGD([layer.A, layer.B], lr=0.01)
+    initial_loss.backward()
+    g = torch.softmax(layer.base(x).detach(), dim=0)
+    g[2] -= 1
+    torch.testing.assert_close(layer.B.grad, torch.outer(g, layer.A.detach() @ x))
+    torch.testing.assert_close(layer.A.grad, torch.zeros_like(layer.A))
+    assert layer.base.weight.grad is None
     optimizer.step()
+    torch.testing.assert_close(layer.B, -0.01 * torch.outer(g, initial_A @ x))
+    torch.testing.assert_close(layer.A, initial_A)
+    torch.testing.assert_close(layer(x), layer.base(x) - 0.52 * g)
+    first_loss = F.cross_entropy(layer(x).unsqueeze(0), target)
+    assert abs(first_loss.item() - 1.179401) < 1e-6
+    assert first_loss < initial_loss
     optimizer.zero_grad(set_to_none=True)
-    ((layer(x) - target).square().mean()).backward()
+    F.cross_entropy(layer(x).unsqueeze(0), target).backward()
     assert layer.A.grad.abs().sum() > 0
     optimizer.step()
     torch.testing.assert_close(layer.base.weight, frozen, atol=0, rtol=0)
     torch.testing.assert_close(layer(x), x @ layer.merged_weight().T, atol=1e-12, rtol=1e-12)
+    batch = torch.stack((x, 2 * x))
+    torch.testing.assert_close(layer(batch), batch @ layer.merged_weight().T,
+                               atol=1e-12, rtol=1e-12)
     assert torch.linalg.matrix_rank(layer.B @ layer.A) <= 2
     assert layer.A.numel() + layer.B.numel() == 20
-    hand_A = torch.tensor([[1., 0., 1., 0.], [0., 1., 0., 1.]], dtype=torch.float64)
-    hand_B = torch.tensor([[1., 0.], [0., 1.], [1., 1.], [-1., 0.], [0., -1.], [1., -1.]], dtype=torch.float64)
-    hand_x = torch.tensor([1., 2., 3., 4.], dtype=torch.float64)
-    torch.testing.assert_close(hand_B @ (hand_A @ hand_x),
-                               torch.tensor([4., 6., 10., -4., -6., -2.], dtype=torch.float64))
+    torch.testing.assert_close(layer.B @ (layer.A @ x), (layer.B @ layer.A) @ x)
     payload = {"A": layer.A.detach().clone(), "B": layer.B.detach().clone(),
                "rank": 2, "alpha": 2, "base_id": "teaching-linear-seed23"}
     stream = io.BytesIO()
@@ -64,8 +94,8 @@ def verify():
         restored.A.copy_(loaded["A"])
         restored.B.copy_(loaded["B"])
     torch.testing.assert_close(restored(x), layer(x), atol=0, rtol=0)
-    print("LoRA: 24 frozen / 20 trainable parameters; initial and trained gradients verified")
-    print("LoRA: merged outputs, hand matrix example and adapter-only serialization verified")
+    print(f"LoRA: initial CE {initial_loss.item():.6f}, after one step {first_loss.item():.6f}")
+    print("LoRA: 24 frozen / 20 trainable; gradients, rank, merge and restore verified")
 
 
 if __name__ == "__main__":

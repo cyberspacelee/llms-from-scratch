@@ -41,13 +41,13 @@ def extract_text(html):
 def filter_record(text, min_words=6, min_letter_fraction=.5):
     if min_words < 1 or not 0 <= min_letter_fraction <= 1:
         raise ValueError("invalid filtering thresholds")
+    if re.search(r"\b(?:password|api_key)\s*[:=]\s*\S+", text, re.IGNORECASE):
+        return "possible_secret"
     if len(text.split()) < min_words:
         return "too_short"
     visible = [c for c in text if not c.isspace()]
     if sum(c.isalpha() for c in visible) / max(1, len(visible)) < min_letter_fraction:
         return "low_letter_fraction"
-    if re.search(r"\b(?:password|api_key)\s*[:=]\s*\S+", text, re.IGNORECASE):
-        return "possible_secret"
     return "keep"
 
 
@@ -137,35 +137,56 @@ def mixture_report(probabilities, source_tokens, training_tokens, epoch_cap):
 
 
 def verify():
-    html = "<nav>links</nav><article><p>the cat watches the quiet garden in the rain.</p><script>secret()</script></article>"
-    text = extract_text(html)
-    assert text == "the cat watches the quiet garden in the rain."
+    cat_html = "<nav>links</nav><article><p>the cat watches the quiet garden in the rain.</p><script>secret()</script></article>"
+    records = [
+        ("A", "web", "allowed", cat_html),
+        ("B", "web", "allowed", cat_html.replace("quiet", "green")),
+        ("C", "web", "allowed", cat_html),
+        ("D", "curated", "allowed", "<p>a dog sleeps beside the door while a child reads a book.</p>"),
+        ("E", "curated", "allowed", "<p>the sun warms the street and a bird sings in the tree.</p>"),
+        ("F", "web", "allowed", "<p>buy now</p>"),
+        ("G", "web", "allowed", "<p>please do not share this password=abc with anyone</p>"),
+        ("H", "web", "unverified", cat_html),
+    ]
+    audit, kept = {}, []
+    for doc_id, source, rights, html in records:
+        reason = "unverified_rights" if rights != "allowed" else filter_record(extract_text(html))
+        audit[doc_id] = reason
+        if reason == "keep":
+            kept.append((doc_id, source, extract_text(html)))
+    assert audit == dict(zip("ABCDEFGH", ["keep"] * 5 + ["too_short", "possible_secret", "unverified_rights"]))
+    assert [doc_id for doc_id, _, _ in kept] == list("ABCDE")
+    assert kept[0][2] == "the cat watches the quiet garden in the rain."
     assert extract_text("<p>a &amp; b<br>c</p>") == "a & b c"
     assert extract_text("<p>he<em>ll</em>o</p><p>world</p>") == "hello world"
-    assert filter_record(text) == "keep"
-    assert filter_record("buy now") == "too_short"
     assert filter_record("123 456 789 012 345 678") == "low_letter_fraction"
-    assert filter_record("please do not share this password=abc with anyone") == "possible_secret"
-    documents = [text, text.replace("quiet", "green"), text,
-                 "a dog sleeps beside the door while a child reads a book.",
-                 "the sun warms the street and a bird sings in the tree."]
+    assert filter_record("password=abc") == "possible_secret"
+    documents = [text for _, _, text in kept]
     groups, candidates = duplicate_groups(documents, threshold=.4)
     exact_groups, _ = duplicate_groups(documents, threshold=.4, use_lsh=False)
     assert groups == exact_groups == [[0, 1, 2], [3], [4]]
-    assert (0, 2) in candidates
-    train, valid = split_groups(groups)
-    assert train.isdisjoint(valid) and train | valid == set(range(len(documents)))
+    assert {(0, 1), (0, 2), (1, 2)} <= candidates
+    train, valid = split_groups(groups, seed=1)
+    assert train == {0, 1, 2, 4} and valid == {3}
     assert all(set(g) <= train or set(g) <= valid for g in groups)
     a, b = shingles(documents[0]), shingles(documents[1])
+    assert len(a) == len(b) == 7 and len(a & b) == 4 and len(a | b) == 10
     signature_a, signature_b = minhash(a, 1000), minhash(b, 1000)
     estimate = sum(x == y for x, y in zip(signature_a, signature_b)) / 1000
     assert abs(estimate - jaccard(a, b)) < .08
-    report = mixture_report({"web": .5, "curated": .5}, {"web": 10000, "curated": 100}, 10000, 3)
-    assert report["epochs"] == {"web": .5, "curated": 50.} and report["over_cap"] == ["curated"]
-    draws = random.Random(5).choices(["web", "curated"], weights=[.8, .2], k=10000)
-    assert abs(draws.count("curated") / len(draws) - .2) < .02
-    print(f"PASS: HTML rules/filter reasons; exact-confirmed LSH groups={groups}; Jaccard={jaccard(a,b):.3f}, MinHash={estimate:.3f}")
-    print("PASS: duplicate-group split; seeded source resampling; 50-epoch scarce-source warning")
+    representatives = {min(group) for group in groups if set(group) <= train}
+    assert representatives == {0, 4}
+    source_words = defaultdict(int)
+    for i in representatives:
+        source_words[kept[i][1]] += len(documents[i].split())
+    assert source_words == {"web": 9, "curated": 12}
+    report = mixture_report({"web": .5, "curated": .5}, source_words, 54, 3)
+    assert report == {"epochs": {"web": 3., "curated": 2.25}, "over_cap": []}
+    over = mixture_report({"web": .8, "curated": .2}, source_words, 54, 3)
+    assert math.isclose(over["epochs"]["web"], 4.8) and math.isclose(over["epochs"]["curated"], .9)
+    assert over["over_cap"] == ["web"]
+    print(f"PASS: rights/filter audit={audit}; exact-confirmed LSH groups={groups}")
+    print(f"PASS: Jaccard={jaccard(a,b):.3f}, MinHash={estimate:.3f}; train=A,E, valid=D; source budgets={report['epochs']}")
 
 
 if __name__ == "__main__":

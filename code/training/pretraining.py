@@ -3,7 +3,6 @@
 import copy
 import io
 from pathlib import Path
-import random
 import sys
 
 import torch
@@ -38,7 +37,7 @@ def train_steps(model, optimizer, count, cursor=0, order=None):
             cursor = 0
         index = order[cursor]
         cursor += 1
-        document = TRAIN[index:index + 1, random.randrange(0, 3):]
+        document = TRAIN[index:index + 1]
         optimizer.zero_grad(set_to_none=True)
         loss = sequence_loss(model(document[:, :-1]), document[:, 1:])
         loss.backward()
@@ -57,28 +56,26 @@ def evaluate(model):
 def verify():
     torch.set_num_threads(1)
     torch.manual_seed(29)
-    random.seed(29)
     model, optimizer = new_run()
     initial = evaluate(model)
     cursor, order, _ = train_steps(model, optimizer, 18)
     checkpoint = dict(config=CONFIG, model=copy.deepcopy(model.state_dict()),
                       optimizer=copy.deepcopy(optimizer.state_dict()), step=18,
                       cursor=cursor, order=order, torch_rng=torch.get_rng_state(),
-                      python_rng=random.getstate(), tokenizer={"a": 0, "b": 1, "c": 2, "EOS": 3})
+                      tokenizer={"a": 0, "b": 1, "c": 2, "EOS": 3})
     stream = io.BytesIO()
     torch.save(checkpoint, stream)
     cursor, order, continuous_losses = train_steps(model, optimizer, 12, cursor, order)
     expected_parameters = copy.deepcopy(model.state_dict())
     final = evaluate(model)
     stream.seek(0)
-    # Only load this process's trusted payload; pickle can execute arbitrary code.
-    loaded = torch.load(stream, weights_only=False)
+    loaded = torch.load(stream, weights_only=True)
     restored, restored_optimizer = new_run()
     assert loaded["config"] == CONFIG
+    assert loaded["step"] == 18 and loaded["tokenizer"] == {"a": 0, "b": 1, "c": 2, "EOS": 3}
     restored.load_state_dict(loaded["model"])
     restored_optimizer.load_state_dict(loaded["optimizer"])
     torch.set_rng_state(loaded["torch_rng"])
-    random.setstate(loaded["python_rng"])
     restored_cursor, restored_order, restored_losses = train_steps(
         restored, restored_optimizer, 12, loaded["cursor"], loaded["order"]
     )
@@ -112,6 +109,8 @@ def verify():
             generated = torch.cat([generated, following], dim=1)
             if following.item() == 3:
                 break
+    assert TRAIN.shape == (3, 12) and VALIDATION.shape == (2, 10)
+    print(f"pretraining: 30 updates x 11 targets = 330 training targets; validation targets=18")
     print(f"pretraining: initial validation NLL={initial:.6f}, final={final:.6f}, bigram={baseline:.6f}")
     print("pretraining: resumed 12 steps exactly equal uninterrupted parameters and losses")
     print("pretraining: trained two-layer model full/cached logits agree for three chunkings")
@@ -150,11 +149,7 @@ def verify_compute():
         sequence_loss(model(ids[:, :-1]), ids[:, 1:]).backward()
     predicted = training_flops(weights, CONFIG["layers"], CONFIG["width"], length - 1, batch * (length - 1))
     assert weights == 4160 and counter.get_total_flops() == predicted
-    # Chinchilla-style budget: C = 6ND with D = 20N gives N = sqrt(C / 120).
-    budget = 1e21
-    params = (budget / 120) ** 0.5
-    assert abs(params - 2.886751e9) < 1e3 and abs(6 * params * 20 * params - budget) < 1e9
-    print(f"pretraining: counted {counter.get_total_flops()} FLOP = 6ND + attention term; 1e21 FLOP -> N={params:.3e}")
+    print(f"pretraining: counted {counter.get_total_flops()} FLOP for one three-document batch")
 
 
 if __name__ == "__main__":

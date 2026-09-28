@@ -1,143 +1,134 @@
 ---
-title: 单卡的上限
-question: 一张加速器给出哪些上限，kernel 怎样靠近它们，怎样测出离上限多远
-description: 把 H100 SXM 的产品页数字代入 G3 的屋顶线并放上 S1 的强度，再看分块、融合与 Tensor Core 在 LLM 负载上意味着什么，最后写下一次可证伪的测量。
+title: 单卡的计算与带宽上限
+question: 同一张 GPU 为什么处理长提示和逐 token 生成时表现不同
+description: 把 S1 的 8B 模型账单代入 H100 SXM 的屋顶线，分别计算 decode 与 prefill 的理想下界，再设计能检验瓶颈的测量。
 order: 2
 code:
-  - code/systems/ledger.py
+  - code/systems/accelerator.py
 ---
 
-[S1](/systems/ledger/) 得到两个强度：单请求线性层约 1 FLOP/byte，长上下文的 decode 注意力约 4 FLOP/byte。它们快还是慢，要看这张卡每秒能搬多少字节、每秒能做多少乘加。[G3](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线) 已经用一台假想设备定义了屋顶线，[G4](/gpu/measurement/) 定义了测量边界；本章把真实产品规格代进去，看 LLM 的两类负载各站在哪一侧，再把分块、融合与测量落到这两类负载上。
+[S1](/systems/ledger/) 为同一个 8B 形状算出两种负载：8192 token 的提示一次进入 prefill；随后一次 decode 只生成一个新 token，却读回已有 KV。两者都运行在 GPU 上，为什么优化方向会不同？本章把 S1 的运算量和字节数放进 [G3 屋顶线](/gpu/kernel-design/)；[G4 测量](/gpu/measurement/) 已介绍计时边界，这里把它用于推理实验。
 
-## 存储层级：容量、带宽与延迟是三件事
+## GPU 提供两种速率，数据经过多个存储层级
 
-放得下，不等于搬得及；搬得及，不等于一次随机访问的等待可以忽略。
-
-```mermaid
-flowchart LR
-  disk[主机存储] --> dram[主机内存]
-  dram --> hbm[GPU HBM]
-  hbm --> l2[L2]
-  l2 --> smem[Shared memory]
-  smem --> reg[寄存器]
-```
-
-权重和 KV 的大头住在 HBM。一次 kernel 如果反复从 HBM 读同一块数据，带宽就被浪费在重复搬运上。Shared memory 和寄存器小得多，但够一个 block 把正在用的 tile 留住。thread、warp、block、grid 与 SM 的对应见 [G1 执行模型](/gpu/execution-model/)，各层存储的访问与同步条件见 [G2 内存与同步](/gpu/memory-and-sync/)。
-
-## 屋顶线把两个峰值收成一个脊点
-
-G3 的屋顶线把两条上限写成一式：可达 FLOP/s 不超过 $\min(\pi,\beta I)$，脊点 $I_{\mathrm{ridge}}=\pi/\beta$，$\pi$ 是算力峰值，$\beta$ 是带宽，$I$ 是算术强度。强度在脊点左边，上限贴着带宽斜线；在右边，上限贴着算力平台。这里只做一件事：把一张真实加速器的数字代进去。
-
-数字取自 [NVIDIA H100 产品页](https://www.nvidia.com/en-us/data-center/h100/) 上 H100 SXM 一列、2026-09-22 读到的数字：80GB 显存，带宽 3.35 TB/s，FP16 Tensor Core 1979 TFLOPS，脚注写明含稀疏。去掉稀疏后的稠密峰值取一半，即 989.5 TFLOPS。产品页会改版，引用这组数时要连同日期和 SXM 这个形态一起写。NVL 那一列是另一组内存和算力，不能混用。
-
-脊点是 $989.5 / 3.35 \approx 295$ FLOP/byte，带宽按 $10^{12}$ 字节/秒理解产品页上的 TB/s。S1 的两个强度都远在脊点左边：
-
-$$
-1 \times 3.35 = 3.35 \text{ TFLOP/s},\qquad
-4 \times 3.35 = 13.4 \text{ TFLOP/s}.
-$$
-
-相对 989.5 的平台，它们大约是 0.3% 和 1.4%。图的右下角把 0 到 10 FLOP/byte 放大，斜线才看得见；主图里这两个点贴在原点。
-
-<Figure src="infra/04-roofline.svg" alt="屋顶线在约 295 FLOP/byte 处进入算力平台，decode 的强度仍在放大图的斜线上">主图的横轴画到 400 FLOP/byte，脊点大约在 295。放大图的纵轴只到 40 TFLOP/s，用来看清 1 和 4 这两个点。</Figure>
-
-### 下界用来对照实测，本身不是实测
-
-单请求 decode 若每个 token 都把 16.06 GB 权重从 HBM 读一遍，并且带宽打满，需要 $16.06 / 3350 \approx 0.0048$ 秒，大约 4.8 ms，对应每秒约 210 个 token。这是权重搬运的下界。真实一步还要读 KV、启动 kernel、做采样，只会更慢。批大小上来以后，同一份权重被多个 token 分摊，这个下界才按 $B$ 下降，直到强度靠近脊点，或者 KV 变成新的大头。
-
-同一模型、8192 token 的 prefill，仅线性层就有约 $1.32\times10^{14}$ FLOP，按一次 FMA 为 2 FLOP 计。除以 989.5 TFLOP/s，计算下界约 0.13 秒。注意力另有约 $3.5\times10^{13}$ FLOP（按完整方阵估算）。长提示因此更接近平台，短请求的 decode 更接近斜线。优化之前先问这次负载站在哪一侧，否则会把一个带宽问题当成算力问题去调。
-
-编程和占用率的进一步阅读从 [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/) 进入。[Wafer 的 GPU fundamentals](https://github.com/wafer-ai/gpu-perf-engineering-resources#1-gpu-fundamentals) 把编程模型和编译链的原始文档排在一起。其他厂商的加速器同样要分开写容量、带宽和算力，数字以各自的规格表为准，见这份清单的 [Current hardware](https://github.com/wafer-ai/gpu-perf-engineering-resources#6-current-hardware)。
-
-## Kernel：复用与融合决定离上限多远
-
-屋顶线的下界假设数据按必要的次数流过 HBM。[G3](/gpu/kernel-design/) 已经推导分块怎样让一次装载服务多次乘加、融合怎样少写回一次中间结果，这里只看它们在 H100 SXM 上意味着什么。
-
-<Figure src="infra/05-tiling.svg" alt="朴素实现反复读取一行和一列，分块实现把 tile 留在 shared memory">左边每个输出元素都沿 K 维重新读 A 的一行和 B 的一列。右边一个 block 把两块 tile 放进 shared memory，tile 里的乘加共用这次装载，累加完成后再写回 C。</Figure>
-
-按 G3 的逐 block 局部计数，边长 t、每元素 $b_{\mathrm{elem}}$ 字节的方形 tile 输入强度为 $t/b_{\mathrm{elem}}$。bf16 下要到约 295 FLOP/byte 的脊点，需要边长约 590，两块 tile 就超过一个 SM 的共享内存。高性能 GEMM 仍能贴近平台，是因为 L2 让相邻 block 共用装载、HBM 实际读入的字节少于逐 block 相加；这也是 prefill 的大矩阵乘能站到平台上的前提。decode 的矩阵只有 $B$ 行，再好的分块也无法凭空增加每个权重字节被复用的次数，它的上限仍由 S1 的强度决定。
-
-融合在 LLM 里最重要的例子是注意力：不把 $T\times T$ 分数写回 HBM。[S3 FlashAttention](/systems/flash-attention/) 专门推导这一点。融合的收益取决于中间张量有多大，G3 的融合一节说明了它也可能因寄存器压力而变慢。
-
-### Tensor Core 吃特定的形状和类型
-
-Tensor Core 在一条 warp 指令里完成一块小矩阵乘加，输入类型和碎片形状由架构决定。PTX 里的 warp 级矩阵指令列出了这些形状，见 [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#warp-level-matrix-instructions)。对不上的尺寸会被补齐，或者退回普通 CUDA core。前面引用的 989.5 TFLOPS 是这类指令的稠密 FP16 峰值，不是任意一个 fp16 kernel 的速度。
-
-从框架或 cuBLAS 基线到 Triton、CUTLASS 与手写 CUDA 的选择标准，见 G3 的入口表；[Wafer 清单](https://github.com/wafer-ai/gpu-perf-engineering-resources#3-programming-models-and-profiling) 也按同一思路把 Triton 放在 CUTLASS 前面：先用能说清问题的那一层。
-
-## 测量：先写下可证伪的假设
-
-屋顶线给出的是上限，分块和融合给出的是一种靠近上限的结构。测量要回答的是：这次运行离那条线有多远，时间到底花在 kernel 里面，还是花在两次 kernel 之间。
+权重和 KV cache 的大部分常驻 HBM（GPU 显存）。一个 kernel 把当前要用的片段搬到 L2、shared memory 或寄存器后，可能在片上多次使用。容量回答“能否放下”，HBM 带宽回答“每秒能搬多少字节”，计算吞吐回答“每秒能做多少浮点运算”；三个数字不能互相替代。[G1](/gpu/execution-model/) 和 [G2](/gpu/memory-and-sync/) 已解释线程、SM 与这些存储位置的关系。
 
 ```mermaid
 flowchart LR
-  hyp[写下预期站在斜线还是平台] --> line[用时间线确认空档]
-  line --> one[只改一个结构]
-  one --> again[再测 TTFT 或 TPOT]
+  HBM[HBM：权重与 KV] --> L2[L2 cache]
+  L2 --> SM[SM：shared memory 与寄存器]
+  SM --> TC[计算单元：乘加]
 ```
 
-<Figure src="infra/06-timeline.svg" alt="时间线上 GPU 在通信和发射间隙出现空档">四行分别是 CPU 发射、GPU kernel、HBM 拷贝和网络。格子是教学用的时间形状。白道是下一步该看的地方：先解释空档，再打开单个 kernel。</Figure>
+读图时关注往返次数：若一块权重从 HBM 进来后服务 8192 个输入位置，计算量相对搬运量很大；若它只服务一个位置，搬运量可能先成为限制。图只表示数据路径，不表示各级存储的真实延迟或容量比例。
 
-### 一次可以比较的运行要写下这些
+本章用 [NVIDIA H100 官方规格表](https://www.nvidia.com/en-us/data-center/h100/) 的 **H100 SXM** 一列（2026-09-28 核对）：80 GB HBM、3.35 TB/s 带宽、FP16 Tensor Core 1979 TFLOP/s。该算力数字的脚注是 *with sparsity*；下面假设稠密计算，取其一半约 **989.5 TFLOP/s**。这里的 TB 和 TF 都按 $10^{12}$ 计。80 GB 是容量，不参与速率除法；H100 NVL 是另一种形态，不能把两列规格拼在一起。
 
-两次耗时能相减，前提是下面几项相同，或者差异被写进记录：
+## 屋顶线：先判断哪种峰值更紧
 
-| 记录项 | 原因 |
-| --- | --- |
-| 模型形状、序列长度、批大小、dtype | 它们就是 S1 的账单 |
-| GPU 形态、驱动、CUDA、框架版本 | 峰值和 kernel 选择会随版本变 |
-| 预热次数、计时区间、是否同步 | 冷启动和异步返回会把启动算进 kernel |
-| 正确性对照 | 更快但结果变了，比较的是另一个计算 |
+令 $F$ 是 FLOP 数（一次融合乘加计 2 FLOP），$D$ 是**从 HBM 搬运**的字节，算术强度 $I=F/D$，单位 FLOP/byte。若计算峰值为 $\pi$、HBM 带宽峰值为 $\beta$，完成时间 $t$ 同时满足 $t\ge F/\pi$ 和 $t\ge D/\beta$。因此
 
-正确性先于速度。越界和竞争可以用 [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) 看。数值对照可以是一小段 CPU 结果，或同一个算子的另一个实现，容差要和 dtype 一起写下来。
+<KeyEq label="单卡的理想时间下界">
 
-### 工具与二进制
+$$
+t\ge\max\left(\frac{F}{\pi},\frac{D}{\beta}\right),\qquad
+P=\frac Ft\le\min(\pi,\beta I).
+$$
 
-Sanitizer、Nsight Systems 与 Nsight Compute 各自回答什么问题，以及观测怎样改变运行，[G4](/gpu/measurement/#从错误检查到-profiler工具分别回答什么) 已经分开讲过。这里只补一项：CUDA C++ 先变成 PTX，再变成目标 GPU 的机器码。PTX 的语义在 [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html)，`cuobjdump` 和 `nvdisasm` 用来查看二进制里实际生成了什么，说明见 [CUDA Binary Utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html)。它用来核对“我以为会发出 Tensor Core 指令”这件事，不代替时间线。编译选项、架构代号和输入形状都会改变产物，所以它们属于上面的记录项。
+</KeyEq>
 
-### 一次只改一个量
+两个时间取**较大值**，因为理想设备可以重叠计算与搬运；将二者相加不是通用下界。两项相等时的强度叫脊点：$I_{\mathrm{ridge}}=\pi/\beta=989.5/3.35\approx295.37$ FLOP/byte。低于脊点，带宽给出的吞吐上限更紧；高于脊点，计算峰值更紧。它是上限的分类，不是对实测瓶颈的诊断。
 
-一次实验里同时改 tile、dtype 和启动方式，快了也无法知道是哪一项生效。可执行的循环是：用屋顶线的下界写下预期站在斜线还是平台，用时间线确认时间是否真在那个 kernel 里，只改一个结构，再测端到端的 TTFT 或 TPOT。Kernel 内部变快，而端到端不变，通常说明空档在别处。
+<Figure src="infra/04-roofline.svg" alt="H100 SXM 的理论屋顶线在约 295 FLOP/byte 转平，1 与 4 FLOP/byte 两点位于放大的带宽斜线上">主图的脊点约为 295；右侧放大 0–10 FLOP/byte，才能看清 S1 中单请求线性层的 1 与 decode 注意力的 4。这两个点是分别计费的子计算，不代表整步 decode 的强度。</Figure>
 
-## CPU 核对：屋顶线计算不是实测性能
+## 一次 decode：把线性层与 KV 放进同一张账
 
-[S1 的验证脚本](/systems/ledger/) 同时核对本章的两个数：989.5 TFLOP/s 除以 3.35 TB/s 得到约 295.37 FLOP/byte 的脊点；强度为 4 时，理想带宽上限是 13.4 TFLOP/s。脚本只做单位与算式验证，不加载 GPU，也不将这条理论线当成真实 kernel 测量。
+沿用 S1 的 Llama 3 8B 公开形状、bf16 权重、batch size $B=1$、KV 长度 $T=8192$。S1 算出本步实际执行的稠密矩阵权重数 $N_{\mathrm{linear}}=7504658432$，其中包含输出头；词 embedding 只查一行。总参数 $8030261248$ 用于常驻容量，不能全按矩阵乘读一次。假设线性权重从 HBM 各读一次，而本步注意力读完已有 KV，得到：
 
-<CodeFile path="code/systems/ledger.py" />
+| 账目 | 运算量 $F$ | HBM 字节 $D$ | 强度 $F/D$ |
+| --- | ---: | ---: | ---: |
+| 稠密线性层 | $2N_{\mathrm{linear}}=15.009$ GFLOP | $2N_{\mathrm{linear}}=15.009$ GB | 1 FLOP/byte |
+| 32 层 decode 注意力的 $QK^\top$ 与 $AV$ | $2^{32}=4.295$ GFLOP | KV 为 $2^{30}=1.074$ GB | 4 FLOP/byte |
+| 两项合计 | 19.304 GFLOP | 16.083 GB | 约 1.20 FLOP/byte |
+
+第三行才是这一份**简化账单**的合计强度。它仍远低于 295.37，所以按规格计算的带宽上限为 $3.35\times1.20\approx4.02$ TFLOP/s，时间下界是
+
+$$
+t_{\mathrm{decode}}\ge
+\max\left(\frac{19.304\times10^9}{989.5\times10^{12}},
+\frac{16.083\times10^9}{3.35\times10^{12}}\right)
+\approx4.80\ \mathrm{ms}.
+$$
+
+第一项只有约 $0.020$ ms。这个 4.80 ms 是本模型、单请求、假定数据都从 HBM 读且达到标称带宽时的**必要数据搬运时间**；不能写成“这张卡每 token 实测 4.80 ms”。实际还要执行 norm、RoPE、softmax、采样、kernel 发射和缓存写入。若数据命中 L2，实际 HBM 字节会改变；若批中多条请求共用一次权重读取，权重项也会被摊薄。应重新计数后再应用公式。
+
+## 同一模型的 prefill：权重复用改写强度
+
+仍用这条 8192 token 提示，但假设推理执行器**只对最后一个位置计算输出头**。S1 的层内权重为 $N_{\mathrm{blocks}}=6979321856$，输出头为 $N_{\mathrm{head}}=525336576$，所以线性层运算量是
+
+$$
+F_{\mathrm{linear,prefill}}=2T N_{\mathrm{blocks}}+2N_{\mathrm{head}}
+\approx114.35\ \mathrm{TFLOP}.
+$$
+
+这里不能用 $2T N_{\mathrm{linear}}$：那会把只在末位置执行的输出头乘上 8192。若 causal attention 的实现跳过未来位置，其 $QK^\top$ 与 $AV$ 主项约为 $2n_{\mathrm{layers}}dT(T+1)=17.59$ TFLOP；若按完整方阵执行，则约 35.18 TFLOP。前一种理想计算时间下界为 $(114.35+17.59)/989.5\approx0.133$ s。
+
+Prefill 把许多位置一起交给大矩阵乘，让同一块层权重服务更多输入，因而**有机会**比 decode 更接近计算平台。但 $0.133$ s 只是用全部 FLOP 和 FP16 Tensor Core 峰值相除；它并未计算 prefill 的全部 HBM 流量，不能单凭这一个数断言整段 prefill 已经计算受限，更不能当作 TTFT。是否真正使用 Tensor Core、因果 tile 是否跳过、激活的读写和实际执行时间都需测量。
+
+## 优化应改变哪一项账目
+
+[G3](/gpu/kernel-design/) 已推导分块与融合。放在本章的负载里，它们分别改变以下条件：
+
+| 做法 | 期望改变 | 需要检查的代价 |
+| --- | --- | --- |
+矩阵乘分块 | 一块权重或激活进片上后服务更多乘加，减少 HBM 重读 | tile 太大可能占满寄存器/shared memory，使可同时运行的 block 变少 |
+融合中间步骤 | 少写回、少读回临时张量，并可能少一次 kernel 发射 | 寄存器压力、计算顺序与数值误差可能变化 |
+批量 decode | 多个新 token 共用一次权重读取 | 每条请求的 KV 仍要分别读取，容量与延迟也随并发变化 |
+Tensor Core 路径 | 提高适配矩阵乘的实际计算吞吐 | 规格峰值不适用于任意元素级 kernel；dtype、形状与指令路径要核对 |
+
+例如，单请求 decode 的线性层即使把内部 tile 做得更好，也无法让一份权重凭空服务更多请求。反过来，长提示 prefill 的矩阵乘已经有跨位置复用，只盯着降低权重字节可能错过计算效率。下一章 [S3 FlashAttention](/systems/flash-attention/) 将以注意力为例：不物化完整的 $T\times T$ 分数，减少中间数据的显存往返。省了逻辑字节并不保证端到端速度按同一比例上升。
+
+## 从理论下界到可比较的测量
+
+先固定同一 checkpoint、GPU 形态、dtype、提示和输出长度、batch、框架与 kernel 版本。预热后分开记录 prefill、稳态 decode、端到端 TTFT 与输出间隔；GPU 异步运行，计时区间必须同步或用设备事件。对照输出要在约定的 dtype 容差内一致。[G4](/gpu/measurement/) 给出具体计时和 profiler 用法。
+
+想检验“单请求 decode 主要受 HBM 搬运限制”，先记录实际 HBM 读写字节与 kernel 时间，再计算 $F/t$ 和 $D/t$。若时间主要落在 kernel 之间的发射空档，改内核带宽不会等比例改善用户延迟。若同一个 kernel 的实际 HBM 字节明显高于账单，应查重复读取、临时张量或内存访问；明显低于账单，应查缓存命中和测量范围。然后只改一个结构，重新测相同请求分布。
+
+三个常被混在一起的指标回答不同问题：**occupancy** 是 SM 上活跃 warp 相对其可驻留上限的比例；**GPU utilization** 常反映采样区间内 GPU 是否有任务活动；**屋顶线达成率** 才把同一边界的实测速率 $F/t$ 与 $\min(\pi,\beta I)$ 比较。前两个高，不说明 Tensor Core 峰值或 HBM 峰值已接近；达成率使用实际 HBM 字节与对应的 FLOP 计数，不能把上表的简化逻辑字节当作 profiler 读数。[NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#bandwidth) 也区分理论带宽、有效带宽和实际搬运。
+
+## 用脚本核对单位与下界
+
+下面的 CPU 脚本从 S1 的模型形状重新计算线性权重、KV、decode 合计和 prefill 主项，再检查脊点与时间下界。它没有运行 GPU，输出绝不是性能测量。
+
+<CodeFile path="code/systems/accelerator.py" />
 
 ## 练习与核对
 
 <details>
-<summary>1. 只看线性层、忽略 KV，8B 模型的 decode 批大小要到多少，才碰到 H100 SXM 的脊点？</summary>
+<summary>只看同一模型的线性层，把 decode 的 batch size 改为 8，且一份权重仍只从 HBM 读一次。强度和带宽上限是多少？</summary>
 
-线性层理想强度等于批大小 $B$，脊点约 295 FLOP/byte，所以 $B\approx295$。实际上远在这之前 KV 就会进入分母：[S1](/systems/ledger/) 的练习按实际线性矩阵计费后，16 条 8192 token 请求时强度只剩约 7.46，长上下文的 decode 很难靠增大批大小走到平台上。
-
-</details>
-
-<details>
-<summary>2. 一个 kernel 的强度是 8 FLOP/byte，在 H100 SXM 上它的上限是多少？该先优化什么？</summary>
-
-$8\times3.35=26.8$ TFLOP/s，约为平台的 2.7%，仍在带宽斜线上。先减少 HBM 字节——复用 tile、融合掉中间张量、降低数据位宽——而不是调算力相关的参数。
+运算量变为 $2N_{\mathrm{linear}}\times8$，权重字节仍为 $2N_{\mathrm{linear}}$，所以强度为 8 FLOP/byte，带宽上限 $8\times3.35=26.8$ TFLOP/s。这个计算故意只看线性层；若加上 8 条请求各自的 KV，强度会下降，不能把 26.8 当作整步 decode 的上限。
 
 </details>
 
 <details>
-<summary>3. 把 tile 大小和 dtype 同时改掉，端到端快了 20%。这个结论能写进报告吗？</summary>
+<summary>如果一个算子的实测执行时间为 6 ms，而规格给出的计算下界为 1 ms、搬运下界为 4 ms，能断言它已打满 HBM 带宽吗？</summary>
 
-只能写“两处改动合起来快了 20%”，不能归因给其中任何一项：dtype 改变了字节数和可用的 Tensor Core 指令，tile 改变了复用和占用率，二者的效果可能互相抵消或叠加。还要确认正确性对照在新 dtype 下仍在容差内，否则比较的是另一个计算。
+不能。理论下界是 $\max(1,4)=4$ ms，6 ms 只说明还有至少 2 ms 没被这个理想模型解释。实际 HBM 字节、带宽利用、发射空档、同步和形状效率都可能改变判断；必须在相同计时边界下测字节与时间。
 
 </details>
 
-下一章 [S3 FlashAttention](/systems/flash-attention/) 从一行 softmax 开始推导怎样通过在线合并减少中间矩阵的显存往返。
+<details>
+<summary>Prefill 的输出头若改为每个位置都计算 logits，哪项公式变了？</summary>
 
-## 引用与边界
+线性主项从 $2TN_{\mathrm{blocks}}+2N_{\mathrm{head}}$ 变成 $2T(N_{\mathrm{blocks}}+N_{\mathrm{head}})$；注意力的 $T(T+1)$ 项不因这个选择改变。训练或逐位置评估可能需要全部 logits，生成首 token 的执行器则可以只投影最后位置。两种策略不能共用同一个 FLOP 账单。
 
-| 用到的内容 | 出处 | 本页的处理 |
-| --- | --- | --- |
-| 加速器在算力、带宽、容量之间取舍 | [AI Infra Book，加速器架构](https://bojieli.github.io/ai-infra-book/manuscripts/04-%E5%8A%A0%E9%80%9F%E5%99%A8%E6%9E%B6%E6%9E%84.html) | 用一张公开规格把取舍算成脊点 |
-| 屋顶线 | [CACM 2009](https://dl.acm.org/doi/10.1145/1498765.1498785) | 只使用两条上限和脊点 |
-| H100 SXM 的带宽与 FP16 Tensor Core | [H100 产品页](https://www.nvidia.com/en-us/data-center/h100/)，2026-09-22 | 稠密峰值按稀疏数字的一半 |
-| 融合、复用、运行时开销 | [AI Infra Book，算子与运行时](https://bojieli.github.io/ai-infra-book/manuscripts/05-%E7%AE%97%E5%AD%90%E4%B8%8E%E8%BF%90%E8%A1%8C%E6%97%B6.html) | 收成「少读、少写回」与两种测量镜头 |
-| 矩阵乘、Tensor Core、Triton、CUTLASS、Nsight、Sanitizer | [Wafer 的 kernel、编程模型与 profiling 各节](https://github.com/wafer-ai/gpu-perf-engineering-resources#2-kernel-optimization) | 保留选择标准，索引到厂商文档 |
+</details>
 
-屋顶线假设这次计算能碰到峰值；真实 kernel 还受 tile 形状、占用率和启动开销限制，测出来的点通常在线的下方。图和伪代码省略了边界、异步拷贝和双缓冲，它们决定生产 kernel 能不能把计算和搬运重叠起来。本页不附带某次 nsys 或 ncu 的导出文件；没有那份导出，时间线图里的格子就只是时间形状，不是性能数据。
+## 原始资料与边界
+
+- [NVIDIA H100 产品规格](https://www.nvidia.com/en-us/data-center/h100/)：2026-09-28 核对 H100 SXM 一列及稀疏算力脚注；算力半值为本页稠密计算假设。
+- [Roofline 原论文](https://dl.acm.org/doi/10.1145/1498765.1498785)：用算术强度比较计算与带宽上限。
+- [NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)：区分理论带宽、有效带宽及访存优化；数值核对不能替代设备 profiler。
+
+本页没有 H100 实测记录；图线、脚本和毫秒数只是在明确假设下的理论账单。遇到量化权重、不同缓存命中率、另一种硬件或不同输出头执行策略时，先重算 $F$ 与实际层级的 $D$，再讨论优化。

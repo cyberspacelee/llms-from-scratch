@@ -56,6 +56,16 @@ def roofline(intensity, peak_flops, bandwidth):
 
 def demo():
     rng = np.random.default_rng(7)
+    rows = np.arange(5)[:, None]
+    inner = np.arange(7)
+    cols = np.arange(6)[None, :]
+    a = rows + inner + 1
+    b = inner[:, None] - cols
+    assert sum(a[0, q] * b[q, 0] for q in range(4)) == 20
+    assert sum(a[0, q] * b[q, 0] for q in range(4, 7)) == 92
+    assert tiled_gemm(a, b, 4)[0, 0] == 112
+    np.testing.assert_allclose(tiled_gemm(a, b, 4), a @ b)
+    assert 5 * 7 * ((6 + 3) // 4) + 7 * 6 * ((5 + 3) // 4) == 154
     x = np.array([[1000., 1001., 1002.], [-2., 0., 2.], [1., 2., 3.]])
     mask = np.array([[True, True, True], [True, False, True], [False, False, False]])
     y = stable_softmax(x, mask)

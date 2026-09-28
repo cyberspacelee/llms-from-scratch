@@ -7,14 +7,15 @@ def main():
     configure()
     rng = np.random.default_rng(42)
     batch_sizes = np.array([1, 4, 16, 64])
-    measured = [rng.normal(size=(20000, int(b))).mean(axis=1).std()
+    losses = np.array([1., 1., 1., 5.])
+    measured = [rng.choice(losses, size=(20000, int(b))).mean(axis=1).std()
                 for b in batch_sizes]
     fig, ax = plt.subplots(figsize=(8, 4.6), layout="constrained")
     grid = np.linspace(1, 64, 400)
-    ax.plot(grid, 1 / np.sqrt(grid), color=GREEN, label=r"理论值 $1/\sqrt{B}$")
+    ax.plot(grid, np.sqrt(3 / grid), color=GREEN, label=r"理论值 $\sqrt{3/B}$")
     ax.scatter(batch_sizes, measured, color=ORANGE, zorder=3, label="20,000 个独立小批量的测量值")
-    ax.set(xlabel="批大小 B", ylabel="样本均值的标准差",
-           title="独立采样：批大小乘 4，均值标准差减半", xlim=(0, 66), ylim=(0, 1.08))
+    ax.set(xlabel="batch size B", ylabel="batch 均值的标准差",
+           title="从 1、1、1、5 独立有放回抽样", xlim=(0, 66), ylim=(0, 1.85))
     ax.legend()
     ax.grid(alpha=0.15)
     save(fig, "probability-batch.svg")

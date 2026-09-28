@@ -1,64 +1,83 @@
-"""CPU float64 tensor contracts: aliases, strides, axis layout and indexing."""
+"""Verify one sequence's tensor storage and multi-head axis contract on CPU."""
 import numpy as np
 import torch
 
 
 def main():
-    source = np.arange(6, dtype=np.float64).reshape(2, 3)
-    shared = torch.from_numpy(source)
-    converted = torch.as_tensor(source)
-    copied = torch.tensor(source)
-    shared[0, 1] = 20
-    assert source[0, 1] == converted[0, 1].item() == 20
-    assert copied[0, 1].item() == 1
-    assert shared.dtype == torch.float64 and shared.device.type == 'cpu'
+    a = np.arange(6, dtype=np.float64).reshape(2, 3)
+    shared = torch.from_numpy(a)
+    snapshot = torch.tensor(a)
+    shared[0, 1] = 9
+    assert a[0, 1] == 9 and snapshot[0, 1].item() == 1
+    a[0, 1] = 1
+    assert torch.as_tensor(a).data_ptr() == shared.data_ptr()
+    assert shared.dtype == torch.float64 and shared.device.type == "cpu"
     assert shared.to(dtype=torch.float64) is shared
     assert shared.to(copy=True).data_ptr() != shared.data_ptr()
-    assert torch.as_tensor(source, dtype=torch.float32).data_ptr() != shared.data_ptr()
+    assert torch.as_tensor(a, dtype=torch.float32).dtype == torch.float32
 
-    x = torch.arange(6, dtype=torch.float64).reshape(2, 3)
-    assert x.stride() == (3, 1)
-    sliced = x[:, 1:]
+    x3 = shared.unsqueeze(0)
+    assert x3.shape == (1, 2, 3) and x3.data_ptr() == shared.data_ptr()
+    zero = torch.zeros((1, 2, 1), dtype=x3.dtype, device=x3.device)
+    x = torch.cat([x3, zero], dim=-1)
+    assert x.tolist() == [[[0., 1., 2., 0.], [3., 4., 5., 0.]]]
+    assert x.data_ptr() != shared.data_ptr()
+    assert x.stride() == (8, 4, 1)
+
+    by_position = x.reshape(1, 2, 2, 2)
+    q = by_position.permute(0, 2, 1, 3)
+    assert by_position.stride() == (8, 4, 2, 1)
+    assert q.stride() == (8, 2, 4, 1)
+    assert q[0, 1, 1, 0].item() == x[0, 1, 2].item() == 5
+    assert q.data_ptr() == x.data_ptr()
+    assert torch.equal(q.permute(0, 2, 1, 3).reshape(1, 2, 4), x)
+    assert not torch.equal(q.reshape(1, 2, 4), x)
+    assert q.reshape(1, 2, 4)[0, 1].tolist() == [2., 0., 5., 0.]
+
+    scores = q @ q.transpose(-2, -1) / (2 ** 0.5)
+    assert scores.shape == (1, 2, 2, 2)
+    future = torch.triu(torch.ones((2, 2), dtype=torch.bool), diagonal=1)
+    weights = scores.masked_fill(future, -torch.inf).softmax(dim=-1)
+    assert torch.all(weights[..., 0, 1] == 0)
+    assert torch.allclose(weights.sum(dim=-1), torch.ones((1, 2, 2), dtype=x.dtype))
+    context = weights @ q
+    restored = context.permute(0, 2, 1, 3).reshape(1, 2, 4)
+    assert restored.shape == x.shape
+    assert torch.allclose(restored[0, 0], x[0, 0])
+    key_index = torch.zeros((1, 2, 2, 1), dtype=torch.long)
+    first = weights.gather(-1, key_index)
+    assert first.shape == (1, 2, 2, 1)
+    assert torch.equal(first[..., 0], weights[..., 0])
+
+    # Unequal axis lengths expose swaps hidden by the 2-by-2 teaching example.
+    unequal = torch.arange(12, dtype=torch.float64).reshape(1, 3, 4)
+    heads = unequal.reshape(1, 3, 2, 2).permute(0, 2, 1, 3)
+    assert heads.shape == (1, 2, 3, 2)
+    assert heads[0, 1, 2, 0].item() == unequal[0, 2, 2].item() == 10
+    assert torch.equal(heads.permute(0, 2, 1, 3).reshape(1, 3, 4), unequal)
+
+    sliced = shared[:, 1:]
     assert sliced.shape == (2, 2) and sliced.stride() == (3, 1)
     assert sliced.storage_offset() == 1 and sliced[1, 1].item() == 5
-    transposed = x.transpose(0, 1)
-    assert transposed.shape == (3, 2) and transposed.stride() == (1, 3)
-    assert not transposed.is_contiguous()
+    transposed = shared.T
+    assert transposed.stride() == (1, 3) and not transposed.is_contiguous()
     try:
         transposed.view(6)
     except RuntimeError:
         pass
     else:
-        raise AssertionError('Non-compatible strides unexpectedly flattened with view')
-    flattened = transposed.reshape(6)
-    assert flattened.tolist() == [0, 3, 1, 4, 2, 5]
-    assert flattened.data_ptr() != x.data_ptr()
-    assert x.contiguous() is x
-    assert transposed.contiguous().stride() == (2, 1)
+        raise AssertionError("The transposed layout should not flatten as a view")
+    assert transposed.reshape(6).tolist() == [0., 3., 1., 4., 2., 5.]
 
-    states = torch.arange(24, dtype=torch.float64).reshape(1, 3, 2, 4)
-    heads = states.permute(0, 2, 1, 3)
-    assert heads.shape == (1, 2, 3, 4) and heads.stride() == (24, 4, 8, 1)
-    assert heads[0, 1, 2, 3] == states[0, 2, 1, 3] == 23
-    assert torch.equal(heads.permute(0, 2, 1, 3).reshape(1, 3, 8), states.reshape(1, 3, 8))
-    assert states.squeeze().shape == (3, 2, 4)
-    assert states.squeeze(0).unsqueeze(0).shape == states.shape
     base = torch.tensor([[1., 2., 3.]], dtype=torch.float64)
-    expanded, repeated = base.expand(2, 3), base.repeat(2, 1)
-    assert expanded.stride() == (0, 1) and expanded.data_ptr() == base.data_ptr()
-    assert repeated.data_ptr() != base.data_ptr()
+    expanded = base.expand(2, 3)
+    repeated = base.repeat(2, 1)
+    assert expanded.stride() == (0, 1)
     base[0, 0] = 9
-    assert expanded[1, 0] == 9 and repeated[1, 0] == 1
-    assert torch.cat([base, base], dim=0).shape == (2, 3)
-    assert torch.stack([base, base], dim=0).shape == (2, 1, 3)
-
-    scores = torch.tensor([[10., 20., 30.], [40., 50., 60.]], dtype=torch.float64)
-    index = torch.tensor([[2, 0], [1, 1]], dtype=torch.long)
-    assert scores.gather(1, index).tolist() == [[30, 10], [50, 50]]
-    masked = scores.masked_fill(torch.tensor([[False, True, False]]), -torch.inf)
-    assert torch.isneginf(masked[:, 1]).all() and torch.isfinite(scores).all()
-    print(f'torch_tensors: aliases, strides, B/T/head layout, gather/mask OK (torch {torch.__version__})')
+    assert expanded[1, 0].item() == 9 and repeated[1, 0].item() == 1
+    assert torch.stack([base, base]).shape == (2, 1, 3)
+    print(f"torch_tensors: shared storage, head axes, causal mask, gather OK (torch {torch.__version__})")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

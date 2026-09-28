@@ -1,291 +1,177 @@
 ---
-title: 怎样测量与优化 GPU
-question: 更高 occupancy 和更多 stream 为什么不一定更快，怎样得到可信的时间
-description: 从等待内存的 warp 进入资源驻留，再用 stream 与 event 建立依赖，区分提交、GPU 区间和端到端计时，最后用 Sanitizer 与 Nsight 检验一次优化。
+title: 怎样测量 GPU kernel
+question: 同一矩阵乘改大 tile 后，怎样判断它是否真的更快
+description: 沿 G3 的分块矩阵乘，核算驻留资源、stream 依赖和计时区间，再用正确性检查与 profiler 解释一次性能差异。
 order: 4
 code:
   - code/gpu/measurement.py
+  - code/gpu/examples/event_timing.py
   - code/gpu/model_profile.py
 ---
 
 import OccupancyLab from '../../../components/labs/OccupancyLab'
 import StreamTimelineLab from '../../../components/labs/StreamTimelineLab'
 
-沿着 [G1](/gpu/execution-model/) 的线程分工、[G2](/gpu/memory-and-sync/) 的同步和 [G3](/gpu/kernel-design/) 的分块矩阵乘，已经可以写出两个都算对的版本：一个使用更大的 tile，另一个启动更多 block。更大的 tile 可能减少搬运，也可能占用更多寄存器，使 SM 上能同时驻留的 warp 变少。仅凭线程数无法决定保留哪个版本。
+[G3](/gpu/kernel-design/) 用共享内存分块计算 $C=AB$。它证明了分块能复用输入，却没有证明 tile 越大越快。本章始终比较**同一个**连续 float32 矩阵乘：A、B、C 都是 $1024\times1024$，先考虑 G3 CUDA kernel 的 $t=16$，再考虑只改变 tile 边长的 $t=32$ 候选。仓库的 CUDA 示例只实现并验证了 $t=16$，下文对 $t=32$ 的资源分析是待设备实验检验的预测。两者必须输出同一个 C，使用同一设备、编译选项和计时区间。没有 GPU 时，我们只核对资源与依赖的教学模型，不给出虚构的加速比。
 
-先计算资源限制，分清驻留的线程与可以发射的指令；再检查哪些操作能够重叠、哪些必须等待；最后确认计时区间和测量工具的影响。选择实现仍要依据真实 GPU 上的结果。
+先修是 [G1 的 block/warp](/gpu/execution-model/)、[G2 的 shared memory 与屏障](/gpu/memory-and-sync/) 和 [G3 的 tile](/gpu/kernel-design/#一个-tile-怎样累计沿-k-分段复用输入)。读完后，应能解释：大 tile 少搬了哪些逻辑数据，又多占了哪些资源；两个 kernel 能否并发；一个时间数字究竟包住了哪些工作。
 
-这里的驻留与时间线实验是可手算的教学模型。它们没有调用你的显卡，也不会根据动画给出某款设备的吞吐。配套 CPU 脚本核对模型算术；可选 GPU 脚本才记录 CUDA event 时间。屋顶线的定义见 [G3](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)，具体硬件的峰值读取与 LLM 负载的位置在 [S2 单卡的上限](/systems/accelerator/)；本章讨论怎样把一次实际运行与这些上限比较。
+## 从 G3 的 tile 得到一个待检验的假设
 
-## 延迟与吞吐：等待时还可以让谁执行
+G3 的教学映射让一个 thread 累计一个输出。每次沿 K 前进 $t$，一个 block 读 A、B 各 $t^2$ 个 float32，在这些值上做约 $t^3$ 次乘加。只算输入读取，局部算术强度为 $2t^3/(2t^2\cdot4)=t/4$ FLOP/byte。$t=16$ 是 4，$t=32$ 是 8。后者让一份输入在 block 内服务更多乘加，所以有理由试它。
 
-延迟（latency）是某一次操作从开始到完成的时间。吞吐（throughput）是单位时间完成的操作或处理的数据量。读一个不在缓存中的值可能要等一段时间；有很多可运行的 warp 时，SM 可以在一个 warp 等待期间发射其他 warp 的指令。这样增加了整体完成工作的密度，但那个读请求本身没有因为换了 warp 就瞬间完成。
+但这个比值不计输出、边缘补零、跨 block 的缓存复用，也不是 HBM 计数器读数。对本例，两个版本的数学运算量同为 $2MNK=2\cdot1024^3\approx2.15$ GFLOP。若只按每个 block 从 global memory 请求的输入元素计，且忽略缓存命中，$t=16$ 约请求 $2MNK/t=134{,}217{,}728$ 个 float32，$t=32$ 约为其一半；两个版本都另外写 $MN$ 个 C 元素。相邻 block 可能从 L2 取得数据，所以这些请求数不能直接当成 HBM 字节或预言运行时间。G3 的[屋顶线](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)也只是上界。
 
-设一个教学任务先等 4 个逻辑时间单位，再做 1 个单位的计算。只有一个任务时，完成一次需要 5 单位。若两个任务的等待相互独立，且执行资源允许，可以先让两者都发起等待，再依次执行它们的计算。两个任务的总完成时间可能接近 6，而不是 10。这只是说明重叠如何减少空档；真实延迟、发射宽度和指令依赖需要硬件与工具报告，不能直接套这两个数字。
-
-关键条件是“有其他可运行的工作”。如果后面的指令都依赖刚才的读结果，继续排同一条依赖链不会隐藏等待。同一线程中相互独立的计算提供指令级并行（instruction-level parallelism，ILP）；其他线程或 warp 提供线程级并行。两者都可能减少执行单元空闲，也都可能需要更多寄存器保存中间值。
-
-因此，第一张心智图不是“把更多线程塞进 GPU 就更快”，而是先把线程状态分开：尚未调度的 block 在等待资源；已驻留的 warp 已拥有执行上下文；这些 warp 中又只有一部分具备发射下一条指令的条件。一个 warp 驻留但等待内存时，不能把它当作正在做算术。多个 warp 都在等待同一个瓶颈时，增加数量也不保证增加有效吞吐。
-
-CUDA 的具体 warp 调度、寄存器与共享内存资源随架构变化，定义见 [Advanced Kernel Programming](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html)。程序不能依赖某个 warp 一定先执行。优化可以利用独立工作增加选择机会；正确性仍然由 [G2](/gpu/memory-and-sync/) 的同步与内存访问规则建立。
+这就留下可证伪的问题：**减少请求是否抵过更大 block 的资源代价？** 先算驻留，再在设备上测同一个工作负载。
 
 ## 驻留资源：先算一个 SM 装得下多少 block
 
-占用率（occupancy）通常讨论一个 SM 的活跃 warp 数占最大可驻留 warp 数的比例。这里“活跃”指已经驻留的 warp；它不表示每个周期所有 lane 都在执行，也不等于整张 GPU 的计算单元利用率。理论 occupancy 由资源配置给出，实际运行中采样得到的 achieved occupancy 还受 block 数、尾部工作和任务分布影响。
+Occupancy 指一个 SM 中**已驻留 warp 数**占可驻留 warp 上限的比例。驻留意味着执行上下文已分配，不意味着该 warp 此刻正在发射指令；GPU utilization、算力达成率和 kernel 耗时也不是这个比例。一个 warp 等待内存时，另一个可运行 warp 可能填补空档，因此驻留资源值得算，但它不是优化目标本身。
 
-先做一个刻意简化的资源账。假设某个教学 SM 可驻留 64 个 warp，拥有 65,536 个 32-bit 寄存器和 96 KiB shared memory，block 数上限为 32。这些是用来手算的参数，不是本章推荐显卡的规格。设一个 block 有 $n_{\mathrm{th}}$ 个线程，每线程使用 $r$ 个寄存器，每块 shared memory 使用 $s$ 字节。
+用一台**假想** SM 手算：最多 64 个 warp、65,536 个寄存器、96 KiB shared memory、32 个 block。假定两个版本编译后都使用每 thread 32 个寄存器。G3 的两份 float32 输入 tile 共占每 block $8t^2$ 字节。
 
-每块所需的 warp 数为
+| 资源账 | $t=16$ | $t=32$ |
+| --- | ---: | ---: |
+| Threads / warps per block | 256 / 8 | 1024 / 32 |
+| Registers per block，按假设 | 8192 | 32768 |
+| Shared memory per block | 2 KiB | 8 KiB |
+| Warp 上限允许的 block | 8 | 2 |
+| 寄存器上限允许的 block | 8 | 2 |
+| Shared 上限允许的 block | 48 | 12 |
+| 最终驻留 block / warp | 8 / 64 | 2 / 64 |
 
+同样是理论 occupancy 100%，大 tile 每 SM 却只有两个独立 block；若 grid 很小或某块结束较晚，尾部工作可能让更多 SM 空闲。若 $t=32$ 的实际编译结果是每 thread 64 个寄存器，寄存器上限就只容一个 block，理论 occupancy 降至 50%。降低寄存器数可能引入 spill 到 local memory；这些情况都不能从源码中一个累计变量的数量推断。
+
+<KeyEq label="教学资源账">
 $$
-w=\left\lceil\frac{n_{\mathrm{th}}}{32}\right\rceil.
+k=\min\!\left(
+\left\lfloor\frac{W_{\max}}{\lceil n_{\mathrm{th}}/32\rceil}\right\rfloor,
+\left\lfloor\frac{R}{n_{\mathrm{th}}r}\right\rfloor,
+\left\lfloor\frac{S}{s}\right\rfloor,
+K_{\max}\right),
+\qquad
+\rho=\frac{k\lceil n_{\mathrm{th}}/32\rceil}{W_{\max}}.
 $$
-
-末尾不完整 warp 仍占一个 warp 的分组。为了让接下来的账容易看清，先取 $n_{\mathrm{th}}=256$，所以 $w=8$。每线程 32 个寄存器意味着每块需要 $256\times32=8192$ 个寄存器。每块再用 16 KiB shared memory。
-
-四条限制分别给出：warp 容量允许 $64/8=8$ 块，寄存器允许 $65536/8192=8$ 块，shared memory 允许 $96/16=6$ 块，block 数允许 32 块。一个 block 同时消耗这些资源，因此能驻留的块数取最小值，得到 6。对应 48 个 warp，教学模型的理论 occupancy 是 $48/64=75\%$。
-
-<KeyEq label="教学资源上界">
-
-$$
-\begin{aligned}
-k&=\min\left(
- \left\lfloor\frac{W_{\max}}w\right\rfloor,
- \left\lfloor\frac{R}{n_{\mathrm{th}}r}\right\rfloor,
- \left\lfloor\frac{S}s\right\rfloor,
- K_{\max}\right),\\
-\rho&=\frac{kw}{W_{\max}}.
-\end{aligned}
-$$
-
 </KeyEq>
 
-其中 $W_{\max}$、$R$、$S$、$K_{\max}$ 分别是 SM 的 warp、寄存器、shared memory 和 block 容量；$k$ 是驻留块数，$\rho$ 是比例。若 $s=0$，shared memory 不提供限制，不做除零；本章程序用 block 上限代替这一项。若某项连一块都容不下，模型给出零，这时配置不能依靠“多等一下”获得空间。
+这里 $n_{\mathrm{th}}$ 是每块 thread 数，$r$ 是每 thread 寄存器数，$s$ 是每块 shared 字节；$W_{\max},R,S,K_{\max}$ 是四种 SM 容量。若 $s=0$，跳过那项除法。某项小于一块时，配置不能驻留。公式只展示约束怎样相交；真实设备还按粒度分配资源，并限制单块 thread、寄存器和 shared 大小。特别是 1024-thread block 并非对所有设备、所有 kernel 都可用。请用编译器报告、设备属性与 [CUDA occupancy API](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__OCCUPANCY.html) 查实际配置。
 
 <OccupancyLab client:visible />
 
-将每块 shared memory 从 16 KiB 改为 32 KiB，另外三条限制不变，shared memory 只容得下 3 块，于是 occupancy 降到 $24/64=37.5\%$。将它恢复到 16 KiB，再把每线程寄存器改成 64，寄存器限制变成 4 块，得到 50%。这些变化不是优化好坏的结论，而是在解释哪个资源先到上限。
+在实验中输入 256 threads、32 registers、2 KiB shared，得到 8 块和 100%；再输入 1024、32、8，得到 2 块和 100%；最后只把后一配置的 registers 改成 64，得到 1 块和 50%。模型没有寄存器分配粒度、spill 和 GPU 时间，不能替你选 tile。延迟是一次操作完成所需时间，吞吐是单位时间完成的工作量；增加可运行 warp 可能提高吞吐，却不会把一次内存请求本身变快。
 
-### 回到分块图：复用增加时哪些资源一起增长
+## Stream 与 event：先保证比较的是同一个计算
 
-[G3 的分块计算与资源生命周期图](/gpu/kernel-design/#逐步读图数据在哪里什么时候可以覆盖) 给出一份 A tile、一份 B tile 的共享存储，以及每个输出的累计槽。对那种一线程一输出的教学映射，边长 $t$ 决定线程数 $n_{\mathrm{th}}=t^2$、shared 用量 $s=8t^2$ 字节和累计槽数 $t^2$；完整内部 tile 的输入算术强度约为 $t/4$ FLOP/byte。这四个量一起变化，不能把 tile 边长只看作数据复用的旋钮。
+为了把两个输入变成适合 GEMM 的布局，假设在 GEMM 前有两个独立准备 kernel：A 处理左输入，B 处理右输入，C 执行分块 GEMM。C 必须等 A 和 B 的结果；A 与 B 可以尝试并发。这三个名字是**同一次矩阵乘的准备与消费阶段**，不是三个互不相关的任务。
 
-例如从 16 改为 32，输入复用的局部强度从 4 增至 8 FLOP/byte，shared 从 2 KiB 增至 8 KiB，线程从 256 增至 1024，累计槽从 256 增至 1024。若仅为手算假定每线程仍用 32 个寄存器，寄存器账从 8192 增至 32768；在上面的教学 SM 容量下，warp 与寄存器限制都从每 SM 八块降为两块。这两个配置的理论 occupancy 都可能达到 100%，却具有完全不同的每块工作与驻留块数，说明 occupancy 单个百分比不足以比较它们。真实设备还必须核对 1024 线程、单块资源上限和分配粒度；这个例子不是建议直接改 kernel 的 TILE。
-
-G3 图中的发布屏障与回收屏障也对应等待：参与线程要等自己的协作组完成装载或消费，增加驻留的其他 warp 可能帮助调度器找到独立工作，但不能让当前 block 跳过正确性所需的屏障。更大的 tile 可能减少 global 读取，却放大每块资源、减少独立协作组；融合又可能提高每线程的暂存需求。优化时应同时检查逻辑流量、编译器寄存器报告、shared 用量、可驻留 block/warp 和 GPU 时间。图中两个输入数组不是双缓冲流水线；若进一步增加缓冲组来重叠装载与计算，还要重新计算 shared 资源和异步依赖。
-
-### 简单除法在哪些地方需要修正
-
-实际 GPU 不是按任意一个寄存器、任意一个字节精确分配资源。寄存器和 shared memory 有分配粒度，线程块还有单块线程数、单块资源量及配置限制。编译器报告的寄存器使用量和程序申请的 shared memory 也可能与纸面变量数不同。我们的交互没有模拟这些架构细节，因此它是上界关系的教学模型，不能替代 CUDA occupancy API。
-
-在 GPU 上，应结合设备属性、编译器资源报告和 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 核对指定 kernel 的驻留数量，再看 Nsight Compute 的实际指标。最大线程数与 warp 容量之间的关系也应从该设备得到，而不是把上面的 64 当作通用常数。详细差异见 [CUDA Best Practices 的 occupancy 讨论](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#occupancy)。
-
-另外，即使一个 SM 理论上能容纳 6 块，整个 grid 只有 2 块，也不可能让很多 SM 同时忙起来。任务数量、尾部块的完成时间和负载均衡是另一层限制。假设八个 SM 都在执行，有的 block 很快完成、有的很慢，最后一段运行可能只剩一小部分 SM 工作。平均指标会把这个尾部阶段计进去，而 launch 配置本身没有变化。
-
-### 更高 occupancy 为什么可能更慢
-
-如果强制每线程少用寄存器，编译器可能把中间值 spill 到线程私有的 local memory，增加存取。一个保留更多寄存器的版本虽然同时驻留的 warp 少一些，却可能减少这种搬运。更大的 tile 同样可能增加 shared memory 使用、降低驻留，同时提高数据复用。是否值得，要同时看等待是否被隐藏、流量是否下降和实际时间是否缩短。
-
-因此，本章不把 occupancy 设成越大越好的优化分数。把 75% 变成 100% 只说明多驻留了一些 warp，不能直接推导吞吐增加三分之一。若已经受算术管线或内存带宽限制，多出的 warp 可能不能增加供给；若它们补上了等待空档，就可能有帮助。读报告时应把 occupancy 与可发射 warp、访存及运行时间一起解释。
-
-## Stream 与 event：把允许的顺序写出来
-
-CUDA stream 可以理解为设备操作的有序队列。同一个 stream 里先提交 A 再提交 C，C 会在 A 之后执行。CPU 可以在提交后继续工作；这种 host/device 异步与队列内部的执行顺序不是矛盾。不同 stream 之间则不能仅根据 CPU 的调用顺序假设依赖，除非相关 API 的特定同步语义提供了保证。
-
-考虑三个 kernel。A 生成一份 C 要读取的数据；B 使用另一份数组，与 A 无数据关系；C 消费 A 的结果，也排在 B 之后。我们希望 B 可以与 A 重叠，同时保证 C 不抢先读取。
-
-若都放一个 stream，A、B、C 依次执行，依赖正确，但没有利用 B 的独立性。若把 A 放 stream 0，B、C 放 stream 1，B 可以独立推进，然而 stream 1 不会自动知道 C 的输入来自 A。应在 A 后记录一个 event，再让 stream 1 在 C 前等待该 event。这是在设备队列之间建立顺序，CPU 不必为这条依赖等待整个 GPU。
+一个 CUDA stream 内的操作按入队顺序执行。放进同一 stream，A、B、C 顺序正确；放进两个 stream，CPU 先提交 A 不等于 B 所在 stream 自动等待 A。若 A 在 stream 0，B 和 C 在 stream 1，须在 A 后记录 event，并在 C 前让 stream 1 等这个 event。B 与 C 本来已有同一 stream 的顺序。跨 stream 的依赖由 event 表达，host 无需为此等待整个 GPU。
 
 <StreamTimelineLab client:visible />
 
-用逻辑时长 A=5、B=3、C=2 手算。同一队列的总时长是 10。在允许 A 与 B 重叠、并建立 event 依赖的模型里，B 在 3 完成，A 在 5 完成，C 从 5 执行到 7。去掉 event，C 会在 B 后于 3 开始，发生提前读。图里更短的“5”不是一个可接受的优化结果：它属于缺少依赖的程序。
+图中的**逻辑时间** A=5、B=3、C=2。单 stream 完成于 10；两个 stream 且有 event 时，C 等到 A、B 都完成，从 5 到 7；删掉 event 时，C 可能从 3 开始读取尚未生成的数据。图上的 5 不是“优化后耗时”，而是错误程序的结束时刻。即使换成 A=3、B=5 后恰好读到正确数据，没有依赖的程序仍会随输入和调度变化而出错。
 
-把 A 改成 3、B 改成 5 后，没有 event 的模型里 C 恰好从 5 开始，看起来没有提前读取。这个程序仍未建立依赖。换一张 GPU、改变输入大小，或 B 的耗时变短，就可能暴露问题。正确性不能建立在两段工作的偶然耗时关系上。
+不同 stream 也不保证物理并发：两个 kernel 可能争用执行单元或带宽。默认 stream 有 legacy 与 per-thread 等语义，实验时显式指定 stream 更容易说清顺序。若在 PyTorch 中让张量跨 stream 使用，还须按其 CUDA allocator 规则维护存储生命周期；event 建立执行顺序，不能独自防止内存过早复用。[CUDA 异步执行文档](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html) 与 [PyTorch CUDA 语义](https://docs.pytorch.org/docs/stable/notes/cuda.html) 给出具体契约。
 
-### 两个 stream 也不承诺同时执行
+## 三种时间：CPU 提交、设备区间、端到端
 
-运行时还要判断资源是否允许重叠。某个 kernel 若占满所需执行资源，另一个 kernel 可能等它结束；独立 kernel 也可能争用同一条带宽。拷贝与计算重叠还受设备能力、传输方向、缓冲区和同步条件影响。涉及主机缓冲区的异步传输通常要考虑 page-locked 内存；换用 pinned memory 同样不保证所有情形都有收益。
+若用 CPU 时钟包住一次异步 kernel 调用，结束时 CPU 可能只完成了提交。开始前同步只能清空旧工作，调用**之后**还要等待完成。对于上面的 A、B、C，有三种正当但不同的问题：
 
-默认 stream 还存在 legacy 与 per-thread 两种语义；普通 stream 与 non-blocking stream 的交互也有具体规则。初学时可以为实验显式创建 stream，并使用 event 表达数据依赖，再回官方文档理解默认流。不要把不同 stream 当成不同显卡，也不要假定一个 stream 独占一个 SM。定义与边界见 [CUDA Asynchronous Execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html)。
+| 要回答的问题 | 计时边界 |
+| --- | --- |
+| GEMM C 自身在设备上的区间 | 与 C 同一 stream 的 start/stop CUDA event，等待 stop |
+| A、B、C 组成的设备工作区间 | 先保证两个 stream 的依赖，正确布置跨 stream 边界并等待最终完成 |
+| 用户从输入到可用 C 的等待 | CPU 时钟包含必要的准备、传输、提交和最终同步 |
 
-在 PyTorch 中管理 stream 时，执行依赖和张量存储生命周期又是两个问题。除了让消费者等待生产完成，还要保证内存不会被 allocator 在另一 stream 仍使用时复用。实际框架代码应按其 stream 与 allocator 接口建立正确的使用契约；把一个 C++ event 例子机械翻成几个 Python 调用，并不能自动处理所有对象生命周期。
+不能把无顺序关系的两个 event 时间戳相减，称为整条跨 stream 链的耗时。event 是进入设备队列的标记；CPU 调用 `record` 的时刻不是该 event 在 GPU 上生效的时刻。下面的图中 event 仅包围 kernel，CPU 端到端边界更宽。
 
-## 测量边界：提交时间、GPU 时间与应用时间
+<Figure src="gpu/measurement-boundaries.svg" alt="CPU 提交与结果等待包住传输和 kernel，设备 event 只包住指定队列中的 kernel">横向长度仅示意边界，不是测得的时间。先决定问题，再放时钟与同步。</Figure>
 
-下面这段 Python 代码为何可能得到非常小的数字？
+第一次运行还可能包含上下文初始化、分配、JIT 编译或库算法选择。要报告稳定的重复 GEMM，先完成这些准备，再预热、同步，并在相同矩阵、dtype、布局、输出分配策略下重复测量。记录至少中位数和样本范围，说明是否复用同一输入；复用可能改变缓存命中。小 kernel 的 event 间隙还可能包含 host 尚未提交下一项工作的空档。
 
-```python
-start = time.perf_counter()
-result = gpu_operation(x)
-elapsed = time.perf_counter() - start
-```
-
-如果 `gpu_operation` 只完成提交，CPU 在 GPU 计算完成前就读了结束时刻。这段代码测到的主要是主机调用与发射开销，并没有测到结果可用的延迟。在调用前插入一次同步，也只能排除已有工作，不能使后面的异步调用自动变成完成等待。
-
-一个可信报告应先写测量问题。只关心 kernel 在 GPU 上的区间，可以用同一 stream 上的两个带计时 event 包围它，等待结束 event 完成，再读取时间差。若关心用户等待结果的时间，要让 CPU 计时包含所需传输、提交、计算和结果等待。若关心一轮服务请求，还应包含调度、排队、采样与协议开销，回读 [S10 服务评估](/systems/serving-evaluation/)。
-
-<Figure src="gpu/measurement-boundaries.svg" alt="CPU 提交、H2D 与 D2H 传输、kernel 以及 event 区间的边界">横向位置表示不同阶段的先后，长度只示意。event 包围 kernel；CPU 端到端计时应从输入所需操作开始，到结果可以安全使用时结束。</Figure>
-
-一个 event 是插入队列的标记，不是 CPU 调用 `record` 时立即读取的设备时钟。它在设备队列运行到该位置时生效。因此记录结束 event 后必须等它完成，才有完整区间。跨 stream 测量还需要建立事件依赖；两个没有顺序关系的标记不能随意相减后当成一个 kernel 的耗时。
-
-即使标记放得正确，短 kernel 也可能受到发射间隙、event 开销和其他任务的干扰。GPU 很快执行了开始标记，但下一项工作尚未提交，区间里可能出现空档。测量不是只调用一个 API 就结束的事情：重复、预热、隔离干扰和固定区间都是为了让数字回答同一个问题。
-
-### 预热与重复：先排除一次性的工作
-
-第一次调用可能包含 CUDA 上下文初始化、内存分配、JIT 编译、库的算法选择或缓存准备。把它和稳定执行混在一起，会把“启动一套程序的代价”与“重复一个算子的代价”混成一个数字。两者都可能值得测量，但要分开报告。使用 Triton 时尤其要交代编译与 autotune 是否纳入时间。
-
-本章的 GPU 示例预先分配输入与输出，执行若干次预热，同步清空已有工作，再为重复加法记录 event。这样回答的是“重复使用已有数组进行向量加法”的区间，不包括 CPU 到 GPU 的数据准备。它另外用 CPU 时钟记录整批提交加最终等待，让你看到设备区间与主机端区间不能简单互换。
-
-除了中位数，脚本输出最小与最大区间。中位数用于减少偶然波动影响，最小值和最大值帮助发现干扰；它们不代替样本分布分析。不同版本比较时，元素数、dtype、stride、预热次数和重复次数应一致。比较小 kernel 时也可以测一批工作总区间，但要说明除以次数得到的是该运行方式下的平均，不能偷偷把批量发射改成每次同步。
-
-### 有效带宽：先定义你数了哪些字节
-
-若向量加法每个元素读两个 float32、写一个 float32，逻辑读写量是每元素 12 字节。用元素数 $N$ 和所测区间 $t$ 秒，定义有效带宽为
-
-$$
-\mathrm{BW}_{\mathrm{eff}}=\frac{12N}{t\times10^9}\quad\mathrm{GB/s}.
-$$
-
-这是一种按算法必须读写的字节计算的速率。它不等于测量了 HBM 物理流量：同一数组反复执行可能命中缓存，实际内存系统也可能搬运未被使用的字节。对于分块与融合，要重新说明逻辑字节怎么数；不能将寄存器复用的每次乘加都当成重新读 HBM。
-
-举一个纯算术核对：若有一百万个元素，逻辑读写量是 12 MB，假设某条记录给出 0.1 ms，则有效带宽为 120 GB/s。这里的 0.1 ms 是演示单位换算的假设，并非本机实测。实际运行脚本才会输出真实时间。GB 使用 $10^9$ 字节，GiB 使用 $2^{30}$ 字节，与规格比较时保持同一单位。
-
-## 从错误检查到 profiler：工具分别回答什么
-
-先检查输入输出。越界读写、未初始化数据或同步错误产生的快速结果没有比较意义；某次测试没崩溃也不是没有错误的证明。对 [G3 的示例](/gpu/kernel-design/) 应使用非整除维度、已知小矩阵与参考实现，先核对所有输出，再运行错误检查工具。
-
-[Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) 提供不同检查器。memcheck 关注内存访问错误；racecheck 检测 shared memory 相关数据竞争危险；initcheck 检测未初始化 global memory 的使用；synccheck 检查同步原语的用法。它们的范围不同，racecheck 不能作为排除了所有跨 block/global memory 竞争的证明。
-
-例如，在有 CUDA 环境时对 G3 的可执行文件执行：
-
-```sh
-compute-sanitizer --tool memcheck ./tiled_gemm
-compute-sanitizer --tool racecheck ./tiled_gemm
-compute-sanitizer --tool initcheck ./tiled_gemm
-compute-sanitizer --tool synccheck ./tiled_gemm
-```
-
-这些命令会改变运行开销。Sanitizer 下的时间用于定位错误，不用来报告正常吞吐。没有报告也只覆盖已执行的输入、路径与工具检测范围，所以还要保留数值对照与边界测试。
-
-### 先看整条时间线，再看单个 kernel
-
-[Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/index.html) 帮你观察 CPU、CUDA 调用、kernel、拷贝和相关事件在时间线上如何排列。若主要空档发生在两次 kernel 之间，先检查主机发射、同步与输入准备；如果 kernel 一直在跑却很慢，再进入 kernel 内部分析。NVTX 可以标记有意义的阶段，但不要为了看清一张图把计时区间本身改变。
-
-[Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html) 进一步观察一个 kernel 的执行资源和内存行为。阅读指标前写下问题，例如“这个 tiled 版本减少了请求字节，为什么时间没有下降？”随后查看寄存器、shared memory、驻留与访存证据，而不是寻找一个看起来漂亮的百分比。
-
-```sh
-nsys profile --trace=cuda,nvtx -o gemm-timeline ./tiled_gemm
-ncu --set basic ./tiled_gemm
-```
-
-工具可能需要系统权限或配置支持，命令选项与指标名也可能随安装版本变化，运行前先用相应 `--help` 核对。保存输入、命令、设备名称、驱动、CUDA/框架版本与原始报告。报告截图应来自真实采集，不能用教学时间线代替。仅对一个微小示例采集报告，也不能代表生产推理引擎的并发行为。
-
-### 观测本身会改变运行
-
-Nsight Compute 为收集多组计数器可能重放 kernel 或应用，并保存、恢复相关内存状态。缓存控制、重放方式与并发环境会影响观测。profiler 运行的整个墙钟时间因此不能替代不带工具的端到端延迟。某个指标要解释的区间与实际计时要比较的区间，应在报告中分别说明。
-
-优化时每次改变一个能解释的因素。固定其他条件后扩大 tile，先确认结果一致，再核对逻辑搬运和资源使用，最后比较重复测量。若改了输入布局、精度和 launch 配置三件事，即使快了，也很难确定收益来自哪里。性能反例同样有价值：它能让你修正“更大 tile 一定更快”这类未经检验的判断。
-
-## 配套代码：模型核对与真实计时分开运行
-
-CPU 脚本只依赖标准库：
-
-```sh
-python code/gpu/measurement.py
-```
-
-它核对 75%、50%、37.5% 三个资源账，shared memory 为零时的处理，一个 block 都放不下的情况，以及有无 event 的两条时间线。输出里的逻辑时间不是 GPU 测量。浏览器交互采用相同参数，输入不同资源容量后可以重新核对。
-
-<CodeFile path="code/gpu/measurement.py" />
-
-可选的实际计时需要 NVIDIA GPU 与 CUDA-enabled PyTorch。CPU 版 PyTorch 或只有驱动、没有可用设备的环境都不能代替。按 PyTorch 官方安装说明选择与设备、驱动相容的安装方式，再运行：
+本仓库现有的可选 [CUDA event 示例](https://docs.pytorch.org/docs/stable/generated/torch.cuda.Event.html)用**预分配的向量加法**单独演示这些计时边界：它报告 event 中位数、最小/最大值以及整批 CPU 提交加等待时间。向量加法不是本节 GEMM 的 tile 对照，也不能拿它的 GB/s 预测矩阵乘。该脚本需要 CUDA-enabled PyTorch 和 NVIDIA GPU：
 
 ```sh
 python code/gpu/examples/event_timing.py --elements 1000003 --warmup 10 --repeats 30
 ```
 
-脚本在启动时检查 CUDA 可用性，记录设备属性和框架版本；在计时外用 CPU 加法参考核对结果。计时里只执行预分配数组的加法，没有 H2D/D2H。元素数为非整除长度，保证不是仅检查一个整齐的教学尺寸。输出含 event 中位数、最小值、最大值、整批 CPU 提交加等待时间和按逻辑字节计算的有效带宽。
-
 <CodeFile path="code/gpu/examples/event_timing.py" />
 
-本仓库这次编写环境没有 CUDA 设备和 `nvcc`，因此没有列出该脚本的 GPU 实测结果。CPU 核对与 GPU 程序能否运行分别验收；脚本源码语法正确也不代表在某张设备上已经测过。读者运行后应连同 JSON 输出和设备信息保存自己的测量记录。
+## 从时间换算速率：先说清分母与分子
 
-## 完整模型：先对齐输出与梯度，再观察执行路径
+若实际测到一次 $1024^3$ GEMM 的设备区间为 $t$ 秒，按每次乘加算 2 FLOP，计算速率是 $2\cdot1024^3/t$ FLOP/s。假设 $t=1$ ms，结果约为 2.15 TFLOP/s；**1 ms 只是单位换算示例，不是本仓库的测量**。如果这次运行涉及 A/B 布局准备，算子速率的分母不能偷偷改用只包住 C 的 event 区间。
 
-`model_profile.py` 使用 [P11](/principles/complete-transformer/) 的同一个现代 LM，比较显式 `QK→mask→softmax→V` 与 PyTorch SDPA。其余投影、RoPE、GQA 映射、归一化与权重完全相同，先核对所有位置 logits 与每个参数梯度，避免把改变结果的版本当作性能优化。
+有效带宽同样要求明确字节口径。G3 两个版本的“逐 block 输入请求”不同，但它们的数学最少输入/输出数组容量相同：A、B 各 4 MiB，C 4 MiB，合计 12 MiB。该容量既不是实际 HBM 流量，也不是 tile 版本的全部 global load 请求。缓存命中、写分配和读放大会使物理计数不同；要判断瓶颈，结合 profiler 的内存指标与[屋顶线模型](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)的相应字节定义。向量加法示例按两个输入读、一个输出写算 12 byte/元素；若一百万元素假设耗时 0.1 ms，逻辑有效带宽是 120 GB/s，依然不是实测 HBM 带宽。
 
-CPU 默认输入为两条长度三十二的序列，float64。profiler 记录形状与内存分配，用 `record_function` 标出两个完整模型区间；先预热，再采集。CPU 时间包含 Python 与主机算子，它只说明本机这组形状的执行，不能代替 GPU event 或服务延迟。profiler 启用形状/内存记录会增加观测成本，采集表不作为稳定基准排行榜。
+## 从错误检查到 profiler：工具分别回答什么
+
+先用 [G3 的 CUDA 程序](/gpu/kernel-design/#验证与边界把三类结论分开)验证 $5\times7$ 乘 $7\times6$、非整除尺寸和整除尺寸。小矩阵暴露越界、边缘补零与同步问题；性能实验再换到固定的 $1024^3$，并比较相同输出与参考实现。float32 累加顺序可不同，所以按 dtype 与 K 长度选择合理容差；不能只看程序没有报错。
+
+```sh
+nvcc -O2 -std=c++17 code/gpu/examples/tiled_gemm.cu -o /tmp/tiled_gemm
+/tmp/tiled_gemm
+compute-sanitizer --tool memcheck /tmp/tiled_gemm
+compute-sanitizer --tool racecheck /tmp/tiled_gemm
+compute-sanitizer --tool synccheck /tmp/tiled_gemm
+```
+
+[Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html) 的 memcheck 看内存访问，racecheck 主要看 shared memory 的数据竞争危险，synccheck 看同步原语，initcheck 可看未初始化 global memory 的使用。它们只检查实际执行的路径与各自覆盖的错误类型；尤其不能将 racecheck 无报告解释为所有跨 block/global 竞争都不存在。Sanitizer 会改变耗时，不能在其中报告正常性能。
+
+正确性通过后，先用 [Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/) 看 CPU 发射、准备 kernel、GEMM、拷贝及空档：慢的是 C，还是 C 前后的排队与提交？若时间集中在 C，再用 [Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/) 查看该 kernel 的寄存器、shared、occupancy、stall 与内存指标，核对“大 tile 减少请求，却可能降低可运行工作”的假设。看到了相关指标，也还需与实际耗时一起解释；occupancy 变高而时间变长可能是 spill 或复用下降。
+
+Nsight Compute 可能为了收集计数器重放 kernel、序列化执行、清理缓存或控制时钟；因此 profiler 下的耗时不必等于正常运行的 event 时间。保留相同输入和采集设置，先用工具定位原因，再回到无 profiler 的计时复测。若问题在请求调度或 CUDA Graph 发射，下一步读 [S6 执行器](/systems/engine-execution/)；若要把实测与设备峰值相比较，读 [S2 单卡的上限](/systems/accelerator/)。
+
+## 本仓库能验证什么
+
+CPU 脚本核对上面的简化资源账、event 依赖时间线和单位换算；它没有读取设备属性，也没有测 GPU：
+
+```sh
+python code/gpu/measurement.py
+```
+
+<CodeFile path="code/gpu/measurement.py" />
+
+### 完整模型：先对齐输出与梯度，再观察执行路径
+
+另一个[完整模型实验](/principles/complete-transformer/)用相同权重比较显式注意力与 PyTorch SDPA，先核对 logits 和梯度，再看 profiler。它回答的是“一个算子选择改变后完整模型如何运行”，不是 $t=16$ 对 $t=32$ 的 GEMM 实验。SDPA 后端随设备、dtype、形状与 mask 改变；若看到融合 kernel，仍不能把完整模型耗时全部归给注意力。无 CUDA 时可运行 CPU 路径：
 
 ```sh
 python code/gpu/model_profile.py
-python code/gpu/model_profile.py --trace model-trace.json
-python code/gpu/model_profile.py --device cuda --trace model-cuda-trace.json
 ```
 
-最后一条需要 CUDA-enabled PyTorch 与 NVIDIA GPU；没有 GPU 时明确报错。CUDA 分支改用 float32，先比较输出与梯度，再对预热后的三十次模型前向记录 event 均值，并报告该区间的 peak allocated 相对基线增量。两个实现都在同一进程保留同一模型，结果无需传回 CPU；因此它是模型设备区间，不是端到端请求测量。
-
-SDPA 根据设备、dtype、形状与 mask 选择可用后端，并不总调用 FlashAttention。即使 profiler 观察到融合内核，完整模型总时间仍包括投影、RoPE、归一化和词表输出；优化一部分不保证总吞吐同比例变化。这里还保留教学 GQA 的临时 KV 展开，不能据此声称测出直接分组内核的显存收益。
-
 <CodeFile path="code/gpu/model_profile.py" />
-
-这份 CPU 核对纳入常规 CI；CUDA 计时只在真实硬件上按上述命令运行。注意力分块的数学依据见 [S3](/systems/flash-attention/)，训练梯度跨 rank 的依据见 [T9](/training/distributed-training/)。
-
-## 常见误区：把一个指标当成所有答案
-
-- **Occupancy 是 GPU 利用率。** 它描述驻留 warp 的比例，不直接描述计算管线每个周期完成了多少工作。
-- **每线程少用寄存器一定更快。** 资源占用可能下降，也可能产生更多 spill 或减少有用的 ILP，需要看整个实现。
-- **两个 stream 就有两倍速度。** 依赖、硬件资源与竞争限制重叠，程序首先要建立正确顺序。
-- **开始前同步一次就够了。** 异步工作之后还必须等待结果或结束 event，否则计时边界仍不完整。
-- **Event 时间就是用户等待时间。** 它只描述标记之间的设备区间；传输、调度和服务协议可能在区间之外。
-- **有效带宽比 HBM 规格高就是测量错误。** 若算法重复访问缓存，逻辑字节速率与物理 HBM 流量并非同一个量，先检查口径。
 
 ## 练习与核对
 
 <details>
-<summary>每块 256 线程、每线程 32 个寄存器、每块 32 KiB shared memory，教学 SM 的 occupancy 是多少？</summary>
+<summary>假想 SM 的 $t=32$ 版本若每 thread 用 64 个寄存器，能驻留几块？能据此断定它比 $t=16$ 慢吗？</summary>
 
-每块 8 个 warp，warp 与寄存器各允许 8 块，shared memory 只允许 $96/32=3$ 块，block 上限允许 32 块。取最小值 3，于是活跃 warp 数为 24，occupancy 为 $24/64=37.5\%$。这只是教学资源账，真实硬件还要计分配粒度与配置限制。
-
+每块 $1024\times64=65536$ 个寄存器，只容 1 块，即 32 个 warp、50% 理论 occupancy。不能断定耗时：它也可能少读数据、提高局部复用。先核对设备限制和编译报告，再测同一 GEMM。
 </details>
 
 <details>
-<summary>A 用 3 单位、B 用 5 单位，没有 event 时 C 恰好在 A 完成后开始，能删除依赖吗？</summary>
+<summary>只把 GEMM 从 $1024^3$ 改成 G3 的 $5\times7$ 乘 $7\times6$，大 tile 仍应减少一半 global 输入请求吗？</summary>
 
-不能。模型里的时长只描述这组参数，而没有 event 的程序缺少生产与消费之间的顺序保证。改用 A=5、B=3 就能得到 C 提前读的反例。应把 event 作为数据依赖，而不是作为某组时长下避免冲突的补丁。
-
+不应。两个尺寸下都只需一个输出 block，输入有效元素只有 $5\cdot7+7\cdot6=77$ 个。更大的 tile 增加无效 thread 和填零位置，无法利用“多个输出 block 重复请求”的那部分收益。算强度时必须重新写明形状与边缘条件。
 </details>
 
 <details>
-<summary>两百万个 float32 元素做向量加法，假设完整区间为 0.2 ms，有效带宽是多少？</summary>
+<summary>A=3、B=5、C=2，两个 stream 不设 event 时 C 恰好等到了 A，还需要依赖吗？</summary>
 
-读两份输入、写一份输出，逻辑字节为 $2000000\times4\times3=24000000$。除以 $0.0002$ 秒和 $10^9$，得到 120 GB/s。这个假设区间只能核对算术，不提供物理 HBM 流量或某张 GPU 的性能证据。
-
+需要。B 的时长可能随输入、设备或争用改变；队列之间没有 A 完成再启动 C 的顺序保证。正确的 event 等待是程序契约，不是根据某组时间补出来的优化。
 </details>
 
 <details>
-<summary>CPU 调用耗时 0.01 ms，event 区间 0.5 ms，哪一个是算子的耗时？</summary>
+<summary>两版的 event 时间分别是 0.8 ms 与 0.7 ms，但端到端请求都为 4 ms，可以写“大 tile 让请求快 12.5%”吗？</summary>
 
-先定义问题。CPU 调用若没有最终等待，0.01 ms 主要是提交时间。event 区间如果正确建立顺序并完成等待，0.5 ms 描述该设备区间。如果用户输入仍在 CPU、结果也要返回 CPU，还要把传输等阶段计入端到端时间，两者都不能直接替代它。
-
+不能。按这组假设数字，C 的设备区间减少 0.1 ms，即相对 0.8 ms 降 12.5%；端到端请求没有变化。应查传输、准备、发射、排队与同步是否主导，且先确认正确性及测量波动。
 </details>
 
-<details>
-<summary>提高理论 occupancy 后实际时间变长，下一步看什么？</summary>
+## 原始资料
 
-确认结果与测量边界一致，然后查看寄存器使用和 spill、shared memory 与访存行为、可运行 warp 和实际驻留。检查是否为提高驻留牺牲了 tile 复用或 ILP，以及工作规模是否足够。提出一个具体解释后，只改变相关因素重新测量，不能仅凭 occupancy 的百分比否定运行结果。
+以下 NVIDIA/PyTorch 官方文档于 2026-09-28 核对。资源容量、A/B/C 逻辑时长、1 ms 与 0.1 ms 都是教学设定，本文没有 GPU 实测结果。
 
-</details>
-
-带着这些边界回读 [S2](/systems/accelerator/) 的硬件上限，再进入 [S3 FlashAttention](/systems/flash-attention/) 与 [S6 GPU 执行器](/systems/engine-execution/)：前者减少注意力的中间流量，后者用 CUDA Graph 减少重复发射开销，它们都仍需满足资源、依赖和正确性约束。
-
-## 原始资料与运行边界
-
-资料读取日期：2026-09-27。驻留参数、逻辑时间和带宽算例为教学设定，不是显卡规格或运行数据。
-
-- [CUDA Advanced Kernel Programming](https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/advanced-kernel-programming.html)：warp 调度、独立执行状态与驻留资源。
-- [CUDA Best Practices](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html)：occupancy、分配粒度、有效带宽与计时。
-- [CUDA Asynchronous Execution](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html)：stream、event、默认流和异步传输。
-- [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)：不同错误检查器的检测范围。
-- [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)：时间线、NVTX 与 CLI。
-- [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)：计数器、重放、缓存控制和指标解释。
-- [PyTorch CUDA Event](https://docs.pytorch.org/docs/stable/generated/torch.cuda.Event.html)、[CUDA semantics](https://docs.pytorch.org/docs/stable/notes/cuda.html)：计时、stream、allocator 与实际脚本使用的接口。
+- [CUDA Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)：occupancy、计时、有效带宽与矩阵乘共享内存。
+- [CUDA Runtime Occupancy API](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__OCCUPANCY.html)：查询特定 kernel 的驻留上限。
+- [CUDA 异步执行](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/asynchronous-execution.html)：stream 和 event 的顺序。
+- [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)、[Nsight Systems](https://docs.nvidia.com/nsight-systems/UserGuide/)、[Nsight Compute](https://docs.nvidia.com/nsight-compute/ProfilingGuide/)：错误检查、时间线与 kernel 指标。
+- [PyTorch CUDA Event](https://docs.pytorch.org/docs/stable/generated/torch.cuda.Event.html)：可选计时脚本使用的接口。

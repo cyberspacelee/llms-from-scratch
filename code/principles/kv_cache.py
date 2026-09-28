@@ -1,4 +1,6 @@
-"""Compare full causal attention with prefill and cached decoding."""
+"""Check one five-token RoPE example and full/cached attention equivalence."""
+
+import math
 
 import torch
 
@@ -30,6 +32,28 @@ def cached_attention(q, k, v, chunks):
 
 
 def verify():
+    # One head, one sequence: BOS/A/B are prefilled, C/D are appended.
+    q = torch.zeros(1, 1, 5, 2, dtype=torch.float64)
+    k = torch.zeros_like(q)
+    v = torch.zeros_like(q)
+    q[..., 0] = k[..., 0] = 1
+    v[0, 0, :, 0] = torch.arange(5, dtype=torch.float64)
+    pos = torch.arange(5)
+    causal = pos[None, :] <= pos[:, None]
+    full = attention(apply_rope(q, pos), apply_rope(k, pos), v, causal)
+    scores_3 = torch.tensor([math.cos(3 - j) / math.sqrt(2) for j in range(4)], dtype=torch.float64)
+    weights_3 = scores_3.softmax(0)
+    expected_3 = (weights_3 * torch.arange(4)).sum()
+    torch.testing.assert_close(full[0, 0, 3, 0], expected_3)
+    torch.testing.assert_close(full, cached_attention(q, k, v, [3, 1, 1]))
+    torch.testing.assert_close(full, cached_attention(q, k, v, [3, 2]))
+    wrong_mask = torch.ones(2, 5, dtype=torch.bool).tril()
+    wrong = attention(apply_rope(q[..., 3:, :], pos[3:]), apply_rope(k, pos), v, wrong_mask)
+    assert not torch.allclose(wrong, full[..., 3:, :])
+    once = apply_rope(k[..., 1:2, :], pos[1:2])
+    assert not torch.allclose(apply_rope(once, pos[1:2]), once)
+    print(f"PASS: five-token example, row 3 output={expected_3:.6f}; rectangular mask error detected")
+
     torch.manual_seed(11)
     q, k, v = [torch.randn(2, 3, 9, 8, dtype=torch.float64) for _ in range(3)]
     pos = torch.arange(9)
@@ -44,11 +68,11 @@ def verify():
     bad = attention(apply_rope(q[..., -1:, :], pos[:1]), apply_rope(k, pos), v)
     assert not torch.allclose(good, bad)
     print("PASS: resetting the decode position is detected as incorrect")
-    model = Decoder(13, width=16, heads=4, ff_width=32, layers=3, max_length=9).double().eval()
-    ids = torch.randint(0, 13, (2, 9))
+    model = Decoder(13, width=16, heads=4, ff_width=32, layers=3, max_length=5).double().eval()
+    ids = torch.tensor([[0, 1, 2, 3, 4], [0, 2, 1, 4, 3]])
     with torch.no_grad():
         expected = model(ids)
-        for chunks in ([9], [1] * 9, [3, 2, 4]):
+        for chunks in ([5], [1] * 5, [3, 1, 1], [3, 2]):
             caches, outputs, offset = None, [], 0
             for size in chunks:
                 logits, caches = model.forward_cached(ids[:, offset:offset + size], caches)
@@ -57,6 +81,24 @@ def verify():
                 assert all(k.shape[-2] == offset for k, v in caches)
             torch.testing.assert_close(torch.cat(outputs, 1), expected, atol=1e-10, rtol=1e-10)
     print("PASS: complete three-layer Decoder cached logits equal full logits")
+
+    # Two windowed layers: a retained upper-layer value can carry evicted input information.
+    tokens = torch.tensor([0., 9., 0., 0., 0., 0.], dtype=torch.float64)
+
+    def window_mean(values):
+        return torch.stack([values[max(0, i - 2):i + 1].mean() for i in range(len(values))])
+
+    full = window_mean(window_mean(tokens))
+    input_cache, first_layer_cache, streamed = [], [], []
+    for token in tokens:
+        input_cache.append(token)
+        first_layer = torch.stack(input_cache[-3:]).mean()
+        first_layer_cache.append(first_layer)
+        streamed.append(torch.stack(first_layer_cache[-3:]).mean())
+    torch.testing.assert_close(torch.stack(streamed), full)
+    torch.testing.assert_close(full[-1], torch.tensor(1., dtype=full.dtype))
+    torch.testing.assert_close(window_mean(window_mean(tokens[-3:]))[-1], torch.tensor(0., dtype=full.dtype))
+    print("PASS: two-layer window cache retains indirect history; truncated-prefix recompute differs")
 
 
 if __name__ == "__main__":

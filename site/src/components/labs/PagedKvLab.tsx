@@ -1,81 +1,44 @@
-import { useId, useState } from 'react'
-import { Arrow, Controls, LabFrame, pen, Range } from './Lab'
+import { useState } from 'react'
+import { Controls, LabFrame, Range, Readout } from './Lab'
 
-const physicalIds = [6, 2, 9, 4]
-const blockSize = 4
+const stages = [
+  { title: 'A 已计算六项', a: [0, 1], b: [] as number[], refs: [1, 1, 0], next: '位置 6 尚未写入' },
+  { title: 'B 共享六项', a: [0, 1], b: [0, 1], refs: [2, 2, 0], next: '共享的尾块 1 还不能直接写' },
+  { title: 'A 写入 7', a: [0, 2], b: [0, 1], refs: [2, 1, 1], next: '复制块 1 → 2；A 写槽 10' },
+  { title: 'B 写入 70', a: [0, 2], b: [0, 1], refs: [2, 1, 1], next: 'B 独占块 1；写槽 6' },
+  { title: 'A 退出', a: [], b: [0, 1], refs: [1, 1, 0], next: '块 2 可回收，B 仍持有块 0、1' },
+  { title: 'B 退出', a: [], b: [], refs: [0, 0, 0], next: '所有块均可回收' },
+]
 
-/** Logical token positions → block_table → flat physical slots. */
+function Blocks({ name, table }: { name: string; table: number[] }) {
+  return (
+    <div className="flex min-h-18 flex-wrap items-center gap-2 border-b border-rule py-3 last:border-0">
+      <strong className="w-5 text-sm">{name}</strong>
+      {table.length ? table.map((physical, logical) => (
+        <div key={logical} className="min-w-30 border border-rule-strong bg-paper px-3 py-2 text-sm">
+          <span className="block text-xs text-muted">逻辑块 {logical}</span>
+          <span className="font-mono">物理块 {physical}</span>
+        </div>
+      )) : <span className="text-sm text-muted">未持有缓存</span>}
+    </div>
+  )
+}
+
 export default function PagedKvLab() {
-  const [length, setLength] = useState(10)
-  const [prefix, setPrefix] = useState(1)
-  const id = useId().replace(/:/g, '')
-
-  const numBlocks = Math.ceil((length + 1) / blockSize)
-  const shared = Math.min(prefix, Math.floor(length / blockSize))
-  const table = physicalIds.slice(0, numBlocks)
-  const nextBlock = Math.floor(length / blockSize)
-  const slot = table[nextBlock] * blockSize + (length % blockSize)
-  const [step, cell] = [180, 36]
+  const [step, setStep] = useState(0)
+  const stage = stages[step]
 
   return (
-    <LabFrame title="逻辑 token → 物理槽位" hint="块大小取 4；绿色首块可以被别的请求共享">
+    <LabFrame title="同一前缀，两个写入位置" hint="教学用标量槽位；块大小为 4">
       <Controls>
-        <Range label="当前序列长度" value={length} min={4} max={15} onChange={setLength} />
-        <Range label="共享的完整前缀块" value={prefix} min={0} max={2} onChange={setPrefix} format={() => String(shared)} />
+        <Range label="操作步骤" value={step} min={0} max={stages.length - 1}
+          onChange={setStep} format={() => stage.title} />
       </Controls>
-      <svg viewBox="0 0 740 320" className={pen.canvas} role="img"
-        aria-label={`block_table [${table.join(', ')}]，下一个 token 写入槽位 ${slot}`}>
-        <defs><Arrow id={`${id}-arrow`} className="fill-info" /></defs>
-        <text x="20" y="24" className="font-semibold">逻辑序列</text>
-        {table.map((physical, block) => {
-          const x = 20 + block * step
-          return (
-            <g key={block}>
-              <text x={x} y={52} className={`${pen.mono} ${pen.muted}`}>logical block {block}</text>
-              {Array.from({ length: blockSize }, (_, offset) => {
-                const position = block * blockSize + offset
-                const isNext = position === length
-                const filled = position < length
-                const fill = isNext ? 'fill-accent2' : filled ? (block < shared ? 'fill-accent' : 'fill-info') : 'fill-sunken'
-                return (
-                  <g key={offset}>
-                    <rect x={x + offset * cell} y={62} width={cell - 4} height={36} rx="3" className={`${fill} stroke-rule-strong`} />
-                    <text x={x + offset * cell + (cell - 4) / 2} y={85} textAnchor="middle"
-                      className={`${pen.mono} ${filled || isNext ? 'fill-paper!' : pen.muted}`}>
-                      {isNext ? 'NEXT' : filled ? position : '·'}
-                    </text>
-                  </g>
-                )
-              })}
-              <path d={`M ${x + 70} 102 C ${x + 70} 140, ${x + 70} 150, ${x + 70} 182`} className="fill-none stroke-info stroke-[1.5]" markerEnd={`url(#${id}-arrow)`} />
-              <text x={x} y={206} className={`${pen.mono} ${pen.muted}`}>physical block {physical}{block < shared ? ' · ref=2' : ''}</text>
-              {Array.from({ length: blockSize }, (_, offset) => (
-                <g key={offset}>
-                  <rect x={x + offset * cell} y={216} width={cell - 4} height={36} rx="3"
-                    className={`${block < shared ? 'fill-accent-soft' : 'fill-sunken'} stroke-rule-strong`} />
-                  <text x={x + offset * cell + (cell - 4) / 2} y={239} textAnchor="middle" className={pen.mono}>
-                    {physical * blockSize + offset}
-                  </text>
-                </g>
-              ))}
-            </g>
-          )
-        })}
-        <text x="20" y="290" className="font-semibold">物理 KV 池</text>
-        <text x="20" y="312" className={pen.muted}>上排数字是 token 的逻辑位置，下排是扁平的物理槽位编号。</text>
-      </svg>
-      <dl className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(10rem,1fr))] gap-px overflow-hidden rounded-lg bg-rule">
-        {[
-          ['block_table', `[${table.join(', ')}]`],
-          ['下一个 token 的逻辑位置', String(length)],
-          ['下一个 token 的物理槽位', `${table[nextBlock]} × ${blockSize} + ${length % blockSize} = ${slot}`],
-        ].map(([label, value]) => (
-          <div key={label} className="flex flex-col-reverse bg-sunken px-3 py-2">
-            <dt className="text-xs text-muted">{label}</dt>
-            <dd className="m-0 font-mono text-sm wrap-anywhere">{value}</dd>
-          </div>
-        ))}
-      </dl>
+      <div className="mt-4 bg-sunken px-4">
+        <Blocks name="A" table={stage.a} />
+        <Blocks name="B" table={stage.b} />
+      </div>
+      <Readout>物理块 0/1/2 引用数：{stage.refs.join(' / ')}。{stage.next}。</Readout>
     </LabFrame>
   )
 }

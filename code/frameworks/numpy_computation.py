@@ -50,7 +50,14 @@ def main():
         raise AssertionError('Incompatible trailing axes accepted')
     np.testing.assert_allclose(x.mean(axis=0), [2.5, 3.5, 4.5])
     np.testing.assert_allclose(x.mean(axis=1, keepdims=True), [[2], [5]])
-    np.testing.assert_allclose(x - x.mean(axis=1, keepdims=True), [[-1, 0, 1], [-1, 0, 1]])
+    centered = x - x.mean(axis=1, keepdims=True)
+    np.testing.assert_allclose(centered, [[-1, 0, 1], [-1, 0, 1]])
+    np.testing.assert_allclose(centered.sum(axis=1), [0, 0])
+    square = np.array([[1, 2], [4, 5]], dtype=np.float64)
+    correct = square - square.mean(axis=1, keepdims=True)
+    wrong = square - square.mean(axis=1)
+    assert correct.shape == wrong.shape == square.shape
+    assert not np.array_equal(correct, wrong)
     np.testing.assert_allclose(x.var(axis=1, ddof=0), [2/3, 2/3])
     np.testing.assert_allclose(x.var(axis=1, ddof=1), [1, 1])
     assert x.sum(axis=(0, 1)) == 21
@@ -67,17 +74,26 @@ def main():
     indices = x.argmax(axis=1, keepdims=True)
     assert indices.dtype.kind in 'iu'
     np.testing.assert_array_equal(np.take_along_axis(x, indices, axis=1), [[3], [6]])
+    target = np.array([0, 1])
+    np.testing.assert_array_equal(np.take_along_axis(z, target[:, None], axis=1), [[-2], [13]])
+    np.testing.assert_array_equal(np.where(z > 0, z, 0), [[0, 4], [0, 13]])
+    np.testing.assert_array_equal(np.clip(z, 0, 10), [[0, 4], [0, 10]])
     assert np.concatenate([x, x], axis=0).shape == (4, 3)
     assert np.stack([x, x], axis=0).shape == (2, 2, 3)
+    assert np.concatenate([x, x[:1]], axis=0).shape == (3, 3)
     rng = np.random.default_rng(7)
     sample = rng.normal(size=(2, 3))
     np.testing.assert_array_equal(sample, np.random.default_rng(7).normal(size=(2, 3)))
-    logits = np.array([[1000, 1001, 1002], [-1000, -1000, -1000]], dtype=np.float64)
+    logits = z + 1000
     probabilities = softmax(logits)
     assert np.isfinite(probabilities).all()
     np.testing.assert_allclose(probabilities.sum(axis=1), [1, 1])
-    np.testing.assert_allclose(probabilities[1], [1/3] * 3)
+    np.testing.assert_allclose(probabilities[:, 1],
+                               [1 / (1 + np.exp(-6)), 1 / (1 + np.exp(-15))])
     np.testing.assert_allclose(probabilities, softmax(logits + 12345))
+    changed = logits.copy()
+    changed[1] = [3, -4]
+    np.testing.assert_array_equal(softmax(changed)[0], probabilities[0])
     for invalid in (np.array(1.0), np.empty((2, 0)), np.array([[-np.inf, -np.inf]])):
         try:
             softmax(invalid)

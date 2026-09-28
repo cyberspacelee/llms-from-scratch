@@ -15,9 +15,10 @@ close(shifted.loss, s.loss, 1e-9)
 const t = softmaxLoss([0, Math.log(2), Math.log(3)], 2, 2)
 const r = [1, Math.SQRT2, Math.sqrt(3)], z = r.reduce((a, b) => a + b, 0)
 close(t.probs[2], Math.sqrt(3) / z); close(t.gradient[2], (Math.sqrt(3) / z - 1) / 2)
-// M4 quadratic: eta 0.2 converges, 0.45 oscillates, 0.6 diverges, threshold 1/2.
+// M4 quadratic: distinguish convergence, oscillation, the threshold, and divergence.
 assert.equal(descend(0.2, [2, 1], 12).verdict, 'converge')
 assert.equal(descend(0.45, [2, 1], 12).verdict, 'oscillate')
+assert.equal(descend(0.5, [2, 1], 12).verdict, 'boundary')
 assert.equal(descend(0.6, [2, 1], 12).verdict, 'diverge')
 const run = descend(0.2, [2, 1], 30)
 close(run.path[30][0], 2 * 0.8 ** 30); close(run.losses[30], 0.5 * ((2 * 0.8 ** 30) ** 2 + 4 * (0.2 ** 30) ** 2))

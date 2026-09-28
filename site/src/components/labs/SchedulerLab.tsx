@@ -4,15 +4,14 @@ import { Button, Controls, LabFrame, Range } from './Lab'
 type Seq = { id: string; prompt: number; cached: number; completion: number; maxCompletion: number; state: 'waiting' | 'running' | 'finished' }
 
 const start = (): Seq[] => [
-  { id: 'A', prompt: 11, cached: 0, completion: 0, maxCompletion: 3, state: 'waiting' },
+  { id: 'A', prompt: 3, cached: 0, completion: 0, maxCompletion: 2, state: 'waiting' },
   { id: 'B', prompt: 5, cached: 0, completion: 0, maxCompletion: 2, state: 'waiting' },
-  { id: 'C', prompt: 8, cached: 4, completion: 0, maxCompletion: 2, state: 'waiting' },
 ]
-const ready = 'READY    三条请求进入 waiting；C 已命中 1 个完整前缀块（4 个 token）。'
+const ready = 'READY    A 的提示长 3，B 长 5；C 将在第 3 轮加入。'
 
-/** One scheduler step at a time, with the same branches as nano-vLLM's Scheduler.schedule(). */
+/** A small synchronous reference for the chapter's prefill-first policy. */
 export default function SchedulerLab() {
-  const [budget, setBudget] = useState(6)
+  const [budget, setBudget] = useState(4)
   const [maxSeqs, setMaxSeqs] = useState(2)
   const [seqs, setSeqs] = useState(start)
   const [step, setStep] = useState(0)
@@ -21,6 +20,7 @@ export default function SchedulerLab() {
   function advance() {
     const next = seqs.map((seq) => ({ ...seq }))
     const number = step + 1
+    if (number === 3) next.push({ id: 'C', prompt: 2, cached: 0, completion: 0, maxCompletion: 1, state: 'waiting' })
     const lines = [`STEP ${String(number).padStart(2, '0')}  budget=${budget}, max_num_seqs=${maxSeqs}`]
     const waiting = next.filter((seq) => seq.state === 'waiting')
     if (waiting.length) {
@@ -50,7 +50,7 @@ export default function SchedulerLab() {
         }
       }
     } else {
-      const running = next.filter((seq) => seq.state === 'running').slice(0, maxSeqs)
+      const running = next.filter((seq) => seq.state === 'running').slice(0, Math.min(maxSeqs, budget))
       if (!running.length) lines.push('DONE     所有序列都已结束')
       for (const seq of running) {
         seq.cached += 1
@@ -103,9 +103,9 @@ export default function SchedulerLab() {
   }
 
   return (
-    <LabFrame title="调度器单步推演" hint="块大小取 4，分支与 scheduler.py 一致">
+    <LabFrame title="调度器单步推演" hint="默认预算 4、最多 2 条请求；C 在第 3 轮到达">
       <Controls>
-        <Range label="本步 token 预算" value={budget} min={3} max={14} onChange={setBudget} />
+        <Range label="本步 token 预算" value={budget} min={2} max={8} onChange={setBudget} />
         <Range label="最多序列数" value={maxSeqs} min={1} max={3} onChange={setMaxSeqs} />
         <div className="flex gap-2">
           <Button primary onClick={advance}>执行一步</Button>
@@ -115,6 +115,7 @@ export default function SchedulerLab() {
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(15rem,1fr))] gap-4">
         {queue('waiting', 'WAITING · 等待 prefill')}
         {queue('running', 'RUNNING · 逐步 decode')}
+        {queue('finished', 'FINISHED · 已完成')}
       </div>
       <p className="mt-3 mb-0 text-xs text-muted">条形代表整条序列：左侧绿色是已写入 KV 的 prompt，右侧橙色是已生成的输出 token。</p>
       <pre aria-live="polite" className="mt-4 mb-0 min-h-22 rounded-lg bg-sunken px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">{trace}</pre>

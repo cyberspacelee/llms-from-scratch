@@ -43,7 +43,7 @@ export default function SpeculativeLab() {
             const y = 37 + 65 * i
             return (
               <g key={i}>
-                <text x={8} y={y + 17}>类 {i + 1}</text>
+                <text x={8} y={y + 17}>ID {i}</text>
                 <rect x={60} y={y} width={accepted[i] * plotWidth} height={22} className="fill-accent" />
                 <rect x={60 + accepted[i] * plotWidth} y={y}
                   width={missing[i] * plotWidth} height={22} className="fill-accent2" />

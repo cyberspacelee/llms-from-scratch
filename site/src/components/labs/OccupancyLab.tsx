@@ -18,7 +18,7 @@ export default function OccupancyLab() {
     <Controls>
       <Range label="每块线程数" value={threads} min={32} max={1024} step={32} onChange={setThreads} />
       <Range label="每线程寄存器数" value={registers} min={8} max={128} step={8} onChange={setRegisters} />
-      <Range label="每块 shared memory（KiB）" value={shared} min={0} max={128} step={4} onChange={setShared} />
+      <Range label="每块 shared memory（KiB）" value={shared} min={0} max={128} step={2} onChange={setShared} />
     </Controls>
     <fieldset className="mt-4 border-t border-rule pt-3">
       <legend className="text-xs font-semibold text-muted">教学 SM 容量</legend>

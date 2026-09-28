@@ -1,254 +1,164 @@
 ---
 title: 自动微分与梯度状态
-question: 哪些操作被记录，梯度怎样留在参数上
-description: 从分支求导与向量雅可比积理解 backward，再区分叶子梯度、计算图生命周期、存储别名和三种梯度模式。
+question: PyTorch 怎样沿计算图求导，梯度为何有时累加、有时报错
+description: 用一个带分支和共享偏置的损失贯穿手算、backward、计算图生命周期、存储别名与梯度模式。
 order: 4
 code:
   - code/frameworks/autograd.py
 ---
 
-import AutogradBranchLab from '../../../components/labs/AutogradBranchLab'
+在 [M6 反向传播](/math/backprop/) 中，我们沿计算图手算过梯度；[F3 张量与轴](/frameworks/torch-tensors/) 又说明了张量可能共享存储。本章把两件事接到 PyTorch：同一个损失为什么能求出多个参数的梯度，为什么再次反向可能报错，以及 `detach()`、`clone()`、`no_grad()` 分别改变了什么。读完后，你应能先手算一个小图，再预测每个 API 调用后的 `.grad` 和数据共享关系。
 
-对 `y=x*x+3*x`，当 x 为 2 时，y 是 10，导数是 7。调用两次 `backward()`，梯度可能累积为 14，也可能因计算图已释放而报错。`clone()` 复制数据仍保留求导关系，`detach()` 切断求导关系却可能共享存储。理解这些结果，要分别追踪存储、计算历史和梯度缓冲区。
+以下始终使用同一组数。输入 $x=(2,-1)$ 是固定数据，参数 $w=(1,2)$ 与共享偏置 $b=1$ 需要求导。先算两个中间值，再让第一个中间值进入两条分支：
 
-先读 [F3 张量与轴](/frameworks/torch-tensors/) 与 [M6 反向传播](/math/backprop/)。数学章解释链式法则，本章将它对应到 PyTorch API：谁参与记录、反向从哪个种子开始、结果放在哪里、哪些状态在一次迭代后仍存活。CPU 脚本使用 float64，验证版本为 PyTorch 2.14.0+cpu；不依赖 GPU，不涉及自定义求导函数或高阶自动微分。
+$$
+u=w\odot x+b=(3,-1),\qquad
+s=u_0^2+u_0u_1=9-3=6,\qquad
+L=\tfrac12(s-2)^2=8.
+$$
 
-## 记录计算：requires_grad 与叶子各管什么
+$\odot$ 是逐元素乘，标量 $b$ 广播到 $u$ 的两个坐标；目标值固定为 2。这里 $u_0$ 被平方项和乘积项各使用一次，$b$ 也进入了两个坐标。这个小图足以显示分支汇合、向量反向和广播归约。
 
-自动微分（automatic differentiation）在执行前向时记录可求导操作及其依赖，再按链式法则传播反向信息。它不是把你的 Python 文件完整保存一遍，也不是先展开所有可能分支。动态图（dynamic graph）跟随本次实际执行路径构建：这次没有执行的分支，不出现在这次图中。
+## 前向记录：哪些张量是叶子
 
-`requires_grad=True` 表示张量需要参与求导。对一般默认梯度模式中的可微操作，只要有需要求导的输入，输出就会记录相应求导关系。普通整数或 bool 张量不能作为浮点参数那样开启梯度。输入是否需要导数与数值是否会被用于计算是两件事：常量也影响结果，只是不接收该路径的梯度。
+PyTorch 在本次前向执行可微操作时建立计算图，反向时沿已执行的依赖使用局部导数。它不会提前记录未走过的 Python 分支。`requires_grad=True` 表示我们要追踪某个浮点张量的梯度；它并不表示该张量的数值已被更新。
 
 ```python
-x = torch.tensor(2., dtype=torch.float64, requires_grad=True)
-y = x * x + 3 * x
-assert x.is_leaf
-assert not y.is_leaf
-assert y.grad_fn is not None
+import torch
+
+dtype = torch.float64
+x = torch.tensor([2., -1.], dtype=dtype)
+w = torch.tensor([1., 2.], dtype=dtype, requires_grad=True)
+b = torch.tensor(1., dtype=dtype, requires_grad=True)
+u = w * x + b
+s = u[0]**2 + u[0] * u[1]
+loss = 0.5 * (s - 2)**2
+assert u.tolist() == [3., -1.] and loss.item() == 8.
 ```
 
-叶子（leaf）是求导图中按框架规则作为源头的张量。用户直接创建并要求求导的 x 是典型叶子；由可微操作产生的 y 是非叶子，`grad_fn` 指向产生它的反向节点。所有 `requires_grad=False` 的张量按惯例也是叶子，但这不意味着它们会获得梯度。不要把“叶子”单独看成“可训练”的同义词。
+直接创建的 `w`、`b` 是需要求导的叶子（leaf）；`u` 和 `loss` 是运算产生的非叶子，`grad_fn` 指向它们的反向关系。前向结束时 `w.grad` 与 `b.grad` 都是 `None`，因为导数还未传播。`u.grad` 默认也不会被长期保存：中间节点参与计算，不等于框架要为它留一个公开的梯度缓冲区。想在这次反向后观察 $\partial L/\partial u$，须在反向前调用 `u.retain_grad()`。
 
-`grad_fn` 是计算历史的入口，不是已经算好的导数；前向刚完成时，x 的 `.grad` 仍然是 None。`is_leaf` 也不等于“数据是独立副本”。F3 中的连续视图、设备转换和 clone，都可能保留历史并成为非叶子。若先创建需要求导的 CPU 张量，再对它做一次可微的设备转换，新的结果不一定是你希望优化器直接持有的叶子参数。通常在目标 dtype/device 上直接创建参数更明确。
+这里 `x.requires_grad=False`，反向不会在 `x.grad` 保存结果；数学上仍可求 $\partial L/\partial x$。这说明“数值影响损失”和“要求保存该输入的梯度”是两项选择。整数 token ID 也可影响模型结果，但不按浮点参数的方式开启梯度。
 
-### 为什么中间结果默认没有 .grad
+## 手算反向：两条贡献在哪里相加
 
-反向会计算经过中间节点的梯度贡献，但默认只把结果累计到需要求导的叶子 `.grad`。中间 y 不自动保留一个长期可读的梯度缓冲区，避免为所有中间张量都持有额外结果。想观察中间量可调用它的 `retain_grad()`，或直接请求 `autograd.grad`；这与保留计算图的 `retain_graph` 是两个不同接口。
+先从标量损失返回 $s$：$\partial L/\partial s=s-2=4$。平方分支对 $u_0$ 的局部导数是 $2u_0=6$，乘积分支对 $u_0$ 是 $u_1=-1$，对 $u_1$ 是 $u_0=3$。因此两条到 $u_0$ 的贡献为 $4\cdot6=24$ 与 $4\cdot(-1)=-4$；到 $u_1$ 的贡献为 $4\cdot3=12$。
 
-观察 `.grad` 前先问三个问题：张量是否要求梯度，它是不是默认累计的叶子，本次反向是否真的经过它。看到 None 不等于导数数学上为零；它可能还没有执行反向、没有参与这次损失，或者只是没有要求保留中间结果。将 None 和零混在一起，会让参数遗漏和正常稀疏参与变得难以区分。
-
-## 标量反向：同一变量的多条路径要相加
-
-令 $y=x^2+3x$。在前向图中，x 经过平方分支与线性分支，最后相加。输出变化一个单位，对两条输入分支各提供一个单位的反向种子；平方分支传回 $2x$，线性分支传回 3。因此
-
+<KeyEq label="分支求和与广播归约">
 $$
-\frac{dy}{dx}=2x+3.
-$$
-
-当 x=2，平方贡献 4，线性贡献 3，总导数是 7。变量重复出现不是选择其中一条贡献，也不是对两个贡献取平均。它们共同解释 x 对输出的影响，必须在汇合位置相加。这种**一次反向中的分支相加**和后面**多次 backward 的缓冲累积**是不同层次。
-
-<AutogradBranchLab client:visible />
-
-实线从叶子流向两条分支，再到 y；虚线逆着依赖传播，旁边显示两条路径的贡献。默认 x=2、种子 g=1，当前 `.grad` 初始为零的教学显示；按一次“重新前向并 backward”后为 7，再按一次为 14。按钮每次先建立新的前向图，才做反向，不是对已经释放保存值的同一个 y 硬调第二次。
-
-把种子 g 改成 2，这次平方贡献变为 8，线性贡献变为 6，总增量为 14；把 x 改成 -2，种子仍为 1，导数是 -1。改变输入或种子不会自动删除已经存下来的旧 `.grad`，所以交互特意让清空作为独立命令。图是显式手算模型，不在浏览器里执行 Torch。
-
-```python
-y.backward()
-assert x.grad.item() == 7
-```
-
-单元素、实数输出可不提供参数，框架使用数值为一的反向种子。它对应“求这个标量本身对叶子的导数”。如果你想求 $2y$ 对 x 的导数，也可以给 y 传一个同形状的种子 2；不是把学习率当作种子随便修改，种子定义的是本次要求的导数对象。
-
-## 向量输出：backward 传播的是 VJP
-
-多元素输出没有唯一的“一个梯度”，每个输出分量都对应一行雅可比矩阵。设输入 $x\in\mathbb R^n$，输出 $y\in\mathbb R^m$，雅可比矩阵为 $J\in\mathbb R^{m\times n}$。反向接口给输出一个同形状向量 $g$，返回的是向量雅可比积（vector-Jacobian product，VJP）：
-
-<KeyEq label="反向种子定义本次要求的导数">
-$$
-\nabla_x(g^\top y)=J^\top g.
+g_u=\nabla_u L=(24-4,12)=(20,12),\qquad
+g_w=g_u\odot x=(40,-12),\qquad
+g_b=20+12=32.
 $$
 </KeyEq>
 
-这里沿用本讲义列向量记法，结果是 $J^\top g$。它不要求把整个 J 显式存出来，也不表示对 y 每个元素分别做一次独立 backward。若把 g 当作常量，上式就是加权标量输出对 x 的梯度。种子 shape 必须与输出匹配，dtype/device 也要满足接口；本章使用同设备同 dtype，避免隐含转换。
+两个 $b$ 是同一个叶子参数，不是两份偏置，所以其梯度是两个坐标的贡献之和。若也要求输入梯度，则 $g_x=g_u\odot w=(20,24)$；本例的 `x` 不存它。分支内求和与批次之间的梯度累积都用加法，但发生在不同位置：前者是在**一次图的反向**中汇合，后者是把**多次反向**写入同一个叶子缓冲区。
 
-具体取
+这个计算也说明反向为什么常被称为 VJP（vector-Jacobian product）。从 $u$ 到 $s$ 的雅可比矩阵在本例只有一行，$J_{s,u}=(2u_0+u_1,u_0)=(5,3)$；上游种子 $g_s=4$，所以 $J_{s,u}^{\top}g_s=(20,12)$。若中间输出有更多坐标，反向仍逐节点计算这种乘积，无须先存出完整雅可比矩阵。
 
-$$
-y_0=x_0^2+x_1,\qquad y_1=x_0x_1,\qquad x=(2,-1),\quad g=(2,3).
-$$
+对于向量输出，种子还定义了你要对哪个标量求导。若单独调用 `torch.autograd.grad(u, (w,b), grad_outputs=torch.tensor([20.,12.], dtype=dtype))`，它求的是 $20u_0+12u_1$ 对 `(w,b)` 的梯度，返回 `((40,-12), 32)`。这是另一轮新前向的核对，不能在下文的 `loss.backward()` 后复用旧 `u`。不提供种子并直接对多元素 `u` 调用 `backward()`，并没有唯一的标量目标；本例真正训练的目标是 `loss`。
 
-此时 $y=(3,-2)$，雅可比为
+## backward：结果写到哪里
 
-$$
-J=\begin{bmatrix}2x_0&1\\x_1&x_0\end{bmatrix}
-=\begin{bmatrix}4&1\\-1&2\end{bmatrix},\qquad
-J^\top g=\begin{bmatrix}5\\8\end{bmatrix}.
-$$
-
-第一输入收到 $4\cdot2+(-1)\cdot3=5$，第二输入收到 $1\cdot2+2\cdot3=8$。`y.backward(torch.ones_like(y))` 求的是各输出之和的梯度；如果种子是 `(2,3)`，求的是 $2y_0+3y_1$。两者都合法，但问题不同。输出没有缩成标量时省略种子会报错，这是在要求你明确导数对象。
+对上述前向结果调用一次：
 
 ```python
-x = torch.tensor([2., -1.], dtype=torch.float64, requires_grad=True)
-y = torch.stack([x[0]**2 + x[1], x[0]*x[1]])
-g = torch.tensor([2., 3.], dtype=torch.float64)
-gradient, = torch.autograd.grad(y, x, grad_outputs=g)
-assert gradient.tolist() == [5., 8.]
+u.retain_grad()
+loss.backward()
+assert u.grad.tolist() == [20., 12.]
+assert w.grad.tolist() == [40., -12.]
+assert b.grad.item() == 32.
 assert x.grad is None
 ```
 
-`autograd.grad` 返回指定输入的梯度，不像 `backward` 那样把这些返回结果累计到输入 `.grad`。它适合局部数学核对或需要直接使用梯度值的算法。返回的是元组，所以 `gradient, = ...` 解包唯一输入的结果。被请求输入必须满足求导契约；未使用输入的处理由 `allow_unused` 等参数决定，不能拿空结果伪装成一条实际执行的依赖。
+`loss` 是单元素实数，`backward()` 默认从数值 1 的种子开始；它按照刚才的链式计算得到各叶子的梯度。它**不更新** `w` 或 `b`，也不读取学习率。`u.retain_grad()` 只让我们查看本次经过中间量的梯度；常规训练不需要对每个中间量都调用它。
 
-有限差分也能检验这个 VJP。先构造标量 $f(x)=2y_0+3y_1$，分别沿 x 的两个坐标加减一个小量，再用中心差分近似偏导。要核对的是同一个标量函数，不能用一个输出的差分去比较另一个种子的 VJP。float64 与合适步长能降低舍入和截断的干扰，但有限差分本身仍是近似，不适合盲目使用极小步长。
+`torch.autograd.grad(loss, (w,b))` 则直接返回所选输入的梯度元组，不把结果写入这两个叶子的 `.grad`。当你需要核对局部公式或在程序里直接使用梯度值时，这个接口很方便。脚本用一次新的前向核对返回值，再用中心有限差分核对同一个 $L(w,b)$：分别扰动一个参数，比较 $[L(\theta+\epsilon)-L(\theta-\epsilon)]/(2\epsilon)$ 与自动微分。有限差分是近似检查，不能把步长无限缩小，也不能换一个损失后仍比较旧梯度。
 
-## 梯度缓冲：为什么两批数据会留下相加的结果
+## 下一次反向：梯度缓冲与图的寿命
 
-一次 `backward` 完成后，叶子的 `.grad` 保留结果，下一次反向默认继续相加。假设两次都在 x=2 重新计算 $x^2+3x$，每次贡献 7，那么第二次之后 `.grad` 是 14。这允许把几个小批量的损失梯度积累起来，再执行一次更新；但如果本来想让每一步独立，它也会造成意外叠加。
+第一次反向后，`w.grad=(40,-12)`、`b.grad=32` 保留在叶子上。若用同一组参数重新执行上述前向，再 `backward()` 一次，缓冲区默认**加上**新的梯度，变为 `(80,-24)` 与 `64`。`w.grad=None; b.grad=None` 后再做一次新前向与反向，结果又是 `(40,-12)` 与 `32`。优化器通常用 `zero_grad(set_to_none=True)` 清理所有已登记参数；`None` 表示没有当前保存的梯度，和数值为零的缓冲区并非同一状态。完整训练次序见 [F6 数据与训练](/frameworks/data-and-training/)。
 
-```python
-x = torch.tensor(2., dtype=torch.float64, requires_grad=True)
-(x*x + 3*x).backward()
-assert x.grad.item() == 7
-(x*x + 3*x).backward()  # 新的前向图
-assert x.grad.item() == 14
-x.grad = None
-(x*x + 3*x).backward()
-assert x.grad.item() == 7
-```
+重做前向很关键。反向节点可能要用前向保存的值：这里平方项求导需要前向的 $u_0=3$。PyTorch 默认在反向后释放这类保存值。Python 名字 `loss` 和它的 `grad_fn` 可能还在，原图却未必还能再次反向；本例对同一个 `loss.backward()` 调第二次会报错。
 
-清空的方法可以是把 `.grad` 设为 None，也可以对已有梯度张量清零。优化器常用 `zero_grad(set_to_none=True)` 管理所有参数，完整训练循环见 [F6](/frameworks/data-and-training/)。None 表示尚没有本轮保存的梯度，零表示已有缓冲区且数值是零；有些优化器对参数梯度 None 与零的行为不同，尤其涉及是否跳过参数以及状态更新时，因此不要把二者当作完全相同的状态。
+<Figure src="frameworks/autograd-lifetime.svg" alt="新前向保存反向所需值，backward 累加叶子梯度并释放保存值，下一次重新前向">沿左到右读一次计算，再沿底部箭头建立下一次图。保存值是否释放与叶子 `.grad` 是否清空是两个独立决定。</Figure>
 
-梯度积累还需要损失尺度正确。假设两个等大小小批量的平均损失分别为 $L_1,L_2$，直接各 backward 一次得到 $\nabla L_1+\nabla L_2$；若目标是合并大批量平均损失，应该对应 $\nabla(L_1+L_2)/2$。最后一个小批量更小时还要按样本数加权。autograd 会忠实求出你写下的标量，不会自动猜测你想平均多少样本。
+`retain_graph=True` 让同一前向的必要保存值继续存活，适用于确实要反向多次的特殊计算，也增加内存占用；普通梯度积累只需每批重新前向。`retain_grad()` 则只要求保留中间张量的 `.grad`，两者不能互换。某些简单算子在第二次反向时可能恰好不需要已释放的保存值；不能用这种偶然成功来设计训练循环。记录损失值时用 `loss.item()`，避免将整串历史挂在日志列表中。
 
-`backward` 本身不更新参数，也不读取学习率。优化器的 `step()` 才按梯度与状态执行更新。把清空、前向、反向、更新四个动作分开，才能解释参数为什么变化、梯度为什么累积。需要多次积累时延后更新；需要独立步骤时在适当位置清空。这属于训练协议，不能通过在某个张量上设置一个标志自动完成。
+如果连续两批的损失各自已经求了平均，直接分别反向得到的是两个平均梯度之和。若目标是合并后的大批平均，两个等大小批次各应乘 $1/2$；大小不同则按各批样本数占总数的比例。autograd 只计算你写出的标量，不猜测训练目标的分母。
 
-## 图的生命周期：保存值释放不等于梯度清空
+## detach 与 clone：求导历史和数据存储是两条关系
 
-反向节点可能需要前向值。例如平方的局部导数依赖 x，乘法导数依赖另一输入。为了反向，框架保存必要数据；默认反向完成后，会释放相关保存值以节省内存。Python 变量 y 仍然存在，甚至还能看到 `grad_fn`，也不意味着所有求导所需数据仍可再次使用。
+有时需要保留一份数值用于日志、缓存或新的计算，同时控制它是否仍连着旧图。`clone()` 复制数据，但在默认梯度模式中保留从副本回到源张量的可微关系；`detach()` 切断该关系，却与源张量共享存储。对本例的 `w`：
 
-<Figure src="frameworks/autograd-lifetime.svg" alt="前向保存值、反向传播并累加叶子梯度、释放保存值，再建立下一次前向图">顺着三个框看一次迭代；底部箭头表示下一次重做前向。释放保存值与清空叶子梯度是两个独立动作，叶子 .grad 可以跨多次前向累积。</Figure>
-
-对同一个平方结果 y 连续反向，第二次一般会报“再次经过已释放的图”一类错误。有些简单图不保存需要释放的值，第二次可能碰巧成功，也不能据此把复用旧图当成普通训练协议。最清楚的循环是在每批数据上重做前向，产生本次的新图，再反向。
-
-`retain_graph=True` 保留图的必要保存状态，用于确实需要多次访问同一前向图的场景，代价是延长内存生命周期。它不是“梯度要积累”的必要条件，更不是发现第二次 backward 报错后就应加入的通用修复。梯度积累可以在多个新图之间自然发生。如果训练循环把旧损失或中间张量无限装进列表，保留历史还可能让内存持续增长；记录数值时应按目的使用 `item()` 或脱离历史的结果。
-
-本章不使用 `create_graph=True`。这个参数涉及把求导过程本身纳入新的可微关系，以便进一步求高阶导数；它与保存同一前向的 `retain_graph` 又是不同目的。先把一阶 VJP、保存值与叶子缓冲理解清楚，才能安全引入更复杂的生命周期。
-
-## Detach 与 clone：历史和存储可以分别选择
-
-`detach()` 返回脱离当前求导历史的张量，**与原张量共享存储**。它不会复制数值，也不会使原张量从此失去 `requires_grad`。`clone()` 则复制数据，在默认梯度模式下仍是可微操作；若输入要求梯度，clone 的输出可以把梯度传回源输入。
-
-| 操作 | 是否独立存储 | 是否保留到源输入的求导路径 |
+| 写法 | 独立存储 | 梯度还能回到原 `w` |
 | --- | --- | --- |
-| `x` 的普通引用 | 否 | 与原对象相同 |
-| `x.clone()` | 是 | 是，输入需要梯度时 |
-| `x.detach()` | 否 | 否 |
-| `x.detach().clone()` | 是 | 否 |
+| `w` 的普通引用 | 否 | 是，同一对象 |
+| `w.clone()` | 是 | 是 |
+| `w.detach()` | 否 | 否 |
+| `w.detach().clone()` | 是 | 否 |
 
-例如 `clone.sum().backward()` 会给原 x 的每个元素贡献一。复制解决的是别人修改数据会不会传播，求导路径解决的是输出依赖哪一个输入；二者不冲突。若需要一个与旧图无关、数据也独立的新可求导输入，可以 `x.detach().clone().requires_grad_()`，得到新叶子。
+若要把当前参数数值变成与旧图无关、数据也独立的新可求导叶子，写 `w.detach().clone().requires_grad_()`；新的 `.grad` 留在新叶子，不会回到旧 `w`。这不是常规参数更新的方法，常规更新应在本轮反向完成后操作原参数。
 
-detach 的共享性尤其影响原地写入：对 detached 结果改一个数，也改了原张量对应的存储。如果旧图保存了这个值以便求导，后续反向可能触发版本检查错误。不要将 detach 理解为“随便修改而不影响训练”。用于独立日志或缓存时，若后续存在可变写入需求，就把共享关系也明确切开。
+存储共享会影响已经建好的图。在本例先算 `u=w*x+b` 和 `loss`，再对 `u.detach()` 原地改写一个值，原来的 `u` 也随之改变；平方项反向需要前向时的 $u_0$，因此版本检查会拒绝这次反向。`detach()` 停止从新结果沿旧历史求导，**不会保护旧图所需的前向数值**。`clone()` 可以让缓存独立修改；不要用 `.data` 绕过版本检查。
 
-## 梯度模式与 eval：三种开关控制不同层次
+原地操作如 `add_`、`copy_` 通常会修改现有存储。直接在默认梯度模式下原地改需要求导的叶子通常会被拒绝；参数更新应在反向后、`torch.no_grad()` 内执行。不是所有原地操作都非法，判断依据是有没有破坏反向所需的值和张量规则，而不是方法名里是否有下划线。
 
-默认梯度模式（grad mode）根据输入的 `requires_grad` 记录可微操作。`torch.no_grad()` 在其上下文中关闭反向图记录，常用于参数更新或不需要梯度的前向。离开上下文后，原参数仍可求导；模式是执行上下文，不是永久把所有参数改成常量。
+## no_grad、inference_mode 与 eval：分别控制什么
 
-```python
-x = torch.tensor(2., dtype=torch.float64, requires_grad=True)
-with torch.no_grad():
-    y = 3*x
-assert not y.requires_grad
-assert x.requires_grad
-```
+正常模式按 `requires_grad` 记录可微运算。`torch.no_grad()` 在其上下文中停止记录通常的张量运算，离开后原参数仍可求导。例如更新已算出梯度的 `w` 时，可在 `with torch.no_grad(): w -= eta * w.grad` 中修改数值，再重新前向；更新本身不是要反向穿过的训练图。显式创建带 `requires_grad=True` 的新张量是这个模式的工厂函数例外。
 
-还有一个容易忽略的例外：创建新张量的工厂函数若显式传入 `requires_grad=True`，不按一般算术的方式受 no_grad 覆盖。所以理解规则时区分“已有张量执行运算”与“显式创建新的需要求导对象”。用上下文包住整个模块构造，也不表示新建的 Parameter 永远不训练。
+`torch.inference_mode()` 也停止记录，并进一步减少跟踪开销；其中创建的 inference tensor 带有更严格的后续求导使用限制。若数值还要进入后续训练图，先明确是否需要普通张量，不能仅因为它更快就替换 `no_grad()`。本章脚本只检验模式的求导边界，不把速度差当成保证。
 
-`torch.inference_mode()` 除了关闭反向记录，还减少视图跟踪和版本计数等开销。它有更强的限制：其中创建的 inference tensor 不能任意拿到后续记录梯度的计算中作为求导保存对象。若输出还要回到训练路径，应核对用途并选择 no_grad 或在模式外建立普通独立张量，而不是把两者当作可以不加思考互换的提速开关。
+`model.eval()` 控制模块行为，例如 Dropout 停止随机丢弃、BatchNorm 使用相应评估行为；它**不关闭 autograd**。处于 eval 的线性层仍能生成求导图；处于 train 的 Dropout 即使在 `no_grad` 下也仍按训练模式工作。这两种开关在推理时常同时使用，但解决的是不同问题。[F5 模块与损失](/frameworks/modules-and-losses/) 将说明模块如何递归切换模式。
 
-`model.eval()` 则切换模块的训练行为，例如 Dropout 与 BatchNorm，**不会关闭 autograd**。一个处于 eval 的线性模块，其参数仍可要求梯度，前向输出仍可带 `grad_fn`；反过来，在 no_grad 下执行一个 train 模式模块，Dropout 仍按训练规则随机丢弃。模块行为与记录梯度分别设置，推理常同时使用 eval 和相应梯度模式，但它们各有职责。更多模块细节见 [F5](/frameworks/modules-and-losses/)。
+还有一个边界：先执行 `x/0` 等未定义算术，再用 mask 从损失中删掉该位置，反向仍可能出现 NaN。无效算术已经进入图，应在前向先定义安全分母或只对有效项执行运算。看到 `.grad is None` 也不要直接判成数值零：先检查输入是否参与本次损失、是否要求梯度、是否为默认保存梯度的叶子。
 
-## 原地操作：版本检查保护哪些依赖
+## 用脚本核对数值与状态
 
-带下划线的操作通常原地改张量，例如 `add_`、`copy_`。对要求梯度的叶子在默认模式中直接原地更新通常会被拒绝；正确参数更新可放在 no_grad 下，但仍必须处在本轮反向完成之后。no_grad 不会让数据依赖消失，只是不建立这次更新的求导图。
-
-设 `saved=x*x` 保存了 x，随后通过 `x.detach().add_(1)` 改了共享存储。反向要计算 $2x$，需要前向时的 x，不能静默使用已经改过的值。框架用版本计数检测许多这样的修改并报错，告诉你保存值不再匹配。这个报错是正确性保护，不应通过 `.data` 或额外 `retain_graph` 绕开。
-
-有的原地操作在特定依赖下合法，不能简单宣称所有原地都禁用；但对初学实现，优先用返回新结果的普通运算，等确实测到内存压力再分析修改时序。外部 NumPy 共享写入等路径也不应指望 autograd 捕获所有错误，所以 F3 中的别名生命周期仍然重要。程序正确不能只建立在“框架没报错”上。
-
-### 先检查无效计算，再决定是否屏蔽输出
-
-自动微分跟随已执行的算术。若先算 `x/0`，然后用 mask 把结果从损失里排除，并不保证反向就能安全忽略除零。无效操作已经进入图，局部导数可能产生无穷或 NaN，与来自后续的零贡献相乘仍可能污染梯度。更可靠的做法是让无效分支根本不执行该算术，或先构造数学上有定义的安全分母，再对有效位置计算。
-
-同样，张量里只要某个位置出现 NaN，就不能仅因为最后损失是有限数而断言所有参数梯度有限。前向值、目标定义与反向值都应按需求检查。这里的原则与全屏蔽 softmax 相同：先定义边界处的计算，再写掩码表达，而不是让未定义中间值进入历史后希望最后一步清理干净。
-
-需要定位复杂训练中的无效反向时，可以在小输入上使用 autograd 的异常检测辅助寻找产生错误的节点，代价是额外运行开销。它不应被当作常规性能模式，也不替代手算和有限差分。先缩小输入、重做一次前向与反向，检查第一个不满足数学契约的位置，比对所有参数统一放宽容差更有解释力。
-
-还要区分“没有梯度”与“梯度暂时没有保存”。一个与损失完全断开的输入，不会因为需要梯度就自动得到这次贡献；一个非叶子中间量则可能确实参与反向，只是没有 retain_grad。排查时从损失沿依赖往回追踪到目标输入，再检查保存策略，不能看到 .grad 为 None 就给所有中间张量都开保留。
-
-如果新版本改变了分支条件，计算图也可能随本轮输入改变。这是动态图的正常行为，要求测试覆盖会执行的路径。不要拿另一次输入的 grad_fn 或旧梯度推断当前前向的依赖，日志记录应同时标明本轮输入与是否已经清空缓冲。
-
-## 完整核对：数学、状态与错误各自断言
-
-下面脚本核对标量分支导数 7、跨新图累积 14、清空后恢复 7；对向量例子比对 VJP `(5,8)` 和中心有限差分。它还测试 clone 的可微关系、detach 的共享地址、新叶子的独立梯度，以及 no_grad、inference_mode 与 eval 的不同职责。
+脚本用固定的 float64 参数复现 $u=(3,-1)$、$L=8$、$g_w=(40,-12)$ 和 $g_b=32$。它还断言新的前向会累积梯度、同一损失重复反向会失败、`detach()` 共享存储、`clone()` 保留求导路径、原地改写保存值会触发错误，并分别检查 `no_grad` 与 `eval`。运行于仓库根目录：`python code/frameworks/autograd.py`。
 
 <CodeFile path="code/frameworks/autograd.py" />
 
-在仓库根运行 `python code/frameworks/autograd.py`。脚本预期捕获两类错误：重复访问已释放保存值，以及改写旧图需要的输入；成功捕获才算检查通过，不是在运行说明里留下一段必然中止的例子。数值核对使用小规模 float64，有限差分步长为 $10^{-6}$。它检查实际框架接口，而浏览器图只负责解释两条路径如何汇合。
-
 ## 常见误区
 
-- `.grad=None` 不等于数学梯度零，先核对叶子、参与路径与反向是否执行。
-- 一次图内多路贡献相加与多次 backward 跨图累积属于不同层次。
-- `backward` 不更新参数，`step` 不自动清空梯度，`eval` 不自动关闭记录。
-- 复制数据不自动停止梯度，停止梯度不自动复制数据。
-- 保留旧图不是普通梯度积累的必要条件，重做前向与清空梯度要分别决定。
-- 版本检查报错要求重新安排写入时序，不能用 `.data` 隐藏依赖。
+- 分支汇合时取一条路径，或把两条贡献平均。对同一个参数的贡献应相加；只有损失定义了平均时才除以相应分母。
+- 把 `.grad is None` 当成零。它可能意味着没有参与图、没有反向或该非叶子默认不保留结果。
+- 为了积累梯度给每次 `backward` 都加 `retain_graph=True`。多次新前向自然可以累积到同一叶子。
+- 认为 `clone` 停止求导，或 `detach` 复制数据。两者控制的关系不同。
+- 认为 `model.eval()` 已关闭求导，或 `backward()` 已改变参数。模块行为、记录和更新各有独立调用。
 
 ## 练习与核对
 
 <details>
-<summary>x=2 时，y=x²+3x 的两条反向贡献是什么？种子改成2后呢？</summary>
+<summary>只把本例输入的第二个数从 -1 改成 0，其余不变。手算新的损失和两个参数的梯度。</summary>
 
-种子一时是 4 与 3，总和 7；种子二时是 8 与 6，总和 14。种子定义输出标量的权重，所以所有经过该输出的反向贡献一起缩放。
+现在 $u=(3,1)$，$s=9+3=12$，$L=\tfrac12(12-2)^2=50$，上游梯度 $g_s=10$。到 $u_0$ 的局部导数是 $2\cdot3+1=7$，到 $u_1$ 是 3，所以 $g_u=(70,30)$。新输入 $x=(2,0)$，故 $g_w=(140,0)$，$g_b=100$。第二个权重本次梯度为零，是因为对应输入为零，并不表示其分支没有影响损失。
 </details>
 
 <details>
-<summary>同一个 y 第二次 backward 报错，为什么梯度积累例子却能得到14？</summary>
+<summary>本例只对向量 u 以种子 (1,0) 调用 autograd.grad，返回的 w、b 梯度是什么？它是否等于损失 L 的梯度？</summary>
 
-积累例子第二次先重做前向，产生新的保存值和新图。两次反向都向同一叶子 .grad 加贡献，旧图的保存值释放不影响这种跨新图累积。
+种子选择的标量是 $u_0$，所以对 $w$ 的梯度为 $(x_0,0)=(2,0)$，对共享偏置为 1。它不等于 $L$ 的梯度，因为后者的上游种子是 $g_u=(20,12)$。种子不是任意缩放按钮，而是定义被求导的标量。
 </details>
 
 <details>
-<summary>autograd.grad 返回 (5,8) 后，为什么 x.grad 仍然为None？</summary>
+<summary>两次都用原输入和参数重新前向，每次完整 backward；第一次后不清空 .grad。第二次的 w.grad、b.grad 是多少？若第二次复用同一个 loss 又怎样？</summary>
 
-该接口把指定输入的梯度作为返回值交给调用者，不把它累计到叶子的 .grad。若需要 .grad 累积，使用相应 backward 路径；不要把返回值与状态缓冲混用。
+两次新图分别贡献 $(40,-12)$ 和 32，所以缓冲区变为 $(80,-24)$ 和 64。若直接复用第一次的 `loss`，本例平方项需要的保存值已经在第一次反向后释放，第二次会报错；它不是一次有效的新前向。
 </details>
 
 <details>
-<summary>为了修改一份缓存而不影响源张量，也不保留旧图，选择clone还是detach？</summary>
+<summary>要保存可修改的参数快照用于对照，同时保证快照的计算不回到旧参数，选哪种表达式？</summary>
 
-单独 clone 复制存储但保留可微路径，单独 detach 停止路径但共享存储。两项需求都满足时用 detach().clone()；若还要新变量可求导，再对它 requires_grad_()，它成为独立叶子。
+用 `w.detach().clone()`：detach 切断旧求导路径，clone 给快照独立存储。只用 detach 会共享数据，只用 clone 则保留可微路径。若把快照作为新待优化参数，再显式调用 `requires_grad_()`。
 </details>
 
-<details>
-<summary>eval 下的模型能不能计算梯度？no_grad 下 train 模型的Dropout是否关闭？</summary>
-
-eval 不关闭 autograd，所以参数可继续接收梯度。no_grad 只关闭该上下文中的反向记录，train 模式的 Dropout 仍按训练行为工作。两个开关控制不同问题。
-</details>
-
-<details>
-<summary>反向前通过detach结果修改原输入，为什么也可能报版本错误？</summary>
-
-detach 与原输入共享数据。旧图可能保存了原输入用于局部导数，修改后它不再是前向时的值。停止新路径求导不意味着可以改写已有路径需要的保存值。
-</details>
-
-接下来进入 [F5 模块与损失](/frameworks/modules-and-losses/)，把这些可求导叶子登记为参数，并为完整模型定义标量训练目标。
+下一章 [F5 模块与损失](/frameworks/modules-and-losses/) 会把这里的叶子参数登记到模块，并给模型输出定义可核对的标量损失。
 
 ## 原始资料
 
-资料于 2026-09-27 核对，计算图与数值为本章自行构造。高阶导数、复数求导与自定义 Function 需要另读相应接口。
-
-- [Autograd mechanics](https://docs.pytorch.org/docs/2.14/notes/autograd.html)：计算图、保存值、叶子梯度、梯度模式和原地修改。
-- [Tensor.backward](https://docs.pytorch.org/docs/2.14/generated/torch.Tensor.backward.html)、[torch.autograd.grad](https://docs.pytorch.org/docs/2.14/generated/torch.autograd.grad.html)：反向种子、返回值与梯度累计。
-- [Tensor.detach](https://docs.pytorch.org/docs/2.14/generated/torch.Tensor.detach.html)、[torch.clone](https://docs.pytorch.org/docs/2.14/generated/torch.clone.html)：共享存储与可微复制。
-- [inference_mode](https://docs.pytorch.org/docs/2.14/generated/torch.autograd.grad_mode.inference_mode.html)、[Module.eval](https://docs.pytorch.org/docs/2.14/generated/torch.nn.Module.html#torch.nn.Module.eval)：执行模式与模块训练行为。
+- [PyTorch Autograd mechanics](https://docs.pytorch.org/docs/stable/notes/autograd.html)：计算图、叶子、梯度模式、保存值与原地操作。
+- [Tensor.backward](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.backward.html)、[torch.autograd.grad](https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad.html)：反向种子、返回值与累积行为。
+- [Tensor.detach](https://docs.pytorch.org/docs/stable/generated/torch.Tensor.detach.html)、[torch.clone](https://docs.pytorch.org/docs/stable/generated/torch.clone.html)：求导历史与存储关系。
+- [Module.eval](https://docs.pytorch.org/docs/stable/generated/torch.nn.Module.html#torch.nn.Module.eval)、[inference_mode](https://docs.pytorch.org/docs/stable/generated/torch.autograd.grad_mode.inference_mode.html)：模块行为和执行模式。

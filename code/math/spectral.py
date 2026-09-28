@@ -11,6 +11,10 @@ def verify():
     close(values, [1., 9.])
     close(vectors.T @ vectors, np.eye(2), atol=1e-14)
     close(vectors @ np.diag(values) @ vectors.T, matrix)
+    x = np.array([1., 0.])
+    y = rotation.T @ x
+    close(rotation @ (np.array([1., 9.]) * y), matrix @ x)
+    close(matrix @ x, [3.88, -3.84])
     for eta, stable in [(.1, True), (.25, False)]:
         state = vectors[:, -1].copy()
         initial = np.linalg.norm(state)

@@ -1,58 +1,28 @@
 ---
-title: 从数组到可训练模块
-question: 怎样把数学公式写成形状、存储、梯度和状态都明确的 NumPy 与 PyTorch 程序
-description: 七章连接 NumPy 数组与批量计算、Torch 张量与求导、模块与损失、数据与状态，以及 torch.compile 的捕获、求导与代码生成。
+title: 数组与框架导读
+question: 怎样把数学上的计算写成轴、梯度和训练状态都可核对的程序
+description: 从 NumPy 数组走到 PyTorch 张量、自动微分、模块和可恢复训练，再按需学习 torch.compile。
 order: 0
 ---
 
-把 $Y=XW^\top+b$ 写成程序时，必须知道 `X.shape` 的轴、`X.T` 的存储关系，以及偏置沿哪个轴广播。训练还要追踪 `loss.backward()` 后的梯度和模型保存的状态。本路线用具体数组和小模型核对这些 API 的行为。
+数学公式里的 $XW+b$ 没有告诉程序哪条轴是样本、哪些对象共享存储，也没有说明梯度存在哪里。假设输入是两行、每行三个数：`[[0,1,2],[3,4,5]]`。取出两列后修改它，原输入会变吗？给每行加上同一个向量，哪条轴被复用？这两个问题若答错，即使输出 shape 看起来正确，后面的模型也可能算错。
 
-本路线放在数学与模型原理之间，使用已有 NumPy 与 PyTorch 依赖，回答数组操作和训练对象的常见问题。章节代码 F 表示框架路线，代码里的 `torch.nn.functional as F` 是 Python 模块别名，二者由上下文区分。已经熟悉这些 API 可以直接进入 P；第一次接触数组的人，可在 M3 后先读前三章，再随着数学路线学自动求导与训练接口。
+这条路线先让每一步的**值和轴**可核对，再加入**梯度、参数和训练状态**。你需要 Python 基础；矩阵乘法可参照 [M3 向量与矩阵](/math/linear-algebra/)，手算反向传播可参照 [M6](/math/backprop/)。刚接触数组时可以先读 F1–F3，学过 M6 后再继续 F4。
 
-## 七章：从轴与状态走到编译执行
+## 从六个数走到一次更新
 
 <ChapterList track="frameworks" />
 
-| 章 | 从什么问题进入 | 读完应能解释 |
-| --- | --- | --- |
-| F1 数组 | 六个数字组成 2×3 表 | 索引、轴、dtype、视图/副本与修改传播 |
-| F2 计算 | 一批样本加偏置，再沿轴求统计量 | 广播、归约分母、矩阵乘法与元素选择 |
-| F3 张量 | 从 NumPy 进入 Torch，并重排多头轴 | 存储共享、设备、stride、view/reshape 和 gather |
-| F4 求导 | 一个输入经过分支，梯度回到哪里 | 叶子张量、VJP、梯度累积、detach 与求导模式 |
-| F5 模块 | 多个运算怎样成为可训练的网络对象 | 参数登记、线性权重、嵌入、归一化与损失契约 |
-| F6 状态 | 五个样本怎样形成三批并恢复训练 | 尾批、有效分母、优化器、随机状态与 checkpoint |
-| F7 编译 | 同一段张量程序怎样被捕获和重复执行 | Dynamo、AOTAutograd、Inductor、guards、图中断与重编译 |
+[F1 NumPy 数组与存储](/frameworks/numpy-arrays/) 从上面的 `2×3` 数组出发，逐格追踪索引、切片、stride 和视图与副本。知道取出的四个数来自哪里后，[F2 NumPy 的轴与计算](/frameworks/numpy-computation/) 把两条三特征记录用于广播、归约、矩阵乘和 softmax。此时要同时检查一个具体元素的值，以及哪条轴被保留或消去。
 
-同一组数值可以有不同形状，两个数组对象也可能共享存储；前向结果相同的运算可能处在不同的求导模式中，加载同一份权重也不能恢复优化器历史。遇到结果异常时，按值、轴、存储、梯度和状态逐项检查。
+[F3 PyTorch 张量与轴](/frameworks/torch-tensors/) 沿用 F1 的六个数，先辨认 NumPy 与 Torch 的共享存储，再有意把两行解释为序列的两个位置，拆成注意力头、读取并合并。这个解释变化会在正文标明；相同的数字不意味着相同的轴含义。准备实现 [P3 多头注意力](/principles/attention/) 时，F3 是直接的接口先修。
 
-## 阅读路径：就近补齐正在使用的 API
+有了张量，[F4 自动微分与梯度状态](/frameworks/autograd/) 用一个带分支的损失核对 `.backward()`：哪些叶子张量得到梯度、两条路径的贡献怎样相加，以及为什么重复反向和重复前向不同。[F5 模块、参数与损失](/frameworks/modules-and-losses/) 随后把层登记成模型，用两条短序列追踪 embedding、输出 logits（softmax 前的类别分数）和有效目标交叉熵。到这里，已经能说明一次前向的参数与损失从哪里来。
 
-- 学 [M3](/math/linear-algebra/) 时遇到一维数组转置、广播或 `@`，回读 F1/F2；继续研究轴重排时再读 F3。
-- 学 [M6](/math/backprop/) 时已经会手算链式法则，再读 F4，解释 `.grad` 与图记录的实际行为。
-- 写 [P1 嵌入](/principles/tokenization/) 与 [P4 Decoder](/principles/decoder/) 前，读 F3/F5，对齐 token 索引、模块参数和各个张量轴。
-- 在 [T1 数据](/training/data/)、[T2 优化](/training/optimization/) 与 [T3 完整训练](/training/pretraining/) 之前，读 F6，分清加载器、优化器和状态文件。
-- 进入 [G1 GPU 执行模型](/gpu/execution-model/) 时，数组地址与 stride 可回读 F1/F3；框架的 device 与底层线程分工属于不同层次。
-- 给训练或推理程序加 `torch.compile` 前，读 [F7](/frameworks/torch-compile/)；性能部分结合 G3/G4，CUDA Graph 再连接 S6。
+[F6 数据、更新与训练状态](/frameworks/data-and-training/) 换用五个可手算的样本，把单次前向放进 `2+2+1` 的批次、梯度更新和 checkpoint（保存的训练状态）中。重点是尾批的分母，以及暂停后如何读到同一批数据并做出同一次更新。接下来可进入 [P1 文本、token 与 embedding](/principles/tokenization/) 构造语言模型输入，再沿 [训练路线](/training/) 完成文档处理和实验评估。
 
-M 解释数学原因，F 解释接口契约，P 解释模型结构，T 解释训练算法和实验。新路线不会用 `softmax` 这个函数名代替概率推导，也不会用一个 checkpoint 示例代替完整恢复协议。
+## 重复运行同一计算时
 
-## 一次操作的核对清单
+如果模型已经能正确运行，需要判断重复执行的开销，再读 [F7 torch.compile](/frameworks/torch-compile/)。它用同一个三元素函数比较普通执行与编译执行，解释首次调用、guard、图中断和重新编译；先核对结果与梯度，再计算编译成本需要运行多少次才能收回。F7 不要求先学 GPU kernel；要研究底层执行和测量，可继续读 [GPU 路线](/gpu/)。
 
-| 维度 | 核对的问题 | 常见例子 |
-| --- | --- | --- |
-| 值 | 结果与手算是否一致，是否有限 | stable softmax、归约与交叉熵 |
-| 轴 | 输入输出形状和各轴身份是什么 | batch、时间、头、特征、类别 |
-| 存储 | 返回对象共享数据还是独立复制 | 基础切片、转置、from_numpy、clone |
-| 类型与设备 | dtype/device 是否符合接口 | token long、float64 核对、CPU/GPU |
-| 梯度 | 操作是否记录，谁的 grad 会累积 | leaf、detach、no_grad、backward |
-| 状态 | 操作读取或改变哪些长期状态 | RNG、optimizer.step、train/eval、state_dict |
-
-例如 `.reshape` 只改数值组织这一句话不够：还要问新布局能否由原 stride 表示，必要时是否复制。`.eval()` 也只说明模块模式，不能推断没有计算图。每章会用短代码和图，让这些问题对应到实际对象，完整脚本再以断言核对。
-
-## 运行与可视化的边界
-
-全部七章的 CPU 示例位于 `code/frameworks/`，安装使用仓库统一的 `code/requirements.txt`。数学核对优先 float64，token 索引用 int64/long；这不是建议大型 GPU 模型全部用 float64。实际验证版本记录在验收文档，本轮使用 NumPy 2.5.2 与 PyTorch 2.14.0+cpu。F7 默认核对捕获、缓存与 AOT 求导，额外的 `--inductor` 检查需要兼容的本地 C++ 编译器；CPU 结果不代表 GPU 性能。
-
-交互图展示小数组的索引、共享关系、梯度或状态计数，数字与 CPU 脚本可以相互核对。浏览器并未加载 NumPy 或 Torch 运行时，图也不测量真实分配器、GPU 带宽或 kernel 延迟。图片若来自实际数组值，正文说明输入与轴；框架 API 的真实行为仍由 Python 示例验证。
-
-从 [F1 NumPy 数组与存储](/frameworks/numpy-arrays/) 开始，把六个数字的值、轴和存储关系先看清楚。
+从 [F1](/frameworks/numpy-arrays/) 开始，每章都先对一个小输入写出预期值和形状，再运行配套脚本核对。只看 shape 无法发现错轴；只看一次前向也无法确认梯度与恢复状态。

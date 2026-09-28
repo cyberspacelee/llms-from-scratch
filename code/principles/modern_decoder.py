@@ -180,6 +180,52 @@ def generate_cached(model, prompt, max_new_tokens, eos_id=None, generator=None,
     return result
 
 
+def verify_chapter_walkthrough():
+    dtype = torch.float64
+    embedding = torch.tensor([[2., 0.], [0., 2.], [0., 0.]], dtype=dtype)
+    x = embedding[:2]
+    a = 2 / math.sqrt(3)
+    c, s = math.cos(1), math.sin(1)
+    wq = torch.tensor([[0., 0., 0., 0.], [c / a, -s / a, s / a, c / a]], dtype=dtype)
+    wk = torch.tensor([[1 / a, 0.], [s / a, c / a]], dtype=dtype)
+    wv = torch.eye(2, dtype=dtype) / a
+    wo = torch.tensor([[1., 0.], [0., 1.], [0., -1.], [1., 0.]], dtype=dtype)
+    normalized = rms_norm(x, torch.ones(2, dtype=dtype), epsilon=1)
+    torch.testing.assert_close(normalized, torch.tensor([[a, 0.], [0., a]], dtype=dtype))
+    positions = torch.arange(2)
+    pre_q = (normalized @ wq).reshape(1, 2, 2, 2).transpose(1, 2)
+    pre_k = (normalized @ wk).reshape(1, 2, 1, 2).transpose(1, 2)
+
+    def attend(query, key):
+        q = apply_rope(query, positions)
+        k = apply_rope(key, positions).repeat_interleave(2, dim=1)
+        weights = ((q[:, :, 1:2] @ k.transpose(-1, -2)) / math.sqrt(2)).softmax(-1)
+        v = (normalized @ wv).reshape(1, 2, 1, 2).transpose(1, 2).repeat_interleave(2, dim=1)
+        output = weights @ v
+        return weights, output.transpose(1, 2).reshape(1, 4) @ wo
+
+    weights, branch = attend(pre_q, pre_k)
+    p = 1 / (1 + math.exp(-1 / math.sqrt(2)))
+    torch.testing.assert_close(weights[0, :, 0], torch.tensor([[p, 1 - p], [1 - p, p]], dtype=dtype))
+    h = x[1] + branch[0]
+    torch.testing.assert_close(h, torch.tensor([2 * p, 2.], dtype=dtype))
+    r = rms_norm(h, torch.ones(2, dtype=dtype), epsilon=1)
+    y = h + F.silu(r) * r
+    f = rms_norm(y, torch.ones(2, dtype=dtype), epsilon=1)
+    logits = f @ embedding.T
+    loss = F.cross_entropy(logits[None], torch.tensor([2]))
+    torch.testing.assert_close(y, torch.tensor([1.6449702029359567, 2.7529870797605573], dtype=dtype))
+    torch.testing.assert_close(logits, torch.tensor([1.3274489792026454, 2.2215903256264036, 0.], dtype=dtype))
+    torch.testing.assert_close(loss, torch.tensor(2.6385854561101554, dtype=dtype))
+
+    norm_q = rms_norm(pre_q, torch.ones(2, dtype=dtype), epsilon=1)
+    norm_k = rms_norm(pre_k, torch.ones(2, dtype=dtype), epsilon=1)
+    qk_weights, _ = attend(norm_q, norm_k)
+    p_qk = 1 / (1 + math.exp(-2 / (3 * math.sqrt(2))))
+    torch.testing.assert_close(qk_weights[0, 0, 0, 0], torch.tensor(p_qk, dtype=dtype))
+    print(f"PASS: chapter walkthrough p={p:.6f}, QK Norm p={p_qk:.6f}, loss={loss.item():.6f}")
+
+
 def verify_model():
     from language_model import sequence_loss
 
@@ -264,5 +310,6 @@ def verify():
 
 
 if __name__ == "__main__":
+    verify_chapter_walkthrough()
     verify()
     verify_model()

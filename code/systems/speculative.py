@@ -53,10 +53,10 @@ def verify():
         accepted, residual, rejected_mass = compensation(p, q)
         assert np.allclose(accepted + rejected_mass * residual, p)
         assert np.isclose(accepted.sum() + rejected_mass, 1)
-    ids, cached = commit([1, 2], [3, 4], 1, 9)
-    assert ids == [1, 2, 3, 9] and cached == 3
-    ids, cached = commit([1, 2], [3, 4], 2, 9)
-    assert ids == [1, 2, 3, 4, 9] and cached == 4
+    ids, cached = commit([1, 2], [0, 2], 1, 1)
+    assert ids == [1, 2, 0, 1] and cached == 3
+    ids, cached = commit([1, 2], [0, 2], 2, 2)
+    assert ids == [1, 2, 0, 2, 2] and cached == 4
 
     class Draws:
         def __init__(self, choices, uniforms):
@@ -85,6 +85,20 @@ def verify():
         return np.array([.5, .3, .2])
     speculative_step([1], conditional_target, proposal, 2, Draws([0, 2, 2], [0., 0.]))
     assert histories == [[1], [1, 0], [1, 0, 2]]
+    # A category absent from q is still reachable through rejection compensation.
+    result, count = speculative_step(
+        [1, 2], lambda history: np.array([0., 1., 0.]),
+        lambda history: np.array([1., 0., 0.]), 1,
+        Draws([0, 1], [.5]),
+    )
+    assert result == [1] and count == 0
+    conditional_p = lambda history: np.array([.5, .3, .2]) if len(history) == 2 else np.array([.1, .8, .1])
+    conditional_q = lambda history: np.array([.6, .1, .3]) if len(history) == 2 else np.array([.2, .2, .6])
+    result, count = speculative_step(
+        [1, 2], conditional_p, conditional_q, 2,
+        Draws([0, 2, 1], [0., .9]),
+    )
+    assert result == [0, 1] and count == 1
     a, k = .8, 4
     assert np.isclose(sum(a ** i for i in range(k + 1)), 3.3616)
     print("speculation: exact marginal, zero support, conditional history, rejection and bonus verified")

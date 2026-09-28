@@ -1,7 +1,7 @@
 ---
 title: 数据、更新与训练状态
-question: 怎样把单样本组织成批次，并让一次更新与恢复具有明确边界
-description: 用五个样本核对 DataLoader 的批次与平均损失，再连接梯度清空、优化器、裁剪和可恢复的 state_dict。
+question: 五个样本怎样组成训练批次，并在暂停后得到相同的下一次更新
+description: 沿五个样本和一个线性模型追踪批次、有效分母、梯度、优化器历史与 checkpoint 中的数据位置。
 order: 6
 code:
   - code/frameworks/data_and_training.py
@@ -9,15 +9,15 @@ code:
 
 import BatchStreamLab from '../../../components/labs/BatchStreamLab'
 
-五个样本按 `batch_size=2` 读取，会得到大小为 2、2、1 的三批。末批是否参与更新、各批损失怎样合成五个样本的平均值，都要在训练循环里明确决定。保存模型权重也只是恢复的一部分：要从同一步继续，还需保存优化器和数据顺序等状态。
+五个样本组成 `2+2+1` 三批。训练到第二批后暂停，怎样保证恢复时读到同一个第五个样本、算出同一个梯度，并做出同一次参数更新？本章沿这个问题连接数据顺序、损失分母、梯度与 checkpoint。
 
-接续 [F4 自动求导](/frameworks/autograd/) 和 [F5 模块与损失](/frameworks/modules-and-losses/)，本章用 CPU 线性模型连接 `Dataset`、`DataLoader`、优化器和 checkpoint，核对各对象负责的状态。更新算法见 [T2](/training/optimization/)，完整语言模型实验见 [T3](/training/pretraining/)。这个小模型只验证接口行为，不用于评价模型质量或 GPU 性能。
+先修是 [F4 自动求导](/frameworks/autograd/) 的梯度累计和 [F5 模块与损失](/frameworks/modules-and-losses/) 的参数登记。本章始终使用 $x_i=i-2$、$y_i=2x_i+1$ 的五个样本和一个 $\hat y=wx+b$ 模型。先在固定顺序下手算，再为同一组样本生成一次随机顺序，最后精确对比连续训练与暂停恢复。优化器公式在 [T2](/training/optimization/) 推导，语言模型的完整实验见 [T3](/training/pretraining/)。
 
 ## 数据集与批次：一个元素和一批元素分别是什么
 
 数据集（dataset）描述有哪些样本，以及怎样按索引得到一个样本。加载器（data loader）组织索引、读取样本并把它们组合成批次。`TensorDataset` 是现成的按第一个轴取样本的实现：输入的多个张量沿第一个轴长度必须一致，索引一次返回对应位置的元组。其余轴是样本内部的结构，不能因为用了 DataLoader 就自动解释成时间轴或类别轴。
 
-令输入 $x_i=i-2$，标签 $y_i=2x_i+1$，其中 $i=0,\ldots,4$。五个标签是 $(-3,-1,1,3,5)$。这里一个样本的输入、标签形状都是 `(1,)`；两个样本组成的批次形状都是 `(2,1)`。这与单个样本有两个特征 `(2,)` 不同，轴的语义由代码和任务共同规定。
+五个输入是 $(-2,-1,0,1,2)$，标签是 $(-3,-1,1,3,5)$。这里一个样本的输入、标签形状都是 `(1,)`；两个样本组成的批次形状都是 `(2,1)`。这与单个样本有两个特征 `(2,)` 不同，轴的语义由代码和任务共同规定。
 
 ```python
 import torch
@@ -61,7 +61,7 @@ $$
 
 <BatchStreamLab client:visible />
 
-从图最上面按编号读样本：上行是编号，下行是当前预测为零时的平方误差。下面每个非空框是一批，标出实际样本数与批均值；橙色位置是被丢弃的样本。默认设置中三批均值分别是 5、5、25。将批大小调到 8 并勾选 `drop_last`，图中没有有效批次，也没有可计算的平均损失。
+从图最上面按编号读样本：上行是编号，下行是模型初始 $w=b=0$ 时的平方误差。下面每个非空框是一批，标出实际样本数与批均值；橙色位置是被丢弃的样本。默认设置中三批均值分别是 5、5、25。将批大小调到 8 并勾选 `drop_last`，图中没有有效批次，也没有可计算的平均损失。
 
 固定顺序下总是丢同一段尾部，可能使一些样本从未被使用。shuffle 后不同轮次被丢的身份可以变化，但仍然有数据未进入本轮。是否丢弃应由算法和工程限制决定，例如某些依赖完整批次的统计或执行形状；不能为了方便计算 epoch 平均值而悄悄丢数据。验证与测试阶段尤其需要明确报告哪些样本参与了统计。
 
@@ -94,25 +94,27 @@ mean_loss = loss_sum / sample_count
 
 ## 随机顺序：种子和随机状态不是同一个概念
 
-`shuffle=True` 改变的是取样顺序，不改变 Dataset 中每个索引代表的样本。可以给 DataLoader 显式传入 `torch.Generator`，让加载器相关的随机数从指定生成器取得。初始化种子描述从哪个初始状态出发；每次使用随机数都会推进状态，所以一直用同一生成器迭代与每轮重新创建同种子的生成器是不同过程。
+`shuffle=True` 改变取样顺序，不改变 Dataset 中每个索引代表的样本。固定顺序便于手算，但暂停恢复还需要知道这一轮已经生成的顺序。这里显式生成排列，把它交给 DataLoader 的 `sampler`；这不是 DataLoader 自动提供的恢复接口，而是本例可检查的做法。
 
 ```python
 g = torch.Generator().manual_seed(41)
-loader = DataLoader(dataset, batch_size=2, shuffle=True,
-                    generator=g, num_workers=0)
-state = g.get_state()
-order = torch.randperm(5, generator=g)
-g.set_state(state)
-assert torch.equal(torch.randperm(5, generator=g), order)
+order = torch.randperm(len(dataset), generator=g)
+loader = DataLoader(dataset, batch_size=2,
+                    sampler=order.tolist(), num_workers=0)
+# 保存 order、下一批游标，以及用于未来排列的 g.get_state()
 ```
 
-最后两行直接演示生成器状态的恢复，不声称恢复这个状态就自动恢复了正在迭代到一半的 DataLoader。一次迭代器可能已经产生完整排列，还可能预取数据。若中途恢复，需要另外保存本轮顺序、游标，以及其他随机来源的状态。示例采用 `num_workers=0`，把数据读取保留在当前进程，便于逐项核对；增加 worker 后还要明确每个 worker 的随机数与数据分片。
+`order` 是本轮五个索引的排列，因此各批仍为 `2+2+1`，只是批内样本变了；前面的 5、5、25 不再是这些随机批次的均值。`g.get_state()` 是**生成排列之后**的随机数状态，供下一次生成排列使用。单独保存初始种子无法说明本轮排列和当前位置；单独保存当前生成器状态，也不能倒推出已经取到的排列。恢复时同时装载 `order` 与下一批游标。
+
+示例采用 `num_workers=0`，把读取保留在当前进程。实际 DataLoader 迭代器还可能预取数据；多 worker 时也有各自的随机状态和分片。因此不能把“保存生成器状态”宣传成任意数据管道的中途恢复接口。`shuffle=True, generator=g` 适合直接迭代整轮；本例使用显式 `sampler`，是为了暴露可恢复的顺序契约。
 
 `torch.manual_seed` 可以初始化 PyTorch 的随机数，但不能独自控制 NumPy `default_rng` 或 Python `random` 对象。给这些库分别设种子，并记录各自状态，才能说明实验的随机来源。即使同样设种子，不同设备、版本或非确定性算法也未必给出逐位相同结果。本章续训对照限定在同一 CPU 环境、固定批次和没有随机层的模型中。
 
 ## 一次更新：清空、前向、反向和 step 的职责
 
-`loss.backward()` 计算梯度并累积到参数 `.grad`，它没有更新参数；`optimizer.step()` 根据当前梯度与优化器状态更新参数，它通常没有为你清空梯度。独立更新的默认顺序可以读成以下代码，每行都对应一种状态变化：
+先看固定顺序第一批：$x=(-2,-1)$、$y=(-3,-1)$，初始 $w=b=0$，批均方误差是 $(9+1)/2=5$。对 $L=((wx_0+b-y_0)^2+(wx_1+b-y_1)^2)/2$ 求导，得到 $\partial L/\partial w=-7$、$\partial L/\partial b=4$。这两个数进入 `.grad`，参数此时仍是零。若使用无动量 SGD、学习率 $0.1$，`step()` 后才变为 $w=0.7,b=-0.4$。脚本直接核对这些数。
+
+`loss.backward()` 计算并**累积**梯度；`optimizer.step()` 根据当前梯度与优化器状态更新参数，通常不会清空梯度。实际训练同样使用这五个样本，但顺序取上一节生成的 `order`。每个批次独立更新的顺序如下：
 
 ```python
 model.train()
@@ -123,10 +125,10 @@ for xb, yb in loader:
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0,
                                    error_if_nonfinite=True)
-    optimizer.step()
+    optimizer.step()                 # 已完成一次更新，游标移向下一批
 ```
 
-`model.train()` 设置模块训练模式，影响 Dropout 等具有模式行为的层。它不生成损失，也不打开一个原本被 `no_grad` 关闭的求导上下文。简单 `Linear` 没有训练/评估不同的前向公式，但保持明确的模式仍使程序结构容易核对。验证时则常同时使用 `model.eval()` 和 `torch.no_grad()`，前者管模块行为，后者管计算图记录。
+`model.train()` 设置模块训练模式，影响 Dropout 等具有模式行为的层。简单 `Linear` 的前向公式不随模式变化，但代码仍明确设定模式；验证时则常同时使用 `model.eval()` 与 `torch.no_grad()`，前者管模块行为，后者管是否记录计算图。`train()` 本身不会重新开启被 `no_grad()` 关闭的求导。
 
 把 zero_grad 放在每次独立更新前，可避免上一批的梯度带进来。若故意累计多个微批，则只在累计组开始清一次，多个前向各自调用 backward，组结束才 step。梯度如何加和见 F4，如何按有效 token 归一并调整训练参数见 T2；不要通过删掉 zero_grad 而无意中把两种训练方案混在一起。
 
@@ -138,37 +140,42 @@ for xb, yb in loader:
 
 ## 优化器与裁剪：更新依据是什么
 
-优化器在创建时获得要管理的参数对象，例如 `torch.optim.SGD(model.parameters(), lr=0.1)`。最简单无动量、无衰减的 SGD 对参数 $\theta$ 应用 $\theta\leftarrow\theta-\eta g$。若参数为 1、梯度为 2、学习率为 0.1，一次 step 后参数为 0.8；梯度仍是 2，直到明确清空。这个数值例子能区分求导、更新和清梯度三件事。
+优化器在创建时获得要管理的**参数对象**。上面的第一批验证使用无动量、无衰减 SGD，规则是 $\theta\leftarrow\theta-\eta g$。它消费 $(-7,4)$ 得到 $(0.7,-0.4)$，但 `.grad` 仍是 $(-7,4)$，直到明确清空。只调用 `backward()` 不会改变 $w,b$。
 
-`AdamW` 则除了参数和当前梯度，还维护 step、一阶矩与二阶原始矩。这里通过 API 使用它，不在本章重推更新算法。恢复权重却重新创建空的 AdamW 状态，会让下一次更新依据改变；保持相同学习率并不补回丢失的历史。T2 会用数值拆开自适应更新与解耦权重衰减。
+精确续训实验改用 `AdamW(lr=0.05, weight_decay=0.01)`。输入仍是这五个样本，模型仍是 $\hat y=wx+b$。AdamW 除了参数和当前梯度，还维护 step、一阶矩与二阶原始矩；这里使用其 API，不在本章重推算法。恢复权重却创建空的优化器历史，会改变下一次更新的依据。相同学习率补不回历史。[T2](/training/optimization/) 会计算这些状态怎样影响数值。
 
 梯度裁剪位于 backward 之后、step 之前。`clip_grad_norm_` 把所有指定参数梯度视为一个整体向量，超过阈值时按同一比例缩放；返回值是裁剪前的总范数。它不是把每个坐标分别截成区间，后者是不同规则。概念上，二范数为 5 的梯度 $(3,4)$ 裁到阈值 2 后为 $(1.2,1.6)$；实际实现含小的数值保护项，不应要求这个缩放逐位等于手算小数。
 
 后缀 `_` 表示原地修改已有梯度。裁剪不重做前向，不把 loss 改成另一个数，也不能修复错误 mask 或 NaN 产生的根因。示例使用 `error_if_nonfinite=True`，遇到非有限总范数就报错。混合精度中的梯度缩放与 unscale 顺序需要另行安排，见 T2；本章固定 CPU float64，不掩盖这条边界。
 
-<Figure src="frameworks/training-state.svg" alt="数据集产生单样本，加载器组成批次；清空梯度、前向、反向、裁剪和更新依次改变不同状态；保存参数优化器游标及随机状态" minWidth="40rem">沿箭头核对对象的职责。蓝色阶段建立当前梯度，橙色阶段消费梯度；下方 checkpoint 保存跨步骤存在的状态。微批累计时需要把清梯度与 step 的边界移到累计组两端。</Figure>
+<Figure src="frameworks/training-state.svg" alt="五个样本经加载器成为三批；每批依次清梯度、前向、反向、可选裁剪与更新，checkpoint 在完整更新后记录下一批所需状态" minWidth="40rem">沿箭头看两类状态：蓝色阶段为当前批次建立梯度，橙色阶段消费梯度并改变参数与优化器历史；下方记录暂停时跨越批次边界仍需保存的状态。</Figure>
 
 ## State dict：保存内容必须对应恢复目标
 
-`model.state_dict()` 返回按名字组织的参数与持久 buffer 状态，例如 `weight`、`bias`。它不包含 Python 类的完整实现，也不自动保存 DataLoader 游标、优化器或所有随机源。恢复者仍需要知道模型配置，并创建兼容结构。`load_state_dict` 的默认严格核对可以暴露缺少、多出或形状不匹配的状态，不能用 `strict=False` 把结构不一致悄悄当成成功。
+现在沿随机排列完成前两批更新，并在第二次 `step()` 后暂停。下一次更新要复现，至少需要同时知道：第三批的样本是谁、模型参数是什么、AdamW 当前历史是什么，以及使用了哪一组训练设置。若参数相同而顺序不同，前向与梯度可能不同；若前向相同但优化器状态不同，参数更新仍可能不同。
+
+`model.state_dict()` 返回按名字组织的参数与持久 buffer 状态，本例是 `weight`、`bias`。它不包含 Python 类实现，也不自动保存数据游标、优化器或随机状态。恢复时先按配置重建兼容模型，再 `load_state_dict`；默认严格核对能暴露缺失、多出或形状不匹配的状态。不能用 `strict=False` 把结构不一致悄悄当成成功。
 
 返回的 state_dict 是浅层结构，其中张量与模块状态存在共享关系。`best = model.state_dict()` 不是“把此刻参数冻结成最佳模型”；之后模型更新可能改变 `best` 所看到的值。要保留内存中的独立快照，可使用 `copy.deepcopy`，或逐张量 detach/clone；直接及时 `torch.save` 到文件也记录保存时的内容。选择哪种方法取决于是否继续保留和修改内存状态。
 
-只有要推理时，模型参数、buffer 与结构配置通常就足够，再配上 tokenizer 等输入契约。要继续训练，还需要优化器状态、更新次数、数据位置，以及影响后续操作的随机状态。scheduler、梯度 scaler 或尚未完成的累计组若存在，也要纳入状态设计。本章在一个已完成更新的边界保存，不讨论保存半个 backward 的计算图。
+只做推理时，模型结构、参数和 buffer 再加输入契约通常就足够。这里要**继续训练**，所以还保存 `optimizer.state_dict()`、本轮 `order`、下一批游标 `cursor=2`、已完成的更新数 `step=2`、用于未来排列的生成器状态，以及本例的 PyTorch RNG。配置中的输入输出维度和代码里的学习率、数据定义同样是恢复契约；真实项目还需把它们版本化。若使用 scheduler、梯度 scaler 或尚未完成的累计组，也要定义其保存边界。
 
 ```python
 torch.save({"model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "order": order,
             "cursor": cursor, "step": step,
             "torch_rng": torch.get_rng_state(),
+            "order_rng": g.get_state(),
             "config": {"in": 1, "out": 1}}, path)
 checkpoint = torch.load(path, map_location="cpu", weights_only=True)
 model.load_state_dict(checkpoint["model"])
 optimizer.load_state_dict(checkpoint["optimizer"])
 torch.set_rng_state(checkpoint["torch_rng"])
+g.set_state(checkpoint["order_rng"])
 ```
 
-恢复之前应先按 config 重建模型，并创建管理该模型参数的优化器。创建完成后再装载它们的状态，并恢复需要的 RNG 与数据位置。`map_location="cpu"` 控制加载张量的存储设备；它不自动决定后续整个训练的设备迁移顺序。上面的片段展示状态字段，完整脚本还保存加载器生成器状态，并从游标选择下一批。
+代码片段中的 `model`、`optimizer`、`g` 都须先依配置重建，其中 optimizer 必须管理**重建后模型**的参数对象。然后用 `order` 重建本轮批次，从 `cursor` 取第三批；恢复的生成器状态留给下一轮生成排列。`map_location="cpu"` 控制加载时张量的存储设备，不负责后续训练设备迁移。
 
 显式 `weights_only=True` 限制反序列化允许的对象类型，不意味着加载内容只有模型权重。兼容的张量、基本数值、字符串与容器组成的优化器状态也可以放在载荷中。它也不是对任何第三方文件都保证安全的沙箱。本章只加载当前脚本在临时目录自己创建的文件，不在教学运行中反序列化外部未知对象。
 
@@ -176,32 +183,19 @@ torch.set_rng_state(checkpoint["torch_rng"])
 
 ### 保存边界怎样与数据位置一致
 
-设前两批各自完成一次更新，更新次数是 2，下一批的索引也是 2。保存时把这两个字段一起记录，恢复者就知道哪些数据已经影响参数，哪些数据尚未消费。若先把游标推进到 3 却仍保存第二次更新后的参数，恢复者会跳过第三批；若游标仍记成 1，又会重复使用已经完成更新的第二批。权重文件能成功读取，并不能排除这些错位。
+前两批各自完成一次更新后，更新次数是 2，下一批的**批次游标**也是 2。它不是样本索引：随机排列中的 `order[4]` 才指明末批是哪一个样本。若游标提前写成 3，就跳过最后一批；若仍是 1，则重复处理第二批。权重文件成功读取不能排除这种错位。
 
 因此 checkpoint 的含义应是一组处于同一逻辑边界的状态。最容易核对的初始设计是在一个完整 step 后保存，游标指向下一个待处理批次。多个微批组成一次更新时，可以等累计组完成再保存；若一定要在中间暂停，还需要记录已累计梯度、累计分母以及处理到哪一个微批。本章不保存中间计算图，示例始终以完整更新为边界。
 
-数据集改变后，即使原游标数值仍在范围内，它也未必指向相同样本。真实实验还需要记录数据版本、切分、tokenizer 和顺序生成方式。F6 通过固定的五个张量样本消除这些变量，目的是让恢复接口的差异可见；到了 T3，必须把这些输入契约与模型配置一起核对。不要把一个很小的精确恢复断言扩展成任何数据管道都能直接恢复的结论。
+数据集改变后，即使 `order` 和游标的数值仍在范围内，它们也未必指向相同的内容。真实实验还需记录数据版本、切分与 tokenizer。这里固定五个张量样本，让状态错误能被隔离；[T3](/training/pretraining/) 会把输入契约纳入完整训练实验。
 
 <CodeFile path="code/frameworks/data_and_training.py" />
 
-运行 `python3 code/frameworks/data_and_training.py`，第一行应报告批次 `2/2/1`、加权损失 9 和精确 AdamW 续训通过，第二行打印实际 Torch 版本与初始、最终损失。脚本固定 CPU float64、一个线程和随机种子，在临时目录写 checkpoint，结束后自动删除文件。它同时核对一个样本也没有的 drop_last 情形、生成器状态恢复、SGD 的参数更新与清梯度，以及 state_dict 快照的共享关系。
+运行 `python3 code/frameworks/data_and_training.py`，第一行应报告批次 `2/2/1`、加权损失 9 和精确 AdamW 续训通过。脚本固定 CPU float64、一个线程和随机种子，在临时目录保存并加载 checkpoint。它还核对 `drop_last` 导致零批次的边界、同一模型的第一批 SGD 梯度 $(-7,4)$ 与参数 $(0.7,-0.4)$、生成器状态及 state_dict 快照的共享关系。
 
-续训实验在前两批完成更新后保存，连续运行第三批作为参考；另建模型和优化器，装载相同状态，从游标 2 读取相同第三批。脚本对第三批 loss、所有模型状态和优化器 step 逐项断言。因为批次已经固定、模型没有 Dropout，比较范围清晰；这不等于已经验证了多 worker 的中途恢复、分布式采样或跨设备逐位复现。
+续训实验在随机排列的前两批更新后保存；连续训练第三批作为参考。另建模型与优化器，装载状态，按保存的 `order` 和 `cursor=2` 取得同一第三批。脚本逐项比较第三批 loss、所有模型参数、AdamW step 与下一轮排列。反例只装载模型权重：第三批前向 loss 一样，但做完 step 后参数不同。模型没有 Dropout，且在同一 CPU 环境中运行；这没有验证多 worker 中途恢复、分布式采样或跨设备逐位复现。
 
 如果恢复后的下一次 loss 不同，先核对输入批次与模型状态；loss 相同但参数更新不同，再核对优化器状态、学习率、裁剪与累计边界。这比只观察后续 loss 曲线是否“看起来相似”更容易定位问题。真正的小语言模型恢复还涉及文本窗口、数据排列和多种随机来源，T3 提供完整实验。
-
-## API 回查：把对象与状态对应起来
-
-| API | 输入或负责的状态 | 本章必须核对的结果 |
-| --- | --- | --- |
-| `TensorDataset` / `Dataset` | 单个索引到单样本 | 第一轴长度、字段与样本形状 |
-| `DataLoader` | 索引顺序、样本组合、尾部策略 | 实际批大小、有效样本数、collate 结果 |
-| `Generator` / `manual_seed` | 指定随机源的状态 | 初始种子与中途状态的区别 |
-| `zero_grad` | 已登记参数的梯度 | None、零张量与未产生梯度分别判断 |
-| `backward` / `step` | 本次梯度 / 参数与优化器历史 | 计算、累计、更新和清空不能混同 |
-| `clip_grad_norm_` | 所有指定参数的梯度总范数 | backward 后、step 前，返回裁剪前范数 |
-| `state_dict` / `load_state_dict` | 按名字组织的参数、buffer 或优化器状态 | 配置一致、快照共享、严格装载 |
-| `save` / `load` | 明确字段的序列化载荷 | 自建文件、map_location、weights_only 与恢复目标 |
 
 ## 常见误区
 
@@ -229,6 +223,13 @@ torch.set_rng_state(checkpoint["torch_rng"])
 </details>
 
 <details>
+<summary>把第五个样本换成标签 7，前两批不变；新的五样本平均损失是多少？</summary>
+
+初始模型仍预测零，前两批损失和分别为 10、10，第五个样本的平方误差变为 $7^2=49$。总和为 69，除以五个实际样本得 $13.8$。直接平均三批均值会得到 $(5+5+49)/3$，仍错把尾批当作两个样本那么重。
+
+</details>
+
+<details>
 <summary>连续两次 backward 后只调用一次 step，可以说已经完成两个独立更新吗？</summary>
 
 不能。两次 backward 如果没有清空梯度，贡献会累加到同一份 `.grad`，而只有一次 step 消费了累计梯度。两个独立更新应分别计算、清空和消费自己的梯度；累计更新还要统一分母，不能只数 backward 的次数。
@@ -239,6 +240,13 @@ torch.set_rng_state(checkpoint["torch_rng"])
 <summary>恢复后前向 loss 相同，但下一次 AdamW 更新不同，优先检查什么？</summary>
 
 相同前向 loss 支持当前输入和参数可能一致，却没有证明更新历史一致。检查 optimizer state 是否装载、一阶矩/二阶原始矩与 step 是否恢复，再检查学习率、权重衰减、裁剪和梯度累计边界。若只加载 model.state_dict 而使用新优化器，下一步一般没有相同的历史依据。
+
+</details>
+
+<details>
+<summary>只保存 `order_rng` 和 `cursor=2`，不保存本轮 `order`，能找回第三批吗？</summary>
+
+不能。`order_rng` 是本轮排列已经生成**之后**的状态，下一次从它生成的是未来一轮的排列。`cursor=2` 只说取第三批，不说这个批次包含哪一个样本。还需要本轮 `order`，或能够严格重建本轮排列的等价信息。
 
 </details>
 

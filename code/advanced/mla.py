@@ -1,37 +1,66 @@
-"""Explicit and absorbed implementations of the same one-head MLA operator."""
+"""Three-token, two-head MLA: explicit K/V and absorbed decode agree."""
+
 import math
+
 import torch
 
 
-def rotation(angle):
-    return torch.tensor([[math.cos(angle), -math.sin(angle)],
-                         [math.sin(angle), math.cos(angle)]], dtype=torch.float64)
+DTYPE = torch.float64
 
 
-def verify():
-    torch.manual_seed(11)
-    dtype = torch.float64
-    latent = torch.randn(5, 3, dtype=dtype)
-    up_k, up_v = torch.randn(2, 3, dtype=dtype), torch.randn(4, 3, dtype=dtype)
-    out = torch.randn(6, 4, dtype=dtype)
-    q_content = torch.randn(2, dtype=dtype)
-    q_rope = rotation(4 * .3) @ torch.tensor([1., 2.], dtype=dtype)
-    raw_rope = torch.randn(5, 2, dtype=dtype)
-    keys_rope = torch.stack([rotation(j * .3) @ key for j, key in enumerate(raw_rope)])
-    keys, values = latent @ up_k.T, latent @ up_v.T
-    scores = (keys @ q_content + keys_rope @ q_rope) / math.sqrt(4)
-    weights = scores.softmax(0)
-    explicit = out @ (weights @ values)
-    q_latent = up_k.T @ q_content
-    absorbed_scores = (latent @ q_latent + keys_rope @ q_rope) / math.sqrt(4)
-    absorbed = (out @ up_v) @ (absorbed_scores.softmax(0) @ latent)
-    torch.testing.assert_close(scores, absorbed_scores)
+def rotate(vector: torch.Tensor, position: int) -> torch.Tensor:
+    angle = position * math.pi / 2
+    matrix = torch.tensor(
+        [[math.cos(angle), -math.sin(angle)],
+         [math.sin(angle), math.cos(angle)]], dtype=DTYPE
+    )
+    return matrix @ vector
+
+
+def verify() -> None:
+    # The first two coordinates are the joint KV latent; the third feeds RoPE.
+    hidden = torch.tensor([[1, 0, 1], [0, 1, 1], [1, 1, 1]], dtype=DTYPE)
+    down = torch.tensor([[1, 0, 0], [0, 1, 0]], dtype=DTYPE)
+    key_position = torch.tensor([[0, 0, 1], [0, 0, 0]], dtype=DTYPE)
+    latent = hidden @ down.T
+    rope_keys = torch.stack([rotate(key_position @ x, j) for j, x in enumerate(hidden)])
+
+    up_keys = torch.tensor([[[1, 1], [0, 1]], [[1, 0], [1, 1]]], dtype=DTYPE)
+    up_values = torch.tensor([[[1, 0], [0, 2]], [[0, 1], [1, 1]]], dtype=DTYPE)
+    content_queries = torch.tensor([[2, 1], [1, 2]], dtype=DTYPE)
+    rope_queries = torch.stack([
+        rotate(torch.tensor([1., 0.], dtype=DTYPE), 2),
+        rotate(torch.tensor([0., 1.], dtype=DTYPE), 2),
+    ])
+    output = torch.tensor([[1, 0, 1, 0], [0, 1, 0, 1]], dtype=DTYPE)
+
+    explicit_heads = []
+    absorbed_heads = []
+    for h in range(2):
+        keys = latent @ up_keys[h].T
+        values = latent @ up_values[h].T
+        explicit_scores = (keys @ content_queries[h] + rope_keys @ rope_queries[h]) / 2
+        absorbed_query = up_keys[h].T @ content_queries[h]
+        absorbed_scores = (latent @ absorbed_query + rope_keys @ rope_queries[h]) / 2
+        torch.testing.assert_close(explicit_scores, absorbed_scores)
+        weights = explicit_scores.softmax(0)
+        explicit_heads.append(weights @ values)
+        absorbed_heads.append(up_values[h] @ (weights @ latent))
+        expected = ([1, 3, 6], [3, 1, 5])[h]
+        torch.testing.assert_close(explicit_scores * 2, torch.tensor(expected, dtype=DTYPE))
+        print(f"head {h}: unscaled scores={expected}, weights={weights.tolist()}")
+
+    explicit = output @ torch.cat(explicit_heads)
+    absorbed = output @ torch.cat(absorbed_heads)
     torch.testing.assert_close(explicit, absorbed)
-    # Position-dependent rotation cannot be absorbed into one fixed query map.
-    square_up = torch.tensor([[1., 2.], [0., 1.]], dtype=dtype)
-    assert not torch.allclose(rotation(.3) @ square_up, square_up @ rotation(.3))
-    assert 5 * (3 + 2) == 25  # Shared latent plus positional keys, per layer.
-    print("MLA: explicit K/V = absorbed latent computation; cached elements = 25")
+    assert latent.shape == (3, 2) and rope_keys.shape == (3, 2)
+    assert 3 * (2 + 2) == 12  # Only latent and shared RoPE key persist per layer.
+
+    # An ordinary up-projection cannot generally pass through position rotation.
+    nonsymmetric = torch.tensor([[1., 2.], [0., 1.]], dtype=DTYPE)
+    basis = torch.tensor([1., 0.], dtype=DTYPE)
+    assert not torch.allclose(rotate(nonsymmetric @ basis, 1), nonsymmetric @ rotate(basis, 1))
+    print(f"output={explicit.tolist()}, cached elements=12; explicit=absorbed")
 
 
 if __name__ == "__main__":

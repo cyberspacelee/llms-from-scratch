@@ -27,16 +27,22 @@ class Pages:
         return list(table)
 
     def append(self, table, length, value):
+        if length < 0 or len(table) != (length + self.block_size - 1) // self.block_size:
+            raise ValueError("table does not match current length")
         logical, offset = divmod(length, self.block_size)
         if logical == len(table):
             table.append(self.allocate())
         block = table[logical]
         if self.refs[block] > 1:
             copy = self.allocate()
-            self.values[copy] = self.values[block]
+            self.values[copy, :offset] = self.values[block, :offset]
             self.refs[block] -= 1
             table[logical] = block = copy
         self.values[block, offset] = value
+        return self.slot(table, length)
+
+    def slot(self, table, position):
+        return table[position // self.block_size] * self.block_size + position % self.block_size
 
     def read(self, table, length):
         return np.array([self.values[table[i // self.block_size], i % self.block_size]
@@ -53,20 +59,26 @@ class Pages:
 def verify():
     pages, a = Pages(), []
     for i in range(6):
-        pages.append(a, i, i + 1)
+        assert pages.append(a, i, i + 1) == i
+    assert a == [0, 1]
+    assert pages.refs[:3].tolist() == [1, 1, 0]
+    assert pages.slot(a, 5) == 5
     b = pages.share(a)
-    assert pages.refs.sum() == 4
-    pages.append(a, 6, 7)
-    pages.append(b, 6, 70)
-    assert a[0] == b[0] and a[1] != b[1]
-    assert pages.refs[a[0]] == 2
+    assert b == [0, 1] and pages.refs[:3].tolist() == [2, 2, 0]
+    assert pages.append(a, 6, 7) == 10
+    assert a == [0, 2] and b == [0, 1]
+    assert pages.refs[:3].tolist() == [2, 1, 1]
+    assert pages.append(b, 6, 70) == 6
+    assert pages.refs[:3].tolist() == [2, 1, 1]
     assert np.array_equal(pages.read(a, 7), [1, 2, 3, 4, 5, 6, 7])
     assert np.array_equal(pages.read(b, 7), [1, 2, 3, 4, 5, 6, 70])
     pages.release(a)
+    assert pages.refs[:3].tolist() == [1, 1, 0]
     assert np.array_equal(pages.read(b, 7), [1, 2, 3, 4, 5, 6, 70])
     pages.release(b)
-    assert pages.refs.sum() == 0
-    print("pages: logical reads, shared prefix, writable tails and release verified")
+    assert pages.refs[:3].tolist() == [0, 0, 0]
+    assert pages.allocate() == 0
+    print("pages: slots 5/10/6, shared reads, copy-on-write and release verified")
 
 
 if __name__ == "__main__":

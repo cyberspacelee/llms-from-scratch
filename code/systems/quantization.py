@@ -1,50 +1,76 @@
-"""Symmetric integer representation and its storage accounting."""
+"""Reproduce the quantization arithmetic and storage accounts in S7."""
+
 import numpy as np
 
 
-def quantize(x, bits=8, axis=None):
-    if bits < 2 or bits > 8 or not np.isfinite(x).all():
-        raise ValueError("finite values and 2..8 bits required")
+def symmetric(values, bits=3, axis=None):
+    if not 2 <= bits <= 8 or not np.isfinite(values).all():
+        raise ValueError("expected finite values and 2..8 bits")
     limit = 2 ** (bits - 1) - 1
-    maximum = np.max(np.abs(x), axis=axis, keepdims=True)
+    maximum = np.max(np.abs(values), axis=axis, keepdims=True)
     scale = np.where(maximum == 0, 1.0, maximum / limit)
-    integers = np.clip(np.rint(x / scale), -limit, limit).astype(np.int8)
-    return integers, scale
+    code = np.clip(np.rint(values / scale), -limit, limit).astype(np.int8)
+    return code, scale
 
 
-def affine_quantize(x, bits=8):
-    if bits < 2 or bits > 8 or not np.isfinite(x).all():
-        raise ValueError("finite values and 2..8 bits required")
+def affine(values, bits=3):
+    if not 2 <= bits <= 8 or not np.isfinite(values).all():
+        raise ValueError("expected finite values and 2..8 bits")
     limit = 2 ** bits - 1
-    lower, upper = min(float(x.min()), 0.), max(float(x.max()), 0.)
-    scale = (upper - lower) / limit if upper > lower else 1.
+    lower = min(float(np.min(values)), 0.0)
+    upper = max(float(np.max(values)), 0.0)
+    scale = (upper - lower) / limit if upper > lower else 1.0
     zero = int(np.clip(np.rint(-lower / scale), 0, limit))
-    integers = np.clip(np.rint(x / scale) + zero, 0, limit).astype(np.uint8)
-    return integers, scale, zero
+    code = np.clip(np.rint(values / scale) + zero, 0, limit).astype(np.uint8)
+    return code, scale, zero
 
 
 def verify():
-    x = np.array([[-1., -.5, 0., .5, 1.], [-20., -1., 0., 1., 20.]])
-    q, scale = quantize(x, 3)
-    assert scale.item() == 20 / 3
-    assert q.min() >= -3 and q.max() <= 3
-    grouped, scales = quantize(x, 3, axis=1)
-    assert scales.shape == (2, 1)
-    assert np.mean((grouped[0] * scales[0] - x[0]) ** 2) < np.mean((q[0] * scale - x[0]) ** 2)
-    zero, zero_scale = quantize(np.zeros((2, 4)), axis=1)
-    assert np.all(zero == 0) and np.all(zero_scale == 1)
-    # Packed INT4, fp16 scale, group size 128.
+    weight = np.array([[-1., -.5, .5, 1.], [-20., 20., -1., 1.]])
+    activation = np.array([0., 1., 2., 3.])
+    exact = weight @ activation
+    assert np.allclose(exact, [3.5, 21.])
+
+    whole, whole_scale = symmetric(weight)
+    rows, row_scales = symmetric(weight, axis=1)
+    # Shape is output row, contiguous group, elements within group.
+    groups, group_scales = symmetric(weight.reshape(2, 2, 2), axis=2)
+    restored_whole = whole * whole_scale
+    restored_rows = rows * row_scales
+    restored_groups = (groups * group_scales).reshape(2, 4)
+    assert np.allclose(restored_whole @ activation, [0., 20.])
+    assert np.allclose(restored_rows @ activation, [11 / 3, 20.])
+    assert np.allclose(restored_groups @ activation, [11 / 3, 21.])
+    assert np.allclose(group_scales[1, :, 0], [20 / 3, 1 / 3])
+
+    eight, eight_scales = symmetric(weight, bits=8, axis=1)
+    assert eight[0, 2] == 64 and eight[1, 2] == -6
+    assert np.isclose((eight * eight_scales)[0, 2], 64 / 127)
+    assert np.isclose((eight * eight_scales)[1, 2], -120 / 127)
+
+    code, scale, zero = affine(activation)
+    assert code.tolist() == [0, 2, 5, 7] and scale == 3 / 7 and zero == 0
+    restored_activation = scale * (code.astype(float) - zero)
+    assert np.allclose(restored_activation, [0, 6 / 7, 15 / 7, 3])
+    assert np.isclose(restored_groups[1] @ restored_activation, 18)
+    _, shifted_scale, shifted_zero = affine(np.array([-1., 3.]))
+    assert shifted_scale == 4 / 7 and shifted_zero == 2
+
+    zeros, zero_scales = symmetric(np.zeros((2, 4)), axis=1)
+    assert np.all(zeros == 0) and np.all(zero_scales == 1)
+    clipped = np.clip(np.rint(np.array([.031, 3.]) / .02), -127, 127) * .02
+    assert np.allclose(clipped, [.04, 2.54])
+    assert np.rint([.5, 1.5, 2.5]).tolist() == [0., 2., 2.]
+
+    packed_code_bytes = weight.size * 3 / 8
+    assert [packed_code_bytes + 2 * scales for scales in (1, 2, 4)] == [5, 7, 11]
+    assert whole.nbytes == 8  # NumPy stores each 3-bit teaching code in int8.
     assert 128 * 4 / 8 + 2 == 66
-    assert np.rint(np.array([.5, 1.5, 2.5])).tolist() == [0., 2., 2.]
-    affine, affine_scale, zero = affine_quantize(np.array([-2., 0., 6.]))
-    assert affine.tolist() == [0, 64, 255] and zero == 64
-    restored = affine_scale * (affine.astype(np.float64) - zero)
-    assert restored[1] == 0 and np.max(np.abs(restored - [-2., 0., 6.])) <= affine_scale / 2
-    rng = np.random.default_rng(2)
-    activation, weight = rng.normal(size=(3, 4)), rng.normal(size=(4, 5))
-    scaling = np.array([.5, 1., 2., 3.])
-    assert np.allclose((activation / scaling) @ (weight * scaling[:, None]), activation @ weight)
-    print("quantization: affine zero point, ranges, outliers, scaling and metadata verified")
+    assert 128 * 4 / 8 + 2 + 1 == 67
+    print("exact:", exact, "whole:", restored_whole @ activation)
+    print("per row:", restored_rows @ activation, "per group:", restored_groups @ activation)
+    print("activation codes:", code, "quantized second output:", restored_groups[1] @ restored_activation)
+    print("packed teaching bytes (whole, row, group): 5, 7, 11")
 
 
 if __name__ == "__main__":

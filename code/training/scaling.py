@@ -100,11 +100,15 @@ def verify():
     np.testing.assert_allclose([fit[k] for k in truth], [truth[k] for k in truth], atol=1e-9)
     held_n, held_d = np.array([3., 10.]), np.array([7., 50.])
     np.testing.assert_allclose(predict(held_n, held_d, fit), predict(held_n, held_d, truth), atol=1e-10)
-    optimal_n, optimal_d = optimal_allocation(6e6, fit)
-    np.testing.assert_allclose(6 * optimal_n * optimal_d, 6e6)
+    np.testing.assert_allclose(predict(10., 50., fit), 1.9230103936403413)
+    optimal_n, optimal_d = optimal_allocation(600, fit)
+    np.testing.assert_allclose([optimal_n, optimal_d], [18.928720334405796, 5.282977308203712])
+    np.testing.assert_allclose(6 * optimal_n * optimal_d, 600)
     grid = np.geomspace(optimal_n / 10, optimal_n * 10, 301)
-    assert predict(optimal_n, optimal_d, fit) <= predict(grid, 6e6 / (6 * grid), fit).min() + 1e-12
-    n2, d2 = optimal_allocation(24e6, fit)
+    assert predict(optimal_n, optimal_d, fit) <= predict(grid, 100 / grid, fit).min() + 1e-12
+    np.testing.assert_allclose([predict(16, 6.25, fit), predict(24, 100 / 24, fit)],
+                               [2.218757830440344, 2.224294619519908])
+    n2, d2 = optimal_allocation(2400, fit)
     np.testing.assert_allclose(n2 / optimal_n, 4 ** .4)
     np.testing.assert_allclose(d2 / optimal_d, 4 ** .6)
     try:
@@ -113,7 +117,7 @@ def verify():
         pass
     else:
         raise AssertionError("unidentifiable design accepted")
-    print("PASS: synthetic E/A/B/alpha/beta recovery, held-out predictions, isoflop optimum and unequal exponents")
+    print("PASS: synthetic E/A/B/alpha/beta recovery, held-out prediction, K=100 allocation and unequal exponents")
 
 
 if __name__ == "__main__":

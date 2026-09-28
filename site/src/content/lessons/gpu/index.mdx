@@ -1,64 +1,33 @@
 ---
 title: 从数组到 GPU kernel
-question: 怎样给线程分工、让数据协作，再检验 GPU 程序是否正确且更快
-description: 从 Python 数组进入 CUDA 的 thread、warp、block、grid，沿内存与同步走到分块 kernel，再用事件和工具测量真实执行。
+question: 怎样证明一个 GPU kernel 算对了，再判断它是否真的更快
+description: 沿输出归属、内存协作、分块计算和设备测量四步，建立 GPU 程序的正确性与性能证据。
 order: 0
 ---
 
-把 Python 循环改写成 GPU kernel，先要给每个输出分配线程，确定线程之间的数据依赖。分工正确后，才能测量内存流量和执行时间。
+设想要把数组计算搬到 GPU：给它更多 thread，结果可能越界；结果算对了，访问地址也可能分散；减少了数据搬运，运行时间仍可能变长。这条路线依次解决这三个障碍。需要先会 Python 数组下标和基本矩阵乘法；若矩阵乘尚不熟悉，可先读 [M3 向量与矩阵](/math/linear-algebra/)。
 
-从向量加法开始，thread 负责元素，block 划定协作范围，grid 组织一次启动的工作；warp 与 SM 决定这些工作如何在硬件上推进。CUDA C++ 与 Triton 的写法不同，索引覆盖、同步和结果仍须分别核对。
+## 先看一张图：程序在哪里运行
 
-## GPU 总览：软件分工怎样落到硬件
+<Figure src="gpu/overall-model.svg" alt="CPU 提交工作给 GPU；GPU 的多个 SM 承载线程块，并通过缓存和设备内存取得数据" minWidth="42rem">沿 CPU、GPU、SM 三层阅读：CPU 侧准备数据并提交 kernel；GPU 的 SM 承载 block，block 内的 thread 使用寄存器与 shared memory 协作。图表示资源与作用范围，不表示某款芯片的实际单元数量或访存路径。</Figure>
 
-<Figure src="gpu/overall-model.svg" alt="CPU和主机内存连接GPU，GPU内部多个SM共享L2并访问设备内存；放大SM显示调度、寄存器、执行与shared/L1资源" minWidth="42rem">先沿 CPU 到 GPU 的方向看提交与数据，再从多个 SM 放大到一个 SM。矩形表示概念层次与资源关系，不表示芯片面积、实际单元数量或每次访存的固定路径。</Figure>
+这里的 kernel 是提交给 GPU 执行的函数；thread 是执行它的逻辑实例，block 是能使用 shared memory 协作的一组 thread，SM 是承载 block 的硬件单元。软件中的 block 数不等于 SM 数，也不决定 block 的执行先后。图采用 NVIDIA CUDA 的术语与常见独立 GPU 的主机、设备视角；具体架构与其他平台的规则应查对应文档。[CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html) 给出了这些概念的正式定义。
 
-从图的最上面开始：应用运行在 CPU，host 代码准备数据并提交 kernel；需要显式搬运时，主机内存与设备内存之间还会发生传输。提交命令与搬运数据是两种操作，不能把 kernel launch 当成一次隐含的全部输入复制。统一内存、集成式设备以及不同互连具有各自的规则，图采用常见的主机/设备概念视图。
-
-再看 GPU 内部：多个 SM 承载 block，多个 SM 可通过共享 L2 与设备内存交换数据。放大一个 SM，线程的局部状态占用寄存器资源，warp 调度器选择能够推进的指令，执行单元完成相应工作。shared memory 提供块内协作的存储，L1 是缓存机制；在许多 NVIDIA 架构中二者共享可配置的物理存储资源，但不能因此混淆用途和同步语义。
-
-最后把软件层放回图中：一次 kernel 的 grid 包含 block，block 包含 thread，块内线性线程号决定 warp 与 lane。grid 的大小来自任务，SM 的数量来自设备。二维或三维 grid/block 是给任务编坐标的方法，不能据此推断 GPU 的执行单元排成同样形状。普通 block 的 shared memory 作用域也不会因为另一个 block 驻留在同一个 SM 就扩大。新架构的 cluster 和分布式 shared memory 属于需要显式使用的额外机制，本图不展开。
-
-沿这张图进入 [G1](/gpu/execution-model/)：先看 block 怎样分批进入 SM，再追踪二维矩阵中的一个元素；用三维切片核对线程编号。到 [G2](/gpu/memory-and-sync/) 时追踪转置数据，到 [G3](/gpu/kernel-design/) 时看共享缓冲区和寄存器的生命周期，最后在 [G4](/gpu/measurement/) 中计算资源上限并测量。
-
-总览依据 [NVIDIA CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html)。硬件存储容量、执行单元种类及缓存组织依架构而异；GPC 等层次在图中省略，不能将本图当成某一型号的芯片结构图。
-
-## 四章：先定义工作与依赖，再测量运行
+## 四步：从唯一负责人到可信时间
 
 <ChapterList track="gpu" />
 
-| 章 | 核心问题 | 读完能核对的结果 |
+| 章节 | 从什么问题出发 | 带走什么判断 |
 | --- | --- | --- |
-| G1 | 一个函数怎样覆盖整个数组 | 100 个元素、64 线程一块，共 2 块和 28 个尾部位置 |
-| G2 | 相同计算为什么搬运不同数量的数据 | 对齐的 32 个 float32 覆盖 4 个 32-byte 段；偏移一元素覆盖 5 段 |
-| G3 | 怎样从算对走到分块与融合 | 非整除的小矩阵乘输出相同，协作装载与边界补零可逐项核对 |
-| G4 | 怎样解释并测量资源、依赖与时间 | 教学 SM 的驻留限制，跨 stream 的 event 顺序，完整测量区间 |
+| [G1 执行模型](/gpu/execution-model/) | 100 个元素的加法交给两块、每块 64 个 thread，谁负责第 99 个元素？ | 用索引证明每个有效输出恰好写一次，并挡住 28 个越界位置；区分逻辑 thread、warp 与 SM。 |
+| [G2 内存与同步](/gpu/memory-and-sync/) | 矩阵转置的读取连续，写入为何分散？ | 数清一条 warp 指令访问的地址段；用 shared memory 换写入者，并证明屏障与边缘 tile 正确。 |
+| [G3 分块与融合](/gpu/kernel-design/) | 矩阵乘的每个输出都算对后，怎样减少重复读取？ | 对非整除的小矩阵逐项核对 tile、补零和复用，再用算术强度估计理论上限。 |
+| [G4 测量与分析](/gpu/measurement/) | 减少搬运、提高 occupancy 后，为什么还不能说更快？ | 计算驻留限制，写清 stream 依赖与计时区间，在真实设备上检查结果、测量并分析瓶颈。 |
 
-这里的 warp 宽度、bank 例子和 CUDA 接口以 NVIDIA 为对象。访问另一厂商的 GPU 时，应核对该平台的执行组宽度、同步与内存规则，不把本路线的常数照搬过去。
+G1 的索引证明是后面三章的共同起点：G2 延续唯一写入要求，重新安排转置的读写者；G3 把这种协作放进矩阵乘的循环；G4 检查节省的数据流量是否抵得上资源和执行代价。读 G3 前还需要 G2 的 block 屏障；读 G4 时带上 G3 的分块资源账。
 
-## 阅读路径：从已有知识进入
+## 两种证据：算对与跑快
 
-具备 Python 数组基础就可以从 G1 开始。G3 的矩阵乘需要 [M3 线性代数](/math/linear-algebra/)，softmax 回读 [P3 注意力](/principles/attention/)。不需要先训练完整模型，才能理解线程索引与内存地址。
+各章的 CPU 脚本和交互图可以枚举索引、地址、bank、同步阶段或教学资源账，适合检验推导。它们不能模拟真实 GPU 的调度、缓存和耗时。仓库里的 CUDA C++、Triton 与 event 示例需要相应设备和工具才能运行；只有在核对输出、说明硬件与输入、明确计时区间之后，才可以报告设备性能。
 
-本路线位于推理系统之前：G3 定义算术强度与屋顶线，G4 定义测量边界，[S2 单卡上限](/systems/accelerator/) 再代入真实硬件规格，[S3 FlashAttention](/systems/flash-attention/) 应用分块与融合减少注意力的中间流量。已经读过 [S1 计算账本](/systems/ledger/) 的读者，可以把那里的负载强度带到 G3 的屋顶线上对照。
-
-需要解释框架怎样生成与融合 kernel 时，结合 [F7 torch.compile](/frameworks/torch-compile/) 的 Dynamo、AOTAutograd 与 Inductor 管线。需要解释 CUDA Graph 与发射开销时，读完 G4 再回 [S6 GPU 执行器](/systems/engine-execution/)。跨设备并行属于 [S9 集群](/systems/cluster/)；block、warp 是一张 GPU 内的工作组织，不要与 tensor parallel rank 混成一层。
-
-## 代码与图：三种证据各自有边界
-
-交互 SVG 显示一维到三维索引、warp 布局、block 调度、地址段、bank、转置路径、tile 生命周期、驻留资源和 stream 依赖。数字来自可手算的模型，颜色显示任务、地址或阶段关系。图片由实际地址表或小矩阵生成，静态结构图说明数据与执行阶段；它们不提供某张显卡的实测吞吐。
-
-每章都有 CPU 验证脚本，检查索引覆盖、访存段数、归约、分块矩阵乘与资源账。它们证明教学算法或计数关系，不模拟 GPU 的全部调度、缓存与指令执行。
-
-`code/gpu/examples/` 另外提供完整 CUDA C++ 和 Triton 示例，章节中说明编译、运行与边界。真实 GPU 程序需要相应设备、驱动与工具；CPU CI 不运行它们。G4 的 event 脚本会在真实设备上记录版本与时间，资料中的工具命令帮助核对越界、同步和执行瓶颈。
-
-## 心智模型：始终带着六个问题读代码
-
-1. 每个输出的负责人是谁？改变 launch 配置后是否仍然没有漏写与重复写？
-2. 一个 block 内哪些线程协作？一个 warp 内哪些 lane 在当前路径上有效？
-3. 这条指令到底访问哪些地址？地址连续、对齐与数据复用分别改变什么？
-4. 谁生产、谁消费？同步保证的是哪些参与者和哪段内存的顺序？
-5. 哪种资源限制驻留？更多线程是否真的增加可执行的独立工作？
-6. 计时区间包含什么？结果已核对吗，所报字节是逻辑请求还是物理流量？
-
-从 [G1 执行模型](/gpu/execution-model/) 开始，用一百个元素写清楚第一份分工。
+完成本路线后，[S2 单卡上限](/systems/accelerator/) 将 G3 的屋顶线用于实际规格，[S3 在线注意力](/systems/flash-attention/) 用分块减少中间数据流量，[S6 GPU 执行器](/systems/engine-execution/) 再处理发射与重放。现在从 [G1](/gpu/execution-model/) 的 100 个元素开始，先回答“每个输出究竟由谁写”。

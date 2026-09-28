@@ -1,4 +1,4 @@
-"""Sparse expert dispatch, dense reference, and routing gradients (CPU)."""
+"""Four-expert top-2 example: output, dispatch, capacity, and gradients (CPU)."""
 import torch
 from torch import nn
 
@@ -20,7 +20,6 @@ def dispatch(x, experts, ids, weights):
 
 
 def verify():
-    torch.manual_seed(7)
     x = torch.tensor([[1., 2.], [2., -1.], [-1., 3.]], dtype=torch.float64)
     experts = nn.ModuleList([nn.Linear(2, 2, bias=False).double() for _ in range(4)])
     with torch.no_grad():
@@ -34,14 +33,28 @@ def verify():
     selected = all_outputs.gather(1, ids[..., None].expand(-1, -1, 2))
     expected = (selected * weights[..., None]).sum(1)
     torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(actual, torch.tensor([
+        [1.268941421369995, 2.537882842739990],
+        [6.537882842739990, -3.268941421369995],
+        [-1.537882842739990, 4.613648528219970],
+    ], dtype=x.dtype))
     torch.testing.assert_close(weights.sum(-1), torch.ones(3, dtype=x.dtype))
     counts = torch.bincount(ids.flatten(), minlength=4)
     assert counts.tolist() == [2, 1, 2, 1]
+    hits = counts.to(x.dtype) / ids.numel()
+    mean_probs = logits.softmax(-1).mean(0)
+    balance = len(experts) * (hits * mean_probs).sum()
+    torch.testing.assert_close(balance.detach(), torch.tensor(1.1983944387531227, dtype=x.dtype))
+    capacity = (x.shape[0] * ids.shape[1] + len(experts) - 1) // len(experts)
+    assert capacity == 2 and (counts <= capacity).all()
+    assert torch.bincount(torch.tensor([[0, 1]] * 3).flatten(), minlength=4).tolist() == [3, 3, 0, 0]
     actual.square().sum().backward()
     assert logits.grad is not None and torch.isfinite(logits.grad).all()
     assert (logits.grad.gather(1, ids).abs().sum() > 0).item()
     assert sum(p.numel() for p in experts.parameters()) == 16
-    print("MoE: sparse dispatch = same-route dense reference; counts", counts.tolist())
+    print("MoE: same-route sparse/dense outputs", actual.detach().tolist())
+    print("expert hits", counts.tolist(), "capacity", capacity,
+          "balance / lambda", balance.detach().item())
 
 
 if __name__ == "__main__":

@@ -26,8 +26,9 @@ export function descend(eta: number, start: readonly [number, number], steps: nu
     path.push([a - eta * a, b - eta * 4 * b])
   }
   const factors = [1 - eta, 1 - 4 * eta] as const
-  const verdict: 'converge' | 'oscillate' | 'diverge' =
-    Math.max(Math.abs(factors[0]), Math.abs(factors[1])) < 1 ? (factors[1] < 0 ? 'oscillate' : 'converge') : 'diverge'
+  const largestFactor = Math.max(Math.abs(factors[0]), Math.abs(factors[1]))
+  const verdict: 'converge' | 'oscillate' | 'boundary' | 'diverge' =
+    largestFactor < 1 ? (factors[1] < 0 ? 'oscillate' : 'converge') : largestFactor === 1 ? 'boundary' : 'diverge'
   return { path, losses: path.map(loss), factors, verdict }
 }
 

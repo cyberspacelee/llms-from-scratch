@@ -5,7 +5,7 @@ import { Controls, LabFrame, Range, Readout, fmt, pen } from './Lab'
 const scale = 80, cx = 220, cy = 130
 const px = (v: number) => Math.round((cx + v * scale) * 100) / 100
 const py = (v: number) => Math.round((cy - v * scale) * 100) / 100
-const verdicts = { converge: '两个系数都在 (0, 1)：单调收敛', oscillate: '第二系数为负但绝对值小于 1：来回振荡地收敛', diverge: '有系数绝对值 ≥ 1：该方向发散' }
+const verdicts = { converge: '两个坐标单调收敛', oscillate: '第二坐标振荡收敛', boundary: '第二坐标等幅振荡，不收敛', diverge: '第二坐标振幅扩大，发散' }
 
 export default function DescentLab() {
   const [eta, setEta] = useState(0.2)

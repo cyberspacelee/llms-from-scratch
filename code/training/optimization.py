@@ -1,12 +1,91 @@
-"""AdamW arithmetic and valid-token gradient accumulation."""
+"""One four-target update, unequal micro-batches, and optimizer state."""
 
 import torch
-import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 
+DTYPE = torch.float64
+TARGETS = torch.tensor([[0.0, -2.0], [0.0, -2.0],
+                        [0.0, -2.0], [2.0, -1.0]], dtype=DTYPE)
+INITIAL = torch.tensor([1.0, -2.0], dtype=DTYPE)
+
+
+def token_losses(weight, targets):
+    return 0.5 * (weight - targets).square().sum(dim=1)
+
+
+def manual_adamw(weight, gradient, first, second, step):
+    first = 0.9 * first + 0.1 * gradient
+    second = 0.99 * second + 0.01 * gradient.square()
+    first_hat = first / (1 - 0.9 ** step)
+    second_hat = second / (1 - 0.99 ** step)
+    weight = 0.98 * weight - 0.1 * first_hat / (second_hat.sqrt() + 1e-8)
+    return weight, first, second
+
+
+def verify_update():
+    weight = torch.nn.Parameter(INITIAL.clone())
+    optimizer = torch.optim.AdamW([weight], lr=0.1, betas=(0.9, 0.99),
+                                  eps=1e-8, weight_decay=0.2, foreach=False)
+    manual = INITIAL.clone()
+    first = torch.zeros_like(manual)
+    second = torch.zeros_like(manual)
+
+    for step in (1, 2):
+        optimizer.zero_grad(set_to_none=True)
+        losses = token_losses(weight, TARGETS)
+        full_loss = losses.mean()
+        full_loss.backward()
+        full_gradient = weight.grad.clone()
+        expected_gradient = weight.detach() - TARGETS.mean(dim=0)
+        torch.testing.assert_close(full_gradient, expected_gradient)
+        if step == 1:
+            assert abs(full_loss.item() - 0.625) < 1e-12
+            torch.testing.assert_close(full_gradient, torch.tensor([0.5, -0.25], dtype=DTYPE))
+            weight.grad = None
+            for selected in (slice(0, 1), slice(1, 4)):
+                (token_losses(weight, TARGETS[selected]).sum() / 4).backward()
+            torch.testing.assert_close(weight.grad, full_gradient)
+            weight.grad = None
+            for selected in (slice(0, 1), slice(1, 4)):
+                (token_losses(weight, TARGETS[selected]).mean() / 2).backward()
+            torch.testing.assert_close(weight.grad, torch.tensor([2 / 3, -1 / 6], dtype=DTYPE))
+            assert not torch.allclose(weight.grad, full_gradient)
+            weight.grad = full_gradient.clone()
+
+        manual, first, second = manual_adamw(manual, full_gradient, first, second, step)
+        if step == 2:
+            fresh_weight = torch.nn.Parameter(weight.detach().clone())
+            fresh_optimizer = torch.optim.AdamW(
+                [fresh_weight], lr=0.1, betas=(0.9, 0.99),
+                eps=1e-8, weight_decay=0.2, foreach=False)
+            fresh_weight.grad = full_gradient.clone()
+            fresh_optimizer.step()
+        optimizer.step()
+        torch.testing.assert_close(weight, manual, atol=1e-12, rtol=1e-12)
+        if step == 1:
+            torch.testing.assert_close(weight, torch.tensor([0.88, -1.86], dtype=DTYPE),
+                                       atol=1e-8, rtol=1e-8)
+            assert abs(token_losses(weight, TARGETS).mean().item() - 0.547) < 1e-8
+        else:
+            assert not torch.allclose(weight, fresh_weight)
+        print(f"AdamW step {step}: {weight.detach().tolist()}, mean loss {token_losses(weight, TARGETS).mean().item():.6f}")
+
+
+def verify_clipping_and_precision():
+    parameter = torch.nn.Parameter(torch.zeros(2, dtype=DTYPE))
+    parameter.grad = torch.tensor([0.5, -0.25], dtype=DTYPE)
+    old_norm = torch.nn.utils.clip_grad_norm_([parameter], max_norm=0.25)
+    assert abs(old_norm.item() - 5 ** 0.5 / 4) < 1e-12
+    torch.testing.assert_close(parameter.grad,
+                               torch.tensor([0.5 / 5 ** 0.5, -0.25 / 5 ** 0.5], dtype=DTYPE),
+                               atol=1e-6, rtol=1e-6)
+    assert torch.tensor(1e-8, dtype=torch.float16).item() == 0
+    assert torch.tensor(1e-8 * 1024, dtype=torch.float16).item() > 0
+    assert torch.tensor(1 + 2 ** -8, dtype=torch.bfloat16).item() == 1
+
+
 def saved_activation_elements(run, parameters):
-    """Elements autograd saves for backward during run(), excluding parameter storage."""
     weights = {p.data_ptr() for p in parameters}
     count = [0]
 
@@ -20,98 +99,29 @@ def saved_activation_elements(run, parameters):
     return loss, count[0]
 
 
-def verify_scale_precision_memory():
-    dtype = torch.float64
-    generator = torch.Generator().manual_seed(3)
-    # Fan-in initialization: Var(Wx) = d_in Var(w) E[x^2], so std 1/sqrt(d_in) keeps variance near 1.
-    x = torch.randn(4096, 256, dtype=dtype, generator=generator)
-    scaled = torch.randn(256, 256, dtype=dtype, generator=generator) / 256 ** 0.5
-    assert abs((x @ scaled.T).var().item() - 1) < 0.05
-    assert abs((x @ (scaled * 256 ** 0.5).T).var().item() / 256 - 1) < 0.05
-    # Residual stream: 24 independent unit-variance writes add variance; 1/sqrt(24) scaling bounds it.
-    writes = torch.randn(24, 4096, 64, dtype=dtype, generator=generator)
-    stream = torch.randn(4096, 64, dtype=dtype, generator=generator)
-    assert abs((stream + writes.sum(0)).var().item() - 25) < 1.0
-    assert abs((stream + writes.sum(0) / 24 ** 0.5).var().item() - 2) < 0.1
-
-    # FP16 flushes 1e-8 to zero; scaling by 1024 survives, BF16 keeps the range but not 1 + 2^-8.
-    assert torch.tensor(1e-8, dtype=torch.float16).item() == 0
-    unscaled = torch.tensor(1e-8 * 1024, dtype=torch.float16).float().item() / 1024
-    assert abs(unscaled - 1e-8) / 1e-8 < 2e-3
-    assert torch.tensor(1e-8, dtype=torch.bfloat16).item() > 0
-    assert torch.tensor(1 + 2 ** -8, dtype=torch.bfloat16).item() == 1
-    assert torch.tensor(1 + 2 ** -8, dtype=torch.float16).item() == 1 + 2 ** -8
-
-    # Checkpointing keeps block inputs only and recomputes the rest; gradients are unchanged.
+def verify_checkpoint():
     torch.manual_seed(5)
-    blocks = torch.nn.ModuleList(torch.nn.Sequential(
-        torch.nn.Linear(8, 32), torch.nn.GELU(), torch.nn.Linear(32, 8)) for _ in range(4)).double()
-    inputs = torch.randn(16, 8, dtype=dtype)
+    block = torch.nn.Sequential(torch.nn.Linear(8, 32), torch.nn.GELU(),
+                                torch.nn.Linear(32, 8)).double()
+    inputs = torch.randn(16, 8, dtype=DTYPE)
+    outcomes = []
+    for recompute in (False, True):
+        block.zero_grad(set_to_none=True)
 
-    def run(use_checkpoint):
-        h = inputs
-        for block in blocks:
-            h = h + (checkpoint(block, h, use_reentrant=False) if use_checkpoint else block(h))
-        return h.square().sum()
+        def run():
+            branch = checkpoint(block, inputs, use_reentrant=False) if recompute else block(inputs)
+            return (inputs + branch).square().sum()
 
-    results = []
-    for use_checkpoint in (False, True):
-        blocks.zero_grad(set_to_none=True)
-        loss, saved = saved_activation_elements(lambda: run(use_checkpoint), blocks.parameters())
+        loss, saved = saved_activation_elements(run, block.parameters())
         loss.backward()
-        results.append((saved, [p.grad.clone() for p in blocks.parameters()]))
-    # Per block: Linear input 16x8, GELU input 16x32, Linear input 16x32; plus the final square.
-    assert results[0][0] == 4 * (128 + 512 + 512) + 128 == 4736
-    assert results[1][0] == 4 * 128 + 128 == 640
-    for plain, recomputed in zip(results[0][1], results[1][1]):
+        outcomes.append((saved, [p.grad.clone() for p in block.parameters()]))
+    assert outcomes[1][0] < outcomes[0][0]
+    for plain, recomputed in zip(outcomes[0][1], outcomes[1][1]):
         torch.testing.assert_close(plain, recomputed, atol=1e-12, rtol=1e-12)
-    print("optimization: fan-in and residual variance, FP16/BF16 range, checkpoint 4736 -> 640 saved")
-
-
-def verify():
-    torch.manual_seed(11)
-    dtype = torch.float64
-    initial = torch.tensor([1.0, -2.0], dtype=dtype)
-    manual = initial.clone()
-    parameter = torch.nn.Parameter(initial.clone())
-    optimizer = torch.optim.AdamW([parameter], lr=0.1, betas=(0.9, 0.99),
-                                 eps=1e-8, weight_decay=0.2, foreach=False)
-    first, second = torch.zeros_like(manual), torch.zeros_like(manual)
-    for step, gradient in enumerate(([0.5, -0.25], [-0.2, 0.4]), start=1):
-        g = torch.tensor(gradient, dtype=dtype)
-        first = 0.9 * first + 0.1 * g
-        second = 0.99 * second + 0.01 * g.square()
-        first_hat = first / (1 - 0.9 ** step)
-        second_hat = second / (1 - 0.99 ** step)
-        manual = (1 - 0.1 * 0.2) * manual - 0.1 * first_hat / (second_hat.sqrt() + 1e-8)
-        parameter.grad = g.clone()
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        torch.testing.assert_close(parameter, manual, atol=1e-12, rtol=1e-12)
-        print("AdamW step", step, manual.tolist())
-
-    x = torch.randn(5, 3, dtype=dtype)
-    y = torch.tensor([0, 1, 0, 1, 1])
-    weight = torch.randn(2, 3, dtype=dtype, requires_grad=True)
-    F.cross_entropy(x @ weight.T, y).backward()
-    complete_gradient = weight.grad.clone()
-    weight.grad = None
-    for begin, end in [(0, 2), (2, 5)]:
-        # Sum each micro-batch, divide by the complete valid-token count.
-        (F.cross_entropy(x[begin:end] @ weight.T, y[begin:end], reduction="sum") / 5).backward()
-    torch.testing.assert_close(weight.grad, complete_gradient, atol=1e-12, rtol=1e-12)
-    weight.grad = None
-    for begin, end in [(0, 2), (2, 5)]:
-        (F.cross_entropy(x[begin:end] @ weight.T, y[begin:end]) / 2).backward()
-    assert not torch.allclose(weight.grad, complete_gradient)
-    p = torch.nn.Parameter(torch.zeros(2, dtype=dtype))
-    p.grad = torch.tensor([3.0, 4.0], dtype=dtype)
-    norm = torch.nn.utils.clip_grad_norm_([p], max_norm=2.0)
-    assert norm.item() == 5.0
-    torch.testing.assert_close(p.grad, torch.tensor([1.2, 1.6], dtype=dtype), atol=1e-6, rtol=1e-6)
-    print("optimization: unequal micro-batches reproduce complete gradient; clipping verified")
+    print(f"checkpoint saved elements: {outcomes[0][0]} -> {outcomes[1][0]}")
 
 
 if __name__ == "__main__":
-    verify()
-    verify_scale_precision_memory()
+    verify_update()
+    verify_clipping_and_precision()
+    verify_checkpoint()

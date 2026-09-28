@@ -1,4 +1,4 @@
-"""Auditable answer rewards, group advantages, and finite-policy gradients."""
+"""One arithmetic task: auditable rewards, policy gradients, and a small LM update."""
 import re
 import copy
 from pathlib import Path
@@ -7,7 +7,7 @@ import torch
 
 
 def answer_reward(response, correct):
-    match = re.fullmatch(r"<answer>\s*(-?\d+)\s*</answer>", response.strip())
+    match = re.fullmatch(r"<answer>\s*(-?\d+)\s*</answer>", response)
     return float(match is not None and int(match.group(1)) == correct)
 
 
@@ -15,20 +15,6 @@ def advantages(rewards):
     if rewards.ndim != 1 or rewards.numel() < 2:
         raise ValueError("a group must contain at least two scalar rewards")
     return (rewards - rewards.mean()) / (rewards.std(correction=0) + 1e-8)
-
-
-def gae(rewards, values, gamma=1., lam=.95):
-    """One terminal episode; values[-1] is the terminal bootstrap, required to be zero."""
-    if rewards.ndim != 1 or values.shape != (rewards.numel() + 1,) or rewards.numel() == 0:
-        raise ValueError("need rewards[T] and values[T+1]")
-    if not 0 <= gamma <= 1 or not 0 <= lam <= 1 or values[-1].item() != 0:
-        raise ValueError("gamma/lambda in [0,1] and zero terminal bootstrap required")
-    result, running = torch.empty_like(rewards), rewards.new_tensor(0.)
-    for t in reversed(range(rewards.numel())):
-        delta = rewards[t] + gamma * values[t + 1] - values[t]
-        running = delta + gamma * lam * running
-        result[t] = running
-    return result
 
 
 def verify_rollout():
@@ -87,32 +73,24 @@ def verify_rollout():
     print(f"RLVR LM: training exact reward {initial_train:.6f} -> {exact_reward(train_pairs):.6f}")
     print(f"RLVR LM: 24 rollouts x 4 prompts x 24 responses; held-out exact reward {initial:.6f} -> {final:.6f}")
     print("PASS: real modern LM rollout/reward/two clipped updates; frozen old log-probs/advantages/reference; finite gradients")
-    # Reward-model pairwise ranking on frozen, explicitly given response features.
-    scorer = torch.nn.Linear(3, 1, bias=False).double()
-    chosen, rejected = torch.tensor([[1., 0., 0.]]).double(), torch.tensor([[0., 1., 0.]]).double()
-    ranking_loss = torch.nn.functional.softplus(-(scorer(chosen) - scorer(rejected))).mean()
-    ranking_loss.backward()
-    assert scorer.weight.grad[0, 0] < 0 < scorer.weight.grad[0, 1]
-    torch.testing.assert_close(gae(torch.tensor([0., 0., 1.]).double(),
-                                   torch.tensor([.2, .3, .4, 0.]).double(), lam=1.),
-                               torch.tensor([.8, .7, .6]).double())
-    print("PASS: preference reward-model gradient direction; terminal GAE returns [0.8,0.7,0.6]")
-
-
 def verify():
-    responses = ["<answer>5</answer>", "<answer>4</answer>", "5", "<answer>5</answer>"]
+    responses = ["<answer>5</answer>", "<answer>4</answer>",
+                 "5", "<answer> 5 </answer>"]
     rewards = torch.tensor([answer_reward(r, 5) for r in responses], dtype=torch.float64)
     assert rewards.tolist() == [1., 0., 0., 1.]
     adv = advantages(rewards)
     torch.testing.assert_close(adv, torch.tensor([1., -1., -1., 1.], dtype=rewards.dtype),
                                atol=3e-8, rtol=0)
     assert torch.equal(advantages(torch.ones(4, dtype=rewards.dtype)), torch.zeros(4, dtype=rewards.dtype))
-    logits = torch.tensor([.1, .2, -.1, .0], dtype=rewards.dtype, requires_grad=True)
+    logits = torch.zeros(4, dtype=rewards.dtype, requires_grad=True)
     probability = logits.softmax(0)
     objective = (probability * rewards).sum()
+    assert objective.item() == .5
     objective.backward()
     expected = probability.detach() * (rewards - objective.detach())
     torch.testing.assert_close(logits.grad, expected)
+    torch.testing.assert_close(logits.grad,
+                               torch.tensor([.125, -.125, -.125, .125], dtype=rewards.dtype))
     samples = torch.tensor([0, 1, 2, 3])
     old_log_probability = logits.detach().log_softmax(0)[samples]
     ratio = (logits.log_softmax(0)[samples] - old_log_probability).exp()
@@ -120,14 +98,9 @@ def verify():
     assert abs(surrogate.item()) < 1e-8
     surrogate_gradient = torch.autograd.grad(surrogate, logits, retain_graph=True)[0]
     assert surrogate_gradient[0] > 0 and surrogate_gradient[1] < 0
-    reference = torch.tensor([.4, .1, .1, .4], dtype=rewards.dtype)
-    log_policy = logits.log_softmax(0)
-    log_ratio = reference.log() - log_policy
-    sampled_kl = log_ratio.exp() - log_ratio - 1
-    exact_kl = (probability * (log_policy - reference.log())).sum()
-    torch.testing.assert_close((probability * sampled_kl).sum(), exact_kl)
-    assert sampled_kl.min() >= 0 and exact_kl >= 0
     assert not answer_reward("<answer>5</answer> extra", 5)
+    assert not answer_reward("<answer>5</answer><answer>4</answer>", 5)
+    assert not answer_reward(" <answer>5</answer>", 5)
     print("RLVR: rewards [1,0,0,1]; group advantages and exact policy gradient verified")
 
 

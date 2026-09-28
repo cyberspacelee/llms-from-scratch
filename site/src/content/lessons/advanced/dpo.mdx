@@ -1,167 +1,144 @@
 ---
 title: 偏好优化 DPO
 question: 同一提示的两个回复，怎样变成有参考约束的学习目标
-description: 从响应条件似然构造对数概率比差，推导 DPO logistic 损失、梯度方向与响应掩码，并核对冻结参考策略。
+description: 用一对可复算的回复，从响应似然、参考概率比推到 DPO 损失，再核对 mask、梯度与适用边界。
 order: 3
 code:
   - code/advanced/dpo.py
 ---
 
-[T5](/training/instruction-tuning/) 给定一个示范回复，最大化其条件似然。有时数据只告诉我们：同一提示下，回复 $y^+$ 比 $y^-$ 更好。直接把 $y^+$ 当 SFT 样本，会忽略比较对象；把 $y^-$ 中每个 token 都当绝对错误，又可能惩罚两个回复共有的正确部分。直接偏好优化（direct preference optimization，DPO）用两个完整回复的相对似然构造目标。
+[T5 指令微调](/training/instruction-tuning/) 教模型模仿一个示范回复。现在只知道同一问题的两个回复孰优，却未必知道理想回复应该怎样写。若只拿较好的回复做 SFT，较差的回复就从训练目标中消失了。直接偏好优化（direct preference optimization，DPO）让模型比较**两条完整回复相对于固定参考模型的概率变化**。
 
-先修为 [M2](/math/distributions/)、[T4](/training/evaluation/) 和 T5。以下采用原始 DPO 的序列求和、固定参考策略和 logistic 目标，系数记为 $\lambda_{\mathrm{DPO}}>0$，避免占用 RoPE 的频率底数 $\beta$。原论文中的 beta 对应本章这个系数。
+本章沿用 [M2 的负对数似然](/math/distributions/)、[P2 的下一 token 预测](/principles/language-modeling/) 和 T5 的回复位置 mask。读完应能从一个偏好对算出 DPO 损失，说明每个概率来自哪些 token，并判断一次更新推动的是哪一种相对优势。
 
-## 回复概率：条件包含提示，求和只包含回复
+## 一对回复：比较的对象是什么
 
-提示为 $x$，回复含 $m$ 个 token，语言模型策略为 $\pi_\theta$：
+贯穿例子只有一个提示 $x=$ `2+2=?`。标注者选择 `4 EOS`（记 $y^+$），拒绝 `5 EOS`（记 $y^-$）。`EOS` 是结束 token；它在本例中属于回复，因此计入概率。这里的数字只是教学模型对各 token 的条件概率，不是数据集中观测到的频率。
+
+| 回复 | 策略 $\pi_\theta$：首 token | 策略：随后 `EOS` | 参考 $\pi_{\mathrm{ref}}$：首 token | 参考：随后 `EOS` |
+| --- | ---: | ---: | ---: | ---: |
+| chosen `4 EOS` | 0.55 | 0.80 | 0.40 | 0.75 |
+| rejected `5 EOS` | 0.30 | 0.60 | 0.40 | 0.50 |
+
+两行的**首 token** 都在同一个提示 $x$ 后预测：策略给 `4` 和 `5` 的概率分别为 0.55、0.30，剩余其他 token 共占 0.15；参考给它们各 0.40，其他 token 共占 0.20。两行 `EOS` 则在不同首 token 后预测，条件上下文已经不同，所以 0.80 与 0.60 不必凑成 1。这样，这张表确实可以来自各自的单一语言模型。
+
+偏好数据只给出 $y^+\succ y^-$，并没有给 `4` 或 `5` 一个绝对奖励。我们先把表转换为模型给**整条回复**的概率，再构造比较。
+
+## 响应似然：提示参与条件，回复参与求和
+
+对回复 $y=(y_1,\ldots,y_m)$，自回归模型的条件概率由链式法则得到：
 
 $$
 \log\pi_\theta(y\mid x)
-=\sum_{t=0}^{m-1}\log\pi_\theta(y_t\mid x,y_{<t}).
+=\sum_{t=1}^{m}\log\pi_\theta(y_t\mid x,y_{<t}).
 $$
 
-这里沿用 [P2](/principles/language-modeling/) 的标签错位：生成首个回复 token 的 logits 位于最后一个提示 token 的输出位置。计算 mask 时应该标记“这一输出预测的目标是否属于回复”，不是简单标记输入 ID 是否属于 assistant。
+提示 $x$ 被模型读取，却不作为这条回复似然的目标。例子中，策略对 chosen 给 $0.55\times0.80=0.44$，对 rejected 给 $0.30\times0.60=0.18$；参考对应 $0.40\times0.75=0.30$ 与 $0.40\times0.50=0.20$。因此四个要送入 DPO 的量分别是 $\ln0.44,\ln0.18,\ln0.30,\ln0.20$。乘积只是手算便捷；实现应把逐 token 的 **log-prob 相加**，避免长回复的概率乘积下溢。
 
-提示仍作为上下文参与注意力，但提示自身的续写标签不计入这个条件似然。padding 也不计入。是否把 EOS 纳入回复需要固定协议；本章默认数据显式列出的回复 token 都参与，生产训练应说明包含哪些结束符。
+为看清 logits 对齐，教学 tokenizer 把提示 `2+2=?` 切为 `2+2=` 和 `?` 两个 token。四个输入行依次是 `2+2=`、`?`、`4`（或 `5`）、`EOS`；它们依次预测 `?`、`4`（或 `5`）、`EOS`、padding 标签。最后一行仅为 batch 补齐，没有真实目标。因此四行输出的 loss mask 是 `[0,1,1,0]`：前一个 0 不计提示内的 `?`，末一个 0 不计 padding，两个 1 对应首个回复 token 与 `EOS`。mask 标的是**该行预测的目标是否属于回复**，不是输入行是否已经写着 assistant token。这个移位细节沿用 T5。
 
-假设 chosen 的两个目标概率为 0.8、0.7，rejected 为 0.6、0.4：
+若模板另有角色头或未把 `EOS` 当目标，必须重新核对回复的确切 token span。chosen 与 rejected 还必须使用相同的提示、tokenizer、chat template 和截断规则；否则表中比较的并不是同一个 $x$ 下的两个候选。
 
-$$
-\pi_\theta(y^+\mid x)=0.56,\qquad
-\pi_\theta(y^-\mid x)=0.24.
-$$
+## 参考差：模型比起点多偏向 chosen 多少
 
-它们的对数概率为 $\ln0.56$、$\ln0.24$。不要先平均 token 对数概率；那会将序列概率比换成长度归一化目标，已不是这里的定义。
-
-## 参考策略：测量相对基线的改变
-
-设固定参考策略 $\pi_{\mathrm{ref}}$ 来自 SFT checkpoint。定义一个回复的对数比：
+策略当前给 chosen 的概率高于 rejected：$0.44/0.18\approx2.44$。但参考本来也偏向 chosen：$0.30/0.20=1.5$。DPO 要测的是**前一种优势相对后一种扩大了多少**。先分别取对数比，再相减：
 
 $$
-r_\theta(x,y)=\lambda_{\mathrm{DPO}}
-\left[\log\pi_\theta(y\mid x)-\log\pi_{\mathrm{ref}}(y\mid x)\right].
+\begin{aligned}
+d_\theta
+&=\big[\log\pi_\theta(y^+\mid x)-\log\pi_\theta(y^-\mid x)\big]\\
+&\quad-\big[\log\pi_{\mathrm{ref}}(y^+\mid x)-\log\pi_{\mathrm{ref}}(y^-\mid x)\big]\\
+&=\ln\frac{0.44/0.18}{0.30/0.20}
+=\ln\frac{44}{27}\approx0.48835.
+\end{aligned}
 $$
 
-这个量可以理解为从策略相对参考的变化推导出的隐式评分，不是另外训练的独立奖励网络。chosen 与 rejected 的差为：
+也可以把括号重新配成“每条回复相对参考的变化”：$d_\theta=\log(\pi_\theta(y^+\mid x)/\pi_{\mathrm{ref}}(y^+\mid x))-\log(\pi_\theta(y^-\mid x)/\pi_{\mathrm{ref}}(y^-\mid x))$。这两个写法完全相同。**正的 $d_\theta$ 不表示模型事实正确；只表示这对给定回复的相对概率优势超过参考。**策略恰好等于参考时，无论参考更喜欢哪条回复，$d_\theta=0$。
+
+参考策略通常是固定的 SFT checkpoint。训练中要让它保持 eval 模式、停止参数更新；也可以预先缓存这批数据的参考 log-prob，但缓存必须与同一 checkpoint、tokenizer、模板、截断和 mask 对应。若每步把参考同步成当前策略，上面的差每次都会重新归零，已经换了训练目标。
+
+## Logistic 损失：把一对偏好变成更新信号
+
+选定正系数 $\lambda_{\mathrm{DPO}}$，令 margin $z=\lambda_{\mathrm{DPO}}d_\theta$。原论文将这个系数记为 $\beta$；本课程把 $\beta$ 留给 RoPE 的频率底数，故此处换名。这里采用 Bradley–Terry 型假设：两条回复的评分差为 $z$ 时，将 chosen 胜出的概率建模为 sigmoid $s(z)=1/(1+e^{-z})$。这是偏好数据的建模假设，不是标注概率天然等于该值的事实。一对标注的负对数似然于是为
+
+<KeyEq label="DPO 单对损失">
 
 $$
-z=r_\theta(x,y^+)-r_\theta(x,y^-)
-=\lambda_{\mathrm{DPO}}\left[
-\log\frac{\pi_\theta(y^+\mid x)}{\pi_\theta(y^-\mid x)}
--\log\frac{\pi_{\mathrm{ref}}(y^+\mid x)}{\pi_{\mathrm{ref}}(y^-\mid x)}\right].
+\ell_{\mathrm{DPO}}
+=-\log s\!\left(\lambda_{\mathrm{DPO}}
+\left[\log\frac{\pi_\theta(y^+\mid x)}{\pi_{\mathrm{ref}}(y^+\mid x)}
+-\log\frac{\pi_\theta(y^-\mid x)}{\pi_{\mathrm{ref}}(y^-\mid x)}\right]\right)
+=\log(1+e^{-z}).
 $$
 
-加入参考不是要求每个 chosen 的绝对概率都增大，而是衡量模型把 chosen 相对 rejected 的优势扩大了多少。数据只观察部分回复，模型其它输出的行为仍取决于参数共享、数据覆盖和约束强度。
+</KeyEq>
 
-```mermaid
-flowchart LR
-  P[同一提示] --> C[chosen 回复]
-  P --> R[rejected 回复]
-  C --> T[训练策略的响应 log-prob]
-  R --> T
-  C --> F[冻结参考的响应 log-prob]
-  R --> F
-  T --> D[两个对数比之差]
-  F --> D
-  D --> L[logistic 损失]
-```
+本例取 $\lambda_{\mathrm{DPO}}=0.2$，得 $z=0.2\ln(44/27)\approx0.09767$，损失约 $0.64550$，比策略等于参考时的 $\ln2\approx0.69315$ 小。对一个 batch，应先逐对计算损失，再对偏好对取平均；这不同于先把全 batch 的回复 token log-prob 平均。
 
-冻结参考既指参数不更新，也指它提供的概率不随着每步新策略一起漂移。可以预计算固定数据的参考 log-prob；必须绑定 checkpoint、tokenizer、模板、截断和 mask，否则“缓存的参考值”与当前样本并不是同一个序列。
-
-## Logistic 目标：为什么梯度推动偏好差扩大
-
-使用 sigmoid $s(z)=1/(1+e^{-z})$ 将差值转成 chosen 胜出的概率。单对损失：
+对 margin 求导可读出训练方向：
 
 $$
-\ell_{\mathrm{DPO}}=-\ln s(z)=\ln(1+e^{-z}).
+\frac{\partial\ell}{\partial z}=s(z)-1=-s(-z),\qquad
+\frac{\partial\ell}{\partial\log\pi_\theta(y^+\mid x)}
+=-\lambda_{\mathrm{DPO}}s(-z),\qquad
+\frac{\partial\ell}{\partial\log\pi_\theta(y^-\mid x)}
+=\lambda_{\mathrm{DPO}}s(-z).
 $$
 
-后者用稳定 `softplus(-z)` 实现，避免先求 sigmoid 再取 log 的极端数值问题。对 $z$ 的导数为：
+因此最小化损失推动 chosen 相对 rejected 的 **log-prob 差**增大。两条回复共用参数，不能把这两个偏导误读为两条序列概率必然各自单调升降。$z$ 很负时，$s(-z)$ 接近 1，这对标注贡献较大；$z$ 已很正时，梯度变小。系数决定 margin 的尺度及这种权重变化，不等同于优化器的学习率。
+
+<Figure src="advanced/dpo-loss.svg" alt="横轴为 DPO margin z；实线损失随 z 减小，虚线梯度幅度在 z 增大时趋近零">从横轴 $z=0$ 的 $\ln2$ 出发，向右是相对参考更偏向 chosen，损失降低；向左则损失和更新权重增大。图中的梯度幅度是对 $z$ 求导的 $s(-z)$，对回复 log-prob 的幅度还要乘 $\lambda_{\mathrm{DPO}}$。</Figure>
+
+## 为什么出现参考比：原始推导的条件（选读）
+
+上面的数值计算只需概率链式法则和 logistic 损失。若想知道参考比的来源，原论文从固定提示 $x$ 下的奖励目标出发：
 
 $$
-\frac{\partial\ell}{\partial z}=s(z)-1=-s(-z).
+\max_\pi\ \sum_y\pi(y\mid x)r(x,y)
+-\lambda_{\mathrm{DPO}}D_{\mathrm{KL}}\!\left(\pi(\cdot\mid x)\Vert\pi_{\mathrm{ref}}(\cdot\mid x)\right).
 $$
 
-所以最小化损失会推动 $z$ 增大。在把两个回复 log-prob 暂时看成独立标量时，chosen 的导数为 $-\lambda_{\mathrm{DPO}}s(-z)$，rejected 为正的对应值。回到模型参数时，两条序列共享网络，更新不是对这两个标量分别独立修改。
+KL 项是 $\sum_y\pi(y\mid x)\log[\pi(y\mid x)/\pi_{\mathrm{ref}}(y\mid x)]$。在概率和为 1 的约束下，对每个 $\pi(y\mid x)$ 求导并令零，可得 $\log[\pi^*(y\mid x)/\pi_{\mathrm{ref}}(y\mid x)]=r(x,y)/\lambda_{\mathrm{DPO}}-\log Z(x)$。于是奖励可写为 $r(x,y)=\lambda_{\mathrm{DPO}}\log[\pi^*(y\mid x)/\pi_{\mathrm{ref}}(y\mid x)]+\lambda_{\mathrm{DPO}}\log Z(x)$。同一个提示下比较两条回复时，后一项抵消。
 
-<Figure src="advanced/dpo-loss.svg" alt="DPO 损失随偏好差 z 单调下降，梯度幅度 s(−z) 在 z 很大时趋近零">实线是单对损失，虚线是它对 z 的梯度幅度。z 为负时梯度接近 1，模型正在偏好 rejected，更新最强；z 越大梯度越小，已经分得开的偏好对几乎不再贡献更新。起点 z = 0 的损失是 ln 2。</Figure>
+再假设偏好服从 Bradley–Terry 模型：$P(y^+\succ y^-\mid x)=s(r(x,y^+)-r(x,y^-))$。把刚才的奖励差代进去，再对已标注的 chosen 取负 log，就得到 DPO 损失。推导要求参考对候选有正概率、比较共享提示，且偏好概率假设适用；有限偏好数据、受限模型和优化过程并不保证找到上述理想策略。参考比是由这些假设导出的目标形式，不是一个能自动保证质量的事实分数。
 
-沿用上一节概率，参考给 chosen 0.4、rejected 0.3，系数 0.2：
+## 用代码核对，再看它会在哪里失效
 
-$$
-z=0.2\ln\left(\frac{0.56/0.24}{0.4/0.3}\right)
-=0.2\ln1.75\approx0.111923,
-\qquad\ell\approx0.638751.
-$$
-
-若训练策略与参考完全相同，则 $z=0$、损失 $\ln2$。这是初始比较对称，不意味着模型给两条回复的原始概率相同。若参考已经强烈偏好 chosen，训练策略也必须在这个基线之上扩大相对差才会得到正 $z$。
-
-系数不仅是“学习率的另一名字”。它位于概率比内部，改变 logistic 饱和范围和参考相对变化所对应的评分尺度；优化器学习率在参数更新外部。改变系数后不能只根据损失数值比较质量。
-
-## 推导背景：从 KL 约束到隐式奖励
-
-原始动机是在每个提示上最大化奖励，同时约束策略偏离参考：
-
-$$
-\max_\pi\;\mathbb E_{y\sim\pi}[r(x,y)]
--\lambda_{\mathrm{DPO}}D_{\mathrm{KL}}(\pi(\cdot\mid x)\Vert\pi_{\mathrm{ref}}(\cdot\mid x)).
-$$
-
-对离散候选空间，加上概率和为 1 的拉格朗日约束，求导可得最优策略与 $\pi_{\mathrm{ref}}\exp(r/\lambda_{\mathrm{DPO}})$ 成比例。整理为奖励等于 $\lambda_{\mathrm{DPO}}\log(\pi/\pi_{\mathrm{ref}})$ 加上只依赖提示的常数。比较同提示两回复时，常数抵消，从而得到上面的对数比差。
-
-这一代数动机需要参考在候选上有支持，奖励与偏好模型满足相应假设；有限数据和神经网络训练并不自动达到理想最优策略。正文的数值计算与梯度是定义后的直接推导，DPO 理论出处见 [原论文](https://arxiv.org/abs/2305.18290)。
-
-## 数据与实现：需要固定的五项约定
-
-一对数据必须来自同一提示上下文。若 chosen 带 system 消息、rejected 不带，两概率不再是在相同 $x$ 下的比较。模板、特殊 token、EOS 和截断规则也要一致。截断若切掉唯一体现偏好的结尾，就可能让原始标签与实际训练输入冲突。
-
-参考参数设为不求导，推理时用 eval 保证 dropout 关闭。训练策略是否保留 dropout 应按实现说明；CPU 检查关闭随机扰动。chosen/rejected 可以拼进一个批次加速，但不能打乱配对关系；输入长度不同，padding 后仍各自求有效回复 token 的 log-prob 总和。
-
-偏好来源可以是人工比较、规则或另一个模型，每种来源有噪声和覆盖限制。DPO 不会凭空校验事实；偏好标签本身错误，模型仍可能朝错误方向更新。训练损失下降要配合 [T4](/training/evaluation/) 的独立质量、格式、长度与基座能力评估。
-
-## 与 SFT、在线 RL 的关系
-
-SFT 对示范逐 token 做交叉熵。原始 DPO 使用固定偏好对，不需要每个梯度步在线采样，也不需要单独拟合一个奖励网络。在线强化学习则采样当前或旧策略的回复、获取奖励、使用相应策略优化算法。DPO 的理论来自奖励约束问题，不代表执行流程与 PPO/GRPO 相同。
-
-也可以组合 SFT 与偏好目标，或采用长度归一化、label smoothing 等变体，但必须重新给出目标。很多名称接近的方法在序列归约、参考策略和数据生成方面不同；不能只把实现里的一个 mean 改成 sum，然后仍引用原论文定义作为完全相同的算法。
-
-## CPU 核对：掩码、稳定损失与梯度方向
-
-运行 `python code/advanced/dpo.py`。它给每条序列四个 logits 行，其中两行参与响应似然，另外两行代表提示与 padding。padding 标签故意设成无效 ID，mask 后不得触发词表索引错误。脚本核对手算 margin/损失、冻结参考、被屏蔽 logits 的直接梯度为零，以及 chosen/rejected 目标 logit 的梯度符号。
+运行 `python code/advanced/dpo.py`。脚本使用同一首步分布、两条不同的 `EOS` 条件分布，检查四个序列 log-prob 与表格相同；无效的 padding 标签设成词表外 ID，确保 mask 在索引前生效。它还比较手算 margin/损失、自动微分的梯度方向，并验证参考没有梯度、无效 logits 行的直接梯度为零。
 
 <CodeFile path="code/advanced/dpo.py" />
 
-直接 logits 梯度为零不意味着 prompt embedding 的梯度为零：回复概率可以经因果注意力依赖提示，梯度会沿网络内部回到提示表示。这与 T5 的响应-only 训练边界一致。
+提示行的**直接 logits 损失**为零，不等于提示 embedding 不会收到梯度：后续回复位置仍可通过因果注意力读取提示。这个区别与 T5 相同。
 
-## 常见误区
+本章使用原始 DPO 的**序列 log-prob 求和**。若把每条回复的和除以长度，便改成每 token 几何平均概率的比较。例如两条回复的序列概率为 0.16（两 token）和 0.25（一 token），原目标更偏向后者，长度平均后的 log-prob 却比较 $\sqrt{0.16}=0.4$ 与 0.25，排序反转。长度归约可以作为变体研究，但不能在没有定义时混进原目标。`EOS`、截断和 padding 的不同处理同样会改目标。
 
-rejected 回复并不是每个 token 都错误，DPO 处理的是整条条件概率的相对比较。chosen 原始概率高于 rejected，也不一定代表 margin 为正，因为参考可能有更大的优势。DPO 训练损失不能与 SFT 的每 token NLL 直接比较，两者对象、归约和尺度都不同。
+偏好标签也有覆盖与噪声：chosen 可能事实错误，截断可能切掉两回复唯一的质量差，模型还可能通过长度或格式迎合标注模式。损失下降仅证明对训练对的拟合改善；须用 [T4 评估](/training/evaluation/) 的独立样本检查事实性、长度、格式及原有能力。
 
 ## 练习与核对
 
 <details>
-<summary>策略概率比和参考概率比都为 3，DPO margin 和损失是多少？</summary>
+<summary>保持策略表不变；参考给 chosen 0.48、rejected 0.15。margin 的符号是什么？模型是否已经比参考更偏向 chosen？</summary>
 
-两对数比抵消，margin 为零，损失为 $\ln2$。策略已经偏好 chosen，但相对参考没有扩大优势。
-
-</details>
-
-<details>
-<summary>为什么不能在每次更新后把参考权重同步成当前策略？</summary>
-
-那会让基线随训练漂移，下一步的零差值不再对应固定 checkpoint 的约束；它是另一个训练算法，需要单独定义。固定参考是本章目标的组成部分，不是可随意省略的缓存细节。
+策略概率比为 $0.44/0.18=22/9\approx2.44$，参考为 $0.48/0.15=3.2$。所以 $d_\theta=\ln[(22/9)/3.2]=\ln(55/72)<0$，$z=0.2\ln(55/72)<0$。模型自身仍更偏向 chosen，但优势没有参考大，单对损失高于 $\ln2$。
 
 </details>
 
 <details>
-<summary>chosen 有四个 token，rejected 有两个，把每条 log-prob 除以长度会怎样？</summary>
+<summary>若在本例中把 `EOS` 排除在回复似然外，四个概率与 margin 会怎样变？</summary>
 
-原始比较是两个序列联合概率的比。除长度后比较的是每 token 几何平均概率，可能反转排序，因此改变训练目标。长度效应确实需要研究，但应命名并评估所采用的变体。
+只保留首 token：策略 chosen/rejected 为 0.55/0.30，参考为 0.40/0.40。于是 $d_\theta=\ln[(0.55/0.30)/(0.40/0.40)]=\ln(11/6)$，不再是 $\ln(44/27)$；margin 为 $0.2\ln(11/6)$。这不是原例的另一种实现，而是换了评分的回复 span。
 
 </details>
 
-偏好优化依赖回复数据，长上下文则先要求输入和状态规则一致。[A4](/advanced/long-context/) 将把位置变换、窗口与评估分开讨论。
+<details>
+<summary>训练时参考权重若每步同步为当前策略，下一步每一对的起始 margin 是多少？为什么不能把它当成固定参考 DPO？</summary>
+
+在同步瞬间，两者对同一回复的 log-prob 相等，两个相对参考的变化都为零，所以 margin 为 0。随训练不断移动基线，会让每步比较不同的参考策略，不再是本章从固定 KL 约束推到的目标。
+
+</details>
+
+原始 DPO 使用离线偏好对和固定参考，不单独拟合奖励网络，也不在每次更新时在线采样并执行 PPO。下一步若有可自动核验的答案，[A5 推理与 RLVR](/advanced/reasoning-rl/) 会转而研究**采样回复、给奖励、更新策略**的另一条训练路径。
 
 ## 原始资料
 
-- [Direct Preference Optimization](https://arxiv.org/abs/2305.18290)：KL 约束动机、成对目标及实践。本文使用原始 sum log-prob 定义，教学概率由本章给定。
+- [Direct Preference Optimization 原论文](https://arxiv.org/html/2305.18290)：第 4 节给出 DPO 目标，附录 A 给出 KL 与 Bradley–Terry 推导。本章的 token 概率为可复算的教学例，不取自论文实验。

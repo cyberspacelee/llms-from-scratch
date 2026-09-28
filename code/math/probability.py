@@ -1,4 +1,6 @@
-"""数学 01/02 的独立数值验证：uv run --with numpy python code/math/probability.py。"""
+"""M1 抽样保证与 M2 预测损失的数值核对。"""
+from itertools import product
+
 import numpy as np
 
 
@@ -16,34 +18,38 @@ def main():
     variance = probabilities @ (values - expectation) ** 2
     assert np.isclose(expectation, 2)
     assert np.isclose(variance, 3)
+    records = np.array([[1., 1.], [1., 0.], [1., 0.], [5., 1.]])
+    assert np.isclose(records[:3, 1].mean(), 1 / 3)
+    assert np.isclose(records[:, 1].mean(), 1 / 2)
+    assert np.isclose((records[:3, 1].sum() / records[:, 1].sum()), 1 / 2)
+    assert np.allclose(records.mean(axis=0), [2, .5])
+    assert np.allclose(records.var(axis=0, ddof=0), [3, .25])
+    assert np.isclose(records[:, 0].var(ddof=1), 4)
 
-    u = np.array([1, 2, 3, 4], dtype=np.float64)
-    assert np.isclose(u.mean(), 2.5)
-    assert np.isclose(u.var(ddof=0), 1.25)
-    assert np.isclose(u.var(ddof=1), 5 / 3)
-    # 样本中心化平方和的分解：无偏方差推导中的确定性恒等式。
-    population_mean = 2.0
-    assert np.isclose(np.sum((u - population_mean) ** 2),
-                      np.sum((u - u.mean()) ** 2)
-                      + len(u) * (u.mean() - population_mean) ** 2)
-    X = np.column_stack([u, 2 * u + 1])
-    centered = X - X.mean(axis=0, keepdims=True)
-    cov = centered.T @ centered / len(X)
-    assert np.allclose(cov, [[1.25, 2.5], [2.5, 5]])
-    var = X.var(axis=0, keepdims=True, ddof=0)
-    normalized = centered / np.sqrt(var + 1e-8)
-    assert np.allclose(normalized.mean(axis=0), 0)
-    assert np.allclose(normalized.var(axis=0), (var / (var + 1e-8))[0])
-    dependent_u = np.array([-1, 0, 1], dtype=np.float64)
-    dependent_v = dependent_u ** 2
-    assert np.isclose(np.mean(dependent_u * dependent_v)
-                      - dependent_u.mean() * dependent_v.mean(), 0)
+    all_means = np.array([records[list(indices), 0].mean()
+                          for indices in product(range(4), repeat=4)])
+    exact = np.mean(np.abs(all_means - expectation) < 1)
+    assert np.isclose(exact, 27 / 64)
+    assert exact >= 1 - variance / 4
+    assert np.isclose(1 - variance / 16, 13 / 16)
+    assert 1 - variance / 60 >= .95
+    assert 1 - variance / 59 < .95
+
+    reweighted = np.array([1 / 6, 1 / 6, 1 / 6, 1 / 2])
+    new_mean = reweighted @ records[:, 0]
+    new_var = reweighted @ (records[:, 0] - new_mean) ** 2
+    assert np.isclose(new_mean, 3)
+    assert np.isclose(new_var, 4)
+    assert np.isclose(1 - new_var / 16, .75)
+    assert 1 - new_var / 40 >= .9
+    assert 1 - new_var / 39 < .9
     for batch_size in [1, 4, 16, 64]:
-        means = rng.normal(size=(20000, batch_size)).mean(axis=1)
+        means = rng.choice(records[:, 0], size=(20000, batch_size)).mean(axis=1)
         measured = means.std(ddof=0)
-        theoretical = 1 / np.sqrt(batch_size)
-        assert np.isclose(measured, theoretical, rtol=0.025)
+        theoretical = np.sqrt(3 / batch_size)
+        assert np.isclose(measured, theoretical, rtol=0.035)
         print(f"B={batch_size:2d}: std(mean)={measured:.6f}, theory={theoretical:.6f}")
+    print(f"B=4: P(|mean-2|<1)={exact:.6f}, Chebyshev lower bound=0.250000")
 
     # 中点积分核对标准正态面积，以及区间 [-1, 1] 的概率。
     edges = np.linspace(-8, 8, 160001, dtype=np.float64)

@@ -37,8 +37,7 @@ def verify():
     x = torch.arange(-2, 3, dtype=torch.float64).reshape(-1, 1)
     y = 2 * x + 1
     dataset = TensorDataset(x, y)
-    generator = torch.Generator().manual_seed(41)
-    loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, generator=generator)
+    loader = DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0)
     batches = list(loader)
     assert [len(batch[0]) for batch in batches] == [2, 2, 1]
     assert torch.equal(torch.cat([batch[0] for batch in batches]), x)
@@ -50,49 +49,67 @@ def verify():
     assert weighted == 9.0 and abs(unweighted - 35 / 3) < 1e-12
     assert loader.batch_size == 2 and batches[0][0].shape == (2, 1)
 
-    snapshot = generator.get_state()
-    order = torch.randperm(5, generator=generator)
-    generator.set_state(snapshot)
-    assert torch.equal(torch.randperm(5, generator=generator), order)
-    assert torch.equal(torch.randperm(5, generator=torch.Generator().manual_seed(9)),
-                       torch.randperm(5, generator=torch.Generator().manual_seed(9)))
+    generator = torch.Generator().manual_seed(41)
+    order = torch.randperm(len(dataset), generator=generator)
+    shuffled = list(DataLoader(dataset, batch_size=2, sampler=order.tolist(), num_workers=0))
+    assert sorted(order.tolist()) == list(range(len(dataset)))
+    assert torch.equal(torch.cat([batch[0] for batch in shuffled]), x[order])
 
-    probe = nn.Parameter(torch.tensor([1.0], dtype=torch.float64))
-    sgd = torch.optim.SGD([probe], lr=0.1)
-    (probe * 2).sum().backward()
-    sgd.step()
-    torch.testing.assert_close(probe, torch.tensor([0.8], dtype=torch.float64))
-    assert probe.grad.item() == 2.0
+    probe = nn.Linear(1, 1).double()
+    with torch.no_grad():
+        probe.weight.zero_()
+        probe.bias.zero_()
+    sgd = torch.optim.SGD(probe.parameters(), lr=0.1)
     sgd.zero_grad(set_to_none=True)
-    assert probe.grad is None
-    (probe * 3).sum().backward()
+    first_x, first_y = batches[0]
+    ((probe(first_x) - first_y).square().mean()).backward()
+    torch.testing.assert_close(probe.weight.grad, torch.tensor([[-7.0]], dtype=torch.float64))
+    torch.testing.assert_close(probe.bias.grad, torch.tensor([4.0], dtype=torch.float64))
+    sgd.step()
+    torch.testing.assert_close(probe.weight, torch.tensor([[0.7]], dtype=torch.float64))
+    torch.testing.assert_close(probe.bias, torch.tensor([-0.4], dtype=torch.float64))
+    assert probe.weight.grad.item() == -7.0
+    sgd.zero_grad(set_to_none=True)
+    assert all(p.grad is None for p in probe.parameters())
+    ((probe(first_x) - first_y).square().mean()).backward()
     sgd.zero_grad(set_to_none=False)
-    assert probe.grad.item() == 0.0
+    assert all(torch.count_nonzero(p.grad) == 0 for p in probe.parameters())
 
     model, optimizer = new_run()
     initial = (model(x) - y).square().mean().item()
-    for batch in batches[:2]:
+    for batch in shuffled[:2]:
         update(model, optimizer, batch)
     frozen = copy.deepcopy(model.state_dict())
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "own-checkpoint.pt"
         torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
-                    "cursor": 2, "step": 2, "torch_rng": torch.get_rng_state(),
-                    "loader_rng": generator.get_state(), "config": {"in": 1, "out": 1}}, path)
-        expected_loss = update(model, optimizer, batches[2])
+                    "order": order, "cursor": 2, "step": 2,
+                    "torch_rng": torch.get_rng_state(),
+                    "order_rng": generator.get_state(), "config": {"in": 1, "out": 1}}, path)
+        expected_loss = update(model, optimizer, shuffled[2])
         expected = copy.deepcopy(model.state_dict())
+        next_order = torch.randperm(len(dataset), generator=generator)
         checkpoint = torch.load(path, map_location="cpu", weights_only=True)
         resumed, resumed_optimizer = new_run()
         resumed.load_state_dict(checkpoint["model"])
         resumed_optimizer.load_state_dict(checkpoint["optimizer"])
         torch.set_rng_state(checkpoint["torch_rng"])
-        generator.set_state(checkpoint["loader_rng"])
+        generator.set_state(checkpoint["order_rng"])
+        assert torch.equal(torch.randperm(len(dataset), generator=generator), next_order)
         assert checkpoint["config"] == {"in": 1, "out": 1}
         assert checkpoint["cursor"] == checkpoint["step"] == 2
-        actual_loss = update(resumed, resumed_optimizer, batches[checkpoint["cursor"]])
+        resumed_batches = list(DataLoader(dataset, batch_size=2,
+                                          sampler=checkpoint["order"].tolist(), num_workers=0))
+        actual_loss = update(resumed, resumed_optimizer, resumed_batches[checkpoint["cursor"]])
         assert actual_loss == expected_loss
         for key in expected:
             torch.testing.assert_close(resumed.state_dict()[key], expected[key], rtol=0, atol=0)
+        weights_only_model, empty_history_optimizer = new_run()
+        weights_only_model.load_state_dict(checkpoint["model"])
+        assert update(weights_only_model, empty_history_optimizer,
+                      resumed_batches[checkpoint["cursor"]]) == expected_loss
+        assert any(not torch.equal(weights_only_model.state_dict()[key], expected[key])
+                   for key in expected)
         for parameter in resumed.parameters():
             assert resumed_optimizer.state[parameter]["step"].item() == 3
         final = (resumed(x) - y).square().mean().item()
