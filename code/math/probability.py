@@ -1,4 +1,4 @@
-"""M1 抽样保证与 M2 预测损失的数值核对。"""
+"""M1–M5：事件、贝叶斯、抽样、信息量与预测损失的数值核对。"""
 from itertools import product
 
 import numpy as np
@@ -19,6 +19,40 @@ def main():
     assert np.isclose(expectation, 2)
     assert np.isclose(variance, 3)
     records = np.array([[1., 1.], [1., 0.], [1., 0.], [5., 1.]])
+    positive = records[:, 1].astype(bool)
+    source_d = np.arange(4) < 3
+    masses = np.full(4, 1 / 4)
+    p_a = masses[positive].sum()
+    p_d = masses[source_d].sum()
+    joint_a_d = masses[positive & source_d].sum()
+    assert np.isclose(p_a, 1 / 2) and np.isclose(p_d, 3 / 4)
+    assert np.isclose(joint_a_d, 1 / 4)
+    assert np.isclose(joint_a_d / p_d, 1 / 3)
+    assert np.isclose(joint_a_d / p_a, 1 / 2)
+    assert not np.isclose(joint_a_d, p_a * p_d)
+    first_two = np.arange(4) < 2
+    assert np.isclose(masses[positive & first_two].sum(), p_a * masses[first_two].sum())
+    assert masses[source_d & ~source_d].sum() == 0 < p_d * (1 - p_d)
+    changed_positive = positive.copy()
+    changed_positive[2] = True
+    changed_joint = masses[changed_positive & source_d].sum()
+    assert np.isclose(changed_joint / p_d, 2 / 3)
+    assert not np.isclose(changed_joint, masses[changed_positive].sum() * p_d)
+    unequal = np.array([1 / 8, 1 / 8, 1 / 4, 1 / 2])
+    assert np.isclose(unequal[positive & source_d].sum() / unequal[source_d].sum(), 1 / 4)
+
+    # 行为来源 D/E，列为正类/非正类；改变先验同时核对全概率与后验。
+    conditional = np.array([[1 / 3, 2 / 3], [1., 0.]])
+    for prior_d, marginal_positive, posterior_d in [
+        (3 / 4, 1 / 2, 1 / 2), (1 / 2, 2 / 3, 1 / 4),
+        (3 / 5, 3 / 5, 1 / 3), (2 / 5, 11 / 15, 2 / 11),
+    ]:
+        joint = conditional * np.array([prior_d, 1 - prior_d])[:, None]
+        assert np.isclose(joint.sum(), 1)
+        assert np.isclose(joint[:, 0].sum(), marginal_positive)
+        posterior = joint[:, 0] / joint[:, 0].sum()
+        assert np.isclose(posterior[0], posterior_d)
+        assert np.isclose(posterior.sum(), 1)
     assert np.isclose(records[:3, 1].mean(), 1 / 3)
     assert np.isclose(records[:, 1].mean(), 1 / 2)
     assert np.isclose((records[:3, 1].sum() / records[:, 1].sum()), 1 / 2)
@@ -93,8 +127,29 @@ def main():
     kl = np.sum(q * (np.log(q) - np.log(p)))
     assert np.isclose(cross_entropy, entropy + kl)
     assert kl >= 0
+    assert np.isclose(cross_entropy, .8369882167858358)
+    assert np.isclose(kl, .14384103622589045)
+    reverse_kl = np.sum(p * (np.log(p) - np.log(q)))
+    assert np.isclose(reverse_kl, .13081203594113697)
+    assert not np.isclose(kl, reverse_kl)
+    assert np.isclose(-np.log(p)[1 - records[:, 1].astype(int)].mean(), cross_entropy)
+    source_entropy = -np.sum(probabilities * np.log(probabilities))
+    entropy_d = -np.sum(conditional[0] * np.log(conditional[0]))
+    conditional_entropy = 3 / 4 * entropy_d
+    joint = conditional * probabilities[:, None]
+    positive_joint = joint[joint > 0]
+    joint_entropy = -np.sum(positive_joint * np.log(positive_joint))
+    assert np.isclose(conditional_entropy, .4773856262211096)
+    assert np.isclose(joint_entropy, source_entropy + conditional_entropy)
+    assert conditional_entropy <= entropy
+    rare_d_label = np.array([5 / 6, 1 / 6])
+    rare_d_entropy = -np.sum(rare_d_label * np.log(rare_d_label))
+    assert entropy_d > rare_d_entropy >= entropy_d / 4
+    assert np.isclose(-np.log(.75) - np.log(1 / 3), -np.log(.25))
+    assert np.isclose(entropy / np.log(2), 1)
     print(f"H={entropy:.6f}, CE={cross_entropy:.6f}, KL={kl:.6f}")
-    print("概率与分布全部验证通过。")
+    print(f"H(U|V)={conditional_entropy:.6f}, reverse KL={reverse_kl:.6f}")
+    print("事件、贝叶斯、抽样、信息量与预测损失全部验证通过。")
 
 
 if __name__ == "__main__":

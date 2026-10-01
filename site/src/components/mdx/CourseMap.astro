@@ -1,0 +1,14 @@
+---
+import { getLessons, url } from '../../lib/lessons'
+import { tracks } from '../../lib/tracks'
+import CourseMapLab from '../labs/CourseMapLab'
+import ChapterList from './ChapterList.astro'
+interface Props { track?: string }
+const { track } = Astro.props
+const nodes = (await getLessons()).filter(lesson => !lesson.isIntro).map(lesson => ({
+  track: lesson.track.id, code: lesson.code, title: lesson.title, question: lesson.question,
+  href: url(lesson.path), order: lesson.entry.data.order,
+}))
+---
+<CourseMapLab nodes={nodes} tracks={tracks.map(({ id, label }) => ({ id, label }))} initialTrack={track ?? 'math'} locked={Boolean(track)} client:visible />
+{track && <details class="not-prose my-4"><summary class="cursor-pointer text-sm font-semibold">各章的问题与入口</summary><ChapterList track={track} /></details>}

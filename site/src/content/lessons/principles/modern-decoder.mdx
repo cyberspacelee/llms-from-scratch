@@ -11,6 +11,8 @@ code:
 
 手算模型只有两个输入 token：BOS 在位置 0，A 在位置 1，目标是 EOS。词表为 `{BOS,A,EOS}`，隐藏维度 $d=2$，查询头数 $n_q=2$，KV 头数 $n_{\mathrm{kv}}=1$，每头宽度 $d_h=2$，FFN 宽度 $d_{\mathrm{ff}}=2$。为了接续 P4 的数值，令输入 embedding 分别为 $E_{BOS}=(2,0)$、$E_A=(0,2)$、$E_{EOS}=(0,0)$；这里不再加学习式位置表，位置进入 RoPE。所有归一化取 $\gamma=(1,1),\epsilon=1$，便于手算；真实模型的 $\epsilon$ 通常更小。
 
+import { GqaMapLab, SwiGluLab } from '../../../components/labs/PrinciplesTraceLabs'
+
 ## RMSNorm：把哪一维的尺度控制住
 
 P4 的 Pre-LayerNorm 先减每个 token 的特征均值。RMSNorm 则用同一行特征的平方平均缩放，不减均值。对 $x\in\mathbb R^d$，
@@ -52,6 +54,10 @@ $$H_A=(2p,2)\approx(1.339523,2).$$
 
 <Figure src="infra/02-variants.svg" alt="普通多头注意力、GQA 与 MQA 的查询头和 KV 头对应关系">图中固定 Q 头数，只减少历史中需要存放的 K/V 头数。我们的两头共享一组是 $n_{\mathrm{kv}}=1$ 的 GQA 极端情形，也称 MQA；一般 GQA 可有多个 KV 组。</Figure>
 
+<GqaMapLab client:visible />
+
+实验固定正文的两个 Q 头和二维头宽。选中任一 Q 头可以确认它读取哪组 K/V；把 KV 头从 1 改成 2，缓存由两位置的 8 个元素增为 16，而 Q 头数不变。这是参数和缓存身份的对照，不宣称新增 KV 权重仍产生原来的 logits。
+
 ## SwiGLU：对同一位置的隐藏状态做门控变换
 
 注意力让 A 读取 BOS；接下来的 FFN 只处理 A 自己的 $H_A$。先用第二个 RMSNorm 得到 $r=H_A/\sqrt{((2p)^2+2^2)/2+1}\approx(0.678541,1.013108)$。P4 的 FFN 是一次扩张、一次收缩。SwiGLU 则把扩张拆成 gate 与 up 两条投影，再逐元素相乘：
@@ -68,6 +74,10 @@ $$Y_A=H_A+\operatorname{SwiGLU}(r)\approx(1.644970,2.752987).$$
 <Figure src="principles/ffn-variants.svg" alt="普通 FFN 一条扩张分支，SwiGLU 的 gate 和 up 两条分支相乘后再收缩">沿 gate 和 up 两条路读图：它们都读同一位置；相乘之后才经 down 回到 $d=2$。这里没有跨 token 的操作。</Figure>
 
 SiLU 的输出可以为负；SwiGLU 不是简单的 `sigmoid(gate) * up`。它也不会自动只计算少数中间坐标；[A1 MoE](/advanced/moe/) 才讨论稀疏选择参数分支。
+
+<SwiGluLab client:visible />
+
+gate 倍数为 1 时，实验沿同一 A 位置恢复 `r≈(0.678541,1.013108)` 和第二次残差 `Y≈(1.644970,2.752987)`。把 gate 倍数设为 0，FFN 不再写入，但原来的 H 仍通过残差保留；设成负数时，观察 SiLU 的符号，再逐坐标与 up 相乘。这些变化只替换 gate 矩阵，up、down 和进入 FFN 的 H 都固定。
 
 ## 权重绑定：从最终隐藏状态回到词表
 

@@ -51,6 +51,16 @@ def verify():
     logits = probabilities.log()[inputs].detach().requires_grad_()
     expected = torch.tensor(-(math.log(.6) + math.log(.7) + math.log(.6)) / 3, dtype=torch.float64)
     close(sequence_loss(logits, targets), expected.double(), rtol=1e-7, atol=1e-8)
+    true_probabilities = probabilities[inputs, targets]
+    joint_probability = true_probabilities.prod().item()
+    assert math.isclose(joint_probability, .252)
+    assert math.isclose(-math.log(joint_probability), 3 * expected.item())
+    perplexity = math.exp(expected.item())
+    assert math.isclose(perplexity, joint_probability ** (-1 / targets.numel()))
+    assert math.isclose(perplexity, 1 / true_probabilities.log().mean().exp().item())
+    assert not math.isclose(perplexity, 1 / true_probabilities.mean().item())
+    assert math.isclose(math.exp(math.log(4)), 4)
+    assert math.isclose(math.exp((math.log(2) + 3 * math.log(8)) / 4), math.sqrt(32))
     assert sequence_loss(logits, inputs) > sequence_loss(logits, targets)
     padded_logits = F.pad(logits.detach(), (0, 0, 0, 2)).requires_grad_()
     padded_targets = torch.tensor([[1, 2, 3, -999, -999]])
@@ -106,6 +116,7 @@ def verify():
         pass
     else:
         raise AssertionError("an empty loss mask was silently accepted")
+    print(f"PASS: sequence probability {joint_probability:.6f}, token PPL {perplexity:.6f}")
     print("PASS: shifted labels, hand NLL, padding invariance, CE gradients, one SGD step")
     print(f"PASS: bigram fitted one document; NLL {initial:.6f} -> {final:.6f}")
     print("This fit checks the training loop, not held-out language quality.")

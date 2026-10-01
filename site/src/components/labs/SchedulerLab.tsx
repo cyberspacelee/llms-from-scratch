@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { Button, Controls, LabFrame, Range } from './Lab'
+import { Button, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
-type Seq = { id: string; prompt: number; cached: number; completion: number; maxCompletion: number; state: 'waiting' | 'running' | 'finished' }
+type Seq = { id: string; prompt: number; cached: number; completion: number; maxCompletion: number; state: 'waiting' | 'running' | 'finished' | 'cancelled' }
 
 const start = (): Seq[] => [
   { id: 'A', prompt: 3, cached: 0, completion: 0, maxCompletion: 2, state: 'waiting' },
@@ -16,6 +16,13 @@ export default function SchedulerLab() {
   const [seqs, setSeqs] = useState(start)
   const [step, setStep] = useState(0)
   const [trace, setTrace] = useState(ready)
+  const [selected, setSelected] = useState('A')
+
+  function changeRequest(cancel: boolean) {
+    setSeqs(current => current.map(seq => seq.id === selected && seq.state !== 'finished' && seq.state !== 'cancelled'
+      ? { ...seq, cached: 0, state: cancel ? 'cancelled' : 'waiting' } : seq))
+    setTrace(`${cancel ? 'CANCEL' : 'PREEMPT'} ${selected}：保留已有 ID 和已交付输出；${cancel ? '终止请求，安全收尾后释放 KV' : '释放 KV 后回到等待，重算已有历史，不重复发送旧输出'}`)
+  }
 
   function advance() {
     const next = seqs.map((seq) => ({ ...seq }))
@@ -43,7 +50,7 @@ export default function SchedulerLab() {
         if (seq.cached === total) {
           seq.state = 'running'
           seq.completion += 1
-          lines.push(`PREFILL  ${seq.id} +${take} token，写完后采样第一个输出 token`)
+          lines.push(`PREFILL  ${seq.id} +${take} token，写完当前历史后采样下一输出 token`)
           if (seq.completion >= seq.maxCompletion) seq.state = 'finished'
         } else {
           lines.push(`CHUNK    ${seq.id} +${take} token，缓存 ${seq.cached}/${total}`)
@@ -111,12 +118,19 @@ export default function SchedulerLab() {
           <Button primary onClick={advance}>执行一步</Button>
           <Button onClick={reset}>重置</Button>
         </div>
+        <label className="text-sm">请求身份<select className="block h-9 w-full border border-rule bg-paper" value={selected} onChange={e => setSelected(e.target.value)}>{seqs.map(seq => <option key={seq.id}>{seq.id}</option>)}</select></label>
+        <div className="flex flex-wrap gap-2"><Button onClick={() => changeRequest(false)}>抢占</Button><Button onClick={() => changeRequest(true)}>取消</Button></div>
       </Controls>
       <div className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(15rem,1fr))] gap-4">
         {queue('waiting', 'WAITING · 等待 prefill')}
         {queue('running', 'RUNNING · 逐步 decode')}
         {queue('finished', 'FINISHED · 已完成')}
+        {queue('cancelled', 'CANCELLED · 已取消')}
       </div>
+      <svg viewBox="0 0 280 145" className={pen.canvas} role="img" aria-label={`${selected} 已有 token 与已写入 KV 的逐位置状态`}>
+        {(() => { const seq = seqs.find(item => item.id === selected)!, total = seq.prompt + seq.completion; return Array.from({ length: total }, (_, i) => <g key={i}><rect x={8 + i % 6 * 44} y={10 + Math.floor(i / 6) * 63} width="38" height="48" className={i < seq.cached ? 'fill-accent/20 stroke-accent' : 'fill-accent2/15 stroke-accent2 [stroke-dasharray:3_3]'} /><text x={27 + i % 6 * 44} y={29 + Math.floor(i / 6) * 63} textAnchor="middle">p{i}</text><text x={27 + i % 6 * 44} y={48 + Math.floor(i / 6) * 63} textAnchor="middle">{i < seq.cached ? 'KV' : 'ID'}</text></g>) })()}
+      </svg>
+      <Readout>{selected}：{(() => { const seq = seqs.find(item => item.id === selected)!; return `已有 N=${seq.prompt + seq.completion} 个 ID；已写 K=${seq.cached} 个 KV；未处理位置=[${Array.from({ length: seq.prompt + seq.completion - seq.cached }, (_, i) => seq.cached + i).join(', ')}]；已交付 ${seq.completion} 个输出` })()}。图中位置保留请求身份，不跨请求读取。</Readout>
       <p className="mt-3 mb-0 text-xs text-muted">条形代表整条序列：左侧绿色是已写入 KV 的 prompt，右侧橙色是已生成的输出 token。</p>
       <pre aria-live="polite" className="mt-4 mb-0 min-h-22 rounded-lg bg-sunken px-4 py-3 font-mono text-xs leading-relaxed whitespace-pre-wrap">{trace}</pre>
     </LabFrame>

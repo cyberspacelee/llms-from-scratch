@@ -7,9 +7,11 @@ code:
   - code/advanced/reasoning_rl.py
 ---
 
+import { GrpoLab } from '../../../components/labs/AdvancedLabs'
+
 [T5](/training/instruction-tuning/) 让模型模仿示范回复，[A3](/advanced/dpo/) 用成对偏好调整回复概率。如果题目有确定答案，还可以让模型自己生成回复，再用规则核对。问题是：规则只给“对或错”，不对模型参数求导，怎样用它更新模型？
 
-本章只追踪题目 `2+3=?`。先把回复当作有限候选，手算一次更新方向；再用同一加法任务检查语言模型中的采样、奖励和更新。需要 [M1 概率](/math/probability/) 的期望、[M2 分布](/math/distributions/) 的 softmax、[M4 微积分](/math/calculus/) 的导数与链式法则，以及 [P2 语言模型](/principles/language-modeling/) 的下一 token 概率。策略、奖励和训练目标将在使用前逐一确定。
+本章只追踪题目 `2+3=?`。先把回复当作有限候选，手算一次更新方向；再用同一加法任务检查语言模型中的采样、奖励和更新。需要 [M3 概率](/math/probability/) 的期望、[M5 分布](/math/distributions/) 的 softmax、[M7 微积分](/math/calculus/) 的导数与链式法则，以及 [P2 语言模型](/principles/language-modeling/) 的下一 token 概率。策略、奖励和训练目标将在使用前逐一确定。
 
 ## 策略与回复：到底改变哪个概率
 
@@ -108,6 +110,10 @@ $$
 在第一步更新前，当前与旧策略相同，$\rho=1$。本例优势之和为零，裁剪目标的**数值**可能也是零，但对参数的导数不为零。脚本分别核对有限策略的精确梯度与这一点；不要用损失当前值猜测梯度是否消失。
 
 ## 用同一道题检查语言模型闭环
+
+<GrpoLab client:visible />
+
+图仍用本题四回复的奖励组 [1,0,0,1]，优势为 [1,-1,-1,1]；ρ 与裁剪系数只改变所选样本的 surrogate 项。负优势也先相乘再取 min，不能交换规则。全零奖励预设约定优势为零。读数中的梯度是所选样本对 logρ 的损失偏导，未加入语言模型共享参数效应、token 平均或 KL 项，不是完整 GRPO 训练模拟。
 
 运行 `python code/advanced/reasoning_rl.py`。脚本先用上表四条文本核对奖励、零方差组、精确有限策略梯度与裁剪方向，再用 [P11 现代 Decoder](/principles/complete-transformer/) 做一个 CPU 实验。为了让实验很快结束，仍是加法题，但把提示编码为三个 token `[BOS,a,b]`，正确回复编码为一个 token `8+a+b`。**这个实验只奖励算术正确性，不检查也不奖励 XML 格式**：表中的 XML 字符串没有进入小词表，完整回复格式协议在这里不适用。两部分共用“采样回复、核对结果、更新概率”的方法，奖励函数则不同。
 

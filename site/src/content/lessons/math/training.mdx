@@ -2,12 +2,15 @@
 title: 神经网络训练
 question: 怎样从四个 XOR 样本走到一次参数更新
 description: 用同一个两单元网络贯穿非线性表示、分类损失、反向传播、SGD 更新和训练结果。
-order: 7
+order: 10
 code:
   - code/math/neural_network.py
 ---
 
-四条记录的标签是 XOR：两个输入相同则为类别 0，不同则为类别 1。我们要让同一个网络从这四条记录中学会分类，而不预先把答案写进输出层。本章先证明网络有能力表达这条规则，再用固定初值手算一次预测、损失、梯度和更新，最后重复更新并检查它究竟学到了什么。阅读前建议掌握 [M2 的分类交叉熵](/math/distributions/)、[M5 的线性层梯度](/math/matrix-calculus/) 和 [M6 的反向传播](/math/backprop/)。
+import SoftmaxLossLab from '../../../components/labs/SoftmaxLossLab'
+import MathTrainingLab from '../../../components/labs/MathTrainingLab'
+
+四条记录的标签是 XOR：两个输入相同则为类别 0，不同则为类别 1。我们要让同一个网络从这四条记录中学会分类，而不预先把答案写进输出层。本章先证明网络有能力表达这条规则，再用固定初值手算一次预测、损失、梯度和更新，最后重复更新并检查它究竟学到了什么。阅读前建议掌握 [M5 的分类交叉熵](/math/distributions/)、[M8 的线性层梯度](/math/matrix-calculus/) 和 [M9 的反向传播](/math/backprop/)。
 
 | 输入 $x=(x_1,x_2)$ | $(0,0)$ | $(0,1)$ | $(1,0)$ | $(1,1)$ |
 | --- | ---: | ---: | ---: | ---: |
@@ -94,7 +97,11 @@ G_1&=(G_2W_2)\odot\mathbf1_{A>0},&
 \end{aligned}
 $$
 
-这正是 [M5](/math/matrix-calculus/) 的线性层局部梯度沿 [M6](/math/backprop/) 的逆依赖顺序相接。$G_1^\top X$ 的形状是 $(2,B)(B,2)=(2,2)$，与 $W_1$ 一致。先算出四组梯度，再统一改参数；若更新 $W_2$ 后才计算 $G_1$，就混用了两次不同前向的参数。
+这正是 [M8](/math/matrix-calculus/) 的线性层局部梯度沿 [M9](/math/backprop/) 的逆依赖顺序相接。$G_1^\top X$ 的形状是 $(2,B)(B,2)=(2,2)$，与 $W_1$ 一致。先算出四组梯度，再统一改参数；若更新 $W_2$ 后才计算 $G_1$，就混用了两次不同前向的参数。
+
+先只检查输出端的局部求导。默认 logits $(0,-1)$、目标 1 与输入 $(0,1)$ 相同，得到 $(1-q,q-1)$；四行平均时再除以 4。温度默认 1，选读中改变温度会同时改变概率和对原始分数的导数，不能仍套用未经缩放的 $p-y$。
+
+<SoftmaxLossLab client:visible />
 
 ## 一次更新：损失下降是否等于学会
 
@@ -108,6 +115,10 @@ $$
 其他参数也使用上节梯度**同时**更新。更新后的平均损失约为 $0.92364$，低于 $1.00320$；但四个预测依次变成 $[1,0,0,1]$，仍然全错。首尾两行初始 logits 打平，微小的偏置更新就能翻转类别；这一步虽然降低了整体交叉熵，却没有提高离散准确率。下一步必须用新参数重新算 $H,Z,P,L$ 和梯度，不能复用旧中间值。
 
 下面的配套脚本先核对上述四组手算梯度与 PyTorch autograd，再从**同一组初值**重复 1500 次更新。实现中的 `cross_entropy` 直接接收 logits；它内部完成稳定的 log-softmax。若先调用 softmax 再把概率交给它，就改变了损失目标。[PyTorch 官方 API](https://docs.pytorch.org/docs/stable/generated/torch.nn.CrossEntropyLoss.html)明确规定了输入语义。
+
+图中完整重复同一网络的前向、反向和四组参数同步更新。第 0 次表示尚未更新；取 $\eta=0.3$、第 1 次即可复核平均损失约 $0.92364$。参数组下的“下一次”使用当前梯度，不混用更新后的输出层。
+
+<MathTrainingLab client:visible />
 
 <CodeFile path="code/math/neural_network.py" />
 

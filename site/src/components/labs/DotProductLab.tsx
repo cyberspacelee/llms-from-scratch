@@ -1,7 +1,7 @@
 import { useId, useState } from 'react'
 import { Arrow, Button, Controls, fmt, LabFrame, pen, Range, Readout } from './Lab'
 
-const initial = { a: 2, b: 3, phase: 60, common: 0, relative: 0 }
+const initial = { a: 1, b: 1, phase: 30, common: 90, relative: -60 }
 const deg = Math.PI / 180
 
 /** Length, angle and the dot product; a common rotation cancels, a relative one does not. */
@@ -23,7 +23,7 @@ export default function DotProductLab() {
   const [px, py] = point(state.b * cosine, angleA)
 
   return (
-    <LabFrame title="长度、夹角与点积" hint="a 的相位是 γ，b 的相位是 γ + δ + φ">
+    <LabFrame title="RoPE 的共同起点与相对位移" hint="P7：q=(1,0)，k=(√3/2,1/2)，ω=30°；a=q，b=k">
       <Controls>
         <Range label="a 的长度" value={state.a} min={0.5} max={4} step={0.1} onChange={set('a')} format={(v) => v.toFixed(1)} />
         <Range label="b 的长度" value={state.b} min={0.5} max={4} step={0.1} onChange={set('b')} format={(v) => v.toFixed(1)} />

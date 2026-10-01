@@ -7,9 +7,18 @@ code:
   - code/systems/engine_execution.py
 ---
 
+import { PackedExecutionLab } from '../../../components/labs/SystemsLabs'
+import NanoOverview from '../../../components/diagrams/NanoOverview.astro'
+import Qwen3Layer from '../../../components/diagrams/Qwen3Layer.astro'
+import LaunchTimeline from '../../../components/diagrams/LaunchTimeline.astro'
+
 [S4](/systems/engine-runtime/) 决定本轮处理哪些 token，[S5](/systems/paged-cache/) 给每个请求分配 KV 块。执行器还得回答一个更具体的问题：**模型收到的扁平张量中，第几个 token 属于谁、处于什么位置、把 K/V 写到哪里、能读多长历史？** 本章沿 [nano-vLLM 固定提交 `bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) 的单卡 `ModelRunner` 追踪一轮 prefill 和随后一轮 decode。真实系统的 GPU 算子由源码执行；文末 CPU 脚本只核对地址和长度，不模拟注意力数值。
 
 ## 本轮清单：三个请求共享一次前向
+
+<NanoOverview />
+
+沿图看一次调用：CPU 选请求和块号，ModelRunner 准备设备输入，GPU 前向读写每层的缓存，采样 ID 回到请求状态。本图列出控制与执行的职责，不表示所有 ModelRunner 方法都在 GPU 上运行。
 
 设物理 KV 块大小 $T_b=4$，块号从 0 开始，配置允许最多 32 条并发序列。调度器交来 A、B、C 三条请求；`num_cached_tokens` 是已经写入 KV 的逻辑长度，`num_scheduled_tokens` 是本轮新算的长度。B 的历史 token ID 为 `[21,22,23,24]`，其 K/V 已在物理块 5；其他历史为空。块表中的第二个号负责容纳本轮新增位置。
 
@@ -49,6 +58,10 @@ B 的 `cu_seqlens_k` 区间长度是 6，却没有再输入旧 token 21–24；�
 
 ## KV 写入：位置与物理槽位各管一件事
 
+<PackedExecutionLab client:visible />
+
+默认九格对应本章 packed 数组。选择一格会同时给出请求身份、RoPE 位置、块表和物理槽；切到 decode 后，三个新 ID 分别进入位置 3、6、4。Graph 场景只对本快照的 decode 展示四行固定地址缓冲区，其中三行有效；padding 行的槽必须为 -1，不能只丢弃其输出。
+
 模型用 `positions` 为 Q/K 应用 RoPE，注意力层用 `slot_mapping` 把本轮 K/V 写入物理缓存。由 [S5 的块表公式](/systems/paged-cache/#块表逻辑位置怎样变成物理槽位)，逻辑位置 $p$ 写到 `block_table[p // 4] * 4 + p % 4`。本例因此得到：
 
 | 请求 | 本轮写入位置 | `slot_mapping` |
@@ -75,6 +88,8 @@ B 的 `cu_seqlens_k` 区间长度是 6，却没有再输入旧 token 21–24；�
 
 ## 从 eager 到 CUDA Graph：复用的是发射序列
 
+<LaunchTimeline />
+
 **eager** 路径按 Python 控制流发起本轮模型算子。decode 每轮只有少量查询，却要经过多层许多短 kernel；这时 CPU 逐次发射的开销可能占明显份额，[S2](/systems/accelerator/)与 [G4](/gpu/measurement/)提供成本和计时边界。CUDA Graph 把一组 GPU 操作及依赖捕获下来，以后作为图重放，减少重复提交开销；它不会重新定义注意力或自动修正元数据。[NVIDIA CUDA Graph 指南](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html)把图定义与执行分开解释。
 
 nano-vLLM 初始化时先以较大输入 warmup，测峰值显存，再按 [S1 的 KV 块字节数](/systems/ledger/)和利用率预算分配固定 KV 池。模型权重已在 `load_model()` 时装入；所有层随后绑定这块缓存的各层 K/V 视图。Graph 捕获在这些地址确定之后进行。该快照的捕获列表按 `[1,2,4,8] + range(16, min(max_num_seqs,512)+1, 16)` 生成；本例 `max_num_seqs=32`，因此有尺寸 4 可用。各图使用同一批预留输入、元数据和输出缓冲区的切片。
@@ -97,6 +112,10 @@ flowchart LR
 [F7 `torch.compile`](/frameworks/torch-compile/) 分析张量程序并可能生成融合算子；这里的显式 CUDA Graph 重放的是已捕获的 GPU 工作提交。nano-vLLM 也对部分层和采样函数使用 `torch.compile`，两种机制可以同时存在，但一次编译图既不自动等于一枚 kernel，也不等于这里的 `CUDAGraph` 对象。
 
 ## 源码如何串起来
+
+<Qwen3Layer />
+
+此图是固定快照的 Qwen3 层路径：Q/K 还需按头归一化，MLP 使用合并 gate/up 投影。两个残差相加都保留；实现可将待相加的残差交给下一次 RMSNorm 一起处理。这是融合调用的组织变化，不是删去模型里的残差。
 
 在固定快照的 [`ModelRunner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py) 中，阅读顺序是 `__init__` 加载权重与分配 KV → `prepare_prefill` 或 `prepare_decode` 装配元数据 → `run_model` 选择 eager/graph → `Attention.forward` 写读 KV → LM head 取隐藏状态并生成 logits → `Sampler` 给 rank 0 返回 token ID。单卡只需跟踪上述数据；多 rank 的权重切片、`all_reduce` 与词表 gather 留给 [S9](/systems/cluster/)。采样分布及策略见 [P9](/principles/generation/)，本章只需要知道 logits 与下一 ID 的接口。
 

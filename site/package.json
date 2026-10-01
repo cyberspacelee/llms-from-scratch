@@ -3,10 +3,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "astro dev",
+    "dev": "NODE_ENV=development astro dev --mode development",
     "build": "astro build && node scripts/check-links.mjs",
     "preview": "astro preview",
-    "check": "astro check && node --experimental-strip-types scripts/check-gpu-models.mjs && node --experimental-strip-types scripts/check-gpu-indexing.mjs && node --experimental-strip-types scripts/check-transpose-model.mjs && node --experimental-strip-types scripts/check-kernel-lifecycle.mjs && node --experimental-strip-types scripts/check-numpy-contracts.mjs && node --experimental-strip-types scripts/check-framework-tensor-model.mjs && node --experimental-strip-types scripts/check-masked-loss.mjs && node --experimental-strip-types scripts/check-batch-plan.mjs && node --experimental-strip-types scripts/check-multihead-model.mjs && node --experimental-strip-types scripts/check-head-pattern.mjs && node --experimental-strip-types scripts/check-sampling-model.mjs && node --experimental-strip-types scripts/check-math-labs.mjs"
+    "check": "astro check && node --experimental-strip-types scripts/check-gpu-models.mjs && node --experimental-strip-types scripts/check-gpu-indexing.mjs && node --experimental-strip-types scripts/check-transpose-model.mjs && node --experimental-strip-types scripts/check-kernel-lifecycle.mjs && node --experimental-strip-types scripts/check-numpy-contracts.mjs && node --experimental-strip-types scripts/check-framework-tensor-model.mjs && node --experimental-strip-types scripts/check-masked-loss.mjs && node --experimental-strip-types scripts/check-batch-plan.mjs && node --experimental-strip-types scripts/check-multihead-model.mjs && node --experimental-strip-types scripts/check-head-pattern.mjs && node --experimental-strip-types scripts/check-sampling-model.mjs && node --experimental-strip-types scripts/check-math-labs.mjs && node --experimental-strip-types scripts/check-interactive-models.mjs"
   },
   "dependencies": {
     "@astrojs/markdown-remark": "^7.3.1",

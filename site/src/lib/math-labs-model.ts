@@ -1,6 +1,6 @@
 /** Teaching models behind the math-track labs; each mirrors a worked example in the text. */
 
-/** M7: softmax cross-entropy with a temperature on the logits, and its gradient on the raw logits. */
+/** M10: softmax cross-entropy with a temperature on the logits, and its gradient on the raw logits. */
 export function softmaxLoss(logits: readonly number[], temperature: number, target: number) {
   if (!logits.length || !logits.every(Number.isFinite) || !(temperature > 0) || !Number.isInteger(target) || target < 0 || target >= logits.length)
     throw new RangeError('Finite logits, positive temperature and a valid target required')
@@ -16,7 +16,7 @@ export function softmaxLoss(logits: readonly number[], temperature: number, targ
   return { probs, loss, gradient, entropy }
 }
 
-/** M4: gradient descent on L = (x1^2 + 4 x2^2) / 2 from a start point. */
+/** M7: gradient descent on L = (x1^2 + 4 x2^2) / 2 from a start point. */
 export function descend(eta: number, start: readonly [number, number], steps: number) {
   if (!(eta > 0) || !Number.isInteger(steps) || steps < 0 || !start.every(Number.isFinite)) throw new RangeError('Positive step size and steps required')
   const loss = ([a, b]: readonly number[]) => 0.5 * (a * a + 4 * b * b)
@@ -32,7 +32,7 @@ export function descend(eta: number, start: readonly [number, number], steps: nu
   return { path, losses: path.map(loss), factors, verdict }
 }
 
-/** M6: a = x^2, b = 3a, loss = a + b; the shared node a collects two backward contributions. */
+/** M9: a = x^2, b = 3a, loss = a + b; the shared node a collects two backward contributions. */
 export function sharedGraph(x: number, keepDirect: boolean, keepThroughB: boolean) {
   if (!Number.isFinite(x)) throw new RangeError('Finite x required')
   const a = x * x, b = 3 * a, loss = a + b

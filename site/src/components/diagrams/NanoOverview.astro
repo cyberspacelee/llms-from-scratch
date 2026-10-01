@@ -5,7 +5,10 @@ import FigureShell from '../FigureShell.astro'
 const box = 'fill-sunken stroke-rule-strong'
 ---
 <FigureShell label="nano-vLLM 系统边界图">
-    <svg viewBox="0 0 900 390" role="img" aria-label="请求经过引擎、调度器和块管理器；模型执行器调用 Qwen3，读写分页 KV cache，并把采样 token 交回序列" class="block h-auto w-full min-w-xl font-sans text-[14px] [&_text]:fill-ink">
+    <svg viewBox="0 0 280 480" role="img" aria-label="CPU 引擎、调度、块管理与执行准备，GPU 模型读写缓存，采样 ID 返回请求" class="mx-auto block h-auto w-full max-w-80 font-sans text-[13px] [&_text]:fill-ink sm:hidden">
+      {['CPU · Engine / Scheduler', 'CPU · BlockManager', 'CPU · ModelRunner 准备', 'GPU · Qwen3 前向', 'GPU · 分页 KV 读写', '采样 ID → 请求 → 下一轮'].map((label, i) => <g><rect x="10" y={10 + i * 77} width="260" height="52" rx="4" class={i === 4 ? 'fill-accent-soft stroke-accent' : box} /><text x="140" y={40 + i * 77} text-anchor="middle">{label}</text>{i < 5 && <path d={`M140 ${65 + i * 77}v17m-4-4 4 4 4-4`} class="fill-none stroke-muted" />}</g>)}
+    </svg>
+    <svg viewBox="0 0 900 390" role="img" aria-label="请求经过引擎、调度器和块管理器；ModelRunner 准备输入，GPU Qwen3 读写分页 KV，采样 token 交回序列" class="hidden h-auto w-full font-sans text-[14px] [&_text]:fill-ink sm:block">
       <defs>
         <marker id="nano-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" class="fill-muted" /></marker>
         <marker id="nano-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" class="fill-accent" /></marker>
@@ -24,7 +27,7 @@ const box = 'fill-sunken stroke-rule-strong'
       <path d="M210 93H282" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
       <path d="M460 93H532" class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#nano-arrow)" />
 
-      <text x="40" y="196" class="font-mono text-[12px] fill-info!">数据面 · GPU × TP ranks</text>
+      <text x="40" y="196" class="font-mono text-[12px] fill-info!">CPU 准备 → GPU 前向与 KV 数据</text>
       <rect x="40" y="212" width="200" height="78" rx="6" class={box} />
       <text x="140" y="246" text-anchor="middle" class="font-semibold">ModelRunner</text>
       <text x="140" y="268" text-anchor="middle" class="font-mono text-[12px] fill-muted!">prepare → run → sample</text>
@@ -43,6 +46,6 @@ const box = 'fill-sunken stroke-rule-strong'
       <text x="430" y="370" text-anchor="middle" class="font-mono text-[12px] fill-muted!">采样出的 token → Sequence.append_token → 下一步</text>
     </svg>
   <Fragment slot="caption">
-    上排三个对象在 CPU 上决定这一步算谁、写到哪里；下排在 GPU 上完成计算。绿色网格是两者共享的分页 KV cache，虚线是采样结果回到序列、进入下一步。
+    Engine、Scheduler、BlockManager 与 ModelRunner 的输入准备在 CPU；模型 kernel 和 KV 数据在 GPU。绿色网格表示分页 KV；采样 ID 返回请求进入下一轮。对象所属的控制职责与其发起的设备运算分开理解。
   </Fragment>
 </FigureShell>

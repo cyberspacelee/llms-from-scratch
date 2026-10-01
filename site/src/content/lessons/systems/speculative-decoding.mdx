@@ -8,8 +8,9 @@ code:
 ---
 
 import SpeculativeLab from '../../../components/labs/SpeculativeLab'
+import { SpeculativeReplayLab } from '../../../components/labs/SystemsLabs'
 
-[P9 生成](/principles/generation/) 每选一个 token，就要用新的历史再问目标模型一次；[P10 KV cache](/principles/kv-cache/) 避免重算旧历史，却没有消除逐次等待。设一个便宜的草稿模型先提出两个候选。目标模型可以用一次因果前向同时检查它们，但草稿的概率与目标不同，直接提交候选会改变输出分布。本章从一个位置的三类别例子解决这个偏差，再把规则用于两步验证。需要 [M1 概率](/math/probability/) 中的条件概率；性能账接 [S1](/systems/ledger/) 和 [S2](/systems/accelerator/)。
+[P9 生成](/principles/generation/) 每选一个 token，就要用新的历史再问目标模型一次；[P10 KV cache](/principles/kv-cache/) 避免重算旧历史，却没有消除逐次等待。设一个便宜的草稿模型先提出两个候选。目标模型可以用一次因果前向同时检查它们，但草稿的概率与目标不同，直接提交候选会改变输出分布。本章从一个位置的三类别例子解决这个偏差，再把规则用于两步验证。需要 [M1 随机事件与条件概率](/math/events/) 中的条件概率；性能账接 [S1](/systems/ledger/) 和 [S2](/systems/accelerator/)。
 
 这里的目标是**分布相同**：对每段已提交历史，下一个 token 仍服从目标模型指定的采样分布。使用相同 seed 不保证与普通生成得到逐项相同的随机输出，因为两种算法消耗随机数的顺序不同。
 
@@ -86,6 +87,10 @@ $$
 第一行必须截掉验证阶段为 2 写入的 KV。草稿模型自身的缓存也要与提交后的历史对齐；替代 token 或额外 token 在其下一次提案前需被处理。分页缓存还要同步有效长度、块引用和尾块回收，不能只缩短 Python 的 ID 列表。EOS 只有在被接受或作为残差/额外 token 真正抽中后才结束；输出预算可能使本轮少提交 token，批中每条请求也有不同的首次拒绝位置。
 
 ## 是否加速：把节省的目标调用与新增工作相抵
+
+<SpeculativeReplayLab client:visible />
+
+回放沿用历史 [1,2]、草稿 [0,2] 和同一组三类别分布；固定抽数只隔离接受/拒绝的控制流。默认第二项拒绝时，已提交 ID 为 [1,2,0,1]，KV 只能保留 [1,2,0]。全部接受场景的额外 token 固定取 2；它是一个示例抽样结果，不是 p₃ 的通用值。图不测性能，也不把固定轨迹当成统计证明。
 
 为得到可手算的数量，**暂时假设**每个候选独立地以同一概率 $a$ 被接受，草稿长度为 $k$。一轮总会提交至少一个 token；要提交第 $i+1$ 个，前 $i$ 个候选都必须被接受，所以
 

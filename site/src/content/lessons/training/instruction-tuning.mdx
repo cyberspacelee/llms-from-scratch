@@ -11,6 +11,8 @@ code:
 
 阅读前建议掌握 [T3 训练与恢复](/training/pretraining/)、[T4 评估](/training/evaluation/) 与 [P9 生成](/principles/generation/)。我们沿一段两轮短对话完成序列化、移位、mask、反向传播和一次 SFT 实验，最后在同样的位置引入蒸馏。
 
+import { ChatMaskLab } from '../../../components/labs/TrainingTraceLabs'
+
 ## 固定会话：角色消息怎样变成模型输入
 
 设 system 规则是“用 OK 确认”，user 先发请求 Q1，assistant 回答 OK；user 再发 Q2，assistant 再回答 OK。它只是一个可逐行核对的格式任务，Q1、Q2 的内容不同，回复却相同。真实模型的 chat template（对话序列化规则）会把消息的角色、内容、边界排成一条 token 流；模型读取的是这条流，不会直接读取 API 字典的 `role` 字段。
@@ -72,6 +74,10 @@ $$
 除以 11 会让长提示额外压低梯度；除以 2 则变成另一种按回复计权的目标。多样本和梯度累积时，先加总有效 token 的损失，再除以有效目标总数；长回复在按 token 平均的协议下自然提供更多监督项。若截断后 $\sum_i v_i=0$，本章目标没有定义，应在数据管道中跳过或报错，而不能把空平均送进优化器。
 
 loss mask 只令无效行的**直接 logits 梯度**为零。它没有阻止后面的回复位置读取 prompt。用一个透明的因果平均作例子，令 $u_i=\sum_{j\leq i}h_j/(i+1)$，则有效的行 4 对位置 0 的表示仍有 $\partial u_4/\partial h_0=I/5$；损失的梯度可沿这条路径回到 `SYS` 的 embedding。真正的注意力还通过 Q/K/V 建立更多路径，结论相同：哪些目标计分和哪些较早位置参与梯度是两件事。若冻结基座参数，只训练 [T6 LoRA](/training/lora/) 的 adapter，提示仍参与前向依赖，但冻结参数不会累积可更新的梯度。
+
+<ChatMaskLab client:visible />
+
+图中仍是完整会话的 11 个预测行，默认有效行 `4、5、9、10`。选中 SYS 所在的行 0，它没有直接 logits 损失，但后面的四个有效预测都依赖它。图下再用明确独立的标量探针 `h_j=(j+1)/10`、因果平均 `u_i` 和目标为 1 的平方损失计算这条路径的实际梯度；它不冒充 Decoder 的参数梯度。只监督第二轮会缩小直接监督集合，却保留读取第一轮的依赖；截断到第一个 assistant 头则没有回复目标，平均损失未定义。
 
 ## 一次 SFT：同一段会话在更新前后怎样变化
 

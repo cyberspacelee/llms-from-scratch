@@ -14,14 +14,14 @@ export default function CausalMaskLab() {
       <Range label="查询位置 i" value={query} min={0} max={3} onChange={setQuery} />
       <Range label="分数温度 τ" value={temperature} min={0.2} max={2} step={0.1} onChange={setTemperature} format={v => v.toFixed(1)} />
     </Controls>
-    <svg viewBox="0 0 440 230" className={pen.canvas} role="img" aria-label={`查询位置 ${query}，未来权重为零`}>
+    <svg viewBox="0 0 360 230" className={`${pen.canvas} max-w-110!`} role="img" aria-label={`查询位置 ${query}，未来权重为零`}>
       {scores.map((s, j) => <g key={j}>
-        <rect x={34 + j * 98} y={170 - weights[j] * 125} width="56" height={Math.max(1, weights[j] * 125)} className={j <= query ? 'fill-accent' : 'fill-rule-strong'} />
-        <text x={62 + j * 98} y="196" textAnchor="middle">j={j}</text>
-        <text x={62 + j * 98} y="217" textAnchor="middle">{j <= query ? weights[j].toFixed(3) : '屏蔽'}</text>
-        <text x={62 + j * 98} y="25" textAnchor="middle">s={s}</text>
+        <rect x={26 + j * 80} y={170 - weights[j] * 125} width="54" height={Math.max(1, weights[j] * 125)} className={j <= query ? 'fill-accent' : 'fill-rule-strong'} />
+        <text x={53 + j * 80} y="196" textAnchor="middle">j={j}</text>
+        <text x={53 + j * 80} y="217" textAnchor="middle">{j <= query ? weights[j].toFixed(3) : '屏蔽'}</text>
+        <text x={53 + j * 80} y="25" textAnchor="middle">s={s}</text>
       </g>)}
-      <line x1="20" y1="170" x2="420" y2="170" className={pen.axis} />
+      <line x1="12" y1="170" x2="348" y2="170" className={pen.axis} />
     </svg>
     <Readout>允许 j ≤ {query} · 权重和 {weights.reduce((a, b) => a + b, 0).toFixed(6)} · 未来权重 0</Readout>
   </LabFrame>

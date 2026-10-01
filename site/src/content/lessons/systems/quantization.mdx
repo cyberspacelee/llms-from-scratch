@@ -7,7 +7,9 @@ code:
   - code/systems/quantization.py
 ---
 
-[S1 资源估算](/systems/ledger/)把权重容量写成“参数个数 × 每个参数的字节数”。若把 bf16 权重换成 4 bit 整数，**编码本身**从每个 2 字节变为半字节；但整数还需要 scale，计算时也需要能消费这种格式的 kernel。本章要沿同一块权重回答三个问题：实际存多少、输出改了多少、请求执行是否可能获益。阅读前建议掌握 [M3 矩阵乘法](/math/linear-algebra/) 和 [S2 带宽与算力](/systems/accelerator/)；任务质量的对照方法见 [T4](/training/evaluation/)。
+import { QuantizationLab } from '../../../components/labs/SystemsLabs'
+
+[S1 资源估算](/systems/ledger/)把权重容量写成“参数个数 × 每个参数的字节数”。若把 bf16 权重换成 4 bit 整数，**编码本身**从每个 2 字节变为半字节；但整数还需要 scale，计算时也需要能消费这种格式的 kernel。本章要沿同一块权重回答三个问题：实际存多少、输出改了多少、请求执行是否可能获益。阅读前建议掌握 [M6 矩阵乘法](/math/linear-algebra/) 和 [S2 带宽与算力](/systems/accelerator/)；任务质量的对照方法见 [T4](/training/evaluation/)。
 
 固定一层 $y=Wx$，采用列向量记法：
 
@@ -58,6 +60,10 @@ $$
 矩阵形式写得更直接：设 $E=\widehat W-W$，同一个输入的输出误差是 $\widehat y-y=Ex$。如果输入在某列的幅度大，该列的权重误差会被放大；不同列的误差也可能相互抵消。对这个矩阵的输出核对，比只报一个权重误差平均值更能解释当前输入发生了什么，但仍不能替代任务评估。
 
 ## 非对称量化：把码留给实际使用的范围
+
+<QuantizationLab client:visible />
+
+默认仍是这块 W、3 bit、全矩阵 scale 和相同 x。图中的点与虚线共用实数横轴；恢复后的矩阵必须再与 x 相乘，才能得到输出误差。非对称选项是额外的 W 编码对照，使用相同的 min/max 规则；它与下文量化 x 的案例分别计算。字节读数假设紧密打包，每个 scale 两字节，非对称方案每组另收一字节 zero point，不包含执行缓冲区。
 
 输入 $x=(0,1,2,3)$ 全在非负范围。若用有符号对称 3 bit，其中一半负码不会被用到。改用无符号码 $0,\ldots,7$，选择 $[v_{\min},v_{\max}]$ 且让它包含 0，定义
 

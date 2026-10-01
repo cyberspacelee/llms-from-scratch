@@ -1,4 +1,4 @@
-"""M6: verify one branched two-layer network and its batch gradient."""
+"""M9: verify one branched two-layer network and its batch gradient."""
 
 import torch
 

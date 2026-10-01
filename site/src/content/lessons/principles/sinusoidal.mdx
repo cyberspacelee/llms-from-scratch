@@ -11,7 +11,7 @@ import RotationLab from '../../../components/labs/RotationLab'
 import FrequencyLab from '../../../components/labs/FrequencyLab'
 import EncodingMatrixLab from '../../../components/labs/EncodingMatrixLab'
 
-上一章 [P5](/principles/attention-order/) 发现：学习式位置表让模型分辨槽位，却不能直接为未建表的位置取值。我们要为每个位置 $p=0,1,2,\ldots$ 计算一个向量，并希望从位置 0 到 4、从 4 到 8 这样的固定偏移遵循同一规则。只需 [M3](/math/linear-algebra/) 的二维向量和点积；角度以弧度计，$2\pi$ 表示一整圈。
+上一章 [P5](/principles/attention-order/) 发现：学习式位置表让模型分辨槽位，却不能直接为未建表的位置取值。我们要为每个位置 $p=0,1,2,\ldots$ 计算一个向量，并希望从位置 0 到 4、从 4 到 8 这样的固定偏移遵循同一规则。只需 [M6](/math/linear-algebra/) 的二维向量和点积；角度以弧度计，$2\pi$ 表示一整圈。
 
 ## 一个周期：位置怎样变成可计算的向量
 
@@ -180,7 +180,7 @@ causal mask 则决定查询可以看哪些键，不能用本节的位置向量�
 
 ## 选读：旋转、极坐标与矩阵指数
 
-前面的主问题已得到答案。以下解释旋转为何自然出现，不作为 [P7](/principles/rope/) 的先修。需要 [M4](/math/calculus/) 的导数与乘积法则；无限幂级数和微分方程在此给出所用事实。
+前面的主问题已得到答案。以下解释旋转为何自然出现，不作为 [P7](/principles/rope/) 的先修。需要 [M7](/math/calculus/) 的导数与乘积法则；无限幂级数和微分方程在此给出所用事实。
 
 <Figure src="math/05-polar.svg" alt="极坐标中的半径和相位">非零向量用半径与相位表示；旋转保持半径，把相位增加同一角度。图中的箭头展示角度相加。</Figure>
 

@@ -7,7 +7,9 @@ code:
   - code/advanced/state_space.py
 ---
 
-[P3 注意力](/principles/attention/) 在 decode 时保存历史 token 的键和值，让新查询重新读取不同位置。能否只保存一个固定大小的状态？本章要算清这种递推的输出、它为何可以并行处理整段输入，以及固定状态付出的代价。只需先会 [M3 矩阵乘法](/math/linear-algebra/) 和 [P4 Decoder](/principles/decoder/) 的逐 token 生成；连续时间模型留到章末选读。
+import { StateScanLab } from '../../../components/labs/AdvancedLabs'
+
+[P3 注意力](/principles/attention/) 在 decode 时保存历史 token 的键和值，让新查询重新读取不同位置。能否只保存一个固定大小的状态？本章要算清这种递推的输出、它为何可以并行处理整段输入，以及固定状态付出的代价。只需先会 [M6 矩阵乘法](/math/linear-algebra/) 和 [P4 Decoder](/principles/decoder/) 的逐 token 生成；连续时间模型留到章末选读。
 
 全章使用四步标量输入 $u_0,u_1,u_2,u_3=(1,2,-1,3)$。$u_t$ 代表当前输入，$s_t$ 是处理到第 $t$ 步后留下的隐藏状态，$y_t$ 是该步读出的结果。这里的数字是教学输入，不是 token ID 或训练好的 embedding。
 
@@ -90,6 +92,10 @@ $$
 
 ## 回到模型：Mamba 与 Mamba-2 做了什么
 
+<StateScanLab client:visible />
+
+初始仍为固定保持 1/2 的四输入案例。选择性预设仅让第三个负输入保持旧状态并停止写入，终态变为 4.25。切换仿射组合可检查每个前缀的累计 A/B；零初态下最终值就是 B。这里顺序计算组合以核对结合律，不把图的步数当作并行 GPU scan 的速度。
+
 [Mamba 原论文](https://arxiv.org/abs/2312.00752)把选择性状态空间算子用于序列建模：参数由输入决定，并设计适合硬件的扫描实现。完整模块还包括投影、短卷积、门控等；本章的四步标量规则只演示“由输入控制状态更新”，没有复现完整模块或其训练效果。
 
 [Mamba-2 论文](https://arxiv.org/abs/2405.21060)研究带特定结构约束的状态空间对偶（SSD），利用递推形式和分块矩阵形式计算同一类算子。这里的“对偶”有结构条件，**不**表示任意状态模型等于 softmax attention。我们的标量组合说明了跨块传状态的基本理由；论文的实际块算法、head 组织和吞吐结论不能由这个小例子直接推出。
@@ -106,7 +112,7 @@ $$
 
 ## 选读：连续时间参数从哪里来
 
-已学过 [M4 微积分](/math/calculus/) 的读者，可以从连续方程 $ds/dt=A_cs+B_cu$ 理解某些离散参数。若一个间隔 $\Delta$ 内输入保持常量，离散传播矩阵为 $\exp(\Delta A_c)$，输入项为 $\left(\int_0^\Delta\exp((\Delta-v)A_c)B_c\,dv\right)u$。这个参数来源不改变前述离散递推和扫描的证明；读懂主线不需要先解微分方程。
+已学过 [M7 微积分](/math/calculus/) 的读者，可以从连续方程 $ds/dt=A_cs+B_cu$ 理解某些离散参数。若一个间隔 $\Delta$ 内输入保持常量，离散传播矩阵为 $\exp(\Delta A_c)$，输入项为 $\left(\int_0^\Delta\exp((\Delta-v)A_c)B_c\,dv\right)u$。这个参数来源不改变前述离散递推和扫描的证明；读懂主线不需要先解微分方程。
 
 ## 练习与核对
 

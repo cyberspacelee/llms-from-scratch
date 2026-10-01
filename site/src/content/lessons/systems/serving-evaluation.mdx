@@ -7,6 +7,8 @@ code:
   - code/systems/serving_metrics.py
 ---
 
+import { ServiceTimelineLab } from '../../../components/labs/SystemsLabs'
+
 [S9](/systems/cluster/) 讨论了多卡布局，[S4](/systems/engine-runtime/) 讨论了调度。现在设想一次优化使 decode kernel 单步时间减少，却让长 prompt 在队列里等待更久。只看 kernel 毫秒数，无法回答用户是否更快收到答案。本章的任务是从请求事件出发，算出用户看见的延迟和系统在约定质量下能承载的负载。
 
 先修只需知道 prefill 处理 prompt、decode 继续生成，以及 [T4](/training/evaluation/) 中固定实验条件的道理。下表数字是**教学用合成轨迹**，不是 GPU benchmark；所有计算都以它为准。
@@ -81,6 +83,10 @@ B 只有一个输出 token，本文从 TPOT 分布中排除并单独计数；若
 满足 SLO 的请求吞吐（goodput）是 $2/1.5\approx1.33$ 请求/s；这些请求贡献 5 个输出 token，按 token 计的 goodput 是 $5/1.5\approx3.33$ token/s。两者都比原始吞吐小，但单位不同。四条到达里有三条完成，成功率是 $3/4$，SLO 达标到达率是 $2/4$；只在完成的三条里算达标率会藏掉 D。生产报告还应规定错误、超时、客户端取消和重试是否归责：重试是新负载，不应只记最终成功的一次。
 
 ## 同一轨迹怎样用于容量实验
+
+<ServiceTimelineLab client:visible />
+
+图的每个输出圆点是一次客户端事件，旁边数字是它携带的 token 数。C 的 +3 仍只有一个事件间隔；B 的 TPOT 未定义；D 的取消仍计入四条到达。改变 SLO 只重算同一轨迹中的合格集合，不改变请求事件，也不能据此声称系统容量改变。
 
 这四条请求只是一个负载片段，不能推出最大容量。先保存它们的 prompt、输出目标、到达时刻和采样参数，再在同一模型与硬件上重放。逐步提高到达率，每档都记录实际发送时间、队列长度、KV 占用、取消和失败、TTFT/ITL/端到端分布，以及上述 goodput。选满足约定尾延迟与成功率的最高**稳定**负载；若队列持续增长，有限测试窗口的高吞吐不是长期容量。
 

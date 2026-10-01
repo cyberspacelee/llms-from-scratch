@@ -8,6 +8,7 @@ code:
 ---
 
 import PagedKvLab from '../../../components/labs/PagedKvLab'
+import { PrefixIdentityLab } from '../../../components/labs/SystemsLabs'
 
 [P10](/principles/kv-cache/) 已证明，在固定权重与相同位置规则下，历史 K/V 不必重算。[S4](/systems/engine-runtime/) 又让多个请求在每步进入或离开运行队列。现在考虑 A 和 B：它们都已经计算相同的六个 token，接下来 A 要写入值 7，B 要写入值 70。有限的 KV 池怎样让它们共享前六项，又保证两次写入互不污染？
 
@@ -71,6 +72,10 @@ $$
 命中一个完整块后，新的 prefill 只计算未命中的后缀，但注意力的键仍包含缓存前缀。因而“本次新增查询长度”和“查询可见的总 KV 长度”是两个数。若整个 prompt 都命中 K/V，也未必已有用于采样的最后隐藏状态或 logits；具体实现可能保守地重算末块。
 
 ## 固定实现：nano-vLLM 实际复用到哪里
+
+<PrefixIdentityLab client:visible />
+
+图中的两个第二块始终有相同局部 ID，但改变第一块或计算命名空间就会使完整前缀不同。这里直接检查前缀相等性；实现的哈希链是查找机制，还须处理碰撞与隔离。上面的物理槽回放则只展示引用数非零块的有效数据，空闲块的旧内存不应被当作可见历史。
 
 在 [nano-vLLM `bb823b3` 的 `BlockManager`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py) 中，`can_allocate()` 只检查 `range(seq.num_blocks - 1)`，也就是**跳过请求最后一个逻辑块**。完整块用前缀 xxh64 链索引；命中时还比较该块的 token ID。活跃块命中则引用数加一；free 队列中内容尚未覆写的块也可重新取得。真正再分配 free 块时，旧哈希索引会被删除并重置元数据。
 

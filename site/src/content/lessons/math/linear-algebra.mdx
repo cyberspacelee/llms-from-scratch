@@ -2,12 +2,14 @@
 title: 向量与矩阵
 question: 怎样用同一组权重处理一批输入
 description: 从逐元素计算推到点积、矩阵乘法和 batch 线性层，学会按轴检查形状与广播。
-order: 3
+order: 6
 code:
   - code/math/linear_algebra.py
 ---
 
-假设每条记录有两个数值特征，模型要为它算出两个新特征。三条记录如何共用同一组权重，同时又不让一条记录读到另一条的特征？本章从一条记录的两次乘加开始，把它写成向量、矩阵和 batch 计算。这里只需要实数运算；下一章 [M4 微积分与梯度](/math/calculus/) 才讨论权重改变后结果怎样变化。
+import MathLinearLab from '../../../components/labs/MathLinearLab'
+
+假设每条记录有两个数值特征，模型要为它算出两个新特征。三条记录如何共用同一组权重，同时又不让一条记录读到另一条的特征？本章从一条记录的两次乘加开始，把它写成向量、矩阵和 batch 计算。这里只需要实数运算；下一章 [M7 微积分与梯度](/math/calculus/) 才讨论权重改变后结果怎样变化。
 
 ## 坐标与轴：每个数字属于哪条记录
 
@@ -116,6 +118,10 @@ $$
 
 第一行可核对为 $(1-2+0.5,\,2-1)=(-0.5,1)$；第二行正是上一节算出的 $(-0.5,5)$。若以后把 batch size 从 3 改成 8，$W,b$ 的形状不变，输出从 `(3,2)` 变为 `(8,2)`。对于非方阵也同理：`X:(8,5)`、`W:(3,5)`、`b:(3,)` 给出 `Z:(8,3)`，这时漏写转置就会暴露形状错误。
 
+选中某个输出格时，图里同时标出它使用的 X 行与 W 行。默认第二条记录的第一输出 $Z_{1,0}=-0.5$，下方逐项乘积可代回刚才的公式。改变输出格只改变读取位置，不创建另一套权重。
+
+<MathLinearLab client:visible />
+
 ### 广播会成功，但结果仍可能是错的
 
 广播从最右侧开始对齐轴，长度相同或其中一个为 1 才兼容。这里 `Z:(3,2)` 加 `b:(2,)`，偏置在三行各用一次。如果预测是 `(2,1)`、目标却是 `(2,)`，相减会广播成 `(2,2)`，比较了每条预测和所有目标，而不是逐条配对。例如 `[[1],[2]] - [1,2]` 得到 `[[0,-1],[1,0]]`。即使代码运行成功，语义也已经错误；计算损失前应断言预测与目标形状相同。
@@ -175,7 +181,7 @@ np.testing.assert_allclose(position_scores[0, 0, 1], X[0] @ X[1])
   矩阵的秩是其列向量中最多能选出多少个线性无关的向量，等于输出能够覆盖的独立方向数；$W\in\mathbb R^{m\times d}$ 的秩不超过 $\min(m,d)$。
 </Definition>
 
-例子 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$ 的第二列是第一列的两倍。它将 $(u,v)^\top$ 映为 $(u+2v)(1,2)^\top$，输出总在一条直线上，故秩为 1；$(2,-1)^\top$ 和 $(0,0)^\top$ 都映为零，原输入无法仅凭输出恢复。若写成 $A=UV$，其中 $U$ 为 `(m,r)`、$V$ 为 `(r,d)`，映射先经过 $r$ 维中间表示，秩至多为 $r$。这只说明乘积矩阵的限制；[T6 LoRA](/training/lora/) 限制的是增量矩阵的 rank，不能据此说原有权重本身低秩。较完整的谱分解留到 [M8](/math/spectral/)。
+例子 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$ 的第二列是第一列的两倍。它将 $(u,v)^\top$ 映为 $(u+2v)(1,2)^\top$，输出总在一条直线上，故秩为 1；$(2,-1)^\top$ 和 $(0,0)^\top$ 都映为零，原输入无法仅凭输出恢复。若写成 $A=UV$，其中 $U$ 为 `(m,r)`、$V$ 为 `(r,d)`，映射先经过 $r$ 维中间表示，秩至多为 $r$。这只说明乘积矩阵的限制；[T6 LoRA](/training/lora/) 限制的是增量矩阵的 rank，不能据此说原有权重本身低秩。较完整的谱分解留到 [M11](/math/spectral/)。
 
 <Definition term="正交矩阵" source="https://zh.wikipedia.org/wiki/正交矩阵">
   实方阵 $Q$ 若满足 $Q^\top Q=I$，便是正交矩阵；它保持任意两个向量的点积，因此也保持长度与距离。
@@ -226,11 +232,11 @@ $$
 
 </details>
 
-现在我们知道线性层怎样从输入与权重算出结果。[M4 微积分与梯度](/math/calculus/) 将研究输入或权重变化一点时结果怎样变化；[M5 矩阵求导](/math/matrix-calculus/) 再利用这里的轴规则整理整个权重矩阵的梯度。
+现在我们知道线性层怎样从输入与权重算出结果。[M7 微积分与梯度](/math/calculus/) 将研究输入或权重变化一点时结果怎样变化；[M8 矩阵求导](/math/matrix-calculus/) 再利用这里的轴规则整理整个权重矩阵的梯度。
 
 ## 引用与验证
 
 - [NumPy `matmul` 文档](https://numpy.org/doc/stable/reference/generated/numpy.matmul.html)：高阶输入在最后两轴执行矩阵乘法。
 - [NumPy 广播规则](https://numpy.org/doc/stable/user/basics.broadcasting.html)：从右对齐各轴并决定输出形状。
 - [PyTorch `nn.Linear` 文档](https://docs.pytorch.org/docs/stable/generated/torch.nn.Linear.html)：权重形状、偏置与输出特征轴。
-- 仓库脚本 `code/math/linear_algebra.py` 验证本章的几何与线性层算例，并包含 [M5](/math/matrix-calculus/) 使用的梯度检验；M5 的推导不是阅读本章的前提。
+- 仓库脚本 `code/math/linear_algebra.py` 验证本章的几何与线性层算例，并包含 [M8](/math/matrix-calculus/) 使用的梯度检验；M8 的推导不是阅读本章的前提。

@@ -10,6 +10,9 @@ code:
 import ThreadIndexLab from '../../../components/labs/ThreadIndexLab'
 import WarpBranchLab from '../../../components/labs/WarpBranchLab'
 import BlockScheduleLab from '../../../components/labs/BlockScheduleLab'
+import MatrixThreadLab from '../../../components/labs/MatrixThreadLab'
+import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
+import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
 
 设两个数组各有 100 个元素，我们要计算 $c_i=a_i+b_i$。CPU 循环逐个推进 $i$；CUDA kernel 则让许多 thread 执行同一段代码，由各自的编号决定 $i$。本章只需要数组下标和整数除法。读完后，你应该能从启动配置算出任意输出由谁写、哪些线程越界，并解释为什么“启动更多线程”不等于“运行更快”。
 
@@ -98,6 +101,25 @@ c=b_xT_x+t_x,\qquad r=b_yT_y+t_y,\qquad p=rC+c.
 $$
 
 只有 $r<R$ **且** $c<C$ 才能访问元素。比如 $5\times7$ 矩阵使用 $4\times2$ block，block $(1,0)$ 的 thread $(3,0)$ 算出 $(r,c)=(0,7)$，列已越界；但偏移 $p=7<35$，只检查 `p < R*C` 会误写下一行的元素。负责同一矩阵元素的 thread 是否相邻，还需看块内线性编号 $t=t_x+T_xt_y$，warp 总按这个编号每 32 个分组，而不是按矩阵行或偏移 $p$ 分组。这为 [G2 的访存分析](/gpu/memory-and-sync/) 做准备。
+
+<MatrixThreadLab client:visible />
+
+默认选中 block $(1,0)$ 的 thread $(3,0)$。矩阵的灰色尾格对应越界列，即使线性偏移 7 看起来合法，也不能执行访问。将 thread x 改为 2，行列检查才通过；再选最右下的 block $(1,2)$，核对最后一个合法元素 34 的负责人。
+
+### 选读：二维与三维布局如何分成 warp
+
+改变 block 的形状时，warp 仍按照 x 最快变化的线性编号分组。下面三个布局都含 64 个 thread；编号 32 总属于 warp 1、lane 0，但二维坐标不同。
+
+<details>
+<summary>同样的 64 个 thread，比较二维布局与三维切片</summary>
+
+<WarpLayoutLab client:visible />
+
+三维 block 的线性编号为 $t=t_x+T_x(t_y+T_yt_z)$。下面单独用 $(8,4,2)$ 布局：一个 z 切片恰好有 32 个 thread，因此切换 z 时坐标相同的 thread 会进入另一个 warp。切片与轴测图都表示逻辑坐标，并非 GPU 核心排列。
+
+<BlockVolumeLab client:visible />
+
+</details>
 
 ## 用代码核对归属
 

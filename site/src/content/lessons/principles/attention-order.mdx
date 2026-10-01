@@ -7,7 +7,9 @@ code:
   - code/principles/attention_order.py
 ---
 
-在 [P3](/principles/attention/) 中，注意力按内容读取 token；[P4](/principles/decoder/) 在输入中加入位置表，又用 causal mask 限制可见范围。为什么同时需要这两种结构？我们沿用 P4 的 `[BOS, A, B]`，每次只改变一项条件，观察交换 BOS 与 A 后输出发生什么。最后再看位置表的作用与限制。阅读前只需掌握 [M3](/math/linear-algebra/) 的矩阵乘法和 P3 的逐行 softmax。
+在 [P3](/principles/attention/) 中，注意力按内容读取 token；[P4](/principles/decoder/) 在输入中加入位置表，又用 causal mask 限制可见范围。为什么同时需要这两种结构？我们沿用 P4 的 `[BOS, A, B]`，每次只改变一项条件，观察交换 BOS 与 A 后输出发生什么。最后再看位置表的作用与限制。阅读前只需掌握 [M6](/math/linear-algebra/) 的矩阵乘法和 P3 的逐行 softmax。
+
+import { PermutationLab } from '../../../components/labs/PrinciplesTraceLabs'
 
 ## 受控对照：同一段输入，先去掉位置和 mask
 
@@ -110,6 +112,10 @@ $$
 四项依次比较内容与内容、内容与位置、位置与内容、位置与位置。$M$ 是两个可训练投影的乘积；存在含位置的项，说明模型**可以**利用它，不能推论它一定学会了距离或能从 $x_i+p_i$ 唯一拆回两者。P4 的 causal mask 决定“哪些键能参与分母”；位置表既可改变这些键的分数，也可改变投影后的值 $V=(X+E)W_V$，两者作用并不相同。
 
 学习式位置表还有一个明确边界。若只建了 $T_{\max}$ 行，位置 $i\ge T_{\max}$ 无法直接查表；即使预留更多行，训练从未触及的行也没有被学出规律。仅凭训练过的位置不同，不能推断未见过的位置或固定距离会如何表示。[P6](/principles/sinusoidal/) 将研究可以按位置编号生成的 sin/cos 编码，以及固定偏移能否以同一规则表示。
+
+<PermutationLab client:visible />
+
+初始只交换 BOS 与 A 的内容，关闭 mask 和位置表，输出正好是旧输出的重排。打开 causal mask 并把它留在原槽位，最大差就不再为零；打开位置表也会破坏这个重排关系。最后让 mask 和位置表一起随 token 身份移动，恢复的是整个输入结构的重排，而不是固定因果时间线下交换文本。图中每格是 softmax 前的分数，选中查询行的概率在图下单独给出。
 
 ## 用脚本复查：数值例与一般性质各检验什么
 

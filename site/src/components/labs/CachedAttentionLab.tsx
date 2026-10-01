@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { cachedAttention } from '../../lib/chapter-labs-model'
+import { cachedChapterAttention } from '../../lib/principles-trace-model'
 import { Controls, LabFrame, Range, Readout, fmt, pen } from './Lab'
 
 export default function CachedAttentionLab() {
@@ -8,9 +8,9 @@ export default function CachedAttentionLab() {
   const [row, setRow] = useState(0)
   const [wrong, setWrong] = useState(false)
   const selected = Math.min(row, length - 1)
-  const result = cachedAttention(past, length, selected, wrong)
+  const result = cachedChapterAttention(past, length, selected, wrong)
   const total = past + length
-  return <LabFrame title="从因果 mask 算到真实注意力输出" hint="单头 dh=2，Q/K 经 RoPE；Vⱼ=(j+1, (−1)ʲ)">
+  return <LabFrame title="从因果 mask 算到真实注意力输出" hint="正文单头 dh=2；q=k=(1,0)，频率 1；Vⱼ=(j,0)">
     <Controls>
       <Range label="缓存长度 P" min={0} max={5} value={past} onChange={setPast} />
       <Range label="新增长度 U" min={1} max={4} value={length} onChange={setLength} />

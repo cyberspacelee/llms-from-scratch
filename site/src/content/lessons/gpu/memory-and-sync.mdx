@@ -10,6 +10,7 @@ code:
 import CoalescingLab from '../../../components/labs/CoalescingLab'
 import BankConflictLab from '../../../components/labs/BankConflictLab'
 import TransposeLab from '../../../components/labs/TransposeLab'
+import BarrierReplayLab from '../../../components/labs/BarrierReplayLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import memoryAddresses from '../../../assets/figures/gpu/memory-addresses.png'
 
@@ -89,6 +90,14 @@ for (int j = 0; j < 32; j += 8)
 <Figure src="gpu/memory-sync.svg" alt="共享缓冲区先装载，再经过发布屏障供消费者读取；复用缓冲区时读完后还需回收屏障" minWidth="40rem">转置只走装载、发布、消费三个阶段。若循环复用同一缓冲区，沿回收箭头进入下一轮前还要等所有消费者读完。</Figure>
 
 这道屏障只覆盖一个 block。它不等待 grid 中其他 block，也不是 host 读取设备结果的完成信号。`__syncwarp()` 只覆盖指定 warp 的参与 lane，不能替代此处可能跨 warp 的交换；原子操作保证某地址更新的原子性，也不等于整个 block 到齐。
+
+### 回放：缺少一道屏障会读到什么
+
+为隔离同步问题，下面用一个 shared 槽和两个消费者，初始旧值为 0，本轮应读 7，下一轮将写 9。转置只需要发布屏障；回收场景是循环复用缓冲区的扩展，对应下一章的分块矩阵乘。
+
+<BarrierReplayLab client:visible />
+
+正常场景里，两个消费者都读到 7，随后才覆盖为 9。缺少发布屏障时，消费者 B 可能先读到旧值 0；缺少回收屏障时，它可能在下一轮覆盖后读到 9。实验列出各一个可能的交错，足以构成反例；它没有声称所有运行都会出现同一个错误。
 
 ## 边缘 tile：没有数据的 thread 仍要协作
 

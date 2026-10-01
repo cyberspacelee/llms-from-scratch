@@ -7,9 +7,11 @@ code:
   - code/advanced/mla.py
 ---
 
+import { MlaPathsLab } from '../../../components/labs/AdvancedLabs'
+
 [P10](/principles/kv-cache/) 的 KV cache 为每层每个已处理 token 保存键和值。[P8](/principles/modern-decoder/) 的 GQA 让多个查询头共享一组完整的键和值。现在换一个问题：**若每个历史位置只保存一条较短的向量，当前查询能否仍算出模型定义的注意力？**多头潜在注意力（multi-head latent attention，MLA）通过在训练时就规定这种参数化来做到这一点。
 
-本章使用 [M3 的矩阵乘法](/math/linear-algebra/)、[P7 的 RoPE](/principles/rope/) 和 P10 的因果缓存。读完应能区分两件事：同一组 MLA 参数下，显式恢复键和值与吸收投影的计算相等；把已有 MHA 权重事后压成 MLA 则没有这个等价保证。
+本章使用 [M6 的矩阵乘法](/math/linear-algebra/)、[P7 的 RoPE](/principles/rope/) 和 P10 的因果缓存。读完应能区分两件事：同一组 MLA 参数下，显式恢复键和值与吸收投影的计算相等；把已有 MHA 权重事后压成 MLA 则没有这个等价保证。
 
 ## 从缓存出发：每个位置留下什么
 
@@ -89,6 +91,10 @@ $M_{ij}$ 是 causal mask：未来位置给 $-\infty$，可见位置给 0。当�
 **吸收只改变乘法位置，不改变 softmax 前的尺度。**若误把分母改成潜变量宽度 $\sqrt2$，两个头的概率都会变。教学例选择 $\pi/2$ 使旋转容易手算；模型中的 RoPE 频率按维度配置，见 P7。
 
 ## 值：先在潜在空间加权，再投影
+
+<MlaPathsLab client:visible />
+
+图按本章两个头分别核对内容分数、位置分数和输出。吸收选项改变乘法所在的路径，持久缓存始终为共享 c 和共享位置键；显式 K/V 仅在计算中展开。最终两路径的误差应为零。头 0/1 的权重不同，潜在加权向量也不同；不能因它们读取同一 c 就合并成一次加权和。
 
 设上表的权重为 $a_{ij,h}=\operatorname{softmax}_j(s_{ij,h})$。头 0 的值投影取 $U_{V,0}=\left[\begin{smallmatrix}1&0\\0&2\end{smallmatrix}\right]$，头 1 取 $U_{V,1}=\left[\begin{smallmatrix}0&1\\1&1\end{smallmatrix}\right]$。对任意一个头，权重一旦算好，值的线性上投影也可移到加权和之后：
 

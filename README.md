@@ -8,7 +8,7 @@
 
 | 路线 | 章节 | 回答的问题 |
 | --- | --- | --- |
-| [数学基础](https://cyberspacelee.github.io/llms-from-scratch/math/) | 导读 + M1–M8 | 从统计、微积分与反向传播到谱分解、低秩与数值稳定性 |
+| [数学基础](https://cyberspacelee.github.io/llms-from-scratch/math/) | 导读 + M1–M11 | 从随机事件、贝叶斯、信息量与预测损失到梯度训练、谱分解与数值稳定性 |
 | [数组与框架](https://cyberspacelee.github.io/llms-from-scratch/frameworks/) | 导读 + F1–F7 | NumPy、Torch 张量与求导、模块、训练状态，以及 torch.compile 编译原理 |
 | [模型原理](https://cyberspacelee.github.io/llms-from-scratch/principles/) | 导读 + P1–P11 | 从 token 到完整现代 Transformer，连接 RoPE/GQA/RMSNorm/SwiGLU、生成与逐层缓存 |
 | [训练与评估](https://cyberspacelee.github.io/llms-from-scratch/training/) | 导读 + T1–T9 | 文本训练与磁盘恢复、评估与适配、缩放规律、数据工程和多进程训练 |
@@ -16,7 +16,7 @@
 | [推理系统](https://cyberspacelee.github.io/llms-from-scratch/systems/) | 导读 + S1–S10 | 计算账本、内核、调度、分页、量化、投机、多卡与服务指标 |
 | [进阶模型](https://cyberspacelee.github.io/llms-from-scratch/advanced/) | 导读 + A1–A9 | MoE、MLA、DPO、长上下文、推理训练、状态空间、混合与稀疏注意力、多模态 |
 
-58 章正文与 7 篇导读按先修关系排列，也可以从首页直接进入感兴趣的章节。读者需要具备 Python 基础，无需预先学过深度学习。课程设计见 [课程计划](docs/CURRICULUM_PLAN.md)、[设计卡](docs/CHAPTER_BLUEPRINTS.md)、[CS336 对照与补充](docs/COURSE_GAP_PLAN.md)、[数组与框架规划](docs/ARRAY_FRAMEWORK_PLAN.md)、[GPU 编程规划](docs/GPU_PROGRAMMING_PLAN.md) 和 [torch.compile 规划](docs/TORCH_COMPILE_PLAN.md)。
+61 章正文与 7 篇导读按先修关系排列，也可以从首页直接进入感兴趣的章节。读者需要具备 Python 基础，无需预先学过深度学习。课程设计见 [课程计划](docs/CURRICULUM_PLAN.md)、[设计卡](docs/CHAPTER_BLUEPRINTS.md)、[CS336 对照与补充](docs/COURSE_GAP_PLAN.md)、[数组与框架规划](docs/ARRAY_FRAMEWORK_PLAN.md)、[GPU 编程规划](docs/GPU_PROGRAMMING_PLAN.md) 和 [torch.compile 规划](docs/TORCH_COMPILE_PLAN.md)。
 
 ## 运行验证脚本
 

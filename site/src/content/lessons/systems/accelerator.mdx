@@ -7,6 +7,8 @@ code:
   - code/systems/accelerator.py
 ---
 
+import { RooflineLab } from '../../../components/labs/SystemsLabs'
+
 [S1](/systems/ledger/) 为同一个 8B 形状算出两种负载：8192 token 的提示一次进入 prefill；随后一次 decode 只生成一个新 token，却读回已有 KV。两者都运行在 GPU 上，为什么优化方向会不同？本章把 S1 的运算量和字节数放进 [G3 屋顶线](/gpu/kernel-design/)；[G4 测量](/gpu/measurement/) 已介绍计时边界，这里把它用于推理实验。
 
 ## GPU 提供两种速率，数据经过多个存储层级
@@ -63,6 +65,10 @@ $$
 第一项只有约 $0.020$ ms。这个 4.80 ms 是本模型、单请求、假定数据都从 HBM 读且达到标称带宽时的**必要数据搬运时间**；不能写成“这张卡每 token 实测 4.80 ms”。实际还要执行 norm、RoPE、softmax、采样、kernel 发射和缓存写入。若数据命中 L2，实际 HBM 字节会改变；若批中多条请求共用一次权重读取，权重项也会被摊薄。应重新计数后再应用公式。
 
 ## 同一模型的 prefill：权重复用改写强度
+
+<RooflineLab client:visible />
+
+图沿用这一次 decode 的两项主账，随 B/T 重新计算点的位置。横轴采用对数刻度，使单请求和较大 batch 都能读到；屋顶线固定为前述 H100 SXM 的稠密假设。图下两个下界取较大值，而不是相加。它没有为 prefill 补出未知的 HBM 流量，也没有生成设备测量数据。
 
 仍用这条 8192 token 提示，但假设推理执行器**只对最后一个位置计算输出头**。S1 的层内权重为 $N_{\mathrm{blocks}}=6979321856$，输出头为 $N_{\mathrm{head}}=525336576$，所以线性层运算量是
 

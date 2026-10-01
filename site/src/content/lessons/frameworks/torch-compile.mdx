@@ -7,6 +7,8 @@ code:
   - code/frameworks/torch_compile.py
 ---
 
+import FrameworkCompileLab from '../../../components/labs/FrameworkCompileLab'
+
 在 [F4 自动微分](/frameworks/autograd/) 中，PyTorch 边运行前向计算边记录求导关系；[F6 数据与训练](/frameworks/data-and-training/) 把它放进重复执行的训练循环。若同一段张量运算会执行很多次，框架能否先分析这段计算，再复用分析结果？本章用一个输入向量和一个函数回答：编译**保存什么**、**何时不能复用**、**怎样判断值不值**。
 
 ## 从 eager 开始：明确要保持的结果
@@ -17,7 +19,7 @@ $$
 y_i=x_i^2+3x_i,\qquad L=\sum_i y_i.
 $$
 
-因此 $y=(-2,0,10)$，$L=8$；[M6 反向传播](/math/backprop/) 的链式法则给出 $\partial L/\partial x_i=2x_i+3$，梯度为 $(-1,3,7)$。这是本章所有编译实验的独立参照，不能用“编译结果等于编译结果”验证正确性。
+因此 $y=(-2,0,10)$，$L=8$；[M9 反向传播](/math/backprop/) 的链式法则给出 $\partial L/\partial x_i=2x_i+3$，梯度为 $(-1,3,7)$。这是本章所有编译实验的独立参照，不能用“编译结果等于编译结果”验证正确性。
 
 ```python
 import torch
@@ -83,6 +85,10 @@ def segmented(value):
 输入 $(1,2)$ 经三步得到 $(2,4)\to(3,5)\to(9,15)$。默认允许**图中断**：Dynamo 可在禁用区域前后各捕获一段图，中间按 eager 执行；脚本的计数 backend 因此收到两张图。设 `fullgraph=True` 要求整个调用属于可捕获区域，此例会报错。这里的“两张”是同一调用被分段，上一节的“两张”是不同输入需要不同版本；原因和排查方式不同。
 
 实际图中断可能来自不支持的 Python 行为、外部调用或显式禁用。张量数值驱动的 Python 分支也要审查，因为捕获时无法只靠 shape 判断分支；具体处理能力随版本与写法变化。不要为了消除中断而无条件改写语义：`torch.where` 会计算其参数表达式，不能充当任意惰性 `if`。先用 `TORCH_LOGS="graph_breaks" python3 code/frameworks/torch_compile.py` 确定发生位置，再决定把 I/O 移到编译区域外、接受分段，或改写可捕获的计算。[Dynamo 核心概念](https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/compile/programming_model.dynamo_core_concepts.html) 给出图中断与 guards 的定义。
+
+下面固定只用 shape 做教学 guard，初始向量为开篇的 $(-2,0,2)$，按长度 `3,3,4,3` 回放保存版本与复用。它不调用浏览器中的 PyTorch，也不预测当前版本生成的全部 guards；实际次数由上面的计数 backend 验证。切换中断案例后，输入改为 $(1,2)$ 等向量，函数改为已经解释的 `segmented`，可以分别核对两段张量图和 eager 加一的数值。
+
+<FrameworkCompileLab client:visible />
 
 ## 值得编译吗：正确性、冷启动和稳态分开
 

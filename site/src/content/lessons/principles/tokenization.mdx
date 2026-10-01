@@ -8,8 +8,9 @@ code:
 ---
 
 import TokenMergeLab from '../../../components/labs/TokenMergeLab'
+import { TokenLookupLab } from '../../../components/labs/PrinciplesTraceLabs'
 
-在 [M7](/math/training/) 中，网络输入已经是实数；这里从字符串 `猫 sat` 出发，一直走到可训练的向量序列。先修只用到 [M3 的矩阵索引](/math/linear-algebra/) 和 M7 的参数更新。我们会让教学 tokenizer 在四份相同的 `猫 sat` 上学习两次合并，用它编码原句，再追踪同一组 ID 如何选取 embedding 行。生产 tokenizer 的额外规则放在这条链完成之后。
+在 [M10](/math/training/) 中，网络输入已经是实数；这里从字符串 `猫 sat` 出发，一直走到可训练的向量序列。先修只用到 [M6 的矩阵索引](/math/linear-algebra/) 和 M10 的参数更新。我们会让教学 tokenizer 在四份相同的 `猫 sat` 上学习两次合并，用它编码原句，再追踪同一组 ID 如何选取 embedding 行。生产 tokenizer 的额外规则放在这条链完成之后。
 
 ## 起点：同一句话能怎样切分
 
@@ -68,9 +69,13 @@ $$
 \frac{\partial L}{\partial E_{256,:}}=g_1+g_2=(4,1).
 $$
 
-这是 [M6](/math/backprop/) 的共享节点梯度相加。ID 是离散地址，不对 ID 求导；未被查到的行对**这一次输入查表**没有梯度贡献。若 $L$ 是两个样本的平均损失，平均因子已经包含在上游 $g_1,g_2$ 中，不应在相加后再除以 2。随机初始化的 embedding 也没有天然词义，只有经过后续预测目标训练，行向量才可能学到有用表示。
+这是 [M9](/math/backprop/) 的共享节点梯度相加。ID 是离散地址，不对 ID 求导；未被查到的行对**这一次输入查表**没有梯度贡献。若 $L$ 是两个样本的平均损失，平均因子已经包含在上游 $g_1,g_2$ 中，不应在相加后再除以 2。随机初始化的 embedding 也没有天然词义，只有经过后续预测目标训练，行向量才可能学到有用表示。
 
 这样，开篇问题已经闭合：`猫 sat` → 七个 UTF-8 字节 → 五个普通 token ID → 五行可训练向量。若附加控制 ID，则序列从五个位置变成七个位置。下一章在这些位置上定义“预测哪一个 ID”。
+
+<TokenLookupLab client:visible />
+
+这里追踪的仍是 `猫 sat` 合并后的五个普通 ID。选中第四项时，`20 73 → 256 → (0.2,-0.1)` 对应正文的同一行；实验为其余四个被查行另设了二维数值，只用于显示地址与向量的区别。附加 BOS/EOS 增加两个位置，不改变正文 ID 或已有参数行。把相同 ID 放到两个位置，反向贡献仍汇合到同一行。
 
 ## 边界：教学 BPE 与生产 tokenizer 差在哪里
 

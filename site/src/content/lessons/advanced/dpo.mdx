@@ -7,9 +7,11 @@ code:
   - code/advanced/dpo.py
 ---
 
+import { DpoLedgerLab } from '../../../components/labs/AdvancedLabs'
+
 [T5 指令微调](/training/instruction-tuning/) 教模型模仿一个示范回复。现在只知道同一问题的两个回复孰优，却未必知道理想回复应该怎样写。若只拿较好的回复做 SFT，较差的回复就从训练目标中消失了。直接偏好优化（direct preference optimization，DPO）让模型比较**两条完整回复相对于固定参考模型的概率变化**。
 
-本章沿用 [M2 的负对数似然](/math/distributions/)、[P2 的下一 token 预测](/principles/language-modeling/) 和 T5 的回复位置 mask。读完应能从一个偏好对算出 DPO 损失，说明每个概率来自哪些 token，并判断一次更新推动的是哪一种相对优势。
+本章沿用 [M5 的负对数似然](/math/distributions/)、[P2 的下一 token 预测](/principles/language-modeling/) 和 T5 的回复位置 mask。读完应能从一个偏好对算出 DPO 损失，说明每个概率来自哪些 token，并判断一次更新推动的是哪一种相对优势。
 
 ## 一对回复：比较的对象是什么
 
@@ -90,6 +92,10 @@ $$
 <Figure src="advanced/dpo-loss.svg" alt="横轴为 DPO margin z；实线损失随 z 减小，虚线梯度幅度在 z 增大时趋近零">从横轴 $z=0$ 的 $\ln2$ 出发，向右是相对参考更偏向 chosen，损失降低；向左则损失和更新权重增大。图中的梯度幅度是对 $z$ 求导的 $s(-z)$，对回复 log-prob 的幅度还要乘 $\lambda_{\mathrm{DPO}}$。</Figure>
 
 ## 为什么出现参考比：原始推导的条件（选读）
+
+<DpoLedgerLab client:visible />
+
+四条账目与前文表格逐项相同，条长表示回复负 log-prob 的大小，右侧保留有符号 log-prob。选择预测行可以核对移位后的有效目标：提示内预测与 padding 不计入回复和。排除 EOS 会改变四个似然与 margin，因而是另一个目标 span；调整 λ 则不改变固定参考和 token 概率。图中的两个偏导是对回复 log-prob 的偏导，不声称共享参数下两条概率会各自单调变化。
 
 上面的数值计算只需概率链式法则和 logistic 损失。若想知道参考比的来源，原论文从固定提示 $x$ 下的奖励目标出发：
 

@@ -18,15 +18,15 @@ export default function NumpyStorageLab() {
       <text x="12" y="20">原数组 A · shape (2,3)</text>
       {result.source.map((v, i) => <g key={i}>
         <rect x={12 + i % 3 * 99} y={34 + Math.floor(i / 3) * 37} width="91" height="31" rx="3" className={i === [1, 2, 4, 5][cell] && result.writesBack ? 'fill-accent2-soft stroke-accent2' : 'fill-accent-soft stroke-accent'} />
-        <text x={57.5 + i % 3 * 99} y={55 + Math.floor(i / 3) * 37} textAnchor="middle">{v}</text>
+        <text x={57.5 + i % 3 * 99} y={55 + Math.floor(i / 3) * 37} textAnchor="middle">S[{i}]={v}</text>
       </g>)}
       <text x="12" y="134">{result.shared ? '共享存储的选区' : mode === 'assign' ? '直接写回后的选区取值' : '独立存储的选区'} · (2,2)</text>
       {result.selected.map((v, i) => <g key={i}>
         <rect x={12 + i % 2 * 148} y={148 + Math.floor(i / 2) * 37} width="139" height="31" rx="3" className={i === cell ? 'fill-accent2-soft stroke-accent2' : 'fill-info-soft stroke-info'} />
-        <text x={81.5 + i % 2 * 148} y={169 + Math.floor(i / 2) * 37} textAnchor="middle">{v}</text>
+        <text x={81.5 + i % 2 * 148} y={169 + Math.floor(i / 2) * 37} textAnchor="middle">{result.shared ? `S[${[1, 2, 4, 5][i]}]` : `C[${i}]`}={v}</text>
       </g>)}
       <text x="12" y="245" className={pen.muted}>每次选择从 A = [[0,1,2],[3,4,5]] 开始</text>
     </svg>
-    <Readout>{snippets[mode]}<br />选区位置 ({Math.floor(cell / 2)},{cell % 2}) → A ({Math.floor(cell / 2)},{cell % 2 + 1})<br />shares_memory：{result.shared ? 'True' : 'False（取值）'} · 原数组写回：{result.writesBack ? '是' : '否'}</Readout>
+    <Readout>{snippets[mode]}<br />选区位置 ({Math.floor(cell / 2)},{cell % 2}) → A ({Math.floor(cell / 2)},{cell % 2 + 1})<br />S 是原存储身份，C 是独立副本身份；方括号为元素偏移，不是真实地址。<br />shares_memory：{result.shared ? 'True' : 'False（取值）'} · 原数组写回：{result.writesBack ? '是' : '否'}</Readout>
   </LabFrame>
 }

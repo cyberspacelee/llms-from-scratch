@@ -9,6 +9,7 @@ code:
 
 import TileReuseLab from '../../../components/labs/TileReuseLab'
 import KernelLifecycleLab from '../../../components/labs/KernelLifecycleLab'
+import FusedEpilogueLab from '../../../components/labs/FusedEpilogueLab'
 
 设 $A\in\mathbb R^{5\times7}$、$B\in\mathbb R^{7\times6}$，我们要计算 $C=AB$。数学式只要求每个 $C_{ij}$ 累加七项；GPU kernel 还必须决定哪个线程写它、怎样协作读取 A 和 B，以及边缘不足一块时如何避免越界。本章从 [G1 线程与 block](/gpu/execution-model/) 和 [G2 内存与同步](/gpu/memory-and-sync/) 出发，把这个小矩阵乘完整地映射到 GPU。文末再用同行计算的 softmax 说明融合适用的另一种依赖结构。
 
@@ -109,6 +110,12 @@ $$
 融合的位置受数学依赖限制。若两段 K 贡献分别是 2 和 $-3$，对总和做 ReLU 得 0；对两段各做 ReLU 再相加却得 2。因而偏置和非线性必须等完整 K 累计结束。若基线是 GEMM、偏置、ReLU 三个独立 kernel，忽略偏置、缓存与输入，C/D 的逻辑读写共 $4MN+8MN+8MN=20MN$ byte；合并写回只有 $4MN$ byte。这个差值只对所述基线成立，融合也可能增加寄存器占用，最终仍需计时。
 
 上面的 CUDA 示例使用普通 float32 标量乘加。Tensor Core 是另一种矩阵乘累加硬件路径；将 `TILE` 改为 16 并不会自动使用它。要核对输入类型、tile 布局、对齐和架构支持，先以 cuBLAS 或框架矩阵乘作为数值与性能基线。[Triton 矩阵乘教程](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html) 用一个 program 负责一个输出 tile，并展示地址计算和分块；它的 `BLOCK_SIZE_M/N/K` 是数据块尺寸，不能直接当作 CUDA threads per block。
+
+### 对照：同一个输出与不同写回路径
+
+<FusedEpilogueLab client:visible />
+
+本图仍使用 $A_{iq}=i+q+1$、$B_{qj}=q-j$，只是增加一项可调整偏置。默认 $C_{00}=112$，偏置为 1，最终得到 113；改到列 5，$C_{05}=-28$，最终 ReLU 得 0。切换融合方式，数值保持相同，而 30 个输出的上述逻辑读写由 600 byte 变为 120 byte。这里仍不包括输入与偏置读取，也不预测运行时间。
 
 ### 延伸：softmax 的一行为什么适合融合
 

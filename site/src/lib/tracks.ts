@@ -14,7 +14,7 @@ export const tracks: Track[] = [
     id: 'math',
     letter: 'M',
     label: '数学基础',
-    summary: '从统计、矩阵与微积分完成训练，再用谱分解、低秩与条件数理解数值稳定性。',
+    summary: '从随机事件、贝叶斯与信息量走到预测损失，再用矩阵、梯度和谱分解理解训练与数值稳定性。',
   },
   {
     id: 'frameworks', letter: 'F', label: '数组与框架',

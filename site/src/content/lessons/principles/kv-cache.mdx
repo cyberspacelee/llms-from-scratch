@@ -9,6 +9,7 @@ code:
 ---
 
 import CacheIndexLab from '../../../components/labs/CacheIndexLab'
+import CachedAttentionLab from '../../../components/labs/CachedAttentionLab'
 
 在 [P9](/principles/generation/) 中，生成一个新 token 后，朴素做法是把增长后的整段历史再次送进 Decoder。这样当然能得到下一步 logits，却把早已算过的历史位置重复计算了一遍。本章使用同一段 `[BOS,A,B,C,D]`：先读 `[BOS,A,B]`，再加入 C、D，说明怎样只算新增位置，同时保留整段重算的结果。先假设模型权重固定、处于 eval 模式、没有 padding 或窗口，且每步采用同一套 RoPE 频率。
 
@@ -119,6 +120,10 @@ $$
 第一行就是先输入 C 时算过的四项；第二行是输入 D 时的五项。直接对 $2\times5$ 全 1 矩阵做左上对齐的 `tril()`，第一行只会看键 0，第二行只看键 0、1，结果会错。某些注意力 API 接受 `is_causal` 标记，但矩形矩阵的对齐规则需按该 API 具体版本核对；示例显式比较绝对位置。
 
 单 token decode 时，新查询恰在缓存末端；在没有 padding 和预分配空槽的本例，键轴里没有未来键，因而可直接读全部键。若把未来的存储槽也传给算子，仍须明确屏蔽它们。
+
+<CachedAttentionLab client:visible />
+
+初始 P=3、U=2 对应同一提示后一起追加 C、D。选中第一查询行时，它的绝对位置是 3，可读键 0–3，首坐标输出恢复正文的 `2.061223`；第二行在位置 4 才能读键 4。切换错误的左上角 tril，概率和仍为 1，却丢掉合法历史，输出随之改变。这里固定本章的 q/k、RoPE 频率与 V，不另外换一套分数。
 
 ## 为什么三种切分得到相同结果？
 

@@ -7,6 +7,8 @@ code:
   - code/advanced/sparse_attention.py
 ---
 
+import { SparseSelectionLab } from '../../../components/labs/AdvancedLabs'
+
 [A7](/advanced/hybrid-attention/) 用固定大小状态汇总历史。本章保留 [P3](/principles/attention/) 的逐位置键和值，却让当前查询只读其中几项。这样做能减少主注意力读取的历史，但先要回答两个问题：**读取集合从哪里来，漏读的位置会怎样改变输出？**
 
 阅读前建议掌握 P3 的 softmax 注意力、[P10](/principles/kv-cache/) 的历史 K/V、[A2](/advanced/mla/) 的缓存布局和 [S3](/systems/flash-attention/) 的精确注意力实现。下文始终使用一个查询、八个可见历史位置和标量键值；标量只为便于手算，一般向量公式随后给出。
@@ -90,6 +92,10 @@ $$
 这也解释了为什么稀疏结果偏大：本例漏掉的值组平均为 36，小于保留组的 $340/7$。一般向量值若满足 $\|v_j\|_2\le M$，则由同一个分解得到 $\|y_{\mathrm{full}}-y_{\mathcal S}\|_2\le2M\delta$。这是**固定单层、固定分数和值**的界限，不是训练后模型质量或多层误差的保证。indexer 若漏掉关键证据，即使只漏一个 token，任务答案也可能改变。
 
 ## 成本：少读历史不等于只保留三项
+
+<SparseSelectionLab client:visible />
+
+初始集合仍是 `{0,3,7}`。实柱在当前集合内归一化，虚线保留完整分布的概率质量；删除一项会同时改变分母和输出。固定 indexer 场景只选择集合，权重始终重新由主分数计算。清空集合时输出未定义，应禁止进入实际 attention；图下的 2Mδ 只解释本章固定单层值的误差界，不能推出任务质量。
 
 对单次 decode，选取本身包括 indexer 查询投影、对 $T$ 个索引键评分、top-$k_s$、索引处理，之后才是 K/V gather 和主注意力。若索引维度为 $d_I$，朴素扫描评分约需 $O(Td_I)$；主注意力键点积约需 $O(k_sd_h)$，多个头还要乘各自头数。top-k 和 gather 的实际开销取决于算法及内存布局。八位置教学例只说明算子，不说明 GPU 一定更快。
 

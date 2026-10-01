@@ -7,7 +7,7 @@ order: 0
 
 用户发来一段 prompt，模型开始生成后续 token。单次前向的结果可以正确，但服务仍可能因显存不足、请求排队或数据搬移而变慢。本路线沿这条请求追问三件事：它占用多少资源，系统怎样同时执行多条请求，改动后用户实际得到了什么。开始前先读 [P9 生成](/principles/generation/) 和 [P10 KV cache](/principles/kv-cache/)；后者证明了只计算新增 token 仍能保持整段计算的结果。
 
-<ChapterList track="systems" />
+<CourseMap track="systems" />
 
 ## 先算清一次前向
 

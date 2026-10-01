@@ -8,10 +8,11 @@ code:
 ---
 
 import MoeRouteLab from '../../../components/labs/MoeRouteLab'
+import { MoeDispatchLab } from '../../../components/labs/AdvancedLabs'
 
 [P8](/principles/modern-decoder/#swiglu对同一位置的隐藏状态做门控变换) 的每个 token 都经过同一组 SwiGLU 权重。如果把前馈层换成许多组独立权重，又让每个 token 只调用其中少数几组，模型就能拥有较多参数而不在每个位置计算全部参数。这种结构叫混合专家（mixture of experts，MoE）。它的关键不是把训练好的普通 FFN 无损拆开，而是在模型中加入**路由**，让专家与路由器共同学习。
 
-本章需要 P8 的 FFN、[M2 softmax](/math/distributions/) 和 [T2 梯度更新](/training/optimization/)。读完要能给定一张路由分数表，独立算出每条 token 的输出，并分别回答：参数总共存多少、每条 token 算多少、专家分布到多卡时传什么。
+本章需要 P8 的 FFN、[M5 softmax](/math/distributions/) 和 [T2 梯度更新](/training/optimization/)。读完要能给定一张路由分数表，独立算出每条 token 的输出，并分别回答：参数总共存多少、每条 token 算多少、专家分布到多卡时传什么。
 
 ## 从一条 token 开始：路由器决定调用谁
 
@@ -70,6 +71,10 @@ flowchart LR
 top-k 索引本身是离散的；在选中集合固定的一小片区域内，选中权重的 softmax 和专家输出仍可求导，主损失可以更新选中专家及对应的路由分数。若 $k_e=1$ 且对唯一选中分数做单元素 softmax，权重恒为 1，主损失不再通过这个权重给 router 梯度；这不等于所有 MoE 路由都无法训练。
 
 ## 负载先于性能：容量和均衡各解决什么
+
+<MoeDispatchLab client:visible />
+
+回放继续使用上表三行，保留原 token 行号、专家编号和混合权重。默认每专家容量为 2；最后的 gather 与逐行参照应完全一致。拥挤预设把三个 token 都送到专家 0/1；默认通过额外批次等待执行所有贡献，选择丢弃才改变输出。本图的容量策略是教学对照，不是 DeepSeek-V3 的 token 丢弃机制。
 
 六次调用分到四个专家，理想平均每专家 $Nk_e/n_e=3\times2/4=1.5$ 次。若为方便批处理，每个专家分配 $C=\lceil cNk_e/n_e\rceil$ 个槽位，容量因子 $c=1$ 时就是 2 个。本例命中数 $(2,1,2,1)$ 均能放下；若三个 token 都选专家 0、1，命中数变为 $(3,3,0,0)$，两位专家各有一次调用超出容量。
 

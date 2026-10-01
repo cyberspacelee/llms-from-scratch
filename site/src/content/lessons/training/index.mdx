@@ -9,7 +9,7 @@ order: 0
 
 ## 阅读路线：先完成一次可信的更新
 
-<ChapterList track="training" />
+<CourseMap track="training" />
 
 [T1 数据与样本构造](/training/data/) 先确定文档身份、训练与验证的边界，再把文本编码成移位的 input/target。它同时区分注意力 mask、损失 mask 与 padding：哪些位置可以读取，哪些目标计入损失，是两件不同的事。[T2 优化与训练稳定性](/training/optimization/) 接着以**有效目标数**为分母，把不同长度的微批合成一次更新，逐步算清梯度、AdamW 状态和 checkpoint 需要保存的历史。[T3 从零训练](/training/pretraining/) 将两者接入真实循环：训练、验证、写盘、中断、恢复，并比较恢复与连续运行的轨迹。
 
@@ -25,6 +25,6 @@ order: 0
 
 ## 从哪里开始
 
-已学过 [P1 token 与 tokenizer](/principles/tokenization/)、[P2 下一 token 预测](/principles/language-modeling/) 和 [P4 Decoder](/principles/decoder/) 的读者，可从 T1 顺序读到 T4；T3 的现代文本实验还会用到 P11。T2 的推导依赖 [M6 反向传播](/math/backprop/) 和 [M7 神经网络训练](/math/training/)；PyTorch 的梯度和训练状态接口可回读 [F4](/frameworks/autograd/) 与 [F6](/frameworks/data-and-training/)。
+已学过 [P1 token 与 tokenizer](/principles/tokenization/)、[P2 下一 token 预测](/principles/language-modeling/) 和 [P4 Decoder](/principles/decoder/) 的读者，可从 T1 顺序读到 T4；T3 的现代文本实验还会用到 P11。T2 的推导依赖 [M9 反向传播](/math/backprop/) 和 [M10 神经网络训练](/math/training/)；PyTorch 的梯度和训练状态接口可回读 [F4](/frameworks/autograd/) 与 [F6](/frameworks/data-and-training/)。
 
 每章都先固定自己的数据、目标和比较边界，再给出手算与可运行核对；数值结果只在该章声明的条件下成立。准备训练真实文本时，先沿 T8 处理原料，再用 T1–T4 的协议记录数据版本、更新状态和评估结果。

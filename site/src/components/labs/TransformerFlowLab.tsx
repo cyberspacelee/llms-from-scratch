@@ -17,17 +17,29 @@ const stages = [
 
 export default function TransformerFlowLab() {
   const [stage, setStage] = useState(0)
-  const [length, setLength] = useState(3)
+  const [length, setLength] = useState(4)
   const [past, setPast] = useState(0)
   const [kv, setKv] = useState(2)
+  const [mode, setMode] = useState('training')
+  const [row, setRow] = useState(0)
+  const selected = Math.min(row, length - 1)
+  const preset = (value: string) => {
+    setMode(value)
+    if (value === 'training') { setLength(4); setPast(0); setStage(9) }
+    if (value === 'prefill') { setLength(2); setPast(0); setStage(3) }
+    if (value === 'decode') { setLength(1); setPast(2); setStage(4) }
+    setRow(0)
+  }
   const ledger = decoderLedger(kv, length, past)
   const current = stages[stage]
   return <LabFrame title="跟踪一个完整现代块" hint="B=1，d=12，nq=4，dh=4，dff=20，L=2，V=8">
     <Controls>
+      <label className="text-sm">调用预设<select className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2" value={mode} onChange={e => preset(e.target.value)}><option value="training">训练：[BOS,春,风,来]</option><option value="prefill">prefill：[BOS,春]</option><option value="decode">decode：追加风</option><option value="custom">自定义长度</option></select></label>
       <label className="text-sm">计算阶段<select className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2" value={stage} onChange={e => setStage(Number(e.target.value))}>{stages.map((s, i) => <option key={s.name} value={i}>{i + 1} · {s.name}</option>)}</select></label>
       <label className="text-sm">KV 头数<select className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2" value={kv} onChange={e => setKv(Number(e.target.value))}>{[1, 2, 4].map(n => <option key={n} value={n}>{n} · {n === 1 ? 'MQA' : n === 2 ? 'GQA' : 'MHA'}</option>)}</select></label>
-      <Range label="新增长度 U" min={1} max={5} value={length} onChange={setLength} />
-      <Range label="历史长度 P" min={0} max={5} value={past} onChange={setPast} />
+      <Range label="新增长度 U" min={1} max={5} value={length} onChange={value => { setLength(value); setMode('custom') }} />
+      <Range label="历史长度 P" min={0} max={5} value={past} onChange={value => { setPast(value); setMode('custom') }} />
+      <Range label="选择本次有效查询行" min={0} max={length - 1} value={selected} onChange={setRow} />
     </Controls>
     <svg viewBox="0 0 380 540" className={`${pen.canvas} max-w-110!`} role="img" aria-label={`完整块的数据路径，当前阶段 ${current.name}`}>
       {stages.map((s, i) => <g key={s.name}>
@@ -39,6 +51,9 @@ export default function TransformerFlowLab() {
       <text x="20" y="520" className={pen.muted}>左侧：x 和 z 的残差旁路；一个块重复两层</text>
     </svg>
     <p className="mt-3 text-sm">{current.meaning}</p>
-    <Readout>{current.code}<br />形状：{current.shape.replaceAll('nkv', String(kv)).replaceAll('P+U', String(past + length)).replaceAll('U', String(length))}<br />总参数 {ledger.parameters} · 全部两层缓存 {ledger.cacheElements} 个元素 · 每层当前分数 {ledger.scoreElements} 个元素</Readout>
+    <svg viewBox={`0 0 360 ${34 + length * 32}`} className={`${pen.canvas} max-w-110!`} role="img" aria-label={`选中有效查询行 ${selected}，绝对位置 ${past + selected}`}>
+      {Array.from({ length }, (_, i) => <g key={i}><rect x="4" y={4 + i * 32} width="352" height="27" className={selected === i ? 'fill-accent-soft stroke-accent' : 'fill-paper stroke-rule'} /><text x="14" y={23 + i * 32}>行 {i} · 位置 {past + i} · 可读键 0…{past + i}</text></g>)}
+    </svg>
+    <Readout>{current.code}<br />形状：{current.shape.replaceAll('nkv', String(kv)).replaceAll('P+U', String(past + length)).replaceAll('U', String(length))}<br />总参数 {ledger.parameters} · 全部两层缓存 {ledger.cacheElements} 个元素 · 每层当前分数 {ledger.scoreElements} 个元素<br />选中行 {selected} 的绝对位置 {past + selected}；{mode === 'training' ? '四行分别预测春、风、来、EOS，全部参与目标。' : '生成只从最后有效行选择下一 ID；较早行仍可参与 KV 构造。'}</Readout>
   </LabFrame>
 }

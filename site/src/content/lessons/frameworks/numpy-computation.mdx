@@ -10,7 +10,7 @@ code:
 import NumpyAxesLab from '../../../components/labs/NumpyAxesLab'
 import NumpyContractionLab from '../../../components/labs/NumpyContractionLab'
 
-[F1 NumPy 数组](/frameworks/numpy-arrays/) 让我们看清 shape、索引和存储。下一步，数组表达式即使能运行，结果 shape 也正确，仍可能沿错轴计算。本章用固定的两条记录，把每次运算写成三个问题：输入轴代表什么，哪条轴被复用或消去，某个输出元素应是多少。矩阵乘的数学定义见 [M3](/math/linear-algebra/)，方差的统计含义见 [M1](/math/probability/)。
+[F1 NumPy 数组](/frameworks/numpy-arrays/) 让我们看清 shape、索引和存储。下一步，数组表达式即使能运行，结果 shape 也正确，仍可能沿错轴计算。本章用固定的两条记录，把每次运算写成三个问题：输入轴代表什么，哪条轴被复用或消去，某个输出元素应是多少。矩阵乘的数学定义见 [M6](/math/linear-algebra/)，方差的统计含义见 [M3](/math/probability/)。
 
 $$
 X=\begin{bmatrix}1&2&3\\4&5&6\end{bmatrix}
@@ -146,7 +146,7 @@ probabilities = weights / weights.sum(axis=1, keepdims=True)
 
 两行移位后分别为 `[-6,0]`、`[-15,0]`；第一行类别 1 的概率为 $1/(1+e^{-6})\approx0.9975$，第二行约为 $0.9999997$。`max` 与 `sum` 都沿类别轴 1，保留 `(B,1)`，因此每行概率和为 1。若误用 `axis=0`，每列的和可能为 1，看着也像“归一化”，却让一条样本依赖另一条样本。改变第二行 logits 时，第一行概率必须不变；这是比只检查非负更有力的错轴测试。
 
-本章的基础函数要求类别轴非空，输入 logits 有限。整行都是负无穷时会发生负无穷减负无穷，上层须先定义没有可用候选的处理策略。概率和损失的含义见 [M2](/math/distributions/)。
+本章的基础函数要求类别轴非空，输入 logits 有限。整行都是负无穷时会发生负无穷减负无穷，上层须先定义没有可用候选的处理策略。概率和损失的含义见 [M5](/math/distributions/)。
 
 ### 选读：局部随机生成器
 

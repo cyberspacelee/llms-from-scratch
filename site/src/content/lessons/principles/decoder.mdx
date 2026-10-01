@@ -7,9 +7,11 @@ code:
   - code/principles/decoder.py
 ---
 
-在 [P2](/principles/language-modeling/) 中，`[BOS,A,B,EOS]` 变成了三个下一 token 分类问题；[P3](/principles/attention/) 已算出一个位置如何读取先前位置。现在缺的是把读取结果变成词表上的 logits，并让三个目标的 loss 能传回所有参数。我们仍用同一段文档，先做一次完整前向，再沿一条梯度路径反向检查。阅读前建议掌握 [M6](/math/backprop/) 的链式法则。
+在 [P2](/principles/language-modeling/) 中，`[BOS,A,B,EOS]` 变成了三个下一 token 分类问题；[P3](/principles/attention/) 已算出一个位置如何读取先前位置。现在缺的是把读取结果变成词表上的 logits，并让三个目标的 loss 能传回所有参数。我们仍用同一段文档，先做一次完整前向，再沿一条梯度路径反向检查。阅读前建议掌握 [M9](/math/backprop/) 的链式法则。
 
 本章的基础教学 Decoder 采用学习式位置表、Pre-LayerNorm、普通多头注意力和 GELU FFN。这是一种明确的配置；[P8](/principles/modern-decoder/) 才比较 RMSNorm、RoPE 后的模块和 GQA，[P11](/principles/complete-transformer/) 才组装带缓存的现代实现。
+
+import { ResidualTraceLab } from '../../../components/labs/PrinciplesTraceLabs'
 
 ## 输入：三个已知 token 怎样进入模型
 
@@ -136,6 +138,10 @@ $$
 </KeyEq>
 
 训练时不必先手动 softmax 再取对数，可将 logits 直接交给交叉熵算子。生成时则只读取最后一个有效位置的分布，选出下一 token 后把它接回输入，重复执行。
+
+<ResidualTraceLab client:visible />
+
+实验沿用本章三行输入和同一组手算参数。选择 A 位置，注意力写入恰为零，但第一次残差仍保留 `(0,2)`；FFN 随后写入 `(GELU(1),0)`。逐个选到词表头，三行目标概率分别约为 `0.5069、0.3878、0.2266`。这将“分支输出”与“更新后的残差状态”分开，避免把前者误当本层全部输出。
 
 ## 反向传播：错误怎样到达 embedding 和分支参数
 

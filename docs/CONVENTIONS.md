@@ -34,7 +34,7 @@ code:                                # 可选，本章对应的验证脚本
 
 ## 链接
 
-- 站内链接一律写成从站点根开始的路径：`[M3 向量与矩阵](/math/linear-algebra/)`、`[P6 sin/cos](/principles/sinusoidal/#固定偏移sincos-两个坐标怎样一起变化)`。构建时自动加上部署前缀。
+- 站内链接一律写成从站点根开始的路径：`[M6 向量与矩阵](/math/linear-algebra/)`、`[P6 sin/cos](/principles/sinusoidal/#固定偏移sincos-两个坐标怎样一起变化)`。构建时自动加上部署前缀。
 - 提到其他章节时用章节代码加链接，不写“第 06 章”“上一篇”这类会随结构变化失效的说法。
 - `pnpm build` 会检查所有站内链接和锚点，断链时构建失败。
 

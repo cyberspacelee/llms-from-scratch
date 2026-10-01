@@ -9,7 +9,7 @@ order: 0
 
 ## 主线：从文本到下一 token
 
-<ChapterList track="principles" />
+<CourseMap track="principles" />
 
 [P1 文本、token 与 embedding](/principles/tokenization/) 把字符串切分、编号，再通过可训练的 embedding 查表变成向量。[P2 下一 token 预测](/principles/language-modeling/) 用 `[BOS,A,B,EOS]` 说明标签为什么要错开一位，以及每个位置的预测如何汇成一次损失。到这里，问题已经明确，但最小的 bigram 模型只能根据当前 token 查表，不能利用更早的上下文。
 
@@ -25,6 +25,6 @@ order: 0
 
 首次学习按章节顺序走。已有注意力基础，只想弄清位置时，从 [P3](/principles/attention/) 核对 causal mask 和分数的定义，再读 P5–P7；只想实现生成，先确认 [P2](/principles/language-modeling/) 的训练目标和 [P4](/principles/decoder/) 的前向过程，再读 P9–P10。要对照现代模型的结构与代码，则继续读 P8 和 P11。各章的手算和脚本检验同一个问题的不同部分，数值断言能核对案例，普遍结论仍要看推导的条件。
 
-进入 P1 前，需要 [M3 向量与矩阵](/math/linear-algebra/) 中的矩阵、轴和索引，以及 [M7 神经网络训练](/math/training/) 中预测与参数更新的关系。[M2 分布与信息量](/math/distributions/) 的 softmax 和交叉熵会在 P2 用到；[M6 反向传播](/math/backprop/) 帮助理解 P4 的梯度。不熟悉数组轴、PyTorch 的自动求导或模块 API，可按遇到的障碍回读 [数组与框架路线](/frameworks/)。
+进入 P1 前，需要 [M6 向量与矩阵](/math/linear-algebra/) 中的矩阵、轴和索引，以及 [M10 神经网络训练](/math/training/) 中预测与参数更新的关系。[M2 贝叶斯与序列概率](/math/bayes/) 的链式法则、[M4 信息量与熵](/math/information/) 的条件交叉熵，以及 [M5 分布与预测损失](/math/distributions/) 的 softmax 会在 P2 用到；[M9 反向传播](/math/backprop/) 帮助理解 P4 的梯度。不熟悉数组轴、PyTorch 的自动求导或模块 API，可按遇到的障碍回读 [数组与框架路线](/frameworks/)。
 
 读完 P11，可以进入 [训练与评估](/training/) 处理语料、优化和模型评估，或进入 [推理系统](/systems/) 估算生成成本并研究服务实现。

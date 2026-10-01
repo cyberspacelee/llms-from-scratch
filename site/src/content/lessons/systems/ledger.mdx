@@ -7,6 +7,8 @@ code:
   - code/systems/ledger.py
 ---
 
+import { LedgerLab } from '../../../components/labs/SystemsLabs'
+
 [P8 Decoder](/principles/modern-decoder/) 给出了每层的矩阵，[P10 KV cache](/principles/kv-cache/) 说明了生成时保存什么。现在要回答一个系统问题：**一条提示到达后，模型占多少空间，处理提示做多少运算，下一步生成又要读写多少数据？** 本章只研究稠密、无偏置、使用 GQA 和 SwiGLU 的 Decoder；权重与 KV 都按每元素 2 字节计算。先用可手算的模型完成整张账，再代入公开模型。FLOP 是运算量，FLOP/s 才是速率；一次乘加计 2 FLOP。
 
 ## 固定模型和请求：每个数字属于哪里？
@@ -100,6 +102,10 @@ GQA 让两个查询头共享缓存，却没有减少这两个头各自的点积�
 | 注意力可见对乘加 | 320 FLOP | 160 FLOP |
 
 ## 数据搬移账：强度何时能用来判断瓶颈？
+
+<LedgerLab client:visible />
+
+默认图仍是两层模型 S、单请求和第 5 个位置。增加请求数时，权重容量不变，而每条请求分别保存 KV。读取一栏假设本轮共用一次稠密权重读取，并逐请求读取全部 KV；新增写入另外记账。切换 8B 时只换公开形状，不把字节账当成 HBM 实测。
 
 **算术强度** $I$ 是 FLOP 除以所讨论存储层级实际搬运的字节，单位 FLOP/byte。先做一个明确的理想化：decode 批中有 $B$ 条请求，同一份稠密权重从 HBM 读一次并供 $B$ 个新 token 使用；权重每元素 2 字节，暂不收 KV、embedding 行、输出、norm 和其它流量。于是
 

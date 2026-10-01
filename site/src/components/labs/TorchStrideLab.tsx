@@ -1,30 +1,21 @@
 import { useState } from 'react'
-import { tensorLayout } from '../../lib/framework-tensor-model'
+import { headCoordinate } from '../../lib/framework-trace-model'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
-import Formula from './Formula'
 
 export default function TorchStrideLab() {
-  const [transposed, setTransposed] = useState(false)
-  const [index, setIndex] = useState(0)
-  const cols = transposed ? 2 : 3
-  const row = Math.floor(index / cols), col = index % cols
-  const state = tensorLayout(transposed, row, col)
-  return <LabFrame title="张量坐标怎样走到同一块存储" hint="arange(6) · 不含复制">
-    <Controls>
-      <label className="flex h-8 items-center gap-2 text-sm"><input type="checkbox" checked={transposed} onChange={event => setTransposed(event.target.checked)} className="accent-accent" />转置两个轴</label>
-      <Range label="逻辑展开位置" value={index} min={0} max={5} onChange={setIndex} />
-    </Controls>
-    <svg viewBox="0 0 320 285" className={`${pen.canvas} max-w-96`} role="img" aria-label={`形状 ${state.rows}乘${state.cols}，stride ${state.stride}，选中坐标 ${row},${col} 指向存储 ${state.offset}`}>
-      <text x="12" y="20">逻辑张量：({state.rows}, {state.cols})</text>
-      {state.traversal.map((offset, i) => <g key={i}>
-        <rect x={12 + i % cols * 92} y={35 + Math.floor(i / cols) * 36} width="82" height="30" rx="3" className={i === index ? 'fill-accent2-soft stroke-accent2 stroke-2' : 'fill-accent-soft stroke-accent'} />
-        <text x={53 + i % cols * 92} y={55 + Math.floor(i / cols) * 36} textAnchor="middle">{offset}</text>
-      </g>)}
-      <path d={`M${53 + col * 92} ${65 + row * 36}V174H${36 + state.offset * 48}V207m-4-5 4 5 4-5`} className={pen.guide} />
-      <text x="12" y="195">底层存储：元素偏移 0–5</text>
-      {Array.from({ length: 6 }, (_, offset) => <g key={offset}><rect x={12 + offset * 48} y="210" width="43" height="32" rx="3" className={offset === state.offset ? 'fill-accent2-soft stroke-accent2 stroke-2' : 'fill-sunken stroke-rule'} /><text x={33.5 + offset * 48} y="231" textAnchor="middle">{offset}</text></g>)}
-      <text x="12" y="272">存储顺序不变：0,1,2,3,4,5</text>
+  const [offset, setOffset] = useState(0), [stage, setStage] = useState(2)
+  const selected = headCoordinate(offset), permuted = stage === 2
+  const cells = Array.from({ length: 8 }, (_, i) => headCoordinate(i)).sort((a, b) => permuted ? (a.head * 4 + a.t * 2 + a.channel) - (b.head * 4 + b.t * 2 + b.channel) : a.offset - b.offset)
+  const cols = permuted ? 2 : 4, stride = ['(8,4,1)', '(8,4,2,1)', '(8,2,4,1)', '(8,4,1)'][stage]
+  return <LabFrame title="一个元素从时间/通道走到头，再合回原位置">
+    <Controls><Range label="原输入元素偏移" value={offset} min={0} max={7} onChange={setOffset} /><Range label="阶段：输入/拆头/换轴/合头" value={stage} min={0} max={3} onChange={setStage} /></Controls>
+    <svg viewBox={`0 0 320 ${permuted ? 350 : 240}`} className={`${pen.canvas} max-w-96`} role="img" aria-label={`阶段 ${stage}，元素 ${selected.value} 位于头 ${selected.head}、时间 ${selected.t}、头内通道 ${selected.channel}`}>
+      <text x="10" y="20">{['X: (1,2,4)', 'reshape: (1,2,2,2)', 'permute: (1,2,2,2)', '先 permute 回去，再 reshape'][stage]}</text>
+      {cells.map((cell, i) => <g key={cell.offset}><rect x={10 + i % cols * (300 / cols)} y={35 + Math.floor(i / cols) * 55} width={300 / cols - 8} height="47" rx="3" className={cell.offset === offset ? 'fill-accent2-soft stroke-accent2 stroke-2' : cell.head ? 'fill-info-soft stroke-info' : 'fill-accent-soft stroke-accent'} /><text x={10 + i % cols * (300 / cols) + (300 / cols - 8) / 2} y={56 + Math.floor(i / cols) * 55} textAnchor="middle">{cell.value}</text><text x={10 + i % cols * (300 / cols) + (300 / cols - 8) / 2} y={73 + Math.floor(i / cols) * 55} textAnchor="middle" className={pen.mono}>S[{cell.offset}]</text></g>)}
+      <text x="10" y={permuted ? 277 : 166}>颜色标记两组头；橙色标记同一元素</text>
+      <text x="10" y={permuted ? 301 : 190}>同一存储身份 S · stride {stride}</text>
+      <text x="10" y={permuted ? 325 : 214}>这条正确的合头路径能恢复原输入</text>
     </svg>
-    <Readout><Formula>{String.raw`p=${row}\times${state.stride[0]}+${col}\times${state.stride[1]}=${state.offset}`}</Formula> · stride ({state.stride.join(', ')}) · {transposed ? '非连续；按逻辑顺序 reshape(6) 需复制' : '连续；view(6) 可共享存储'} · 逻辑遍历 [{state.traversal.join(', ')}]</Readout>
+    <Readout>X[{selected.original.join(',')}]={selected.value} → 拆头 [{selected.split.join(',')}] → 换轴 [{selected.permuted.join(',')}] → 合头 [{selected.original.join(',')}]<br />换轴后的元素偏移=头×2+时间×4+头内通道={selected.offset}，存储次序不变。<br />这里先换回原轴才合头；直接把换轴结果 reshape(1,2,4) 会按头先后重排元素，并可能复制。存储关系与梯度关系需要分别检查。</Readout>
   </LabFrame>
 }

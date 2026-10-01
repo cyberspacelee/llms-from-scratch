@@ -1,9 +1,10 @@
 export type LossReduction = 'none' | 'sum' | 'mean'
-export const lossLogits = [[2, 1, 0], [0, 1, 2], [1, 1, 1]] as const
+const s = 1 / Math.sqrt(2)
+export const lossLogits = [[s, -s, 0, 0], [-s, s, 0, 0], [s, -s, 0, 0], [-s, s, 0, 0], [s, -s, 0, 0], [s, -s, 0, 0]] as const
 
 export function maskedLoss(targets: readonly number[], ignored: readonly boolean[], reduction: LossReduction) {
-  if (targets.length !== 3 || ignored.length !== 3 || targets.some(value => !Number.isInteger(value) || value < 0 || value > 2)
-      || !['none', 'sum', 'mean'].includes(reduction)) throw new RangeError('Expected 3 targets in 0–2, masks, and a reduction')
+  if (targets.length !== 6 || ignored.length !== 6 || targets.some(value => !Number.isInteger(value) || value < 0 || value > 3)
+      || ignored.some(value => typeof value !== 'boolean') || !['none', 'sum', 'mean'].includes(reduction)) throw new RangeError('Expected 6 targets in 0..3, boolean masks, and a reduction')
   const rows = lossLogits.map((logits, index) => {
     const maximum = Math.max(...logits)
     const exps = logits.map(value => Math.exp(value - maximum))

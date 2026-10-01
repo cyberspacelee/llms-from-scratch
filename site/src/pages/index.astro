@@ -2,6 +2,7 @@
 import BaseLayout from '../layouts/BaseLayout.astro'
 import { getLessons, repoUrl, url, type Lesson } from '../lib/lessons'
 import { tracks } from '../lib/tracks'
+import CourseMap from '../components/mdx/CourseMap.astro'
 
 const lessons = await getLessons()
 const byTrack = (id: string) => lessons.filter((lesson) => lesson.track.id === id)
@@ -63,7 +64,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
         {[
           [String(chapters.length), '章正文'],
           [String(scripts.length), '个验证脚本'],
-          [String(Object.keys(import.meta.glob('../components/labs/*Lab.tsx')).length), '个交互实验'],
+          [String(tracks.length), '条学习路线'],
         ].map(([value, label]) => (
           <div class="flex flex-col-reverse bg-raised px-4 py-3">
             <dt class="text-xs text-muted">{label}</dt>
@@ -105,6 +106,7 @@ const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))
     <section aria-labelledby="routes-heading" class="border-t border-rule py-14">
       <h2 id="routes-heading" class="mb-2 text-xl font-semibold">从哪里开始</h2>
       <p class="mt-0 mb-8 text-muted">路线按依赖排好；已经熟悉前面的内容，可以沿下面的捷径直接进入。</p>
+      <CourseMap />
       <div class="grid gap-6 md:grid-cols-3">
         {routes.map((route) => (
           <section>

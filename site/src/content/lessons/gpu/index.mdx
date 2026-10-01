@@ -5,17 +5,21 @@ description: 沿输出归属、内存协作、分块计算和设备测量四步�
 order: 0
 ---
 
-设想要把数组计算搬到 GPU：给它更多 thread，结果可能越界；结果算对了，访问地址也可能分散；减少了数据搬运，运行时间仍可能变长。这条路线依次解决这三个障碍。需要先会 Python 数组下标和基本矩阵乘法；若矩阵乘尚不熟悉，可先读 [M3 向量与矩阵](/math/linear-algebra/)。
+import GpuHierarchyLab from '../../../components/labs/GpuHierarchyLab'
+
+设想要把数组计算搬到 GPU：给它更多 thread，结果可能越界；结果算对了，访问地址也可能分散；减少了数据搬运，运行时间仍可能变长。这条路线依次解决这三个障碍。需要先会 Python 数组下标和基本矩阵乘法；若矩阵乘尚不熟悉，可先读 [M6 向量与矩阵](/math/linear-algebra/)。
 
 ## 先看一张图：程序在哪里运行
 
-<Figure src="gpu/overall-model.svg" alt="CPU 提交工作给 GPU；GPU 的多个 SM 承载线程块，并通过缓存和设备内存取得数据" minWidth="42rem">沿 CPU、GPU、SM 三层阅读：CPU 侧准备数据并提交 kernel；GPU 的 SM 承载 block，block 内的 thread 使用寄存器与 shared memory 协作。图表示资源与作用范围，不表示某款芯片的实际单元数量或访存路径。</Figure>
+<GpuHierarchyLab client:visible />
+
+沿 CPU、GPU、SM 三层阅读：CPU 侧准备数据并提交 kernel；GPU 的 SM 承载 block，block 内的 thread 使用寄存器与 shared memory 协作。图表示资源与作用范围，不表示某款芯片的实际单元数量或访存路径。
 
 这里的 kernel 是提交给 GPU 执行的函数；thread 是执行它的逻辑实例，block 是能使用 shared memory 协作的一组 thread，SM 是承载 block 的硬件单元。软件中的 block 数不等于 SM 数，也不决定 block 的执行先后。图采用 NVIDIA CUDA 的术语与常见独立 GPU 的主机、设备视角；具体架构与其他平台的规则应查对应文档。[CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html) 给出了这些概念的正式定义。
 
 ## 四步：从唯一负责人到可信时间
 
-<ChapterList track="gpu" />
+<CourseMap track="gpu" />
 
 | 章节 | 从什么问题出发 | 带走什么判断 |
 | --- | --- | --- |

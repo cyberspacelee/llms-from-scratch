@@ -7,9 +7,11 @@ code:
   - code/principles/generation.py
 ---
 
+import SamplingLab from '../../../components/labs/SamplingLab'
+
 ## 从一次预测到一段输出
 
-[P2](/principles/language-modeling/) 用真实文档 `[BOS,A,B,EOS]` 训练下一 token 预测；[P4](/principles/decoder/) 给出完成这项预测的 Decoder。现在只有提示 `[BOS,A]`，真实后文未知。怎样让模型自己接着写，又知道何时停止？本章先用一个四类模型走完循环，再研究选择下一项的规则。这里只需要 [M2](/math/distributions/) 的 softmax；KV cache 留给下一章。
+[P2](/principles/language-modeling/) 用真实文档 `[BOS,A,B,EOS]` 训练下一 token 预测；[P4](/principles/decoder/) 给出完成这项预测的 Decoder。现在只有提示 `[BOS,A]`，真实后文未知。怎样让模型自己接着写，又知道何时停止？本章先用一个四类模型走完循环，再研究选择下一项的规则。这里只需要 [M5](/math/distributions/) 的 softmax；KV cache 留给下一章。
 
 词表 ID 固定为 `BOS=0,A=1,B=2,EOS=3`。模型读取 `[BOS,A]` 后，在最后位置给出四个 logits
 
@@ -56,6 +58,10 @@ q^{(0.5)}=\frac{(0.01,0.16,0.09,0.04)}{0.30}
 $$
 
 升温则让各分数差的作用变小。只改变正温度时，排序不变，纯贪心仍选 A；低温也不保证输出正确。某些 API 将 `temperature=0` 作为切换到贪心的特殊设置，不能把 0 代入上式。
+
+<SamplingLab client:visible />
+
+默认显示本章 `[BOS,A]` 后的四类分布 `(0.1,0.4,0.3,0.2)`。先只改变温度，再恢复到 1 并试 top-k/top-p：空心框保留原模型分布，实心柱显示截断后重新归一化的分布。温度 0.5、其余控制不截断时，应得到 `(0.0333,0.5333,0.3000,0.1333)`。min-p 与重复惩罚在下面解释后再展开核对；实验展示确定性的候选分布，不伪装成一次随机抽样。
 
 ## Top-k 与 top-p：候选集合怎样确定
 

@@ -1,44 +1,21 @@
 ---
 import FigureShell from '../FigureShell.astro'
-
-/** One Qwen3 decoder layer as nano-vLLM implements it. */
-const box = 'fill-sunken stroke-rule-strong'
-const blocks = [
-  { x: 40, w: 110, title: 'RMSNorm', lines: ['fused add'] },
-  { x: 210, w: 160, title: '自注意力', lines: ['Q/K → RMSNorm', 'RoPE → KV cache', 'FlashAttention'] },
-  { x: 430, w: 110, title: 'RMSNorm', lines: ['fused add'] },
-  { x: 600, w: 160, title: 'Gated MLP', lines: ['gate_up_proj', 'SiLU(gate) × up', 'down_proj'], accent: true },
+const stages = [
+  ['输入 x', '保留残差 x'],
+  ['RMSNorm → 自注意力', 'Q/K Norm · RoPE · KV'],
+  ['h = x + Attention(Norm(x))', '第一条残差'],
+  ['RMSNorm → Gated MLP', 'SiLU(gate) × up → down'],
+  ['y = h + MLP(Norm(h))', '第二条残差'],
 ]
 ---
-<FigureShell label="Qwen3 解码层数据通路">
-    <svg viewBox="0 0 880 300" role="img" aria-label="输入经过 RMSNorm、自注意力、RMSNorm、门控 MLP，残差以融合加法贯穿" class="block h-auto w-full min-w-xl font-sans text-[14px] [&_text]:fill-ink">
-      <defs>
-        <marker id="qwen-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-muted" /></marker>
-        <marker id="qwen-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10Z" class="fill-accent2" /></marker>
-      </defs>
-      <text x="40" y="36" class="font-mono text-[12px] fill-accent2!">Qwen3DecoderLayer × n_layers</text>
-      {blocks.map((block) => {
-        const h = block.lines.length > 1 ? 104 : 60
-        const y = 120 - h / 2
-        return (
-          <g>
-            <rect x={block.x} y={y} width={block.w} height={h} rx="6" class={block.accent ? 'fill-accent-soft stroke-accent' : box} />
-            <text x={block.x + block.w / 2} y={y + 26} text-anchor="middle" class="font-semibold">{block.title}</text>
-            {block.lines.map((line, index) => (
-              <text x={block.x + block.w / 2} y={y + 48 + index * 20} text-anchor="middle" class="font-mono text-[12px] fill-muted!">{line}</text>
-            ))}
-          </g>
-        )
-      })}
-      <rect x="820" y="96" width="44" height="48" rx="6" class={box} />
-      <text x="842" y="127" text-anchor="middle" class="text-[20px]">+</text>
-      {[[150, 202], [370, 422], [540, 592], [760, 812]].map(([from, to]) => (
-        <path d={`M${from} 120H${to}`} class="fill-none stroke-muted stroke-[1.5]" marker-end="url(#qwen-arrow)" />
-      ))}
-      <path d="M40 120H22V236H842V152" class="fill-none stroke-accent2 stroke-[1.5] [stroke-dasharray:7_5]" marker-end="url(#qwen-arrow-accent)" />
-      <text x="430" y="266" text-anchor="middle" class="font-mono text-[12px] fill-accent2!">残差以融合的 add + RMSNorm 贯穿每一层</text>
-    </svg>
-  <Fragment slot="caption">
-    结构和普通 Transformer 解码层一致；不同在于每个线性层已按张量并行切好，注意力同时负责读写 KV cache，RMSNorm 与残差加法融合在一次调用里。
-  </Fragment>
+<FigureShell label="固定快照 Qwen3 层：两条残差">
+  <svg viewBox="0 0 280 390" role="img" aria-label="输入 x 经归一化和自注意力后加回 x；再归一化并经门控 MLP 后加回 h" class="mx-auto block h-auto w-full max-w-88 font-sans text-[12px] [&_text]:fill-ink">
+    {stages.map(([title, detail], i) => <g>
+      <rect x="8" y={8 + i * 77} width="264" height="57" rx="4" class={i === 2 || i === 4 ? 'fill-accent-soft stroke-accent' : 'fill-sunken stroke-rule-strong'} />
+      <text x="140" y={32 + i * 77} text-anchor="middle">{title}</text>
+      <text x="140" y={52 + i * 77} text-anchor="middle" class="fill-muted!">{detail}</text>
+      {i < 4 && <path d={`M140 ${67 + i * 77}v14m-4-4 4 4 4-4`} class="fill-none stroke-muted" />}
+    </g>)}
+  </svg>
+  <Fragment slot="caption">两条残差分别加回 x 与 h。固定实现允许 add 与下一次 RMSNorm 融合执行；融合改变调用边界，模型里的两次相加仍然存在。图不按运行耗时比例绘制。</Fragment>
 </FigureShell>

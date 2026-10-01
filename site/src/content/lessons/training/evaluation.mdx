@@ -8,7 +8,9 @@ code:
   - code/training/ablation.py
 ---
 
-[T3 训练、保存与恢复](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。阅读前建议掌握 [M1 概率与抽样](/math/probability/)、[M2 负对数似然](/math/distributions/) 和 [P9 生成](/principles/generation/)；不要求亲自训练模型。
+[T3 训练、保存与恢复](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。阅读前建议掌握 [M3 概率与抽样](/math/probability/)、[M5 负对数似然](/math/distributions/) 和 [P9 生成](/principles/generation/)；不要求亲自训练模型。
+
+import { EvaluationReplayLab } from '../../../components/labs/TrainingTraceLabs'
 
 ## 固定比较对象：四篇文档和两个 checkpoint
 
@@ -67,6 +69,10 @@ $$
 一般地，对新增目标区间 $[a,b)$（$a\geq1$，$b=\min(a+s,N)$），输入取 $[u,b-1)$，其中 $u=\max(0,b-1-K)$。只累加 $j\in[a,b)$ 的目标损失。D2 的三组刚好覆盖 1 到 6；D1/D3 的短文档一次完成。代码断言每篇目标无重复也无遗漏。
 
 **步幅会改变条件分布。** 如果 $s=1$，某些目标可得到比本例更长的可见前缀；若 $s=K$，每组开头的历史较短。即使计分集合相同，A/B 的实际损失也可能变化。因此表中的 NLL 必须视为在固定 $K=4,s=2$ 协议下记录的值；不能拿它预测另一个步幅的结果。文档之间重新开始，位置编号按模型约定处理。用 [P10 KV cache](/principles/kv-cache/) 加速时，也必须核对缓存淘汰和位置规则是否保持同样的可见历史；删掉旧缓存项不一定等价于重算截短窗口。
+
+<EvaluationReplayLab client:visible />
+
+默认步幅 2 时，依次读取三窗，可以核对目标 `1、2 → 3、4 → 5、6` 各计一次；输入上下文可以重读。下方用同四篇固定观测独立汇总：A 是 `40/16=2.5`，B 是 `35.2/16=2.2`。取消 D4 后会重算分子、分母和一次指数，而不是平均篇 PPL。改变上方步幅只重算窗口协议，没有为新上下文伪造预测分数；下方一直明确标为正文 `s=2` 的固定观测。
 
 ## 从预测到任务：同两个 checkpoint 的四次生成
 
