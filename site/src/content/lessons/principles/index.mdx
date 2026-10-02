@@ -23,7 +23,15 @@ order: 0
 
 ## 按问题选择入口
 
-首次学习按章节顺序走。已有注意力基础，只想弄清位置时，从 [P3](/principles/attention/) 核对 causal mask 和分数的定义，再读 P5–P7；只想实现生成，先确认 [P2](/principles/language-modeling/) 的训练目标和 [P4](/principles/decoder/) 的前向过程，再读 P9–P10。要对照现代模型的结构与代码，则继续读 P8 和 P11。各章的手算和脚本检验同一个问题的不同部分，数值断言能核对案例，普遍结论仍要看推导的条件。
+首次学习按 P1–P11 的顺序走。已有部分基础时，可以按下面的问题选择入口：
+
+| 要解决的问题 | 先核对哪项能力 | 接着读 |
+| --- | --- | --- |
+| 位置怎样改变注意力 | [P3](/principles/attention/) 的分数定义与 causal mask | [P5](/principles/attention-order/) → [P6](/principles/sinusoidal/) → [P7](/principles/rope/) |
+| 怎样实现逐步生成 | [P2](/principles/language-modeling/) 的预测目标、[P4](/principles/decoder/) 的前向过程 | [P9](/principles/generation/) → [P10](/principles/kv-cache/) |
+| 怎样对照现代模型代码 | 基础 Decoder 与 RoPE 的计算路径 | [P8](/principles/modern-decoder/) → [P11](/principles/complete-transformer/) |
+
+上方路线图中的每个节点对应一个章节问题。选择一个入口前，先确认自己能完成表中的先修计算。各章的手算和脚本核对具体案例；推广结论时，还要检查推导中的条件。
 
 进入 P1 前，需要 [M6 向量与矩阵](/math/linear-algebra/) 中的矩阵、轴和索引，以及 [M10 神经网络训练](/math/training/) 中预测与参数更新的关系。[M2 贝叶斯与序列概率](/math/bayes/) 的链式法则、[M4 信息量与熵](/math/information/) 的条件交叉熵，以及 [M5 分布与预测损失](/math/distributions/) 的 softmax 会在 P2 用到；[M9 反向传播](/math/backprop/) 帮助理解 P4 的梯度。不熟悉数组轴、PyTorch 的自动求导或模块 API，可按遇到的障碍回读 [数组与框架路线](/frameworks/)。
 

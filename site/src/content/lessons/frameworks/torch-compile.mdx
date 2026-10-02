@@ -86,7 +86,11 @@ def segmented(value):
 
 实际图中断可能来自不支持的 Python 行为、外部调用或显式禁用。张量数值驱动的 Python 分支也要审查，因为捕获时无法只靠 shape 判断分支；具体处理能力随版本与写法变化。不要为了消除中断而无条件改写语义：`torch.where` 会计算其参数表达式，不能充当任意惰性 `if`。先用 `TORCH_LOGS="graph_breaks" python3 code/frameworks/torch_compile.py` 确定发生位置，再决定把 I/O 移到编译区域外、接受分段，或改写可捕获的计算。[Dynamo 核心概念](https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/compile/programming_model.dynamo_core_concepts.html) 给出图中断与 guards 的定义。
 
-下面固定只用 shape 做教学 guard，初始向量为开篇的 $(-2,0,2)$，按长度 `3,3,4,3` 回放保存版本与复用。它不调用浏览器中的 PyTorch，也不预测当前版本生成的全部 guards；实际次数由上面的计数 backend 验证。切换中断案例后，输入改为 $(1,2)$ 等向量，函数改为已经解释的 `segmented`，可以分别核对两段张量图和 eager 加一的数值。
+下面的回放只用 shape 作为教学 guard，初始向量为开篇的 $(-2,0,2)$。它展示版本复用的规则；实际 PyTorch 的全部 guards 和捕获次数须由日志及计数 backend 核对。
+
+先不勾选中断案例，将“已提交调用”从 0 逐步调到 4，输入长度依次为 `3,3,4,3`。每次提交前，预测会复用还是新增版本。尤其检查第四次：长度回到 3，是否能命中第一次保存的版本？同时用 $x^2+3x$ 与 $2x+3$ 核对当前输入的值和梯度。
+
+然后勾选中断案例。函数改为前面解释的 `segmented`，初始输入改为 $(1,2)$；先手算结果 $(9,15)$，再观察图 A、eager 加一、图 B 三个区域。分别数“保存的 shape 版本”与“一次调用中的图段”，说明为什么它们不能当作同一个数量。
 
 <FrameworkCompileLab client:visible />
 

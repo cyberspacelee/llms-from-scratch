@@ -13,7 +13,11 @@ import OccupancyLab from '../../../components/labs/OccupancyLab'
 import StreamTimelineLab from '../../../components/labs/StreamTimelineLab'
 import TimingBoundaryLab from '../../../components/labs/TimingBoundaryLab'
 
-[G3](/gpu/kernel-design/) 用共享内存分块计算 $C=AB$。它证明了分块能复用输入，却没有证明 tile 越大越快。本章始终比较**同一个**连续 float32 矩阵乘：A、B、C 都是 $1024\times1024$，先考虑 G3 CUDA kernel 的 $t=16$，再考虑只改变 tile 边长的 $t=32$ 候选。仓库的 CUDA 示例只实现并验证了 $t=16$，下文对 $t=32$ 的资源分析是待设备实验检验的预测。两者必须输出同一个 C，使用同一设备、编译选项和计时区间。没有 GPU 时，我们只核对资源与依赖的教学模型，不给出虚构的加速比。
+[G3](/gpu/kernel-design/) 用共享内存分块计算 $C=AB$，证明了分块能复用输入。本章检验另一个问题：增大 tile 后，执行时间是否缩短？
+
+固定连续 float32 矩阵乘，A、B、C 都是 $1024\times1024$。基线是 G3 CUDA kernel 的 $t=16$，候选只把 tile 边长改为 $t=32$。比较时，两者须输出同一个 C，并使用同一设备、编译选项和计时区间。
+
+仓库 CUDA 示例只实现并验证了 $t=16$。下文对 $t=32$ 的资源分析是待设备实验检验的预测。没有 GPU 时，只核对资源与依赖的教学模型。
 
 阅读前建议掌握 [G1 的 block/warp](/gpu/execution-model/)、[G2 的 shared memory 与屏障](/gpu/memory-and-sync/) 和 [G3 的 tile](/gpu/kernel-design/#一个-tile-怎样累计沿-k-分段复用输入)。读完后，应能解释：大 tile 少搬了哪些逻辑数据，又多占了哪些资源；两个 kernel 能否并发；一个时间数字究竟包住了哪些工作。
 
@@ -103,7 +107,16 @@ python code/gpu/examples/event_timing.py --elements 1000003 --warmup 10 --repeat
 
 <TimingBoundaryLab client:visible />
 
-提交结束时刻为 0.4，结果可用时刻为 8.4；C 的设备区间只有 2，整条设备链为 7。四个数描述同一份工作中的不同区间，不能拿提交时间充当 kernel 耗时，或拿 C 的改善比例描述整个请求。实际设备仍需按上面的 event 与同步规则测量。
+依次切换“计时对象”，检查高亮区间的起点与终点：
+
+| 区间 | 本例读数 |
+| --- | ---: |
+| CPU 提交 | 0.4 |
+| GEMM C 的设备区间 | 2 |
+| 整条设备工作链 | 7 |
+| 输入到结果可用 | 8.4 |
+
+四个数描述同一份工作的不同区间。提交时间不能充当 kernel 耗时，C 的改善比例也不能代表整个请求。实际设备仍需按上面的 event 与同步规则测量。
 
 ## 从时间换算速率：先说清分母与分子
 

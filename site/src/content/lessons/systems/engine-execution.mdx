@@ -12,7 +12,9 @@ import NanoOverview from '../../../components/diagrams/NanoOverview.astro'
 import Qwen3Layer from '../../../components/diagrams/Qwen3Layer.astro'
 import LaunchTimeline from '../../../components/diagrams/LaunchTimeline.astro'
 
-[S4](/systems/engine-runtime/) 决定本轮处理哪些 token，[S5](/systems/paged-cache/) 给每个请求分配 KV 块。执行器还得回答一个更具体的问题：**模型收到的扁平张量中，第几个 token 属于谁、处于什么位置、把 K/V 写到哪里、能读多长历史？** 本章沿 [nano-vLLM 固定提交 `bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) 的单卡 `ModelRunner` 追踪一轮 prefill 和随后一轮 decode。真实系统的 GPU 算子由源码执行；文末 CPU 脚本只核对地址和长度，不模拟注意力数值。
+[S4](/systems/engine-runtime/) 决定本轮处理哪些 token，[S5](/systems/paged-cache/) 给每个请求分配 KV 块。执行器要为扁平张量中的每个 token 保留四项信息：所属请求、逻辑位置、K/V 写入槽位和可读历史长度。
+
+本章沿 [nano-vLLM 固定提交 `bb823b3`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8) 的单卡 `ModelRunner`，追踪一轮 prefill 和随后一轮 decode。GPU 算子的行为按该源码说明；文末 CPU 脚本只核对地址和长度，不模拟注意力数值。
 
 ## 本轮清单：三个请求共享一次前向
 
@@ -60,7 +62,13 @@ B 的 `cu_seqlens_k` 区间长度是 6，却没有再输入旧 token 21–24；�
 
 <PackedExecutionLab client:visible />
 
-默认九格对应本章 packed 数组。选择一格会同时给出请求身份、RoPE 位置、块表和物理槽；切到 decode 后，三个新 ID 分别进入位置 3、6、4。Graph 场景只对本快照的 decode 展示四行固定地址缓冲区，其中三行有效；padding 行的槽必须为 -1，不能只丢弃其输出。
+默认九格对应本章 packed 数组。依次核对三个场景：
+
+1. prefill 中把“packed 下标”设为 3，检查 B 的第一格：逻辑位置为 4、物理槽为 28。三个编号的用途不同。
+2. 勾选“下一轮 decode”，依次选择下标 0、1、2。A、B、C 的新 ID 分别进入位置 3、6、4，槽位分别为 11、30、40。
+3. 把“执行阶段”调到 capture、replay，读图下的缓冲区说明：Graph 共四行，三行有效，padding 行槽号为 -1。该行的上下文长度按下文规则置为 0；实验不展示这一字段。
+
+Graph 场景只展示本快照的 decode 固定地址缓冲区。无效行必须跳过 KV 写入；丢弃它的输出不能撤销已经发生的缓存写入。
 
 模型用 `positions` 为 Q/K 应用 RoPE，注意力层用 `slot_mapping` 把本轮 K/V 写入物理缓存。由 [S5 的块表公式](/systems/paged-cache/#块表逻辑位置怎样变成物理槽位)，逻辑位置 $p$ 写到 `block_table[p // 4] * 4 + p % 4`。本例因此得到：
 
@@ -94,7 +102,11 @@ B 的 `cu_seqlens_k` 区间长度是 6，却没有再输入旧 token 21–24；�
 
 nano-vLLM 初始化时先以较大输入 warmup，测峰值显存，再按 [S1 的 KV 块字节数](/systems/ledger/)和利用率预算分配固定 KV 池。模型权重已在 `load_model()` 时装入；所有层随后绑定这块缓存的各层 K/V 视图。Graph 捕获在这些地址确定之后进行。该快照的捕获列表按 `[1,2,4,8] + range(16, min(max_num_seqs,512)+1, 16)` 生成；本例 `max_num_seqs=32`，因此有尺寸 4 可用。各图使用同一批预留输入、元数据和输出缓冲区的切片。
 
-本例真实 batch size 为 3，所以选已捕获的尺寸 4。重放前把前三项新 `input_ids`、`positions`、`slot_mapping`、`context_lens` 和块表复制进**同一地址**的静态缓冲区；第四行是 padding：`slot_mapping=-1`、`context_lens=0`，输出切回前三行。`-1` 让写缓存 kernel 跳过无效行，零长度使它没有有效历史可读；padding 的隐藏状态不得送去 LM head 或采样。已有块表缓冲区里超出本轮有效长度的旧列可能保留旧值，所以读取还必须服从 `context_lens`，不能把整张物理表都当成有效历史。
+本例真实 batch size 为 3，选择已捕获的尺寸 4。重放前，执行器把前三项新 `input_ids`、`positions`、`slot_mapping`、`context_lens` 和块表复制进同一地址的静态缓冲区。
+
+第四行是 padding，设 `slot_mapping=-1`、`context_lens=0`。前者让写缓存 kernel 跳过该行，后者使它没有有效历史可读。执行器只取前三行输出；padding 的隐藏状态不得送去 LM head 或采样。
+
+块表缓冲区中超出本轮有效长度的旧列可能保留旧值。读取必须服从 `context_lens`，只有有效历史可读。
 
 ```mermaid
 flowchart LR

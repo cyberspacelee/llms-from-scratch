@@ -66,9 +66,13 @@ $$
 
 ## 同一模型的 prefill：权重复用改写强度
 
+先用下面的实验检查上一节的 decode 估算，再计算 prefill。实验只计算 decode 的线性层与 KV 主项。
+
 <RooflineLab client:visible />
 
-图沿用这一次 decode 的两项主账，随 B/T 重新计算点的位置。横轴采用对数刻度，使单请求和较大 batch 都能读到；屋顶线固定为前述 H100 SXM 的稠密假设。图下两个下界取较大值，而不是相加。它没有为 prefill 补出未知的 HBM 流量，也没有生成设备测量数据。
+保持 T=8192，把 B 从 1 改为 8，观察算术强度与点的位置。权重读取由多条请求共用，但 KV 仍逐请求读取。再固定 B=8，把 T 增至 16384，检查更多 KV 读取怎样改变强度。
+
+横轴是对数刻度，屋顶线采用前述 H100 SXM 的稠密假设。图下两个时间下界取较大值。实验没有计算 prefill 的全部 HBM 流量，也没有设备测量数据。
 
 仍用这条 8192 token 提示，但假设推理执行器**只对最后一个位置计算输出头**。S1 的层内权重为 $N_{\mathrm{blocks}}=6979321856$，输出头为 $N_{\mathrm{head}}=525336576$，所以线性层运算量是
 
@@ -100,7 +104,15 @@ Tensor Core 路径 | 提高适配矩阵乘的实际计算吞吐 | 规格峰值�
 
 想检验“单请求 decode 主要受 HBM 搬运限制”，先记录实际 HBM 读写字节与 kernel 时间，再计算 $F/t$ 和 $D/t$。若时间主要落在 kernel 之间的发射空档，改内核带宽不会等比例改善用户延迟。若同一个 kernel 的实际 HBM 字节明显高于估算值，应查重复读取、临时张量或内存访问；明显低于估算值，应查缓存命中和测量范围。然后只改一个结构，重新测相同请求分布。
 
-三个常被混在一起的指标回答不同问题：**occupancy** 是 SM 上活跃 warp 相对其可驻留上限的比例；**GPU utilization** 常反映采样区间内 GPU 是否有任务活动；**屋顶线达成率** 才把同一边界的实测速率 $F/t$ 与 $\min(\pi,\beta I)$ 比较。前两个高，不说明 Tensor Core 峰值或 HBM 峰值已接近；达成率使用实际 HBM 字节与对应的 FLOP 计数，不能把上表的简化逻辑字节当作 profiler 读数。[NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#bandwidth) 也区分理论带宽、有效带宽和实际搬运。
+三个指标的测量对象不同：
+
+| 指标 | 回答的问题 |
+| --- | --- |
+| occupancy | SM 上已驻留 warp 数占可驻留上限的多少？ |
+| GPU utilization | 采样区间内 GPU 是否有任务活动？ |
+| 屋顶线达成率 | 同一边界的实测速率 $F/t$ 达到 $\min(\pi,\beta I)$ 的多少？ |
+
+occupancy 和 GPU utilization 高，不代表接近 Tensor Core 或 HBM 峰值。计算达成率时，要使用实际 HBM 字节与对应的 FLOP 计数。上表的简化逻辑字节不能当作 profiler 读数。[NVIDIA CUDA 最佳实践](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html#bandwidth) 也区分理论带宽、有效带宽和实际搬运。
 
 ## 用脚本核对单位与下界
 

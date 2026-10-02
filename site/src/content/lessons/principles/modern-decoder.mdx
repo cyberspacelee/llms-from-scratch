@@ -87,7 +87,17 @@ gate 倍数为 1 时，实验沿同一 A 位置恢复 `r≈(0.678541,1.013108)` 
 
 ## 逐项核算：参数、缓存与比较条件
 
-本例 $d=2,n_q=2,n_{\mathrm{kv}}=1,d_h=2,d_{\mathrm{ff}}=2,n_{\mathrm{vocab}}=3$，且线性层无偏置。Q/O 各有 $d n_qd_h=8$ 个权重，K/V 各有 $d n_{\mathrm{kv}}d_h=4$ 个，注意力共 **24** 个；若改回两个 KV 头则是 **32** 个。两处 Pre-RMSNorm 和最终 RMSNorm 各有 $d=2$ 个缩放参数，共 **6** 个。SwiGLU 有 $3dd_{\mathrm{ff}}=12$ 个；同宽的普通 FFN 为 $2dd_{\mathrm{ff}}=8$ 个。绑定词表只存 $n_{\mathrm{vocab}}d=6$ 个，独立输出 head 则再加 6 个。因此这一块加输出层的示例总数为 $24+6+12+6=48$，这里未计其他块、偏置或任何位置表。
+本例使用 $d=2,n_q=2,n_{\mathrm{kv}}=1,d_h=2,d_{\mathrm{ff}}=2,n_{\mathrm{vocab}}=3$，所有线性层均无偏置。按这些尺寸逐项计数：
+
+| 部件 | 本例权重或缩放参数数 | 保持其他尺寸不变的对照 |
+| --- | --- | --- |
+| Q 与输出投影 | $2dn_qd_h=16$ | 改 KV 头数不影响这两项 |
+| K 与 V 投影 | $2dn_{\mathrm{kv}}d_h=8$ | KV 头数改为 2 后，共 16 个 |
+| 两处 Pre-RMSNorm 与末层 RMSNorm | $3d=6$ | 每处有独立的逐特征缩放参数 |
+| SwiGLU | $3dd_{\mathrm{ff}}=12$ | 同宽普通 FFN 为 8 个 |
+| 绑定的词表参数表 | $n_{\mathrm{vocab}}d=6$ | 独立输出 head 还需增加 6 个 |
+
+注意力投影合计 $16+8=24$ 个；两个 KV 头时为 32 个。整个示例只有一个块，连同词表表和最终归一化，共 $24+6+12+6=48$ 个参数。账中没有其他块、偏置或学习式位置表。
 
 GQA 不减少 Q 的宽度，也不改变注意力分数的 $n_q$ 条查询路径；它减少 K/V 投影和历史 KV 存储。长度 $T$、批大小 $B$、层数 $n_{\mathrm{layers}}$ 的未量化 KV cache 有 $2Bn_{\mathrm{layers}}Tn_{\mathrm{kv}}d_h$ 个元素，不含 Q。我们的一个样本、一层、两位置只需 8 个元素；两个 KV 头时需 16 个。实际字节数还要乘每元素字节数，P10/S1 再处理缓存正确性和容量。
 
@@ -95,7 +105,21 @@ GQA 不减少 Q 的宽度，也不改变注意力分数的 $n_q$ 条查询路径
 
 ## QK Norm：在 RoPE 前改动的是哪两个向量
 
-一些模型还在 Q/K 投影后、RoPE 前，对**每个头的 $d_h$ 维**分别做 RMSNorm，简称 QK Norm。它与块入口的 Pre-RMSNorm 是两次不同运算：前者作用在投影后的每头 Q/K，后者作用在投影前的整行隐藏状态。QK Norm 不作用于 V。
+一些模型还在 Q/K 投影后、RoPE 前，对每个头的 $d_h$ 维分别做 RMSNorm，简称 QK Norm。它处理投影后的每头 Q/K；块入口的 Pre-RMSNorm 处理投影前的整行隐藏状态。QK Norm 不作用于 V。
+
+```mermaid
+flowchart LR
+  X[隐藏状态] --> N[Pre-RMSNorm：整行特征]
+  N --> Q[Q/K 投影与拆头]
+  Q --> K[QK Norm：每头特征]
+  K --> R[RoPE：按位置旋转]
+  R --> S[计算分数]
+  N --> V[V 投影]
+  V --> O[按注意力权重读取]
+  S --> O
+```
+
+沿 Q/K 路径读图：两次 RMSNorm 的输入宽度和参数位置不同。V 从投影后直接参加加权读取，绕过 QK Norm 与 RoPE。这里画的是本节讨论的调用顺序。
 
 给手算例的 Q/K 再取 $\gamma=(1,1),\epsilon=1$。参与 A 分数的 Q/K 都是单位长度的二维向量；每个归一化因子是 $\sqrt{1/2+1}=\sqrt{3/2}$。RoPE 保长度，故原来非零的 $1/\sqrt2$ 分数变成 $2/(3\sqrt2)$，头 0 对 BOS 的权重降为
 
@@ -109,7 +133,11 @@ $$p'=\frac{e^{2/(3\sqrt2)}}{e^{2/(3\sqrt2)}+1}\approx0.615716.$$
 
 Meta 的 Llama 3 8B 密集模型公开参数是 $d=4096$、32 层、$n_q=32$、$n_{\mathrm{kv}}=8$、$d_h=128$。官方实现采用 Pre-RMSNorm、SwiGLU、RoPE 和 GQA；词表输入与输出矩阵在实现中是独立对象。这里的 8B 指明确版本，不能把数字套到 Llama 3 家族所有成员，也不能仅由结构式推出性能。
 
-[Qwen3-0.6B 配置](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json) 则给出 $d=1024$、28 层、$d_{\mathrm{ff}}=3072$、$n_q=16$、$n_{\mathrm{kv}}=8$、$d_h=128$，并设 `tie_word_embeddings=true`。它的 Q 总宽度为 $16\times128=2048$，**不等于** $d$，所以不能把本章 $d=n_qd_h$ 当成普遍定律；输出投影负责从 2048 回到 1024。[Qwen3 实现](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3/modeling_qwen3.py) 明确在 Q/K 投影后按头维做 QK Norm，然后应用 RoPE。Qwen3 家族还含 MoE 模型，具体模型的 config 和代码比家族名可靠。
+[Qwen3-0.6B 配置](https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json) 给出 $d=1024$、28 层、$d_{\mathrm{ff}}=3072$、$n_q=16$、$n_{\mathrm{kv}}=8$、$d_h=128$，并设 `tie_word_embeddings=true`。Q 的总宽度为 $16\times128=2048$，残差宽度为 1024，输出投影负责将前者映回后者。
+
+P3 的普通 MHA 示例使用 $d=n_qd_h$。本章手算例已经将两者分开：残差宽 2，Q 总宽 $2\times2=4$。因此这个等式是特定配置的约定，不能套到所有模型。
+
+[Qwen3 实现](https://github.com/huggingface/transformers/blob/main/src/transformers/models/qwen3/modeling_qwen3.py) 在 Q/K 投影后按头维做 QK Norm，然后应用 RoPE。Qwen3 家族还含 MoE 模型，核对结构时应使用具体模型的 config 和代码。
 
 ## 验证：让同一段计算在脚本里重现
 

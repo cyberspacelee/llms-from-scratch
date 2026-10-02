@@ -13,7 +13,13 @@ import FusedEpilogueLab from '../../../components/labs/FusedEpilogueLab'
 
 设 $A\in\mathbb R^{5\times7}$、$B\in\mathbb R^{7\times6}$，我们要计算 $C=AB$。数学式只要求每个 $C_{ij}$ 累加七项；GPU kernel 还必须决定哪个线程写它、怎样协作读取 A 和 B，以及边缘不足一块时如何避免越界。本章从 [G1 线程与 block](/gpu/execution-model/) 和 [G2 内存与同步](/gpu/memory-and-sync/) 出发，把这个小矩阵乘完整地映射到 GPU。文末再用同行计算的 softmax 说明融合适用的另一种依赖结构。
 
-先约定接口：本章 CUDA 示例接受连续行主序的 float32 A、B，另分配 C；不允许输入输出共享存储。元素地址分别为 `A + i*7 + q`、`B + q*6 + j`、`C + i*6 + j`，C 的形状是 $5\times6$。如果 A 是隔列切片，即使形状仍是 $5\times7$，它的实际 stride 也已改变，这个入口就不适用。dtype、形状、stride 和别名约定共同构成 kernel 的正确性前提。
+本章 CUDA 示例的接口有三个条件：
+
+- A、B 都是连续行主序的 float32 矩阵。
+- C 单独分配，形状为 $5\times6$。
+- 输入与输出不共享存储。
+
+元素地址分别为 `A + i*7 + q`、`B + q*6 + j`、`C + i*6 + j`。如果 A 是隔列切片，即使形状仍是 $5\times7$，实际 stride 也已改变，这个入口就不适用。dtype、形状、stride 和别名约定共同构成 kernel 的正确性前提。
 
 ## 一个输出归谁：从公式到线程坐标
 
@@ -38,7 +44,9 @@ $$
 
 <TileReuseLab client:visible />
 
-图中 A 的高亮列和 B 的高亮行是同一段 K；蓝色 C tile 在所有 K 段里保持不变。调整 tile 边长可以观察装载范围及重复读取数，但图中的“读取”是按算法逐元素计数，不是硬件 DRAM 事务。
+保持 tile 边长为 4，将“K 维分块编号”从 0 调到 1。A 的高亮列与 B 的高亮行会从 K=0–3 移到 K=4–6，蓝色 C tile 保持不变。核对 $C_{00}$ 两段贡献为 20、92。
+
+再把 tile 边长改为 2，观察 K 被分成四段，有效输入逻辑读取从 154 增至 231。这里按算法逐元素计数；硬件 DRAM 事务还取决于缓存与访问布局。
 
 一个完整的 $t\times t$ 输出 tile 在一段长度为 $t$ 的 K 上，装载 A、B 各 $t^2$ 个元素，计算 $t^2$ 个输出的 $t$ 次乘加。一次融合乘加（FMA）按 2 FLOP 计，因此运算量为 $2t^3$ FLOP，输入读取为 $2t^2$ 个元素。同一 A 元素在 tile 内被 $t$ 列使用，同一 B 元素被 $t$ 行使用；这正是分块能减少重复输入读取的原因。
 

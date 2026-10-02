@@ -13,9 +13,17 @@ import GpuHierarchyLab from '../../../components/labs/GpuHierarchyLab'
 
 <GpuHierarchyLab client:visible />
 
-沿 CPU、GPU、SM 三层阅读：CPU 侧准备数据并提交 kernel；GPU 的 SM 承载 block，block 内的 thread 使用寄存器与 shared memory 协作。图表示资源与作用范围，不表示某款芯片的实际单元数量或访存路径。
+在“观察层级”中依次选择 CPU、GPU、SM，核对每一层的职责：
 
-这里的 kernel 是提交给 GPU 执行的函数；thread 是执行它的逻辑实例，block 是能使用 shared memory 协作的一组 thread，SM 是承载 block 的硬件单元。软件中的 block 数不等于 SM 数，也不决定 block 的执行先后。图采用 NVIDIA CUDA 的术语与常见独立 GPU 的主机、设备视角；具体架构与其他平台的规则应查对应文档。[CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html) 给出了这些概念的正式定义。
+1. CPU 侧准备数据并提交 kernel。
+2. GPU 的 SM 承载 block。
+3. block 内的 thread 使用寄存器与 shared memory 协作。
+
+图表示资源与作用范围，不表示某款芯片的实际单元数量或访存路径。
+
+kernel 是提交给 GPU 执行的函数。thread 是执行它的逻辑实例，block 是能使用 shared memory 协作的一组 thread。SM 是承载 block 的硬件单元。软件中的 block 数不等于 SM 数，也不决定 block 的执行先后。
+
+图采用 NVIDIA CUDA 的术语，以及常见独立 GPU 的主机、设备视角。具体架构与其他平台的规则应查对应文档。[CUDA Programming Model](https://docs.nvidia.com/cuda/cuda-programming-guide/01-introduction/programming-model.html) 给出了这些概念的正式定义。
 
 ## 四步：从唯一负责人到可信时间
 

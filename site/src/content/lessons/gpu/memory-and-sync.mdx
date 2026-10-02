@@ -14,7 +14,9 @@ import BarrierReplayLab from '../../../components/labs/BarrierReplayLab'
 import FigureShell from '../../../components/FigureShell.astro'
 import memoryAddresses from '../../../assets/figures/gpu/memory-addresses.png'
 
-已知 [G1](/gpu/execution-model/) 中的 thread、warp 和 block，可以给矩阵的每个元素安排负责人。但把 $A_{r,c}$ 写到转置结果 $B_{c,r}$ 时，按输入行排列线程会让读取连续、写入分散；按输出行排列则相反。本章要让一个 warp 读取 A、写入 B 时都访问相邻的全局内存地址。我们会先数清一条 warp 指令的地址，再用 block 内的 shared memory 交换数据，并证明什么时候可以读取交换后的值。只需先会行主序下标 $rC+c$。
+用 [G1](/gpu/execution-model/) 的 thread、warp 和 block，可以给矩阵的每个元素安排负责人。转置要把 $A_{r,c}$ 写到 $B_{c,r}$。按输入行排列线程时，读取连续、写入分散；按输出行排列时则相反。
+
+本章要让一个 warp 读取 A、写入 B 时都访问相邻的全局内存地址。先列出一条 warp 指令的地址，再用 block 内的 shared memory 交换数据，最后证明交换后的值何时可读。先修是行主序下标 $rC+c$。
 
 全章固定 float32（每元素 4 字节）、输入 $A\in\mathbb R^{35\times67}$、输出 $B\in\mathbb R^{67\times35}$，满足 $B_{c,r}=A_{r,c}$。一个 block 处理 $32\times32$ 的数据 tile，使用 `dim3(32, 8)` 的 256 个 thread；`threadIdx.x` 从 0 到 31，刚好让同一 warp 沿一行排列。起初只看左上完整 tile，最后处理右下只有 $3\times3$ 个有效元素的 tile。下面的地址段与 bank 数量是 NVIDIA CUDA 的教学模型，不是计时结果。
 
@@ -103,7 +105,9 @@ for (int j = 0; j < 32; j += 8)
 
 $35\times67$ 的输入需要 $\lceil67/32\rceil\times\lceil35/32\rceil=3\times2$ 个 tile。最右下 block 从输入 $(32,64)$ 开始，只有 3 行、3 列有效。以其中 $(r,c)=(2,2)$ 为例，它代表全局 $A_{34,66}$；转置输出是 $B_{66,34}$。两边的行主序偏移分别是 $34\cdot67+66=2344$ 和 $66\cdot35+34=2344$，碰巧相同；这一个元素的地址相同不代表整次转置可以原地执行。
 
-越界 thread 不读取无效 global 地址，向自己的 shared 槽写 0，然后参加屏障。写回时只对有效输出坐标执行 store。不能先按“我没有有效输出”直接 `return`，因为该 thread 仍可能负责装载别人的有效输入，且 block 的屏障参与必须一致。切换交互图到右下 tile，灰色位置会显示“装载零、跳过输出”；有效 $(2,2)$ 仍沿同一个映射到达 $B_{66,34}$。边缘只有 3 个活跃 shared 列读 lane，无填充时本模型是 3 路冲突，填充后为 1 路。
+越界 thread 不读取无效 global 地址。它向自己的 shared 槽写 0，然后参加屏障；写回时只对有效输出坐标执行 store。不能按“我没有有效输出”直接 `return`：该 thread 仍可能装载别人的有效输入，且 block 的屏障参与必须一致。
+
+回到转置实验，选择“右下：3×3 有效”，将 tile 内行、列都设为 2，核对 $A_{34,66}$ 到 $B_{66,34}$ 的路径。再把列改为 3，观察该位置装载零并跳过输出。边缘只有 3 个活跃 shared 列读 lane；比较 32 列与 33 列布局，本模型的冲突分别为 3 路和 1 路。
 
 ## 迁移：归约复用同一套推理
 

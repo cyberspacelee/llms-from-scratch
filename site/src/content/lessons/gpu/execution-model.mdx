@@ -14,7 +14,9 @@ import MatrixThreadLab from '../../../components/labs/MatrixThreadLab'
 import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
 import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
 
-设两个数组各有 100 个元素，我们要计算 $c_i=a_i+b_i$。CPU 循环逐个推进 $i$；CUDA kernel 则让许多 thread 执行同一段代码，由各自的编号决定 $i$。本章只需要数组下标和整数除法。读完后，你应该能从启动配置算出任意输出由谁写、哪些线程越界，并解释为什么“启动更多线程”不等于“运行更快”。
+设两个数组各有 100 个元素，我们要计算 $c_i=a_i+b_i$。CPU 循环逐个推进 $i$；CUDA kernel 让许多 thread 执行同一段代码，各自用编号确定 $i$。
+
+阅读本章只需要数组下标和整数除法。你将从启动配置算出每个输出的写入者和越界线程，再分析增加线程数对吞吐的影响。
 
 以下 thread、block、grid、warp 和 SM 均按 NVIDIA CUDA 的定义使用。warp 宽度为 32 是该平台的规定，迁移到其他 GPU 平台时需重新核对。
 
@@ -82,7 +84,9 @@ Occupancy 指一个 SM 上已驻留 warp 数占该 SM 可驻留 warp 上限的�
 
 ### 当数据多于启动的 thread
 
-不是每个元素都必须启动一个 thread。若仍处理 100 个元素，却只启动两个 16-thread block，grid 共 $P=32$ 个 thread。让编号为 $i_0$ 的 thread 每次跨过整个 grid，处理 $i_k=i_0+kP<N$：thread 3 负责 3、35、67、99。任意有效下标除以 32 的余数给出唯一的 $i_0$，商给出第几轮，所以仍然没有漏写或重复写。这叫 grid-stride loop；它是各 thread 自己的循环，轮次之间没有跨 block 屏障。
+一个 thread 也可以处理多个元素。仍处理 100 个元素，只启动两个 16-thread block，此时 grid 共 $P=32$ 个 thread。编号为 $i_0$ 的 thread 每次跨过整个 grid，处理 $i_k=i_0+kP<N$。例如 thread 3 负责 3、35、67、99。
+
+任意有效下标除以 32，余数给出唯一的 $i_0$，商给出循环轮次，所以仍然没有漏写或重复写。这叫 grid-stride loop。各 thread 独立执行自己的循环，轮次之间没有跨 block 屏障。
 
 ```cpp
 const size_t start = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -100,7 +104,9 @@ $$
 c=b_xT_x+t_x,\qquad r=b_yT_y+t_y,\qquad p=rC+c.
 $$
 
-只有 $r<R$ **且** $c<C$ 才能访问元素。比如 $5\times7$ 矩阵使用 $4\times2$ block，block $(1,0)$ 的 thread $(3,0)$ 算出 $(r,c)=(0,7)$，列已越界；但偏移 $p=7<35$，只检查 `p < R*C` 会误写下一行的元素。负责同一矩阵元素的 thread 是否相邻，还需看块内线性编号 $t=t_x+T_xt_y$，warp 总按这个编号每 32 个分组，而不是按矩阵行或偏移 $p$ 分组。这为 [G2 的访存分析](/gpu/memory-and-sync/) 做准备。
+只有 $r<R$ 且 $c<C$ 才能访问元素。比如 $5\times7$ 矩阵使用 $4\times2$ block，block $(1,0)$ 的 thread $(3,0)$ 算出 $(r,c)=(0,7)$，列已越界。但偏移 $p=7<35$，只检查 `p < R*C` 会误写下一行的元素。
+
+分析 warp 内的访问时，还要计算块内线性编号 $t=t_x+T_xt_y$。warp 按这个编号每 32 个 thread 分组，矩阵行和偏移 $p$ 不决定分组。这为 [G2 的访存分析](/gpu/memory-and-sync/) 做准备。
 
 <MatrixThreadLab client:visible />
 

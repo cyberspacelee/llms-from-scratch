@@ -9,11 +9,20 @@ order: 0
 
 ## 按问题选一条路径
 
-- **计算与缓存**：从 [A1 MoE](/advanced/moe/) 看每个 token 如何只调用少数前馈专家；从 [P10 KV cache](/principles/kv-cache/) 接 [A2 MLA](/advanced/mla/)，看注意力如何少存历史状态。两章改变不同部位，无须互为先修。
-- **训练目标**：了解 [T5 指令微调](/training/instruction-tuning/) 后，读 [A3 DPO](/advanced/dpo/)，把成对偏好变成有固定参考的损失；再读 [A5 可验证奖励训练](/advanced/reasoning-rl/)，看可核验的结果怎样更新当前策略。
-- **长上下文**：从 [P7 RoPE](/principles/rope/) 和 P10 进入 [A4 长上下文与窗口](/advanced/long-context/)，区分位置可计算、历史可读取与模型真正能用上远处信息。
-- **序列状态与读取**：从 [P3 注意力](/principles/attention/) 进入 [A6 状态空间模型](/advanced/state-space/)，再读 [A7 递归式线性注意力与混合层](/advanced/hybrid-attention/)，看递归状态与逐位置 KV cache 怎样共存。若想保留逐位置状态而只读其中一部分，从 P3 进入 [A8 稀疏注意力](/advanced/sparse-attention/)；读其 DSA 案例前补 A2。
-- **视觉输入**：熟悉 [P4 Decoder](/principles/decoder/) 的序列输入后，读 [A9 视觉语言模型](/advanced/multimodal/)，追踪图像特征怎样接入 Decoder；理解其文本训练还需 T5。
+先选自己要解释的问题，再按表中的入口补先修。各章开篇会列出计算所需的具体能力。
+
+| 要解释的问题 | 从哪里进入 | 阅读章节 |
+| --- | --- | --- |
+| 每个 token 怎样少算前馈层 | [P8 现代 Decoder](/principles/modern-decoder/) | [A1 MoE](/advanced/moe/) |
+| 注意力怎样少存历史状态 | [P10 KV cache](/principles/kv-cache/) | [A2 MLA](/advanced/mla/) |
+| 成对偏好怎样成为损失 | [T5 指令微调](/training/instruction-tuning/) | [A3 DPO](/advanced/dpo/) |
+| 规则奖励怎样更新生成策略 | T5 和 A3 | [A5 可验证奖励训练](/advanced/reasoning-rl/) |
+| 位置算得更远，模型为何未必用得更远 | [P7 RoPE](/principles/rope/) 和 P10 | [A4 长上下文与窗口](/advanced/long-context/) |
+| 固定状态怎样处理序列，并与 KV 共存 | [P3 注意力](/principles/attention/) | [A6 状态空间模型](/advanced/state-space/) → [A7 混合层](/advanced/hybrid-attention/) |
+| 保留逐位置状态，怎样只读取一部分 | P3；DSA 案例还需 A2 | [A8 稀疏注意力](/advanced/sparse-attention/) |
+| 图像特征怎样接入文本序列 | [P4 Decoder](/principles/decoder/)；训练部分还需 T5 | [A9 视觉语言模型](/advanced/multimodal/) |
+
+A1 改变前馈层调用，A2 改变注意力状态；两章无须互为先修。A6–A7 先汇总历史再读取，A8 保留逐位置历史再选择读取。可以按自己的计算问题选择这两条路径。
 
 读完一条路径，可以用同一组问题检验是否理解：新结构保留什么信息、舍弃或近似什么、输出与哪种参照计算相同，以及省下的资源是否转移到了别处。不同章节的教学例并不声称这些模型可以直接替换为彼此。
 

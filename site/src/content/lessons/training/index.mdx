@@ -11,7 +11,11 @@ order: 0
 
 <CourseMap track="training" />
 
-[T1 数据与样本构造](/training/data/) 先确定文档身份、训练与验证的边界，再把文本编码成移位的 input/target。它同时区分注意力 mask、损失 mask 与 padding：哪些位置可以读取，哪些目标计入损失，是两件不同的事。[T2 优化与训练稳定性](/training/optimization/) 接着以**有效目标数**为分母，把不同长度的微批合成一次更新，逐步算清梯度、AdamW 状态和 checkpoint 需要保存的历史。[T3 从零训练](/training/pretraining/) 将两者接入真实循环：训练、验证、写盘、中断、恢复，并比较恢复与连续运行的轨迹。
+[T1 数据与样本构造](/training/data/) 先确定文档身份和训练/验证边界，再把文本编码成移位的 input/target。读完后，应能分别指出哪些输入位置可以读取、哪些预测目标计入损失。注意力 mask、损失 mask 与 padding 各有自己的作用。
+
+[T2 优化与训练稳定性](/training/optimization/) 以**有效目标数**为分母，把不同长度的微批合成一次更新。读完后，应能算出合成梯度与 AdamW 状态，并说明下一次更新需要哪些历史。
+
+[T3 从零训练](/training/pretraining/) 将样本与更新规则接入真实循环：训练、验证、写盘、中断、恢复。验收时比较恢复与连续运行的后续损失和参数。
 
 更新能复现，还不能说明模型有用。[T4 模型评估与受控实验](/training/evaluation/) 固定 tokenizer、文档来源、上下文窗口和评分协议，再比较有效 token 的 NLL、任务结果及其不确定性。它回答“观察到的改善支持什么结论”，也为后续实验提供共同的测量边界。有现成 checkpoint 的读者可从 T4 开始，不必先完成 T3 的训练。
 

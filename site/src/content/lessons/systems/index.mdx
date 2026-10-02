@@ -11,16 +11,32 @@ order: 0
 
 ## 先算清一次前向
 
-[S1 资源估算](/systems/ledger/)从模型权重和 KV cache 算起，区分显存容量、运算量与每一步实际搬移的字节。同一请求进入 [S2 单卡上限](/systems/accelerator/)后，把这些估算值与设备带宽、算力比较，得到有条件的理想下界，而非真实耗时。[S3 FlashAttention](/systems/flash-attention/)接着处理注意力的中间数据：分块更新 softmax，核对输出不变，再解释为什么能减少对设备内存的读写。
+| 问题 | 章节 | 核对结果 |
+| --- | --- | --- |
+| 权重、KV 和一次前向各需要多少资源？ | [S1 资源估算](/systems/ledger/) | 分开计算容量、FLOP 和搬移字节 |
+| 设备带宽与算力给出什么限制？ | [S2 单卡上限](/systems/accelerator/) | 在明确假设下求理想时间下界 |
+| 怎样减少注意力中间张量的读写？ | [S3 FlashAttention](/systems/flash-attention/) | 分块更新 softmax，核对输出不变 |
 
 这里需要知道 GPU 的 thread 怎样负责输出、分块为何能复用数据，以及怎样测量异步执行；这些先修在 [G1–G4 GPU 路线](/gpu/) 中逐步建立。读过 S2 后再看 S3，就能把“算得一样”和“可能搬得更少”分开判断。
 
 ## 再让多条请求共用设备
 
-新请求到来时，[S4 连续批处理](/systems/engine-runtime/)决定本轮处理哪些 prompt 位置或新 token；刚采样出的 token 尚未写入 KV。[S5 分页 KV cache](/systems/paged-cache/)再把逻辑位置映射到物理块，说明共享前缀何时可以复用、何时必须复制或释放。[S6 引擎执行器](/systems/engine-execution/)把调度清单变成 GPU 输入、位置和缓存槽位，并检查 CUDA Graph 重放时哪些地址必须稳定。三章合起来才能回答：两条请求共用一次前向时，为什么仍只读各自有效的历史。
+| 问题 | 章节 | 核对结果 |
+| --- | --- | --- |
+| 本轮处理哪些输入位置？ | [S4 连续批处理](/systems/engine-runtime/) | 区分已采样 ID 与已写入 KV |
+| 逻辑位置放在哪个物理块？ | [S5 分页 KV cache](/systems/paged-cache/) | 核对共享、复制与释放的条件 |
+| 请求清单怎样变成 GPU 输入？ | [S6 引擎执行器](/systems/engine-execution/) | 对齐位置、槽位、有效长度与 Graph 地址 |
+
+两条请求可以共用一次前向，但各自只能读取自己的有效历史。这三章分别建立调度、地址与执行上的保证。
 
 ## 最后比较改动的代价与收益
 
-在正确执行的基础上，[S7 量化](/systems/quantization/)改变权重或 KV 的表示，分别核对存储字节、数值误差和实际执行；质量比较可回读 [T4 模型评估](/training/evaluation/)。[S8 推测解码](/systems/speculative-decoding/)用草稿模型提出多个 token，再由目标模型验证：它必须保持目标采样分布，节省的目标调用也要抵过新增工作。[S9 多卡推理](/systems/cluster/)进一步切分权重与请求状态，逐项算通信和等待。S6 中的多卡执行细节可在此时回读。
+| 改动 | 章节 | 必须一起比较的量 |
+| --- | --- | --- |
+| 改变权重或 KV 的表示 | [S7 量化](/systems/quantization/) | 存储字节、数值误差、实际执行 |
+| 先提出多个草稿 token，再由目标验证 | [S8 推测解码](/systems/speculative-decoding/) | 目标采样分布、节省的调用、新增工作 |
+| 切分权重与请求状态 | [S9 多卡推理](/systems/cluster/) | 通信、等待、容量与吞吐 |
+
+质量比较可回读 [T4 模型评估](/training/evaluation/)。读 S9 时，再回看 S6 的多卡执行细节。
 
 这些改变最终都要回到 [S10 服务评估](/systems/serving-evaluation/)：从客户端事件计算首 token 延迟、后续输出间隔和满足服务目标的吞吐，并记录负载与失败请求。一个 kernel 更快、模型更小或 GPU 更多，都只是中间证据；只有固定模型质量与请求分布、明确计时边界，才能判断这条请求是否真的得到改善。

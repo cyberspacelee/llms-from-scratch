@@ -12,7 +12,7 @@ import FrameworkModuleLab from '../../../components/labs/FrameworkModuleLab'
 
 [F3 张量](/frameworks/torch-tensors/) 已经讲过轴，[F4 自动微分](/frameworks/autograd/) 已经讲过计算图。现在把这些计算放进一个能训练和保存的模型：输入是两条长度为 3 的 token ID 序列，输出每个位置对四个类别的 logits（softmax 前的原始分数），其中两个目标位置不参与损失。读完本章，你应能从模块树列出全部参数、手算一个位置的分数，并说明损失为什么除以 4。
 
-本章的目标是核对 **PyTorch 的层与损失接口**。这里的目标 ID 已直接给定，只是逐位置分类；构造“当前位置预测下一 token”的移位目标见 [P2](/principles/language-modeling/)。模型没有注意力，所以每个位置单独经过同一组参数。记批大小 $B=2$、序列长度 $T=3$、词表大小 $V=4$、隐藏宽度 $d=2$：
+本章的目标是核对 **PyTorch 的层与损失接口**。这里的目标 ID 已直接给定，只是逐位置分类；构造“当前位置预测下一 token”的移位目标见 [P2](/principles/language-modeling/)。模型没有注意力，所以每个位置单独经过同一组参数。记批大小 $B=2$、序列长度 $T=3$、词表大小 $n_{\mathrm{vocab}}=4$、隐藏宽度 $d=2$：
 
 | 样本 | 输入 ID | 目标 ID |
 | --- | --- | --- |
@@ -43,7 +43,9 @@ class TinyWords(nn.Module):
 
 这是一个逐位置模型：`Linear` 只改变最后一个轴，不把三个位置接成一个长向量。为便于手算，脚本在 `torch.no_grad()` 下给参数写入固定值，并使用 float64。`eps=1` 比常见配置大，只是让数字简洁；这里不讨论哪组配置训练效果好。
 
-模块树中 embedding、norm、head 分别登记 8、4、8 个标量，Dropout 没有参数。图里的参数身份跟随名字，而不会因切换模式或重复读取而新建一份；同 ID 读取同一行，相同数值的不同 ID 仍是不同参数行。
+下面的模块树按名字标出参数对象。先逐一选择登记参数，数出 embedding、norm、head 的标量数量。再切换 train 模式，检查总参数数是否仍为 20，以及哪一层的前向行为发生变化。切换模式不会新建参数。
+
+接着比较 embedding 行 ID 0 与 2。两行的数值同为 $(2,0)$，先根据输入表找出各自被读取的位置，再核对图下的说明。解释为什么同 ID 的多次读取共用参数，而相同数值的不同 ID 仍是不同参数行。
 
 <FrameworkModuleLab client:visible />
 
@@ -118,14 +120,14 @@ $$
 
 <KeyEq label="单个位置的类别索引交叉熵">
 $$
-p_c=\frac{e^{z_c}}{\sum_{r=0}^{V-1}e^{z_r}},\qquad
-\ell=-\log p_y=\log\sum_{c=0}^{V-1}e^{z_c}-z_y.
+p_c=\frac{e^{z_c}}{\sum_{r=0}^{n_{\mathrm{vocab}}-1}e^{z_r}},\qquad
+\ell=-\log p_y=\log\sum_{c=0}^{n_{\mathrm{vocab}}-1}e^{z_c}-z_y.
 $$
 </KeyEq>
 
 以 $(0,0)$ 为例，四个指数的和是 $e^s+e^{-s}+2\approx4.521184$；正确类别概率 $e^s/(e^s+e^{-s}+2)\approx0.448581$，所以 $\ell\approx0.801667$。其余三个有效位置仅交换前两类，正确类别分数仍为 $s$，损失相同。实现时将**logits** 直接交给 `F.cross_entropy`；API 内部使用稳定的等价计算。先对 logits 做 softmax 再传进去，会把概率数值当成一组新 logits，算的是另一个损失。
 
-`F.cross_entropy` 对多维索引目标把第 1 轴当类别轴。模型给的是 `(B,T,V)=(2,3,4)`，直接传入会把长度为 3 的 $T$ 误认成类别数。可将每个位置展平成一行 `(B*T,V)`，目标展平为 `(B*T,)`：
+`F.cross_entropy` 对多维索引目标把第 1 轴当类别轴。模型给的是 `(B,T,n_vocab)=(2,3,4)`，直接传入会把长度为 3 的 $T$ 误认成类别数。可将每个位置展平成一行 `(B*T,n_vocab)`，目标展平为 `(B*T,)`：
 
 ```python
 flat_logits = logits.reshape(-1, logits.shape[-1])
@@ -133,7 +135,7 @@ flat_targets = targets.reshape(-1)
 loss = F.cross_entropy(flat_logits, flat_targets, ignore_index=-100)
 ```
 
-也可以将类别轴移到第 1 轴，调用 `F.cross_entropy(logits.transpose(1, 2), targets, ignore_index=-100)`，此时输入是 `(2,4,3)`，目标仍是 `(2,3)`。脚本核对两种调用相等。若恰巧 $T=V$，某些错误轴排列可能通过形状检查，因此还应追踪某个位置手算的 logits 与目标。不能仅凭“代码没报错”判定监督对齐。
+也可以将类别轴移到第 1 轴，调用 `F.cross_entropy(logits.transpose(1, 2), targets, ignore_index=-100)`，此时输入是 `(2,4,3)`，目标仍是 `(2,3)`。脚本核对两种调用相等。若恰巧 $T=n_{\mathrm{vocab}}$，某些错误轴排列可能通过形状检查，因此还应追踪某个位置手算的 logits 与目标。不能仅凭“代码没报错”判定监督对齐。
 
 本例有效位置集合是 $(0,0),(0,1),(1,0),(1,1)$，共四个。无类别权重、无标签平滑时，`reduction='none'` 给六个逐位置损失，忽略位置返回零；`sum` 是四项相加；`mean` 用**四个有效目标**做分母：
 
@@ -144,7 +146,9 @@ $$
 
 把两个零也计入分母 6，会错误地得到约 $0.534445$，并缩小梯度。忽略位置只取消这个位置的损失项；有效位置的 softmax 仍在全部四个类别上求和。`ignore_index=-100` 不是删除一个类别，也不自动决定注意力 mask。若使用类别权重，索引目标的 mean 分母还会变为有效目标权重之和；本例明确没有类别权重。下一 token 任务还须先按 [P2](/principles/language-modeling/) 的定义移位输入与目标，交叉熵不会替你移位。
 
-下面直接使用表中的六行 eval logits。默认四个有效目标的平均数为 $0.801667$；把 $(0,1)$ 的目标从 1 换成 0，平均损失增加约 $0.353553$。忽略复选框只取消对应损失项，四个类别依然参与该行 softmax。全部忽略时显示本节随后解释的安全分母策略，不能把保护值 0 当作原始 mean 已有定义。
+下面固定表中的六行 eval logits。先保持默认四个有效目标、归约方式 mean，核对平均损失 $0.801667$。选择位置 $(0,1)$，只把目标从 1 换成 0；操作前手算这一项增加 $2s$，再检查平均损失是否增加 $2s/4\approx0.353553$。
+
+然后保持当前目标，逐个勾选忽略位置。每次先数有效目标，再看分母与有效和。四个类别的概率条是否变化？忽略只取消损失项，不删除类别。全部忽略后，先说明原始有效平均为何没有定义，再读本章保护策略返回的 0；下一节说明它的训练边界。
 
 <MaskedLossLab client:visible />
 
@@ -159,6 +163,8 @@ $$
 <CodeFile path="code/frameworks/modules_and_losses.py" />
 
 在仓库根运行 `python code/frameworks/modules_and_losses.py`。脚本核对 20 个参数、六行固定 logits、四个有效损失、两种类别轴调用、eval 仍可求导、train 的 Dropout 行为，以及全忽略零梯度。它也构造普通 list 持有层的反例：子层得到梯度，父模块却没有登记任何参数。即使当前模型的单个损失数值正确，仍需分别核对这些结构和轴契约。
+
+## 练习与核对
 
 <details>
 <summary>把第 (0,1) 个目标从 1 改为 0，损失会怎样变？</summary>
