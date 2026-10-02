@@ -10,6 +10,14 @@ from .config import AttentionConfig, BlockConfig
 
 
 def parameter_count(module: nn.Module) -> int:
+    """统计独立参数元素数，绑定权重只计一次。
+
+    Args:
+        module: 要计数或初始化的 nn.Module。
+
+    Returns:
+        int 独立参数元素数。
+    """
     return sum(p.numel() for p in module.parameters())  # PyTorch deduplicates tied weights.
 
 
@@ -25,9 +33,25 @@ class AttentionCost:
 
     @property
     def flops(self) -> int:
+        """求投影、混合和矩阵吸收 matmul FLOPs之和。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            int matmul FLOPs。
+        """
         return self.projection_flops + self.mixing_flops + self.absorption_flops
 
     def to_dict(self) -> dict[str, int]:
+        """将成本字段和总 FLOPs 转为字典。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            dict[str,int] 成本明细。
+        """
         return asdict(self) | {"flops": self.flops}
 
 
@@ -44,6 +68,18 @@ def attention_cost(
 
     new_kv_tokens=0 for already-projected cross memory. Sparse manual masks still
     allocate and compute dense scores. Decode cache read is one ideal logical pass.
+
+    Args:
+        config: 本模块的显式配置对象。
+        dim: 输入/输出 hidden width D；不要求等于 Attention 投影宽度。
+        batch: batch size B，正整数。
+        query_tokens: 本次 query 长度 S_q。
+        key_tokens: 完整可用 KV 长度 S_kv。
+        new_kv_tokens: 本次新投影的 KV token 数 N，None 使用 query_tokens；静态 Cross decode 为 0。
+        bytes_per_element: 每个缓存元素占用字节数。
+
+    Returns:
+        AttentionCost：参数、投影/混合/吸收 FLOPs、cache/read bytes、score elements。
     """
     n = query_tokens if new_kv_tokens is None else new_kv_tokens
     if (
@@ -95,6 +131,16 @@ def attention_cost(
 
 
 def ffn_cost(dim: int, config: BlockConfig, tokens: int = 1) -> dict[str, int]:
+    """计算 Dense/MoE 的理论参数和 matmul FLOPs。
+
+    Args:
+        dim: 输入/输出 hidden width D；不要求等于 Attention 投影宽度。
+        config: 本模块的显式配置对象。
+        tokens: 待计算的有效 token 数 N，非负整数。
+
+    Returns:
+        dict[str,int]：total_parameters、active_parameters_per_token、matmul_flops。
+    """
     multiplier = 3 if config.activation.endswith("glu") else 2
     expert = multiplier * dim * config.ff_dim
     if config.experts:

@@ -13,12 +13,22 @@ from .runners import benchmark, consistency, ledger, train
 
 
 def main() -> None:
+    """解析命令行、执行指定实验并输出 JSON 或 checkpoint。
+
+    Args:
+        无显式输入。
+
+    Returns:
+        None；读取 argv，向 stdout输出 JSON，可选写文件。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("experiment", choices=("lesson", "check", "train", "ledger", "benchmark"))
     parser.add_argument(
-        "--step", type=int, choices=range(14), default=0, help="lesson 演进步号 00–13"
+        "experiment", choices=("chapters", "chapter", "check", "train", "ledger", "benchmark")
     )
-    parser.add_argument("--preset", choices=PRESETS, default="deepseek")
+    parser.add_argument(
+        "--chapter", type=int, choices=range(1, 26), default=1, help="课程章号 01–25"
+    )
+    parser.add_argument("--preset", choices=PRESETS, default="deepseek_v3")
     parser.add_argument("--architecture", choices=("encoder", "decoder", "encoder_decoder"))
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--steps", type=int, default=60)
@@ -31,10 +41,14 @@ def main() -> None:
     torch.set_num_threads(1)
     torch.manual_seed(7)
     device = torch.device(args.device)
-    if args.experiment == "lesson":
-        from ..tutorials.evolution import run_lesson
+    if args.experiment == "chapters":
+        from ..chapters import CHAPTERS
 
-        report = run_lesson(args.step, device)
+        report = {f"{i:02}": title for i, (_, title) in enumerate(CHAPTERS, 1)}
+    elif args.experiment == "chapter":
+        from ..chapters import run_chapter
+
+        report = run_chapter(args.chapter, device)
     elif args.experiment == "ledger":
         report = ledger(args.length)
     elif args.experiment == "benchmark":

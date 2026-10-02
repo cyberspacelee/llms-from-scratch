@@ -1,26 +1,19 @@
-# 实验覆盖与检查范围
+# 检查覆盖
 
-这是原理库的功能覆盖表；默认测试使用小张量 CPU，未来的 GPU 路径需要硬件核对。没有以语言生成样例代替数值检查，没有运行性能基准。
+每章有可运行的`run(device)`与assert，所有25章由unittest调用；这不是官方大模型质量评估。
 
-| 用户目标 | 代码/文档 | 功能核对 |
-| --- | --- | --- |
-| 1. 基础 Transformer 和三类结构 | `attention/softmax.py` / `models/transformer.py` / `training/losses.py` | 手算 SDPA；因果性；双向性；teacher forcing；Encoder memory；greedy cached/naive |
-| 2. 位置编码 | `attention/position.py` / `experiments/presets.py` | sin/cos 起点；RoPE 范数与共同平移；Linear Scaling；各 Scaling 的缓存一致 |
-| 3. Prefill/Decode 与 Cache | `cache/state.py` / `models/transformer.py` | 完整、逐 token、非等长 chunk 前向；层位置一致；Cross static cache |
-| 4. MHA/MQA/GQA/MLA 演进 | `attention/softmax.py` / `attention/mla.py` / `analysis.py` | KV group 手工映射；参数与实际 cache byte 计数 |
-| 5. MLA 深入 | `attention/mla.py` | 两种 query rank；self/cross；naive/absorbed 输出和所有参数梯度 |
-| 6. Attention pattern | `attention/patterns.py` / `gathered_attention` | 全局/窗口/分块/稀疏缓存；gather 与相同 dense selection 相等 |
-| 7. Norm/FFN/Residual | `layers/` / `TransformerBlock` | LayerNorm/RMSNorm 对照；5 种 FFN 参数；Pre/Post-Norm；门控残差配置 |
-| 8. MoE | `MixtureOfExperts` | sparse dispatch 与所有专家 reference 相等；router 梯度；shared；bias 更新方向 |
-| 9. MTP | `MultiTokenPrediction` / `language_model_loss` | 各深度 Shape/标签；未来目标不泄漏；padding；联合梯度 |
-| 10. 长上下文 | `inference/compression.py` / `analysis.py` / `docs/inference.md` | 压缩分块边界；逐 token/完整压缩一致；无未来泄漏；理论成本 |
-| 11. Hybrid | `attention/recurrent.py` / `layer_blocks` | Linear 与并行特征 kernel 对照；delta overwrite 方程；hybrid cache |
-| 12. 现代 Encoder–Decoder | `encode` / `EncoderMemory` / `causal_seq2seq` | 不同 encoder/decoder 配方；Encoder causal append；aligned causal source |
-| 13. 统一框架 | configs / `make_attention` / `TransformerBlock` | 多种小型配方与统一输出/cache 接口 |
-| 14. 公式/Shape/成本对应 | `docs/principles.md` / `docs/inference.md` | 参数计数与 tensor 字节可执行核对；FLOPs 标明分析口径 |
-| 15. 高性能对照 | SDPA / page/quant/speculation 原语 / `benchmark` | CPU SDPA 输出/梯度已核对；GPU 性能与外部 kernel 未执行 |
+| 章节 | 保留的检查 |
+| --- | --- |
+| 01–03 | 朴素/核心同权重结果及embedding梯度；多头多层；NTP因果性与MLM双向性 |
+| 04–06 | MQA逐head参考、KV容量；Pre/Post-Norm；FFN各激活梯度与参数 |
+| 07–08 | sparse gather与同selection dense结果；linear特征对照；RoPE范数/平移 |
+| 09–12 | MoE dispatch/router/shared/bias；online softmax输出及输入梯度；GQA映射；Scaling/cache |
+| 13–15 | MLA naive/absorbed所有参数梯度；MTP对齐与未来泄漏；hybrid cache、KDA full/chunk状态 |
+| 16–19 | 非等长chunk、static Cross、causal Encoder；分页COW/int8误差；draft接受/拒绝；压缩因果边界 |
+| 20–22 | 短卷积因果性、异构头递归；token/block selection；Sinkhorn行列和、mHC/GR形状、AttnRes深度权重/梯度 |
+| 23–25 | hashed memory因果性/梯度；共享KV的chunk绝对位置/梯度；模态slots与projector梯度 |
 
-运行：
+原有数值不变量测试仍覆盖全部小型配方、padding/all-masked rows、teacher forcing、cache非法输入、analysis实际参数/字节对照、SDPA输出/梯度和联合loss。章节自检与这些测试都使用小张量，无权重下载、数据集训练或语言质量基准。fp64对照通常使用atol=1e-9/rtol=1e-7；新独立原语按各自数值精度检查。
 
 ```bash
 uv sync --locked
@@ -30,12 +23,6 @@ uv run --locked python -m compileall -q src tests
 uv run --locked python -m unittest discover -s tests -v
 ```
 
-Ruff 检查 import、Python 常见错误、bugbear 和缺失的函数类型标注；它不是完整静态类型推导器。源码的 Tensor Shape 使用 docstring/文档与运行时检查表达，没有引入专用 shape typing 包。Python `unittest` 使用子用例复用检查，覆盖全部配方，而不是只核对函数能 import。
+每个源码函数/方法（包括构造函数、property和内部函数）都有Args/Returns；tensor参数、返回和关键reshape/transpose/gather/state写入都说明shape。Ruff核对imports、Python错误、bugbear与函数类型标注；不把它当完整shape类型系统。本轮使用CPU Torch，CUDA测试跳过。
 
-CPU 验证采用 fp64 做严格数值对照，通常 `atol=1e-9, rtol=1e-7`；单步 optimizer 功能使用小模型。没有大数据集、长上下文或反复拟合测试。当前环境安装 CPU torch，因此 CUDA 检查会跳过；换成 CUDA wheel 后可以运行同一套命令。
-
-只完成原语或研究入口的内容：learned DSA/CSA/HCA indexer/compressor、完整 KDA、Hyper-Connection/mHC、动态扩展 decoder source、MTP 专属 speculative cache、随机 speculative sampling、生产 Prefix 服务、paged allocator 与 GPU paged/quantized/MoE kernels。它们分别需要新数据流、算法或真实硬件；不能把已有相邻功能计为完整实现。
-
-## 由浅入深的入口
-
-`tutorials/mvp.py` 提供固定单头、单层 Encoder–Decoder；`tutorials/evolution.py` 提供 00–13 步可运行核对。新增测试检查 MVP 与统一模型同权重输出/梯度，以及整条演进路线。阅读顺序见 [MVP](mvp.md) → [演进](evolution.md)，包边界见 [子包规划](architecture.md)。
+官方模型的完整训练、checkpoint mapping、分布式专家通信、chunkwise recurrence、持久压缩cache、Single-Pass残差、conv/lookup增量状态、低比特GPU算子与音视频encoder未实现；具体对应见[2026结构边界](models-2026.md)。入口为[25章课程](../README.md)、[规划](plan.md)、[源码边界](architecture.md)。

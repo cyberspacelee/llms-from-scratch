@@ -19,6 +19,16 @@ def attention_mask(
     causal 使用 k<=q；decode 的 q 通常从 S-1 开始，不能用一个局部 tril
     代替此条件。pattern 只改变可见关系，本函数仍生成密集 mask，
     不会自动减少 Q*S 的 score 分配；真实稀疏计算见 gathered_attention。
+
+    Args:
+        query_positions: long [S_q] query 绝对位置。
+        key_positions: long [S_kv] key 绝对位置。
+        config: 本模块的显式配置对象。
+        causal: 是否限制 key 绝对位置不超过 query。
+        key_valid: 可选 bool [B,S_kv]，True 表示有效，含完整历史。
+
+    Returns:
+        bool visible[1或B,1,S_q,S_kv]，可广播到 Attention scores。
     """
     q, k = query_positions[:, None], key_positions[None, :]
     visible = torch.ones((q.numel(), k.numel()), device=q.device, dtype=torch.bool)
@@ -43,13 +53,21 @@ def attention_mask(
             or key_valid.shape[1] != key_positions.numel()
             or key_valid.device != q.device
         ):
-            raise ValueError("key_valid must be boolean [B,K] on the input device")
+            raise ValueError("key_valid must be boolean [B,S_kv] on the input device")
         visible = visible & key_valid[:, None, None, :]
     return visible
 
 
 def masked_softmax(scores: torch.Tensor, visible: torch.Tensor) -> torch.Tensor:
-    """Zero for a fully masked row; finite gradients, including padded queries."""
+    """Zero for a fully masked row; finite gradients, including padded queries.
+
+    Args:
+        scores: float [B,H_q,S_q,S_kv] 或 [...,K]。
+        visible: bool [...,K] mask，可广播到 scores；True=可见。
+
+    Returns:
+        概率 tensor，同 scores shape/dtype；全遮挡行返回零。
+    """
     dtype = torch.float64 if scores.dtype == torch.float64 else torch.float32
     masked = scores.to(dtype).masked_fill(~visible, -torch.inf)
     has_key = visible.any(-1, keepdim=True)

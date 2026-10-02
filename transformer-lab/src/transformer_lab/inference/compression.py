@@ -10,12 +10,29 @@ from ..attention import scaled_dot_product_attention
 def compress_sequence(
     key: torch.Tensor, value: torch.Tensor, block_size: int
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Mean pooling completed blocks; never include an unfinished/future block."""
+    """Mean pooling completed blocks; never include an unfinished/future block.
+
+    Args:
+        key: float [B,H,S_kv,D_h]。
+        value: float [B,H,S_kv,D_v]。
+        block_size: 块宽 R，正整数。
+
+    Returns:
+        tuple: pooled K[B,H,C,D_h]、V[B,H,C,D_v]、long ends[C]；C=floor(S_kv/R)。
+    """
     if key.ndim != 4 or value.ndim != 4 or key.shape[:3] != value.shape[:3] or block_size < 1:
-        raise ValueError("expected aligned [B,H,S,D] and positive block size")
+        raise ValueError("expected aligned [B,H_q,S,D] and positive block size")
     count = key.shape[-2] // block_size
 
     def pool(x: torch.Tensor) -> torch.Tensor:
+        """对已完成的序列块求均值。
+
+        Args:
+            x: float [B,H,S_kv,D]。
+
+        Returns:
+            float [B,H,C,D]，reshape[B,H,C,R,D]后沿 R 求平均。
+        """
         return (
             x[..., : count * block_size, :]
             .reshape(*x.shape[:2], count, block_size, x.shape[-1])
@@ -38,6 +55,17 @@ def compressed_causal_attention(
 
     Partial blocks between old summaries and the local window remain exact.
     Absolute block ends prevent future information entering an old summary.
+
+    Args:
+        q: float Q[B,H_q,S_q,D_h]。
+        k: float K[B,H_q,S_kv,D_h]。
+        v: float V[B,H_q,S_kv,D_v]。
+        block_size: 块宽 R，正整数。
+        window: 精确保留的近期 token 窗口宽度。
+        query_offset: query 绝对位置起点 P；Self cache 时等于前缀长度。
+
+    Returns:
+        float [B,H_q,S_q,D_v]，每行读取因果可用的旧块摘要和精确近期 keys。
     """
     if (
         q.ndim != 4

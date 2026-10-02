@@ -1,124 +1,84 @@
-# 推理、计算量与内存账本
+# 推理、计算量与内存
 
-当前仅有 CPU。本项目完成小张量功能核对，性能内容使用公式分析，**没有将 CPU 耗时外推为 GPU 吞吐，也没有 GPU 性能排名**。以下乘加按 2 FLOPs 计，参数与状态按实际配置计算。
+统一shape符号见[规划](plan.md)。乘加按2 FLOPs计。成本由[analysis.py](../src/transformer_lab/analysis.py)计算；本轮仅运行小张量CPU功能检查，未测GPU吞吐。
 
-## 1. Training、Prefill、Decode
+## Training、Prefill、Decode
 
-| 路径 | 输入 | 可并行的维度 | 保存内容 |
+| 路径 | 输入 | 输出 | 状态 |
 | --- | --- | --- | --- |
-| Training | 完整序列 | batch、head、token；递归参考实现按 token 循环 | autograd 激活与梯度；默认不返回推理 cache |
-| Prefill | 完整 prompt 或新 chunk | query 维可并行 | 每层已处理前缀的 KV/latent/state，以及 valid |
-| Decode | 通常一个新增 token | batch、head | append 一个 KV/latent，或更新一个有限状态 |
-
-prefill 和 decode 不是两个不相关的模型，都是 `forward(..., use_cache=True)`。Decoder 输出为 `[B,Q,Vocab]`；cache 中各层的 `length` 必须一致。因果 chunk mask 用 $k\le offset+q$，不能只对 `[Q,Q]` 做三角 mask，也不能让 chunk 中早期 token 看见较晚 token。
-
-调用范式：
+| Training | IDs`[B,S]` | logits`[B,S,V]` | autograd激活，默认不返回推理cache |
+| Prefill | IDs`[B,S_q]`，可为新chunk | logits`[B,S_q,V]` | 追加S_q个KV或更新递归state |
+| Decode | IDs`[B,1]` | logits`[B,1,V]` | 读取前缀，处理一个新token |
 
 ```python
 model.eval()
 with torch.no_grad():
-    first = model(prompt, use_cache=True)  # prefill
+    first = model(prompt, use_cache=True)
     next_output = model(next_ids, cache=first.cache, use_cache=True)
 ```
 
-缓存本身不 detach，方便研究 autograd；实际推理用 `no_grad()`，否则完整旧前缀的图仍被持有。标准等价性是在 `eval()` 下比较，训练 dropout 和逐块 MoE balance loss 不要求与整序列相同。
+前缀长度为P时，mask为`key_position <= P+local_query_position`；完整KV长度S_kv=P+S_q。每层length必须一致，RoPE/PE从P继续。cache本身不detach，实际推理用no_grad避免保存旧计算图。完整/chunk等价性在eval下核对，不要求dropout或分块MoE auxiliary loss完全相同。
 
-## 2. KV 容量和 bandwidth
+普通Cross cache静态，K/V由每层自己的投影生成；source不变时复用。双向Encoder追加新token会改变旧hidden，不能沿用旧memory；因果Encoder支持追加。当前decoder会话绑定固定source，source扩展后需重建会话。24章独立演示共享联合KV，未接入官方CED调度。
 
-$b$ 为每个元素的字节数，$N_l$ 为层数。MHA/MQA/GQA 的缓存字节：
+## 持久状态与逻辑读取量
 
-$$
-M_{KV}=2bBN_lGSd.
-$$
+令每元素字节为b，层数为N_l；普通Attention的D_v=D_h：
 
-MLA：$M_{latent}=bBN_lS(L+r)$。Linear：$bBN_lH(dv+d)$；Delta/Gated Delta：$bBN_lHdv$。Decoder 多一层 Cross-Attention 时，还加 static source cache；Encoder hidden 本身为 $bBSD$。`ModelCache.kv_nbytes` 只统计各层 KV/latent/recurrent state，**不包含 hidden memory、valid mask、临时分数或参数**。
-
-一个规模示例，$B=1,S=32768,N_l=32,H=32,d=128,b=2$：
-
-| 结构 | 每层 KV | 32 层 KV |
+| 结构 | 每层状态shape | N_l层字节 |
 | --- | --- | --- |
-| MHA，$G=32$ | 512 MiB | 16 GiB |
-| GQA，$G=8$ | 128 MiB | 4 GiB |
-| MQA，$G=1$ | 16 MiB | 512 MiB |
-| MLA，$L=512,r=64$ | 36 MiB | 1.125 GiB |
+| MHA/MQA/GQA | K/V各`[B,H_kv,S_kv,D_h]` | `2*b*B*N_l*H_kv*S_kv*D_h` |
+| MLA | latent`[B,1,S_kv,L_kv]`、rotary`[B,1,S_kv,D_r]` | `b*B*N_l*S_kv*(L_kv+D_r)` |
+| Linear | matrix`[B,H,D_k,D_v]`、normalizer`[B,H,D_k]` | `b*B*N_l*H*(D_k*D_v+D_k)` |
+| Delta/Gated Delta/KDA | matrix`[B,H,D_k,D_v]` | `b*B*N_l*H*D_k*D_v`，完整模型另有conv状态 |
 
-这组 MLA 小于 MHA/GQA，但大于 MQA；它们的表达能力与投影结构也不同，不能仅凭字节数选架构。理论上单 token decode 读完整历史一次，所读 KV 字节与上表相近；GQA kernel 的 KV group 复用、cache residency、head tiling 和临时展开都会改变真实访存次数。本项目账本的 `decode_cache_read_bytes` 是逻辑读取量，不是 HBM counter。
+`ModelCache.kv_nbytes`只计Attention状态，不含Encoder hidden、mask、权重、scores或分配器保留内存。固定递归推理state也不意味着训练总内存固定。
 
-粗略 roofline：$time\ge\max(FLOPs/throughput,bytes/bandwidth)$；还要考虑 launch、通信和串行依赖。prefill 通常更容易利用大 GEMM，decode 的小 batch GEMM 与历史读取容易受带宽限制。没有 GPU 时可推导成本随 $S$、$G$、rank 的变化，不能给出 tokens/s。
+例如B=1、S_kv=32768、N_l=32、H_q=32、D_h=128、b=2：MHA32个KV头为16 GiB，GQA8头为4 GiB，MQA1头为512 MiB；MLA若L_kv=512/D_r=64则为1.125 GiB。MLA不必比MQA更省，具体尺寸必须计算。
 
-缓存追加目前 `cat` 新旧 tensor，会复制旧前缀；token decode 累积复制成本为二次量级。Sliding mask 不自动驱逐旧 KV，当前容量仍线性增长。优化顺序是预分配/分页、窗口 ring buffer、grouped kernel，而非根据教学实现的 CPU 时间断言某架构更慢。
+单token逻辑读取量近似缓存容量；真实HBM流量还受KV group复用、tiling、cache residency影响。粗略roofline为`time >= max(FLOPs/throughput, bytes/bandwidth)`，另有launch和通信开销。小型CPU参考耗时不能外推GPU性能。
 
-## 3. 投影与 Attention FLOPs
+## 投影与Attention成本
 
-[analysis.py](../src/transformer_lab/analysis.py) 的 `attention_cost` 明确区分 query 长 $Q$、可用 key 长 $S$ 和新投影 KV 数 $N$。例如 Cross cache decode 传 `new_kv_tokens=0`，首次 source 投影则传 source 长度。
+`attention_cost`区分S_q、S_kv和新投影KV数N；static Cross decode令N=0。普通MHA/MQA/GQA参数为`2*D*D_h*(H_q+H_kv)`；QK-Norm另加2D_h。
 
-MHA/MQA/GQA：投影 $4BQDHd+4BNDGd$；mixing $4BHQ S d$。MLA 记内容维 $c$、rotary 维 $r$、latent rank $L$、value 维 $v$。忽略两条路径共同的 Query/KV down projection：
-
-| MLA 路径 | 新增 matmul 项 |
+| 普通Attention matmul | FLOPs |
 | --- | --- |
-| naive | KV up: $2BSLH(c+v)$；Attention: $2BHQ S(c+r+v)$；输出: $2BQHvD$ |
-| absorbed | Q 吸收: $2BQHcL$；Attention+latent context: $2BHQ S(2L+r)$；latent 输出: $2BQHLD$；权重吸收: $2HLvD$ |
+| Q/O投影 | `4*B*S_q*D*H_q*D_h` |
+| 新K/V投影 | `4*B*N*D*H_kv*D_h` |
+| QK/PV mixing | `4*B*H_q*S_q*S_kv*D_h` |
 
-吸收后的维度未必更小，例如 $L>c$；节省来自避免反复展开历史 K/V，以及实际 kernel 和访存布局。当前每次计算 $W_{VO}$，并未缓存冻结后的吸收权重。把 absorption 与 mixing 单列，便于下一阶段研究预计算权重如何改变 decode 成本。
+减少H_kv不会同比减少QK/PV mixing。当前repeat_interleave还会展开临时KV，不具有优化GQA kernel的内存访问特性。
 
-这些 FLOPs 不含 norm、softmax、dropout、activation、Top-K、mask 构建、Python 循环和 gather/cat。`score_elements` 只统计一个显式分数 tensor 的元素数，不代表训练 peak memory；autograd 还保存许多激活。
+MLA的naive路径展开所有历史K/V；absorbed路径在L_kv轴计算，并重新计算Value/Output吸收权重。若L_kv大于content head维，其算术量不保证更小；本库每次重算吸收矩阵保证optimizer更新后的正确性。冻结权重后可预吸收，但本轮不保存第二套可失效权重。
+
+普通FFN参数2D*D_ff，gated FFN参数3D*D_ff；对应N个token的matmul为4N*D*D_ff与6N*D*D_ff。MoE总专家数决定参数，Top-K+shared决定激活近似成本；Top-K、dispatch/combine、norm/softmax与通信不在matmul账本里。
 
 ```bash
-uv run transformer-lab ledger --length 32768 --output runs/ledger.json
+uv run --locked transformer-lab ledger --length 32768 --output runs/ledger.json
 ```
 
-## 4. 长上下文方案比较
+## 长上下文路线
 
-| 方法 | 理想 mixing 复杂度 | 持久状态 | 信息变化 | 本项目实现 |
-| --- | --- | --- | --- | --- |
-| Full softmax | prefill $O(T^2d)$；decode $O(Td)$ | $O(TGd)$ | 完整 token 检索 | 默认路径 |
-| RoPE Scaling | 不改变 Attention 复杂度 | 同原 KV | 改变位置频率 | 固定 Linear/NTK/YaRN |
-| Sliding/Local | 特定 kernel 下 $O(TWd)$ | 驱逐后 $O(WGd)$ | 丢弃窗口之外的直接读取 | mask；当前仍 dense compute/full cache |
-| Local/Global 交替 | 各层求和，global 层仍二次 | 各层不同 | 随深度传播更远信息 | `layer_blocks` |
-| Sparse gather，每 query $M$ keys | $O(TMd)$，另加 selection/indexing | 不一定减少完整 KV | 仅选中 token 参与当前 Attention | 独立 gather 原语 |
-| MLA | naive/absorbed 不同；仍有 $Q\times S$ | $O(T(L+r))$ | 共享压缩特征 | 全模型路径 |
-| 序列压缩，比例 $R$ | $O(T(W+T/R)d)$ | 实际缓存可约 $O((W+T/R)d)$ | 历史块变为摘要，通常近似 | completed-block mean pooling 原语 |
-| Recurrent/Delta | $O(Tdv)$ | $O(dv)$ | 固定容量记忆 | sequential reference |
-| Attention/Recurrent hybrid | 两类层成本相加 | 部分 KV + 部分 state | 保留有限比例的显式检索 | 全模型路径 |
+| 方法 | 理想计算/状态变化 | 当前实现边界 |
+| --- | --- | --- |
+| RoPE Scaling | 改频率，不降低Attention复杂度 | 固定Linear/NTK/YaRN |
+| Flash/online softmax | 精确dense结果，减少scores驻留 | 10章KV tiling；SDPA对照，无外部GPU kernel |
+| Sliding/Local | 专用kernel可O(S*W)，驱逐后窗口state固定 | 核心mask仍dense，旧cache未驱逐 |
+| Sparse gather | mixing O(S_q*M)，另加indexer成本 | gather算子；21章indexer先计算dense scores |
+| MLA | 压缩特征轴，scores仍S_q*S_kv | naive/absorbed全模型路径 |
+| Sequence compression | 历史块摘要，固定比例仍可二次 | 19章mean pooling；无持久compressed cache |
+| Recurrent/hybrid | 递归层O(S*D_k*D_v)，softmax层另计 | 顺序参考；无生产chunkwise kernel |
+| Shared KV | 减少重复source投影/存储 | 24章独立consumer，不实现官方lower/upper调度 |
 
-固定比例的序列压缩仍是 $O(T^2/R)$，不是自动降为线性。Sparse 的 indexer 如果先扫全历史，selection 本身可能有较大开销。Window + compressed summary + sparse selection 结合时，还需计算 summary 的因果可用时刻、更新状态和位置编码；DeepSeek V4/V4.1 的差异见 [research.md](research.md)。
+## Cache存储与投机
 
-## 5. 分页、Prefix 和量化原语
+17章[分页与量化](../src/transformer_lab/cache/storage.py)：`fork()`共享已有页，不满页追加采用copy-on-write；`materialize()`重新拼成普通KV，所以不是paged kernel。普通KV的cat追加会复制前缀，逐token累积拷贝为二次量级。生产服务需要预分配、页引用管理、prefix身份与驱逐策略。
 
-`PagedKVCache` 在 [cache/storage.py](../src/transformer_lab/cache/storage.py) 中存储 tensor pages。`fork()` 共享已有 pages；追加不满页时复制该页，满页继续共享。`block_table` 用 tensor 对象标识说明映射，不是设备地址或可传给真实 kernel 的页表。`materialize()` 拼回连续 K/V，方便复用普通 Attention 验证数值；其拷贝说明这还不是 paged kernel 加速。
+int8对最后一维做对称量化：`scale=max(abs(x))/127`，codes为round/clip到[-127,127]；零向量scale取1。scales占真实字节，fp64输入保留fp64 scales，否则fp32。还原值每坐标误差最多scale/2，Attention输出误差需单独评估；没有FP4/FP8布局或fused dequant算子。
 
-普通 `ModelCache` 的 append 也返回新 tensor，旧 prefix 不会被原地修改，允许安全分叉；Tensor 内容仍需由调用者保持只读。生产 Prefix Cache 还要实现内容 hash、模型权重/版本/dtype/position/padding/source 身份、引用计数、驱逐和跨请求隔离，本项目只验证 prefix ownership 与复用原语。
+18章[greedy speculation](../src/transformer_lab/inference/speculative.py)用draft提议K个候选，target并行核对；接受连续相同greedy token，首次不符提交target修正，全接受可加bonus。结果与target greedy相等；当前重算prefix，未接KV rollback。随机采样需要min(1,p/q)接受率和(p-q)+修正分布，不能沿用token相等判据。14章MTP是训练目标，未将teacher-forced未来当合法draft。
 
-`QuantizedTensor` 对最后一维做对称 int8：
+## 性能验证口径
 
-$$
-s=\max_i|x_i|/127,\quad q_i=\operatorname{clip}(\operatorname{round}(x_i/s),-127,127),\quad\hat x_i=s q_i.
-$$
-
-全零向量取 scale 1。codes 为 int8、scales 为 fp32（fp64 输入时为 fp64）；实际字节数包括 scales，没有假装 3/4-bit 打包。本原语可以编码 K/V/latent，再 decode 成普通 `KVCache` 使用；原缓存误差每坐标不超过 $s/2$，Attention 输出误差仍需独立评估。
-
-数据流为 float cache → quantized codes/scales → restored cache → reference Attention。当前 append 还没有直接在量化存储上进行，没有 GPU fused dequant-Attention kernel，因此不声称 decode 更快。
-
-## 6. 投机与 MTP
-
-[inference/speculative.py](../src/transformer_lab/inference/speculative.py) 提供 greedy draft/target 验证：draft 生成长度 $K$ 的候选；target 对 `prefix+draft` 做一个因果前向；逐个比较对应 greedy token；遇到第一次不匹配，保留已经接受的 draft 并提交 target 修正；全接受时可提交一个 bonus token。
-
-它严格保持 target greedy 输出，测试覆盖相同 draft 的全接受，以及不同 draft 的拒绝。当前完整重算 prefix 以展示原理；没有 decoder KV rollback，没有动态 batching，也没有把减少 target forward 次数直接称为速度提升。
-
-随机采样需不同接受规则 $\min(1,p(x)/q(x))$，拒绝后从归一化 $(p-q)_+$ 采样。直接沿用 greedy 的“token 相等”判据会改变分布；本项目不提供该随机推理循环。MTP 专属 speculative 路径需处理各 head 的条件状态，不能拿 teacher-forced logits 当合法 draft 分布。
-
-## 7. 高性能实现如何对照
-
-| 技术 | 需要核对的功能 | 硬件实测重点 | 当前状态 |
-| --- | --- | --- | --- |
-| PyTorch SDPA | output/gradient、mask、GQA group | 具体 backend、dtype、长度 | 已接入，并在 CPU 核对 |
-| FlashAttention | 与显式 softmax 的容差；mask/dropout 契约 | HBM traffic、峰值、prefill latency | 经 CUDA SDPA 可由 PyTorch 选择；未单独接入外部包 |
-| Paged KV | 页表顺序、跨页追加、共享页读写 | page fragmentation、连续/分页 kernel | tensor pages 与 COW 原语 |
-| Prefix Cache | prefix 身份、复用范围 | 命中率、prefill saved work | 只读 prefix fork 原语 |
-| Quantized KV | 误差、metadata、位置支路 | 显存 savings、dequant 开销 | int8 encode/decode 原语 |
-| Speculation | token/distribution 等价、拒绝回滚 | 接受率、draft 开销 | greedy reference；MTP cache 路径后续 |
-| MoE kernel | 同路由 combine/gradient、load balance | grouped GEMM、all-to-all、小 batch | Python dispatch reference |
-
-SDPA 是 API，FlashAttention 是可能的执行 backend，二者不能互相当同义词。设备、dtype、head 维、mask 与版本都影响选择。[PyTorch SDPA 文档](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) 说明 backend dispatch 与语义。[FlashAttention 官方库](https://github.com/Dao-AILab/flash-attention) 提供专用实现；当前不将其列为默认依赖。
-
-可选 `benchmark` 入口只测小型单步 decode，报告同步后的 wall-clock median、KV 字节和 CUDA peak allocated；独立随机模型只能比较代码路径，不能比较训练质量。获得 GPU 后，先核对功能，再用 CUDA events、实际 kernel 名称、warmup、同权重和同工作负载做正式性能实验。当前没有执行该入口。
+[PyTorch SDPA](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)是API，[FlashAttention](https://github.com/Dao-AILab/flash-attention)是可能的backend/独立kernel；设备、dtype、head维与mask影响选择。`benchmark`显式测median、cache bytes和CUDA peak；本轮没有执行性能排名。先核对同权重结果与梯度，再在目标硬件上验证backend、同步、warmup、延迟与峰值。

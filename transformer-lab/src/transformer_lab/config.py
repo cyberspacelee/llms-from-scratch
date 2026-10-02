@@ -18,6 +18,14 @@ class PositionConfig:
     attention_factor: float = 1.0
 
     def __post_init__(self) -> None:
+        """核对 dataclass 字段与组合约束，非法值抛 ValueError。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            None；只验证现有字段。
+        """
         if self.kind not in {"none", "sinusoidal", "rope"}:
             raise ValueError("unknown position encoding")
         if self.scaling not in {"none", "linear", "ntk", "yarn"}:
@@ -56,6 +64,14 @@ class AttentionConfig:
     backend: str = "manual"  # sdpa only for MHA/MQA/GQA comparisons
 
     def __post_init__(self) -> None:
+        """核对 dataclass 字段与组合约束，非法值抛 ValueError。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            None；只验证现有字段。
+        """
         if self.kind not in {"mha", "mqa", "gqa", "mla", "linear", "delta", "gated_delta"}:
             raise ValueError("unknown attention kind")
         for name in (
@@ -92,6 +108,14 @@ class AttentionConfig:
 
     @property
     def effective_kv_heads(self) -> int:
+        """按 MHA/MQA/GQA 规则确定 KV head 数。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            int H_kv；MHA为H_q，MQA为1，GQA为kv_heads。
+        """
         return self.heads if self.kind == "mha" else 1 if self.kind == "mqa" else self.kv_heads
 
 
@@ -112,6 +136,14 @@ class BlockConfig:
     residual: str = "standard"  # standard, gated (HC needs a different stream shape)
 
     def __post_init__(self) -> None:
+        """核对 dataclass 字段与组合约束，非法值抛 ValueError。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            None；只验证现有字段。
+        """
         if type(self.ff_dim) is not int or self.ff_dim <= 0:
             raise ValueError("ff_dim must be positive")
         if self.activation not in {"relu", "gelu", "glu", "geglu", "swiglu"}:
@@ -162,6 +194,14 @@ class ModelConfig:
     mtp_depth: int = 0
 
     def __post_init__(self) -> None:
+        """核对 dataclass 字段与组合约束，非法值抛 ValueError。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            None；只验证现有字段。
+        """
         if self.architecture not in {"encoder", "decoder", "encoder_decoder"}:
             raise ValueError("unknown architecture")
         if any(

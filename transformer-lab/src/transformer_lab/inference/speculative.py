@@ -22,6 +22,16 @@ def greedy_speculative_generate(
 
     Target verifies a proposal block in one forward; at the first mismatch,
     commit the target correction and discard all later draft tokens.
+
+    Args:
+        target: 用来验证并提交 token 的 Decoder-only 目标模型。
+        draft: 与 target 共享词表的 Decoder-only 草稿模型。
+        prompt: 无 padding long [1,S_prompt]，两个模型共享词表。
+        max_new_tokens: 要生成的新 token 数，非负整数。
+        draft_length: 每轮提议的最大 token 数，正整数。
+
+    Returns:
+        tuple: long tokens[1,S_prompt+max_new_tokens]、accepted/proposed/target_calls 计数字典。
     """
     if target.config.architecture != "decoder" or draft.config.architecture != "decoder":
         raise ValueError("reference speculation supports decoder-only models")
@@ -51,6 +61,7 @@ def greedy_speculative_generate(
             proposed_total += count
             # ponytail: full prefix recomputation exposes verification; KV rollback is the next speed upgrade.
             logits = target(torch.cat((result, proposal), 1)).logits
+            # prefix长度P：logits[:,P-1:P+K] -> expected[1,K+1]，最后一个为bonus。
             expected = logits[:, result.shape[1] - 1 : result.shape[1] + count].argmax(-1)
             target_calls += 1
             accepted = 0

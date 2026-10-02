@@ -33,7 +33,7 @@ class EncoderMemory:
 
 @dataclass(frozen=True)
 class ModelOutput:
-    """logits[B,T,V]、hidden[B,T,D]，以及可选 cache 和训练所需 MoE 统计。"""
+    """logits[B,S,V]、hidden[B,S,D]，以及可选 cache 和训练所需 MoE 统计。"""
 
     logits: torch.Tensor
     hidden: torch.Tensor
@@ -48,11 +48,19 @@ class Transformer(nn.Module):
     Encoder-only 使用双向 self-attention；Decoder-only 使用因果 self-attention；
     Encoder–Decoder 先 encode source，再由 Decoder 通过 cross-attention 读取。
     配置允许输入/输出使用不同 Block、Attention 和层数，默认共享 token embedding。
-    绑定 embedding/head 时参数计数只计一次；head 投影仍需约 2*B*T*D*V FLOPs。
+    绑定 embedding/head 时参数计数只计一次；head 投影仍需约 2*B*S*D*V FLOPs。
     layer_blocks 支持 local/global、RoPE/NoPE、递归/softmax 的逐层交替。
     """
 
     def __init__(self, config: ModelConfig | None = None) -> None:
+        """根据尺寸和配置创建参数/子层。
+
+        Args:
+            config: 本模块的显式配置对象。
+
+        Returns:
+            None；参数与子层注册在 self 中。
+        """
         super().__init__()
         config = config or ModelConfig()
         self.config = config
@@ -104,31 +112,58 @@ class Transformer(nn.Module):
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:
+        """为 Linear/Embedding 初始化权重和 bias。
+
+        Args:
+            module: 要计数或初始化的 nn.Module。
+
+        Returns:
+            None；原地初始化 module参数。
+        """
         if isinstance(module, (nn.Linear, nn.Embedding)):
             nn.init.normal_(module.weight, std=0.02)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 nn.init.zeros_(module.bias)
 
     def validate_ids(self, ids: torch.Tensor, valid: torch.Tensor | None) -> torch.Tensor:
+        """验证 token设备、词表范围与有效位置 mask。
+
+        Args:
+            ids: 非空 long [B,S]，与模型同设备且 ID 在词表内。
+            valid: 可选 bool [B,S]，设备/shape必须与 ids 一致。
+
+        Returns:
+            bool [B,S] valid；None输入转换为全 True；非法输入抛 ValueError。
+        """
         if (
             ids.ndim != 2
             or ids.dtype != torch.long
             or ids.numel() == 0
             or ids.device != self.embedding.weight.device
         ):
-            raise ValueError("IDs must be nonempty long [B,T] on model device")
+            raise ValueError("IDs must be nonempty long [B,S] on model device")
         if ids.min() < 0 or ids.max() >= self.config.vocab_size:
             raise ValueError("token outside vocabulary")
         if valid is None:
             return torch.ones_like(ids, dtype=torch.bool)
         if valid.dtype != torch.bool or valid.shape != ids.shape or valid.device != ids.device:
-            raise ValueError("valid must be boolean [B,T] on input device")
+            raise ValueError("valid must be boolean [B,S] on input device")
         return valid
 
     def embed(self, ids: torch.Tensor, offset: int, block: BlockConfig) -> torch.Tensor:
+        """将 token IDs 映射为 hidden，加可选 PE和dropout。
+
+        Args:
+            ids: 非空 long [B,S]，与模型同设备且 ID 在词表内。
+            offset: 当前 chunk 的绝对位置起点 P。
+            block: 当前层 BlockConfig，决定输入 PE 与 dropout。
+
+        Returns:
+            float [B,S,D]；Sinusoidal配方加 PE[S,D]，其他配方只查表/dropout。
+        """
         if offset + ids.shape[1] > self.config.max_length:
             raise ValueError("sequence exceeds max_length")
-        x = self.embedding(ids)
+        x = self.embedding(ids)  # long[B,S] -> float[B,S,D]
         if block.attention.position.kind == "sinusoidal":
             positions = torch.arange(offset, offset + ids.shape[1], device=ids.device)
             dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
@@ -149,6 +184,15 @@ class Transformer(nn.Module):
         双向编码通常一次计算再复用；因果编码可分块追加，并拼接旧 hidden。
         编码缓存负责省去 Encoder 的重复计算，Cross cache 负责省去 Decoder
         中各层的重复 source 投影；两者的节省范围不同。
+
+        Args:
+            ids: long [B,S_new] 本次 source IDs。
+            valid: 可选 bool [B,S_new]。
+            past: 可选 causal EncoderMemory 前缀；双向 Encoder 不接受追加。
+            use_cache: 是否返回新状态；不原地修改既有缓存。
+
+        Returns:
+            EncoderMemory: hidden[B,P+S_new,D]、valid[B,P+S_new] 和可选逐层状态。
         """
         if self.config.architecture != "encoder_decoder":
             raise ValueError("encode() belongs to encoder-decoder models")
@@ -160,7 +204,7 @@ class Transformer(nn.Module):
         if past is not None:
             if past.hidden.shape[0] != ids.shape[0] or len(past.layers) != len(self.encoder_blocks):
                 raise ValueError("encoder cache batch/layer count mismatch")
-            valid = torch.cat((past.valid, valid), 1)
+            valid = torch.cat((past.valid, valid), 1)  # [B,P] + [B,S_new] -> [B,P+S_new]
         x = self.embed(ids, offset, ec)
         layers, routing, auxiliary = [], (), x.new_zeros(())
         for i, block in enumerate(self.encoder_blocks):
@@ -176,7 +220,7 @@ class Transformer(nn.Module):
             auxiliary, routing = auxiliary + aux, routing + stats
         x = self.encoder_norm(x)
         if past is not None:
-            x = torch.cat((past.hidden, x), 1)
+            x = torch.cat((past.hidden, x), 1)  # [B,P,D] + [B,S_new,D]
         return EncoderMemory(
             x,
             valid,
@@ -196,12 +240,24 @@ class Transformer(nn.Module):
         cache: ModelCache | None = None,
         use_cache: bool = False,
     ) -> ModelOutput:
-        """训练传完整 ids[B,T]；prefill 传前缀并 use_cache=True；decode 传新 chunk。
+        """训练传完整 ids[B,S]；prefill 传前缀并 use_cache=True；decode 传新 chunk。
 
         seq2seq 首次调用必须提供 source_ids 或 memory，二者互斥。
         已缓存会话拥有固定 source，后续仅传 cache，不允许换 source。
         use_cache=False 不返回状态，不影响 autograd；teacher forcing 的右移
         和标签对齐由 training.losses 负责，模型不会自行移动输入或标签。
+
+        Args:
+            ids: long [B,S_q] 本次 Decoder/Encoder IDs。
+            source_ids: 可选 long [B,S_kv] Encoder token IDs。
+            source_valid: 可选 bool [B,S_kv] Encoder 有效位置。
+            memory: 可选 EncoderMemory 或 float [B,S_kv,D] source hidden。
+            valid: 可选 bool [B,S_q]，只传本次 chunk。
+            cache: 已有单层/模型状态；None 表示没有历史。
+            use_cache: 是否返回新状态；不原地修改既有缓存。
+
+        Returns:
+            ModelOutput: logits[B,S_q,V]、hidden[B,S_q,D]、可选 ModelCache、scalar auxiliary loss、Routing。
         """
         c = self.config
         current_valid = self.validate_ids(ids, valid)
@@ -223,7 +279,7 @@ class Transformer(nn.Module):
                 raise ValueError(
                     "cached session owns encoder memory; start a new session to change source"
                 )
-        # 同一绝对 offset 传到所有层；valid 由本次 [B,T] 扩展成完整历史 [B,S]。
+        # 同一绝对 offset 传到所有层；valid 由本次 [B,S] 扩展成完整历史 [B,S]。
         offset = 0 if cache is None else cache.length
         full_valid = current_valid if cache is None else torch.cat((cache.valid, current_valid), 1)
         auxiliary, routing = self.embedding.weight.new_zeros(()), ()
@@ -283,10 +339,19 @@ class Transformer(nn.Module):
             if use_cache
             else None
         )
+        # 输出当前chunk：hidden[B,S_q,D] -> head logits[B,S_q,V]；cache保留完整历史。
         return ModelOutput(self.head(x), x, result_cache, auxiliary, routing)
 
     @torch.no_grad()
     def update_router_bias(self, routing: Routing) -> None:
+        """在 optimizer step 后更新每个 MoE 的选择偏置。
+
+        Args:
+            routing: (MoE module, long counts[E]) 组成的记录 tuple。
+
+        Returns:
+            None；调用 Routing 中各 MoE的偏置更新。
+        """
         for expert, counts in routing:
             expert.update_balance(counts)
 
@@ -307,6 +372,18 @@ class Transformer(nn.Module):
         cached=True: 一次 prefill，随后每次只输入最新 token；
         cached=False: 每次重算完整前缀，用作数值对照。seq2seq memory 只编码一次。
         函数暂时进入 eval/no_grad，再恢复原 training 标志；EOS 后保持 EOS。
+
+        Args:
+            prompt: 无 padding 的非空 long [B,S_prompt]。
+            max_new_tokens: 要生成的新 token 数，非负整数。
+            source_ids: 可选 long [B,S_kv] Encoder token IDs。
+            memory: 可选 EncoderMemory 或 float [B,S_kv,D] source hidden。
+            source_valid: 可选 bool [B,S_kv] Encoder 有效位置。
+            eos_id: 可选 EOS ID；生成遇到 EOS 后停止或保持 EOS。
+            cached: 是否使用 KV Cache，False 时每步完整重算。
+
+        Returns:
+            long [B,S_prompt+N_generated]；N_generated≤max_new_tokens。
         """
         if self.config.architecture == "encoder":
             raise ValueError("generation requires a decoder")
@@ -336,7 +413,7 @@ class Transformer(nn.Module):
                     current, memory=memory if cache is None else None, cache=cache, use_cache=cached
                 )
                 cache = output.cache
-                token = output.logits[:, -1].argmax(-1)
+                token = output.logits[:, -1].argmax(-1)  # [B,V] -> long[B]
                 if eos_id is not None:
                     token = torch.where(finished, eos_id, token)
                     finished |= token == eos_id

@@ -24,23 +24,47 @@ class QuantizedTensor:
 
     @classmethod
     def encode(cls, x: torch.Tensor) -> QuantizedTensor:
+        """对每个末维向量生成对称 int8 codes和scale。
+
+        Args:
+            x: 任意非空末维的有限 float tensor [...,D]。
+
+        Returns:
+            QuantizedTensor: int8 codes[...,D]、float scales[...,1]、原 dtype。
+        """
         if not x.is_floating_point() or not torch.isfinite(x).all():
             raise ValueError("quantization requires finite floating point tensors")
         work = x.float() if x.dtype != torch.float64 else x
-        scale = work.abs().amax(-1, keepdim=True) / 127
+        scale = work.abs().amax(-1, keepdim=True) / 127  # [...,D] -> [...,1]
         scale = torch.where(scale > 0, scale, torch.ones_like(scale))
         return cls((work / scale).round().clamp(-127, 127).to(torch.int8), scale, x.dtype)
 
     def decode(self) -> torch.Tensor:
+        """将 int8 codes和scale还原为原dtype浮点值。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            重建 float tensor，与原 tensor shape/dtype相同。
+        """
         return (self.codes.to(self.scales.dtype) * self.scales).to(self.dtype)
 
     @property
     def nbytes(self) -> int:
+        """统计实际 tensor 存储字节。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            int tensor存储字节数。
+        """
         return self.codes.numel() + self.scales.numel() * self.scales.element_size()
 
 
 class PagedKVCache:
-    """教学页表：K/V 按序列轴分成 [B,G,page_size,d] 的 Tensor pages。
+    """教学页表：K/V 按序列轴分成 [B,H_kv,page_size,D_h] 的 Tensor pages。
 
     fork 共享只读前缀；append 对不满页进行 copy-on-write，避免分支污染。
     materialize 拼回连续张量供普通 Attention 使用，会分配/拷贝完整前缀。
@@ -49,24 +73,49 @@ class PagedKVCache:
     """
 
     def __init__(self, page_size: int = 16) -> None:
+        """根据尺寸和配置创建参数/子层。
+
+        Args:
+            page_size: 每个 Tensor page 的 token 容量。
+
+        Returns:
+            None；参数与子层注册在 self 中。
+        """
         if type(page_size) is not int or page_size < 1:
             raise ValueError("page_size must be positive")
         self.page_size = page_size
         self.pages: list[tuple[torch.Tensor, torch.Tensor]] = []
 
     def fork(self) -> PagedKVCache:
+        """创建共享只读前缀的分页缓存分支。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            新 PagedKVCache，对已有只读完整 pages共享引用。
+        """
         result = PagedKVCache(self.page_size)
         result.pages = list(self.pages)
         return result
 
     def append(self, key: torch.Tensor, value: torch.Tensor) -> None:
+        """沿 sequence轴追加新的 K/V，维护状态语义。
+
+        Args:
+            key: float [B,H_kv,S_new,D_h] 待追加/压缩的 keys。
+            value: float [B,H_kv,S_new,D_v] 待追加/压缩的 values。
+
+        Returns:
+            None；按 sequence轴增加 pages，部分页采用 copy-on-write。
+        """
         if (
             key.ndim != 4
             or value.ndim != 4
             or key.shape[:3] != value.shape[:3]
             or key.shape[-2] == 0
         ):
-            raise ValueError("expected nonempty aligned [B,H,T,D] tensors")
+            raise ValueError("expected nonempty aligned [B,H_q,S,D] tensors")
         if self.pages:
             k, v = self.pages[0]
             if any(
@@ -95,10 +144,26 @@ class PagedKVCache:
             )
 
     def materialize(self) -> KVCache:
+        """将分页 K/V拼接为连续张量。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            连续 KVCache：K[B,H_kv,S_kv,D_h]、V[B,H_kv,S_kv,D_v]；分配并拷贝。
+        """
         if not self.pages:
             raise ValueError("cache is empty")
         return KVCache(*(torch.cat([p[i] for p in self.pages], -2) for i in (0, 1)))
 
     @property
     def block_table(self) -> tuple[int, ...]:
+        """读取教学页表中的 tensor对象标识。
+
+        Args:
+            无显式输入；读取实例字段。
+
+        Returns:
+            tuple[int,...]，各页 key tensor 的对象标识，不是 GPU 地址。
+        """
         return tuple(id(k) for k, _ in self.pages)

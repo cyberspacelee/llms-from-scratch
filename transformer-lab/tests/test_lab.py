@@ -23,11 +23,11 @@ from transformer_lab import (
 from transformer_lab.analysis import attention_cost, ffn_cost, parameter_count
 from transformer_lab.attention.position import apply_rope, sinusoidal
 from transformer_lab.cache import KVCache, ModelCache, PagedKVCache, QuantizedTensor
+from transformer_lab.chapters import CHAPTERS, run_chapter
+from transformer_lab.chapters.ch01_naive_transformer import NaiveTransformer, to_core
 from transformer_lab.experiments.presets import PRESETS, preset
 from transformer_lab.inference import compressed_causal_attention, greedy_speculative_generate
 from transformer_lab.layers import FeedForward, LayerNorm, MixtureOfExperts, RMSNorm
-from transformer_lab.tutorials.evolution import LESSONS, lift_mvp, run_lesson
-from transformer_lab.tutorials.mvp import MinimalTransformer
 
 
 class LabTests(unittest.TestCase):
@@ -222,7 +222,7 @@ class LabTests(unittest.TestCase):
 
     def test_padding_and_batch_isolation(self) -> None:
         valid = torch.tensor([[False, True, True, True, False, False, False], [True] * 7])
-        for name in ("llama", "deepseek", "qwen_hybrid", "classic"):
+        for name in ("llama", "deepseek_v3", "qwen3_hybrid", "classic"):
             model = Transformer(preset(name)).double().eval()
             source = self.ids if name == "classic" else None
             source_valid = valid if source is not None else None
@@ -326,7 +326,7 @@ class LabTests(unittest.TestCase):
         dtypes = [torch.float32]
         if torch.cuda.is_bf16_supported():
             dtypes.append(torch.bfloat16)
-        for name in ("classic", "llama", "deepseek", "qwen_hybrid"):
+        for name in ("classic", "llama", "deepseek_v3", "qwen3_hybrid"):
             for dtype in dtypes:
                 with self.subTest(preset=name, dtype=dtype):
                     model = Transformer(preset(name)).to(device=device, dtype=dtype).eval()
@@ -495,7 +495,7 @@ class LabTests(unittest.TestCase):
         self.assert_close(QuantizedTensor.encode(torch.zeros_like(k)).decode(), torch.zeros_like(k))
 
     def test_generation_speculation_and_optimizer_step(self) -> None:
-        for name in ("classic", "llama", "deepseek", "qwen_hybrid"):
+        for name in ("classic", "llama", "deepseek_v3", "qwen3_hybrid"):
             config = preset(name)
             model = Transformer(config).double().train()
             source = self.ids[:, :4] if config.architecture == "encoder_decoder" else None
@@ -562,25 +562,25 @@ class LabTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 call()
 
-    def test_mvp_to_configurable_outputs_and_gradients(self) -> None:
+    def test_naive_to_core_outputs_and_gradients(self) -> None:
         """教学入口与核心版本共享数学，而不是仅检查尺寸能对上。"""
-        mvp = MinimalTransformer().double().eval()
-        core = lift_mvp(mvp)
+        naive = NaiveTransformer().double().eval()
+        core = to_core(naive)
         source, decoder = self.ids[:, :3], self.ids[:, :5]
-        expected = mvp(source, decoder)
+        expected = naive(source, decoder)
         actual = core(decoder, source_ids=source).logits
         self.assert_close(expected, actual)
         expected.square().mean().backward()
         actual.square().mean().backward()
-        self.assert_close(mvp.embedding.weight.grad, core.embedding.weight.grad)
-        self.assert_close(mvp.cross_attention.q.weight.grad, core.blocks[0].cross.q.weight.grad)
+        self.assert_close(naive.embedding.weight.grad, core.embedding.weight.grad)
+        self.assert_close(naive.cross_attention.q.weight.grad, core.blocks[0].cross.q.weight.grad)
 
-    def test_evolution_lessons(self) -> None:
+    def test_chapters(self) -> None:
         """每个教程自带原理不变量，整条路线能在 CPU 上独立执行。"""
-        for step in range(len(LESSONS)):
+        for step in range(1, len(CHAPTERS) + 1):
             with self.subTest(step=step):
-                report = run_lesson(step, torch.device("cpu"))
-                self.assertEqual(report["step"], f"{step:02}")
+                report = run_chapter(step, torch.device("cpu"))
+                self.assertEqual(report["chapter"], f"{step:02}")
 
 
 if __name__ == "__main__":

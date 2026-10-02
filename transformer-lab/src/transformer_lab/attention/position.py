@@ -20,6 +20,15 @@ def rotary_frequencies(
     linear 全部除 factor；固定 NTK 调整 base；YaRN 按频段混合原频率
     与插值频率。factor 在整次实验中固定，避免 decode 随长度改变频率后
     新 Q 与已缓存 K 使用不同坐标系。参数量为零，不缓存 token 状态。
+
+    Args:
+        dim: 偶数 rotary width D_r。
+        config: 本模块的显式配置对象。
+        device: 可选输出设备，None 使用 PyTorch 默认设备。
+        dtype: 位置编码/统计计算的浮点 dtype。
+
+    Returns:
+        float angular frequencies[D_r/2]，位于指定 device/dtype。
     """
     if dim < 2 or dim % 2:
         raise ValueError("RoPE needs a positive even dimension")
@@ -34,6 +43,14 @@ def rotary_frequencies(
     elif config.scaling == "yarn":
 
         def correction(rotations: float) -> float:
+            """将目标旋转圈数换算成频率坐标。
+
+            Args:
+                rotations: 在原始上下文范围内的目标旋转圈数，正数。
+
+            Returns:
+                float 频率坐标，用于构造 YaRN 插值区间。
+            """
             return (
                 dim
                 * math.log(config.original_length / (rotations * 2 * math.pi))
@@ -52,7 +69,16 @@ def rotary_frequencies(
 def sinusoidal(
     positions: torch.Tensor, dim: int, dtype: torch.dtype = torch.float32
 ) -> torch.Tensor:
-    """PE(p,2i)=sin(p*omega_i)，PE(p,2i+1)=cos(p*omega_i)，返回 [...,D]。"""
+    """PE(p,2i)=sin(p*omega_i)，PE(p,2i+1)=cos(p*omega_i)，返回 [...,D]。
+
+    Args:
+        positions: 位置坐标 [...]，常用 [S]。
+        dim: Sinusoidal 输出宽度 D，允许奇数。
+        dtype: 位置编码/统计计算的浮点 dtype。
+
+    Returns:
+        float PE[...,D]，常用 [S,D]。
+    """
     if dim < 1:
         raise ValueError("encoding dimension must be positive")
     # Also supports odd d_model (the last cosine is omitted).
@@ -66,18 +92,27 @@ def apply_rope(
 ) -> torch.Tensor:
     """相邻维度 (a,b) 旋转为 (a*cos-b*sin, a*sin+b*cos)。
 
-    x [B,H,T,D]，positions [T] -> 相同形状。旋转保持范数，
+    x [B,H_q,S,D_h]，positions [S] -> 相同形状。旋转保持范数，
     R(p)q 与 R(s)k 的点积取决于相对位置 p-s。只用于 Q/K，不旋转 V。
     phase 在 fp32/fp64 计算，输出恢复输入 dtype，设备从 x 派生。
+
+    Args:
+        x: float [B,H,S,D_h]，D_h 必须为偶数。
+        positions: [S] 位置坐标，RoPE 长度必须与序列轴一致。
+        config: 本模块的显式配置对象。
+
+    Returns:
+        rotated tensor[B,H,S,D_h]，shape/device/dtype 不变。
     """
     if x.ndim != 4 or positions.ndim != 1 or positions.numel() != x.shape[-2]:
-        raise ValueError("expected [B,H,T,D] and positions [T]")
+        raise ValueError("expected [B,H_q,S,D_h] and positions [S]")
     config = config or PositionConfig()
     dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+    # positions[S] * frequencies[D_h/2] -> phase[S,D_h/2]，广播到batch/head。
     phase = positions.to(device=x.device, dtype=dtype)[:, None] * rotary_frequencies(
         x.shape[-1], config, x.device, dtype
     )
-    a, b = x.to(dtype)[..., 0::2], x.to(dtype)[..., 1::2]
+    a, b = x.to(dtype)[..., 0::2], x.to(dtype)[..., 1::2]  # 每个 [B,H,S,D_h/2]
     return (
         torch.stack((a * phase.cos() - b * phase.sin(), a * phase.sin() + b * phase.cos()), -1)
         .flatten(-2)

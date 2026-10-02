@@ -16,6 +16,15 @@ from ..training import language_model_loss, teacher_forcing, token_loss
 
 
 def consistency(config: ModelConfig, device: torch.device) -> dict[str, object]:
+    """用小张量核对完整、分块缓存前向和 greedy生成一致。
+
+    Args:
+        config: 本模块的显式配置对象。
+        device: 执行 torch.device，默认由 CLI 选择 CPU。
+
+    Returns:
+        dict 报告：logits shape、参数、cache误差/字节和 greedy tokens。
+    """
     model = Transformer(config).to(device).double().eval()
     ids = torch.arange(7, device=device)[None].repeat(2, 1)
     source = torch.flip(ids[:, :5], (1,)) if config.architecture == "encoder_decoder" else None
@@ -54,7 +63,17 @@ def consistency(config: ModelConfig, device: torch.device) -> dict[str, object]:
 def train(
     config: ModelConfig, steps: int, device: torch.device, output_path: str | None = None
 ) -> dict[str, object]:
-    """Learn a deterministic cyclic sequence / copy task, no external tokenizer/data."""
+    """Learn a deterministic cyclic sequence / copy task, no external tokenizer/data.
+
+    Args:
+        config: 本模块的显式配置对象。
+        steps: optimizer 更新次数，正整数。
+        device: 执行 torch.device，默认由 CLI 选择 CPU。
+        output_path: 可选 .pt checkpoint 路径；创建父目录并保存当前状态。
+
+    Returns:
+        dict 训练报告；可选将配置、模型/optimizer权重保存至 output_path。
+    """
     model = Transformer(config).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
     tokens = torch.arange(1, 9, device=device)[None].repeat(4, 1)
@@ -104,6 +123,14 @@ def train(
 
 
 def ledger(length: int) -> dict[str, dict[str, int]]:
+    """生成不同 Attention 配方的理论成本表。
+
+    Args:
+        length: 待分析/计时的 sequence length S。
+
+    Returns:
+        dict[str,dict[str,int]]，各种 Attention的理论成本。
+    """
     return {
         kind: attention_cost(
             AttentionConfig(
@@ -120,6 +147,16 @@ def ledger(length: int) -> dict[str, dict[str, int]]:
 
 
 def benchmark(device: torch.device, length: int, repeats: int) -> dict[str, object]:
+    """显式计时 decode，CUDA 时同步；不推断 SDPA 后端。
+
+    Args:
+        device: 执行 torch.device，默认由 CLI 选择 CPU。
+        length: 待分析/计时的 sequence length S。
+        repeats: 计时重复次数，正整数。
+
+    Returns:
+        dict 设备/torch版本与各实现 median_ms、cache bytes、CUDA峰值。
+    """
     x = torch.randn(1, length, 32, device=device)
     result = {}
     for kind in ("mha", "gqa", "mla"):

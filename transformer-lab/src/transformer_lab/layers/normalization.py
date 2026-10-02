@@ -14,11 +14,28 @@ class RMSNorm(nn.Module):
     """
 
     def __init__(self, dim: int, eps: float = 1e-6) -> None:
+        """根据尺寸和配置创建参数/子层。
+
+        Args:
+            dim: 最后一维的归一化宽度 D。
+            eps: 归一化分母中的稳定常数。
+
+        Returns:
+            None；参数与子层注册在 self 中。
+        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """执行本模块的前向计算；输入与输出 shape 约定如下。
+
+        Args:
+            x: float [...,D]，例如 [B,S,D]。
+
+        Returns:
+            normalized tensor，同输入 shape；统计 [...,1]。
+        """
         work = x if x.dtype == torch.float64 else x.float()
         return (work * torch.rsqrt(work.square().mean(-1, keepdim=True) + self.eps)).to(
             x.dtype
@@ -33,12 +50,29 @@ class LayerNorm(nn.Module):
     """
 
     def __init__(self, dim: int, eps: float = 1e-5) -> None:
+        """根据尺寸和配置创建参数/子层。
+
+        Args:
+            dim: 最后一维的归一化宽度 D。
+            eps: 归一化分母中的稳定常数。
+
+        Returns:
+            None；参数与子层注册在 self 中。
+        """
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.bias = nn.Parameter(torch.zeros(dim))
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """执行本模块的前向计算；输入与输出 shape 约定如下。
+
+        Args:
+            x: float [...,D]，例如 [B,S,D]。
+
+        Returns:
+            normalized tensor，同输入 shape；mean/variance [...,1]。
+        """
         work = x if x.dtype == torch.float64 else x.float()
         centered = work - work.mean(-1, keepdim=True)
         return (centered * torch.rsqrt(centered.square().mean(-1, keepdim=True) + self.eps)).to(
@@ -47,4 +81,13 @@ class LayerNorm(nn.Module):
 
 
 def make_norm(kind: str, dim: int) -> RMSNorm | LayerNorm:
+    """按名称构造 LayerNorm/RMSNorm。
+
+    Args:
+        kind: 组件类型名，必须为该函数支持的实现。
+        dim: 最后一维的归一化宽度 D。
+
+    Returns:
+        新 LayerNorm 或 RMSNorm 实例。
+    """
     return {"rms": RMSNorm, "layer": LayerNorm}[kind](dim)

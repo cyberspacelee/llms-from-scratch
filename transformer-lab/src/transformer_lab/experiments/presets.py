@@ -8,6 +8,15 @@ from ..config import AttentionConfig, BlockConfig, ModelConfig, PositionConfig
 
 
 def preset(name: str, architecture: str | None = None) -> ModelConfig:
+    """根据名称创建小规模教学配方，不加载官方权重。
+
+    Args:
+        name: 教学配方名称，必须出现在 PRESETS。
+        architecture: 可选架构覆盖：encoder/decoder/encoder_decoder。
+
+    Returns:
+        ModelConfig 教学配方。
+    """
     rope = PositionConfig()
     gqa = AttentionConfig(position=rope)
     modern = BlockConfig(attention=gqa)
@@ -19,8 +28,10 @@ def preset(name: str, architecture: str | None = None) -> ModelConfig:
             norm_order="post",
         )
         result = ModelConfig(architecture="encoder_decoder", block=block)
-    elif name in {"llama", "qwen"}:
-        result = ModelConfig(block=replace(modern, attention=replace(gqa, qk_norm=name == "qwen")))
+    elif name in {"llama", "qwen3_dense"}:
+        result = ModelConfig(
+            block=replace(modern, attention=replace(gqa, qk_norm=name == "qwen3_dense"))
+        )
     elif name in {"gemma", "gpt_oss"}:
         local = replace(
             modern,
@@ -29,7 +40,7 @@ def preset(name: str, architecture: str | None = None) -> ModelConfig:
             experts=4 if name == "gpt_oss" else 0,
         )
         result = ModelConfig(layers=2, block=modern, layer_blocks=(local, modern))
-    elif name in {"deepseek", "kimi"}:
+    elif name in {"deepseek_v3", "kimi_k2"}:
         mla = AttentionConfig(kind="mla", position=rope)
         block = replace(
             modern,
@@ -40,8 +51,8 @@ def preset(name: str, architecture: str | None = None) -> ModelConfig:
             router_score="sigmoid",
             balance="bias",
         )
-        result = ModelConfig(block=block, mtp_depth=1 if name == "deepseek" else 0)
-    elif name in {"qwen_hybrid", "kimi_linear"}:
+        result = ModelConfig(block=block, mtp_depth=1 if name == "deepseek_v3" else 0)
+    elif name in {"qwen3_hybrid", "kimi_linear"}:
         recurrent = replace(
             modern,
             attention=AttentionConfig(kind="gated_delta", position=PositionConfig(kind="none")),
@@ -64,12 +75,12 @@ def preset(name: str, architecture: str | None = None) -> ModelConfig:
 PRESETS = (
     "classic",
     "llama",
-    "qwen",
+    "qwen3_dense",
     "gemma",
     "gpt_oss",
-    "deepseek",
-    "kimi",
-    "qwen_hybrid",
+    "deepseek_v3",
+    "kimi_k2",
+    "qwen3_hybrid",
     "kimi_linear",
     "irope",
     "causal_seq2seq",
