@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from .config import AttentionConfig
+from ..config import AttentionConfig
 
 
 def attention_mask(
@@ -14,6 +14,12 @@ def attention_mask(
     causal: bool = False,
     key_valid: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """根据绝对 q/k 位置生成 [1或B,1,Q,S] 可见性，随后叠加 padding。
+
+    causal 使用 k<=q；decode 的 q 通常从 S-1 开始，不能用一个局部 tril
+    代替此条件。pattern 只改变可见关系，本函数仍生成密集 mask，
+    不会自动减少 Q*S 的 score 分配；真实稀疏计算见 gathered_attention。
+    """
     q, k = query_positions[:, None], key_positions[None, :]
     visible = torch.ones((q.numel(), k.numel()), device=q.device, dtype=torch.bool)
     if config.pattern == "sliding":

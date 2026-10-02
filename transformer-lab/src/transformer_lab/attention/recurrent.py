@@ -6,11 +6,25 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .cache import RecurrentCache
-from .config import AttentionConfig
+from ..cache import RecurrentCache
+from ..config import AttentionConfig
 
 
 class RecurrentAttention(nn.Module):
+    """用固定矩阵状态代替随长度增长的 KV 序列；只支持因果 self-attention。
+
+    Linear: S+=phi(k)⊗v，z+=phi(k)，y=phi(q)ᵀS/(phi(q)ᵀz)。
+    Delta: S+=beta*k⊗(v-kᵀS)，用预测误差更新关联记忆。
+    Gated Delta: 先 S'=alpha*S，再 S=S'+beta*k⊗(v-kᵀS')。
+    Delta 的 Q/K 做单位范数归一化；beta/alpha 是每 token、每 head 的标量。
+    这是原理递归，不包含完整 KDA 的逐通道门或专用 chunkwise kernel。
+
+    输入 [B,T,D]，输出同形状；state=[B,H,d,v]，linear 额外 z=[B,H,d]。
+    训练/prefill 顺序遍历 T，decode 只更新一个 token，状态空间 O(BHdv)。
+    所有步骤保留梯度；长序列训练仍需保存反向中间量，不能把推理状态
+    的固定大小解释成训练总内存固定。精确成本见 analysis.attention_cost。
+    """
+
     def __init__(self, dim: int, config: AttentionConfig) -> None:
         super().__init__()
         self.config = config
@@ -95,6 +109,7 @@ class RecurrentAttention(nn.Module):
                 z = normalizer + ki
                 normalizer = torch.where(active.squeeze(-1), z, normalizer)
             else:
+                # 先衰减旧记忆，再估计旧状态在当前 key 上的 value；只写入残差。
                 decayed = state if decay is None else decay[:, :, i, None, None] * state
                 residual = vi - (ki.unsqueeze(-2) @ decayed).squeeze(-2)
                 updated = decayed + beta[:, :, i, None, None] * ki.unsqueeze(

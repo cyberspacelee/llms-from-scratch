@@ -21,11 +21,13 @@ from transformer_lab import (
     token_loss,
 )
 from transformer_lab.analysis import attention_cost, ffn_cost, parameter_count
+from transformer_lab.attention.position import apply_rope, sinusoidal
 from transformer_lab.cache import KVCache, ModelCache, PagedKVCache, QuantizedTensor
+from transformer_lab.experiments.presets import PRESETS, preset
 from transformer_lab.inference import compressed_causal_attention, greedy_speculative_generate
 from transformer_lab.layers import FeedForward, LayerNorm, MixtureOfExperts, RMSNorm
-from transformer_lab.position import apply_rope, sinusoidal
-from transformer_lab.presets import PRESETS, preset
+from transformer_lab.tutorials.evolution import LESSONS, lift_mvp, run_lesson
+from transformer_lab.tutorials.mvp import MinimalTransformer
 
 
 class LabTests(unittest.TestCase):
@@ -559,6 +561,26 @@ class LabTests(unittest.TestCase):
         for call in calls:
             with self.assertRaises(ValueError):
                 call()
+
+    def test_mvp_to_configurable_outputs_and_gradients(self) -> None:
+        """教学入口与核心版本共享数学，而不是仅检查尺寸能对上。"""
+        mvp = MinimalTransformer().double().eval()
+        core = lift_mvp(mvp)
+        source, decoder = self.ids[:, :3], self.ids[:, :5]
+        expected = mvp(source, decoder)
+        actual = core(decoder, source_ids=source).logits
+        self.assert_close(expected, actual)
+        expected.square().mean().backward()
+        actual.square().mean().backward()
+        self.assert_close(mvp.embedding.weight.grad, core.embedding.weight.grad)
+        self.assert_close(mvp.cross_attention.q.weight.grad, core.blocks[0].cross.q.weight.grad)
+
+    def test_evolution_lessons(self) -> None:
+        """每个教程自带原理不变量，整条路线能在 CPU 上独立执行。"""
+        for step in range(len(LESSONS)):
+            with self.subTest(step=step):
+                report = run_lesson(step, torch.device("cpu"))
+                self.assertEqual(report["step"], f"{step:02}")
 
 
 if __name__ == "__main__":

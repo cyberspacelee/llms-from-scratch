@@ -1,19 +1,16 @@
-"""Teacher forcing, NTP and sequential future-token-conditioned MTP."""
+"""Teacher Forcing、Next-Token 和 MTP 联合损失；显式处理标签对齐。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .config import BlockConfig
-from .layers import Routing
-
-if TYPE_CHECKING:
-    from .model import ModelOutput, Transformer
 import torch
-from torch import nn
 from torch.nn import functional as F
 
-from .layers import RMSNorm
+from ..layers import Routing
+
+if TYPE_CHECKING:
+    from ..models import ModelOutput, Transformer
 
 
 def teacher_forcing(
@@ -53,55 +50,9 @@ def token_loss(
 def next_token_loss(
     logits: torch.Tensor, tokens: torch.Tensor, valid: torch.Tensor | None = None
 ) -> torch.Tensor:
+    """logits[:,t] 监督 tokens[:,t+1]，丢掉没有 next-token 标签的最后一位。"""
     mask = None if valid is None else valid[:, :-1] & valid[:, 1:]
     return token_loss(logits[:, :-1], tokens[:, 1:], mask)
-
-
-class MultiTokenPrediction(nn.Module):
-    """Depth j consumes the true future token x(t+j), predicts x(t+j+1).
-
-    Shared embedding/output weights live in the parent model, avoiding duplicate
-    state_dict entries. Each depth has its own projection and Transformer block.
-    """
-
-    def __init__(self, dim: int, config: BlockConfig, depth: int) -> None:
-        super().__init__()
-        from .model import TransformerBlock
-
-        self.hidden_norms = nn.ModuleList([RMSNorm(dim) for _ in range(depth)])
-        self.token_norms = nn.ModuleList([RMSNorm(dim) for _ in range(depth)])
-        self.projections = nn.ModuleList(
-            [nn.Linear(2 * dim, dim, bias=False) for _ in range(depth)]
-        )
-        self.blocks = nn.ModuleList([TransformerBlock(dim, config) for _ in range(depth)])
-        self.output_norms = nn.ModuleList([RMSNorm(dim) for _ in range(depth)])
-
-    def forward(
-        self,
-        hidden: torch.Tensor,
-        tokens: torch.Tensor,
-        embedding: nn.Embedding,
-        head: nn.Linear,
-        valid: torch.Tensor | None = None,
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor, Routing]:
-        if hidden.shape[:2] != tokens.shape or tokens.ndim != 2:
-            raise ValueError("MTP needs aligned hidden states and tokens")
-        valid = torch.ones_like(tokens, dtype=torch.bool) if valid is None else valid
-        h, outputs, auxiliary, routing = hidden, [], hidden.new_zeros(()), ()
-        active = valid
-        for i, block in enumerate(self.blocks):
-            if h.shape[1] < 3:
-                break
-            h = h[:, :-1]
-            future = embedding(tokens[:, i + 1 :])
-            active = active[:, :-1] & valid[:, i + 1 :]
-            h = self.projections[i](
-                torch.cat((self.hidden_norms[i](h), self.token_norms[i](future)), -1)
-            )
-            h, _, aux, stats = block(h, True, active)
-            outputs.append(head(self.output_norms[i](h))[:, :-1])
-            auxiliary, routing = auxiliary + aux, routing + stats
-        return tuple(outputs), auxiliary, routing
 
 
 def language_model_loss(
@@ -112,6 +63,12 @@ def language_model_loss(
     mtp_weight: float = 0.3,
     auxiliary_weight: float = 0.01,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor], Routing]:
+    """L=NTP + mtp_weight*mean(MTP_j) + auxiliary_weight*MoE_aux。
+
+    返回可 backward 的总损失、各深度诊断损失和显式 routing 记录。
+    MTP 的有效 mask 覆盖当前位置到未来标签之间的全部 token，不能跨 padding
+    把互不连续的文本当成一个预测链。普通 generate 只使用 NTP 主 head。
+    """
     if mtp_weight < 0 or auxiliary_weight < 0:
         raise ValueError("loss weights must be nonnegative")
     losses = {"ntp": next_token_loss(output.logits, tokens, valid)}

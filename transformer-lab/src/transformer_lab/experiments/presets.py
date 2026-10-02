@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from .config import AttentionConfig, BlockConfig, ModelConfig, PositionConfig
+from ..config import AttentionConfig, BlockConfig, ModelConfig, PositionConfig
 
 
 def preset(name: str, architecture: str | None = None) -> ModelConfig:

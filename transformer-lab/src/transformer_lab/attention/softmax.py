@@ -1,4 +1,4 @@
-"""Explicit softmax attention. No nn.MultiheadAttention/Transformer wrappers."""
+"""显式 Softmax Attention 与统一 MHA/MQA/GQA 实现。"""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .cache import KVCache
-from .config import AttentionConfig
-from .layers import RMSNorm
-from .masks import attention_mask, masked_softmax
+from ..cache import KVCache
+from ..config import AttentionConfig
+from ..layers.normalization import RMSNorm
+from .patterns import attention_mask, masked_softmax
 from .position import apply_rope
 
 
@@ -22,7 +22,14 @@ def scaled_dot_product_attention(
     training: bool = False,
     scale: float | None = None,
 ) -> torch.Tensor:
-    """Q [B,H,Q,Dk], K [B,H,K,Dk], V [B,H,K,Dv] -> [B,H,Q,Dv]."""
+    """Attention(Q,K,V) = softmax(QKᵀ / sqrt(Dk) + mask)V。
+
+    Q [B,H,Q,Dk]、K [B,H,S,Dk]、V [B,H,S,Dv] -> [B,H,Q,Dv]。
+    visible 为可广播到 [B,H,Q,S] 的 bool 张量，True 表示允许读取。
+    原语没有参数；两次 matmul 约 2*B*H*Q*S*(Dk+Dv) FLOPs，
+    scores/weights 占 O(B*H*Q*S) 空间。训练、prefill、decode 的数学相同，
+    区别是调用者提供的 Q/S 长度及缓存；此函数自身不持有状态。
+    """
     if (
         q.ndim != 4
         or k.ndim != 4
@@ -87,7 +94,15 @@ def gathered_attention(
 
 
 class MultiHeadAttention(nn.Module):
-    """One implementation for MHA/MQA/GQA, self/cross, full/prefill/decode."""
+    """统一 MHA/MQA/GQA，以及 self/cross、训练/prefill/decode。
+
+    H 是 query head 数，G 是 KV head 数，d 是每头宽度：
+    Q: [B,T,D] -> [B,H,T,d]；K/V: [B,S,D] -> [B,G,S,d]。
+    MHA G=H，MQA G=1，GQA 1<G<H；缓存始终保留 G 个头。
+    bias-free 投影共 2*D*d*(H+G) 参数，QK-Norm 额外增加 2*d。
+    普通 KV 存储为 2*B*G*S*d 个元素；计算时临时扩展到 H 个头。
+    成本的精确配置对照见 analysis.attention_cost。
+    """
 
     def __init__(
         self, dim: int, config: AttentionConfig, dropout: float = 0.0, cross: bool = False
@@ -112,6 +127,13 @@ class MultiHeadAttention(nn.Module):
         causal: bool = False,
         key_valid: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, KVCache | None]:
+        """x 仅包含本次 query；key_valid 覆盖完整 key 前缀。
+
+        无 cache：训练/首次 prefill，从 x 或 encoder memory 投影 K/V。
+        self cache：query_offset 必须等于缓存长度，再追加本次 K/V。
+        cross cache：K/V 是静态 source 投影，decode 只更新 Q 的位置。
+        use_cache 控制是否返回状态；状态不会原地修改。
+        """
         c = self.config
         b, t, _ = x.shape
         h, g, d = c.heads, c.effective_kv_heads, c.head_dim
@@ -127,6 +149,8 @@ class MultiHeadAttention(nn.Module):
         qp = torch.arange(query_offset, query_offset + t, device=x.device)
         if c.position.kind == "rope":
             q = apply_rope(q, qp, c.position)
+        # Cross 的 S 来自输入序列，T 来自输出序列，两侧 RoPE 都从自身位置计数。
+        # 静态 Cross cache 不必在每个输出 token 上重算 encoder 的 K/V。
         if self.cross and cache is not None:
             next_cache = cache
         else:
@@ -155,6 +179,7 @@ class MultiHeadAttention(nn.Module):
         )
         # ponytail: expanded KV is temporary; grouped GPU kernels avoid the H/G replication.
         k, v = (a.repeat_interleave(h // g, 1) for a in (k, v))
+        # attention_factor 同时缩放 Q/K 的振幅，等价于 logits 乘其平方。
         scale = d**-0.5 * c.position.attention_factor**2
         if c.backend == "sdpa":
             y = F.scaled_dot_product_attention(
@@ -168,105 +193,3 @@ class MultiHeadAttention(nn.Module):
         else:
             y = scaled_dot_product_attention(q, k, v, visible, self.dropout, self.training, scale)
         return self.output(y.transpose(1, 2).reshape(b, t, -1)), next_cache if use_cache else None
-
-
-class MultiHeadLatentAttention(nn.Module):
-    """DeepSeek-style normalized KV latent + shared decoupled rotary key.
-
-    Both paths use the same latent cache. Naive reconstructs K/V; absorbed
-    contracts Q with W_UK and absorbs W_UV into W_O, retaining autograd.
-    """
-
-    def __init__(
-        self, dim: int, config: AttentionConfig, dropout: float = 0.0, cross: bool = False
-    ) -> None:
-        super().__init__()
-        self.config, self.dim, self.cross, self.dropout = config, dim, cross, dropout
-        h, d, r, rank = config.heads, config.head_dim, config.rope_dim, config.kv_rank
-        if config.q_rank:
-            self.q_down = nn.Linear(dim, config.q_rank, bias=False)
-            self.q_norm = RMSNorm(config.q_rank)
-            self.q_up = nn.Linear(config.q_rank, h * (d + r), bias=False)
-        else:
-            self.q_down = nn.Identity()
-            self.q_norm = nn.Identity()
-            self.q_up = nn.Linear(dim, h * (d + r), bias=False)
-        self.kv_down = nn.Linear(dim, rank, bias=False)
-        self.kv_norm = RMSNorm(rank)
-        self.k_rope = nn.Linear(dim, r, bias=False)
-        self.k_up = nn.Linear(rank, h * d, bias=False)
-        self.v_up = nn.Linear(rank, h * config.value_dim, bias=False)
-        self.output = nn.Linear(h * config.value_dim, dim, bias=False)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        memory: torch.Tensor | None = None,
-        cache: KVCache | None = None,
-        use_cache: bool = False,
-        query_offset: int = 0,
-        causal: bool = False,
-        key_valid: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, KVCache | None]:
-        c = self.config
-        b, t, _ = x.shape
-        if not self.cross and cache is None and query_offset != 0:
-            raise ValueError("nonzero MLA position requires a prefix cache")
-        if cache is not None:
-            if not isinstance(cache, KVCache):
-                raise ValueError("expected a latent KVCache")
-            cache.validate(b, 1, c.kv_rank, c.rope_dim, x, self.cross)
-            if not self.cross and query_offset != cache.length:
-                raise ValueError("append position must equal cached prefix length")
-        q = (
-            self.q_up(self.q_norm(self.q_down(x)))
-            .reshape(b, t, c.heads, c.head_dim + c.rope_dim)
-            .transpose(1, 2)
-        )
-        qc, qr = q.split((c.head_dim, c.rope_dim), -1)
-        qp = torch.arange(query_offset, query_offset + t, device=x.device)
-        if c.position.kind == "rope":
-            qr = apply_rope(qr, qp, c.position)
-        if self.cross and cache is not None:
-            next_cache = cache
-        else:
-            source = memory if self.cross else x
-            if (
-                source is None
-                or source.ndim != 3
-                or source.shape[0] != b
-                or source.shape[-1] != self.dim
-            ):
-                raise ValueError("cross MLA requires compatible encoder memory")
-            latent = self.kv_norm(self.kv_down(source)).unsqueeze(1)
-            kr = self.k_rope(source).unsqueeze(1)
-            start = 0 if self.cross else query_offset
-            kp = torch.arange(start, start + source.shape[1], device=x.device)
-            if c.position.kind == "rope":
-                kr = apply_rope(kr, kp, c.position)
-            next_cache = (
-                KVCache(latent, kr, self.cross) if cache is None else cache.append(latent, kr)
-            )
-        latent, kr = next_cache.key, next_cache.value
-        s = next_cache.length
-        visible = attention_mask(qp, torch.arange(s, device=x.device), c, causal, key_valid)
-        scale = (c.head_dim + c.rope_dim) ** -0.5 * c.position.attention_factor**2
-        if c.mla_impl == "naive":
-            kc = self.k_up(latent[:, 0]).reshape(b, s, c.heads, c.head_dim).transpose(1, 2)
-            v = self.v_up(latent[:, 0]).reshape(b, s, c.heads, c.value_dim).transpose(1, 2)
-            scores = (qc @ kc.transpose(-1, -2) + qr @ kr.transpose(-1, -2)) * scale
-            p = F.dropout(masked_softmax(scores, visible), self.dropout, self.training)
-            y = p @ v
-            y = self.output(y.transpose(1, 2).reshape(b, t, -1))
-        else:
-            wk = self.k_up.weight.reshape(c.heads, c.head_dim, c.kv_rank)
-            q_latent = torch.matmul(qc, wk)
-            scores = (q_latent @ latent.transpose(-1, -2) + qr @ kr.transpose(-1, -2)) * scale
-            p = F.dropout(masked_softmax(scores, visible), self.dropout, self.training)
-            context = p @ latent  # [B,H,T,L], no expanded K/V
-            wv = self.v_up.weight.reshape(c.heads, c.value_dim, c.kv_rank)
-            wo = self.output.weight.T.reshape(c.heads, c.value_dim, self.dim)
-            # Recompute from current weights, so optimizer steps cannot leave stale absorbed weights.
-            wvo = torch.matmul(wv.transpose(-1, -2), wo)  # [H,L,D]
-            y = torch.matmul(context, wvo).sum(1)
-        return y, next_cache if use_cache else None

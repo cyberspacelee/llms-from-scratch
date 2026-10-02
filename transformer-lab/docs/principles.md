@@ -8,7 +8,7 @@ $$
 P=\operatorname{softmax}\left(\frac{QK^\top}{\sqrt d}+M\right),\qquad O=PV.
 $$
 
-`scaled_dot_product_attention` 在 [attention.py](../src/transformer_lab/attention.py) 中实现。矩阵形状为 `Q[B,H,Q,d]`、`K[B,H,S,d]`、`V[B,H,S,v]`、`scores/P[B,H,Q,S]`、`O[B,H,Q,v]`。mask True 为可见，转换为 $0/-\infty$；全遮挡行先替换为有限分数，再乘零，避免 NaN 和 NaN 梯度。fp16/bf16 的 softmax 统计升为 fp32，fp64 保持 fp64。
+`scaled_dot_product_attention` 在 [attention/softmax.py](../src/transformer_lab/attention/softmax.py) 中实现。矩阵形状为 `Q[B,H,Q,d]`、`K[B,H,S,d]`、`V[B,H,S,v]`、`scores/P[B,H,Q,S]`、`O[B,H,Q,v]`。mask True 为可见，转换为 $0/-\infty$；全遮挡行先替换为有限分数，再乘零，避免 NaN 和 NaN 梯度。fp16/bf16 的 softmax 统计升为 fp32，fp64 保持 fp64。
 
 此原语无可训练参数。QK 和 PV 的 matmul FLOPs 合计 $2BHQ S(d+v)$；显式 scores 的元素数为 $BHQ S$。训练保留计算图并允许 Attention dropout；prefill 的 $Q$ 可以很大；decode 的 $Q=1$，仍读取历史 $K/V$。dropout 后的权重不再是逐行和严格为 1 的概率。
 
@@ -35,7 +35,7 @@ $$
 
 ## 3. Encoder、Decoder、Cross-Attention
 
-模型组装位于 [model.py](../src/transformer_lab/model.py)。
+模型组装位于 [models/transformer.py](../src/transformer_lab/models/transformer.py)。
 
 | 结构 | Query 来源 | Key/Value 来源 | 可见性 |
 | --- | --- | --- | --- |
@@ -51,11 +51,11 @@ Cross-Attention 的 query 长度和 source 长度不同；其 FLOPs 是 $O(BHQSd
 
 双向 Encoder 输出可以重复使用；不能追加后假设旧 hidden 不变。因果 Encoder 可用 `encode(..., past=..., use_cache=True)` 追加，与完整 Encoder 前向相等。当前 decoder 会话绑定固定 source；扩展 source 后应开新 decoder 会话，动态扩展 Cross cache 尚未接入。
 
-Teacher forcing 在 [objectives.py](../src/transformer_lab/objectives.py) 中：targets 为 `[y0,y1,...,EOS]`，输入为 `[BOS,y0,y1,...]`。因果 mask 确保并行训练不会看到当前位置的目标。自回归生成只给已生成前缀，逐步选择下一个 token；`generate` 用 greedy argmax，便于对比缓存与完整重算。
+Teacher forcing 在 [training/losses.py](../src/transformer_lab/training/losses.py) 中：targets 为 `[y0,y1,...,EOS]`，输入为 `[BOS,y0,y1,...]`。因果 mask 确保并行训练不会看到当前位置的目标。自回归生成只给已生成前缀，逐步选择下一个 token；`generate` 用 greedy argmax，便于对比缓存与完整重算。
 
 ## 4. Absolute PE、RoPE 和 Scaling
 
-[position.py](../src/transformer_lab/position.py) 实现相邻坐标配对。Sinusoidal：
+[attention/position.py](../src/transformer_lab/attention/position.py) 实现相邻坐标配对。Sinusoidal：
 
 $$
 PE(p,2i)=\sin(p\,10000^{-2i/D}),\quad
@@ -87,7 +87,7 @@ $$
 
 ## 5. MLA：特征维压缩与矩阵吸收
 
-[attention.py](../src/transformer_lab/attention.py) 的 `MultiHeadLatentAttention` 用内容维 $c$（配置 `head_dim`）、rotary 维 $r$、KV latent rank $L$、query rank $L_q$ 和 value 维 $v$。
+[mla.py](../src/transformer_lab/attention/mla.py) 的 `MultiHeadLatentAttention` 用内容维 $c$（配置 `head_dim`）、rotary 维 $r$、KV latent rank $L$、query rank $L_q$ 和 value 维 $v$。
 
 $$
 C^{KV}=\mathrm{RMSNorm}(XW_{DKV}),\qquad
@@ -120,11 +120,11 @@ $$
 s_{h,p,s}=\frac{Q^C_{h,p}(K^C_{h,s})^\top+Q^R_{h,p}(K^R_s)^\top}{\sqrt{c+r}}.
 $$
 
-吸收 Key 上投影：$\widetilde Q_h=Q_h^C W_{UK,h}^\top$（此处矩阵按 PyTorch weight `[out,in]` 记），直接与 latent 点积。将 Value 上投影与 head 对应的输出投影合并：
+下面的吸收公式按 PyTorch weight `[out,in]` 记：$W_{UK,h}\in\mathbb R^{c\times L}$、$W_{UV,h}\in\mathbb R^{v\times L}$，$W_{O,h}\in\mathbb R^{D\times v}$ 是输出权重中第 h 个 head 的列块。吸收 Key 上投影：$\widetilde Q_h=Q_h^C W_{UK,h}$，结果为 `[B,H,Q,L]`，直接与 latent 点积。将 Value 上投影与 head 对应的输出投影合并：
 
 $$
 Z_h=P_h C^{KV},\quad
-Y=\sum_h Z_h\underbrace{W_{UV,h}^\top W_{O,h}}_{W_{VO,h}\in\mathbb R^{L\times D}}.
+Y=\sum_h Z_h\underbrace{W_{UV,h}^\top W_{O,h}^\top}_{W_{VO,h}\in\mathbb R^{L\times D}}.
 $$
 
 普通 RoPE 不可任意穿过内容上投影矩阵，$R(p)W\ne WR(p)$；把位置支路解耦后，内容投影才可以按上述代数移动。MLA 对 Cross-Attention 也使用这个分离定义；source latent 和 rotary key 可静态复用。
@@ -147,7 +147,7 @@ $$
 
 ## 6. Full、Sliding、Local、Sparse
 
-[masks.py](../src/transformer_lab/masks.py) 以绝对位置计算可见性：
+[attention/patterns.py](../src/transformer_lab/attention/patterns.py) 以绝对位置计算可见性：
 
 | pattern | 规则，最后还与 causal $k\le q$ 相交 |
 | --- | --- |
@@ -165,7 +165,7 @@ $$
 
 ## 7. Block、Normalization 与 FFN
 
-[layers.py](../src/transformer_lab/layers.py)：
+[layers/](../src/transformer_lab/layers/)：
 
 $$
 \mathrm{LN}(x)=\gamma\frac{x-\mu}{\sqrt{\operatorname{mean}[(x-\mu)^2]+\epsilon}}+\beta,
@@ -228,7 +228,7 @@ L_j=\mathrm{CE}(head(\mathrm{RMS}(h_t^{(j)})),x_{t+j+1}),
 \quad L=L_{NTP}+\lambda_{MTP}\operatorname{mean}_j L_j+\lambda_{bal}L_{bal}.
 $$
 
-`MultiTokenPrediction` 和 `language_model_loss` 位于 [objectives.py](../src/transformer_lab/objectives.py)。基干 hidden `[B,T,D]`；depth 1 的 future embedding 为 `tokens[:,1:]`，MTP 状态长度 `T-1`，可用于监督的 logits 长度 `T-2`，labels 为 `tokens[:,2:]`。每加一个深度缩短一个 token；不同深度 mask 要覆盖从起点到目标的全部有效位置。短序列不会产生空监督的 CE/NaN。
+`MultiTokenPrediction` 位于 [mtp.py](../src/transformer_lab/training/mtp.py)，联合目标 `language_model_loss` 位于 [losses.py](../src/transformer_lab/training/losses.py)。基干 hidden `[B,T,D]`；depth 1 的 future embedding 为 `tokens[:,1:]`，MTP 状态长度 `T-1`，可用于监督的 logits 长度 `T-2`，labels 为 `tokens[:,2:]`。每加一个深度缩短一个 token；不同深度 mask 要覆盖从起点到目标的全部有效位置。短序列不会产生空监督的 CE/NaN。
 
 每个深度有三套 RMSNorm（$3D$）、投影 `[2D,D]`（$2D^2$）和一个无 Cross 的 TransformerBlock；embedding/head 与主干共享，不额外计词表参数。新增 FLOPs 是各深度的投影、block、head，监督序列逐层变短。训练可能改善表示，但需实测任务质量。
 
@@ -236,7 +236,7 @@ $$
 
 ## 10. Linear、DeltaNet、Gated DeltaNet 与 Hybrid
 
-[recurrent.py](../src/transformer_lab/recurrent.py) 使用状态 $S_t\in\mathbb R^{d\times v}$，实际 `[B,H,d,v]`。Linear Attention 用正特征 $\phi(x)=elu(x)+1$：
+[attention/recurrent.py](../src/transformer_lab/attention/recurrent.py) 使用状态 $S_t\in\mathbb R^{d\times v}$，实际 `[B,H,d,v]`。Linear Attention 用正特征 $\phi(x)=elu(x)+1$：
 
 $$
 S_t=S_{t-1}+\phi(k_t)v_t^\top,\quad z_t=z_{t-1}+\phi(k_t),

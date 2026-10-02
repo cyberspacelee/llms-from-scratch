@@ -1,9 +1,7 @@
-"""Runnable CPU experiments: cache equivalence, training and honest benchmarks."""
+"""小型功能实验、理论账本与用户主动选择的性能基准。"""
 
 from __future__ import annotations
 
-import argparse
-import json
 import statistics
 import time
 from functools import partial
@@ -11,11 +9,10 @@ from pathlib import Path
 
 import torch
 
-from .analysis import attention_cost, parameter_count
-from .config import AttentionConfig, ModelConfig, PositionConfig
-from .model import Transformer, make_attention
-from .objectives import language_model_loss, teacher_forcing, token_loss
-from .presets import PRESETS, preset
+from ..analysis import attention_cost, parameter_count
+from ..config import AttentionConfig, ModelConfig, PositionConfig
+from ..models import Transformer, make_attention
+from ..training import language_model_loss, teacher_forcing, token_loss
 
 
 def consistency(config: ModelConfig, device: torch.device) -> dict[str, object]:
@@ -169,39 +166,3 @@ def benchmark(device: torch.device, length: int, repeats: int) -> dict[str, obje
         "note": "wall-clock with synchronization; independent random weights; SDPA backend selected by PyTorch, not necessarily Flash",
         "results": result,
     }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("experiment", choices=("check", "train", "ledger", "benchmark"))
-    parser.add_argument("--preset", choices=PRESETS, default="deepseek")
-    parser.add_argument("--architecture", choices=("encoder", "decoder", "encoder_decoder"))
-    parser.add_argument("--device", default="cpu")
-    parser.add_argument("--steps", type=int, default=60)
-    parser.add_argument("--length", type=int, default=128)
-    parser.add_argument("--repeats", type=int, default=20)
-    parser.add_argument("--output", help="JSON report, or .pt checkpoint for train")
-    args = parser.parse_args()
-    if args.steps < 1 or args.length < 2 or args.repeats < 1:
-        parser.error("steps/repeats must be positive, length >= 2")
-    torch.set_num_threads(1)
-    torch.manual_seed(7)
-    device = torch.device(args.device)
-    if args.experiment == "ledger":
-        report = ledger(args.length)
-    elif args.experiment == "benchmark":
-        report = benchmark(device, args.length, args.repeats)
-    elif args.experiment == "train":
-        report = train(preset(args.preset, args.architecture), args.steps, device, args.output)
-    else:
-        report = consistency(preset(args.preset, args.architecture), device)
-    serialized = json.dumps(report, ensure_ascii=False, indent=2)
-    print(serialized)
-    if args.output and args.experiment != "train":
-        path = Path(args.output)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(serialized + "\n")
-
-
-if __name__ == "__main__":
-    main()

@@ -1,52 +1,13 @@
-"""Independent principle experiments, not production serving kernels."""
+"""Greedy draft/target 推测解码，重点是接受、修正与位置对齐。"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from .model import Transformer
 import torch
 
-from .attention import scaled_dot_product_attention
-from .cache import compress_sequence
-
-
-def compressed_causal_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    block_size: int = 4,
-    window: int = 8,
-    query_offset: int = 0,
-) -> torch.Tensor:
-    """Exact recent K/V plus mean-pooled completed old blocks (an approximation).
-
-    Partial blocks between old summaries and the local window remain exact.
-    Absolute block ends prevent future information entering an old summary.
-    """
-    if (
-        q.ndim != 4
-        or k.ndim != 4
-        or v.ndim != 4
-        or q.shape[:2] != k.shape[:2]
-        or k.shape[:3] != v.shape[:3]
-        or q.shape[-1] != k.shape[-1]
-    ):
-        raise ValueError("incompatible attention tensors")
-    if window < 1 or query_offset < 0 or query_offset + q.shape[-2] > k.shape[-2]:
-        raise ValueError("invalid local window or query positions")
-    pooled_k, pooled_v, ends = compress_sequence(k, v, block_size)
-    output = []
-    for row in range(q.shape[-2]):
-        pos = query_offset + row
-        local_start = max(0, pos - window + 1)
-        selected = ends < local_start
-        exact_start = int(selected.sum()) * block_size
-        keys = torch.cat((pooled_k[:, :, selected], k[:, :, exact_start : pos + 1]), -2)
-        values = torch.cat((pooled_v[:, :, selected], v[:, :, exact_start : pos + 1]), -2)
-        output.append(scaled_dot_product_attention(q[:, :, row : row + 1], keys, values))
-    return torch.cat(output, -2)
+if TYPE_CHECKING:
+    from ..models import Transformer
 
 
 @torch.no_grad()

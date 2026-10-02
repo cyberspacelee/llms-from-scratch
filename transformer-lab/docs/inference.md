@@ -85,7 +85,7 @@ uv run transformer-lab ledger --length 32768 --output runs/ledger.json
 
 ## 5. 分页、Prefix 和量化原语
 
-`PagedKVCache` 在 [cache.py](../src/transformer_lab/cache.py) 中存储 tensor pages。`fork()` 共享已有 pages；追加不满页时复制该页，满页继续共享。`block_table` 用 tensor 对象标识说明映射，不是设备地址或可传给真实 kernel 的页表。`materialize()` 拼回连续 K/V，方便复用普通 Attention 验证数值；其拷贝说明这还不是 paged kernel 加速。
+`PagedKVCache` 在 [cache/storage.py](../src/transformer_lab/cache/storage.py) 中存储 tensor pages。`fork()` 共享已有 pages；追加不满页时复制该页，满页继续共享。`block_table` 用 tensor 对象标识说明映射，不是设备地址或可传给真实 kernel 的页表。`materialize()` 拼回连续 K/V，方便复用普通 Attention 验证数值；其拷贝说明这还不是 paged kernel 加速。
 
 普通 `ModelCache` 的 append 也返回新 tensor，旧 prefix 不会被原地修改，允许安全分叉；Tensor 内容仍需由调用者保持只读。生产 Prefix Cache 还要实现内容 hash、模型权重/版本/dtype/position/padding/source 身份、引用计数、驱逐和跨请求隔离，本项目只验证 prefix ownership 与复用原语。
 
@@ -101,7 +101,7 @@ $$
 
 ## 6. 投机与 MTP
 
-[inference.py](../src/transformer_lab/inference.py) 提供 greedy draft/target 验证：draft 生成长度 $K$ 的候选；target 对 `prefix+draft` 做一个因果前向；逐个比较对应 greedy token；遇到第一次不匹配，保留已经接受的 draft 并提交 target 修正；全接受时可提交一个 bonus token。
+[inference/speculative.py](../src/transformer_lab/inference/speculative.py) 提供 greedy draft/target 验证：draft 生成长度 $K$ 的候选；target 对 `prefix+draft` 做一个因果前向；逐个比较对应 greedy token；遇到第一次不匹配，保留已经接受的 draft 并提交 target 修正；全接受时可提交一个 bonus token。
 
 它严格保持 target greedy 输出，测试覆盖相同 draft 的全接受，以及不同 draft 的拒绝。当前完整重算 prefix 以展示原理；没有 decoder KV rollback，没有动态 batching，也没有把减少 target forward 次数直接称为速度提升。
 

@@ -1,4 +1,4 @@
-"""Encoder, decoder and encoder-decoder share the same explicit blocks."""
+"""Encoder-only、Decoder-only 和 Encoder–Decoder 的组装及状态管理。"""
 
 from __future__ import annotations
 
@@ -8,114 +8,22 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
-from .attention import MultiHeadAttention, MultiHeadLatentAttention
-from .cache import LayerCache, ModelCache
-from .config import AttentionConfig, BlockConfig, ModelConfig
-from .layers import FeedForward, MixtureOfExperts, Routing, make_norm
-from .position import sinusoidal
-from .recurrent import RecurrentAttention
-
-
-def make_attention(
-    dim: int, config: AttentionConfig, dropout: float = 0.0, cross: bool = False
-) -> MultiHeadAttention | MultiHeadLatentAttention | RecurrentAttention:
-    if config.kind in {"mha", "mqa", "gqa"}:
-        return MultiHeadAttention(dim, config, dropout, cross)
-    if config.kind == "mla":
-        return MultiHeadLatentAttention(dim, config, dropout, cross)
-    if cross:
-        raise ValueError("cross attention must use softmax")
-    return RecurrentAttention(dim, config)
-
-
-class TransformerBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        config: BlockConfig,
-        cross_attention: AttentionConfig | None = None,
-        cross_causal: bool = False,
-    ) -> None:
-        super().__init__()
-        self.config, self.cross_causal = config, cross_causal
-        self.attention = make_attention(dim, config.attention, config.dropout)
-        self.cross = (
-            make_attention(dim, cross_attention, config.dropout, True) if cross_attention else None
-        )
-        self.ff = (
-            MixtureOfExperts(dim, config)
-            if config.experts
-            else FeedForward(dim, config.ff_dim, config.activation)
-        )
-        self.norms = nn.ModuleList(
-            [make_norm(config.norm, dim) for _ in range(3 if self.cross else 2)]
-        )
-        self.dropout = nn.Dropout(config.dropout)
-        self.residual_gates = (
-            nn.Parameter(torch.zeros(len(self.norms))) if config.residual == "gated" else None
-        )
-
-    def branch_input(self, x: torch.Tensor, index: int) -> torch.Tensor:
-        return self.norms[index](x) if self.config.norm_order == "pre" else x
-
-    def combine(self, x: torch.Tensor, branch: torch.Tensor, index: int) -> torch.Tensor:
-        branch = self.dropout(branch)
-        if self.residual_gates is not None:
-            branch = branch * self.residual_gates[index].sigmoid()
-        x = x + branch
-        return x if self.config.norm_order == "pre" else self.norms[index](x)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        causal: bool,
-        valid: torch.Tensor,
-        cache: LayerCache | None = None,
-        use_cache: bool = False,
-        offset: int = 0,
-        memory: torch.Tensor | None = None,
-        memory_valid: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, LayerCache | None, torch.Tensor, Routing]:
-        branch, self_cache = self.attention(
-            self.branch_input(x, 0),
-            cache=None if cache is None else cache.self_attention,
-            use_cache=use_cache,
-            query_offset=offset,
-            causal=causal,
-            key_valid=valid,
-        )
-        x = self.combine(x, branch, 0)
-        cross_cache = None
-        if self.cross is not None:
-            branch, cross_cache = self.cross(
-                self.branch_input(x, 1),
-                memory=memory,
-                cache=None if cache is None else cache.cross_attention,
-                use_cache=use_cache,
-                query_offset=offset,
-                causal=self.cross_causal,
-                key_valid=memory_valid,
-            )
-            x = self.combine(x, branch, 1)
-        index = len(self.norms) - 1
-        if isinstance(self.ff, MixtureOfExperts):
-            branch, auxiliary, counts = self.ff(
-                self.branch_input(x, index), valid[:, offset : offset + x.shape[1]]
-            )
-            routing = ((self.ff, counts),)
-        else:
-            branch = self.ff(self.branch_input(x, index))
-            auxiliary, routing = x.new_zeros(()), ()
-        return (
-            self.combine(x, branch, index),
-            LayerCache(self_cache, cross_cache) if use_cache else None,
-            auxiliary,
-            routing,
-        )
+from ..attention.position import sinusoidal
+from ..cache import LayerCache, ModelCache
+from ..config import AttentionConfig, BlockConfig, ModelConfig
+from ..layers import Routing, make_norm
+from .blocks import TransformerBlock
 
 
 @dataclass(frozen=True)
 class EncoderMemory:
+    """Encoder 输出 hidden[B,S,D] 与 valid[B,S]，可供多个 decode 会话复用。
+
+    layers 只用于 causal Encoder 的流式追加；双向 Encoder 的新输入会改变
+    旧 hidden，必须重新编码。hidden memory 与各 Decoder 层的 Cross KV
+    是两种不同状态，后者由每层的 K/V 权重从此 memory 生成。
+    """
+
     hidden: torch.Tensor
     valid: torch.Tensor
     layers: tuple[LayerCache, ...] | None = None  # causal encoder streaming only
@@ -125,6 +33,8 @@ class EncoderMemory:
 
 @dataclass(frozen=True)
 class ModelOutput:
+    """logits[B,T,V]、hidden[B,T,D]，以及可选 cache 和训练所需 MoE 统计。"""
+
     logits: torch.Tensor
     hidden: torch.Tensor
     cache: ModelCache | None
@@ -133,6 +43,15 @@ class ModelOutput:
 
 
 class Transformer(nn.Module):
+    """用同一 Block 构造三类模型；模型层负责位置、mask、memory 和会话状态。
+
+    Encoder-only 使用双向 self-attention；Decoder-only 使用因果 self-attention；
+    Encoder–Decoder 先 encode source，再由 Decoder 通过 cross-attention 读取。
+    配置允许输入/输出使用不同 Block、Attention 和层数，默认共享 token embedding。
+    绑定 embedding/head 时参数计数只计一次；head 投影仍需约 2*B*T*D*V FLOPs。
+    layer_blocks 支持 local/global、RoPE/NoPE、递归/softmax 的逐层交替。
+    """
+
     def __init__(self, config: ModelConfig | None = None) -> None:
         super().__init__()
         config = config or ModelConfig()
@@ -174,7 +93,7 @@ class Transformer(nn.Module):
             self.encoder_blocks = nn.ModuleList()
         self.head = nn.Linear(config.dim, config.vocab_size, bias=False)
         if config.mtp_depth:
-            from .objectives import MultiTokenPrediction
+            from ..training.mtp import MultiTokenPrediction
 
             self.mtp = MultiTokenPrediction(config.dim, config.block, config.mtp_depth)
         else:
@@ -225,7 +144,12 @@ class Transformer(nn.Module):
         past: EncoderMemory | None = None,
         use_cache: bool = False,
     ) -> EncoderMemory:
-        """Reuse bidirectional memory; append is only valid for a causal encoder."""
+        """source_ids[B,S] -> memory[B,S,D]；past 只适用于 causal Encoder。
+
+        双向编码通常一次计算再复用；因果编码可分块追加，并拼接旧 hidden。
+        编码缓存负责省去 Encoder 的重复计算，Cross cache 负责省去 Decoder
+        中各层的重复 source 投影；两者的节省范围不同。
+        """
         if self.config.architecture != "encoder_decoder":
             raise ValueError("encode() belongs to encoder-decoder models")
         valid = self.validate_ids(ids, valid)
@@ -272,6 +196,13 @@ class Transformer(nn.Module):
         cache: ModelCache | None = None,
         use_cache: bool = False,
     ) -> ModelOutput:
+        """训练传完整 ids[B,T]；prefill 传前缀并 use_cache=True；decode 传新 chunk。
+
+        seq2seq 首次调用必须提供 source_ids 或 memory，二者互斥。
+        已缓存会话拥有固定 source，后续仅传 cache，不允许换 source。
+        use_cache=False 不返回状态，不影响 autograd；teacher forcing 的右移
+        和标签对齐由 training.losses 负责，模型不会自行移动输入或标签。
+        """
         c = self.config
         current_valid = self.validate_ids(ids, valid)
         causal = c.architecture != "encoder" or c.encoder_causal
@@ -292,6 +223,7 @@ class Transformer(nn.Module):
                 raise ValueError(
                     "cached session owns encoder memory; start a new session to change source"
                 )
+        # 同一绝对 offset 传到所有层；valid 由本次 [B,T] 扩展成完整历史 [B,S]。
         offset = 0 if cache is None else cache.length
         full_valid = current_valid if cache is None else torch.cat((cache.valid, current_valid), 1)
         auxiliary, routing = self.embedding.weight.new_zeros(()), ()
@@ -370,7 +302,12 @@ class Transformer(nn.Module):
         eos_id: int | None = None,
         cached: bool = True,
     ) -> torch.Tensor:
-        """Deterministic greedy reference, equal-length unpadded prompts."""
+        """等长无 padding prompt 的 greedy 自回归生成，返回 prompt+新 token。
+
+        cached=True: 一次 prefill，随后每次只输入最新 token；
+        cached=False: 每次重算完整前缀，用作数值对照。seq2seq memory 只编码一次。
+        函数暂时进入 eval/no_grad，再恢复原 training 标志；EOS 后保持 EOS。
+        """
         if self.config.architecture == "encoder":
             raise ValueError("generation requires a decoder")
         self.validate_ids(prompt, None)

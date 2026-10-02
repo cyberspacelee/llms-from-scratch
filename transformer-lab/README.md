@@ -2,6 +2,20 @@
 
 面向学习、实验和原理验证的现代 Transformer 代码库。以 PyTorch 的 `matmul`、`reshape`、`transpose`、`softmax` 和自动求导为基础，不使用 `nn.Transformer` / `nn.MultiheadAttention`。默认 CPU，模型和张量可迁移到 CUDA；CPU 功能核对与 GPU 性能研究分开进行。
 
+## 从最小 MVP 开始
+
+```bash
+cd transformer-lab
+uv sync --locked
+uv run --locked python -m transformer_lab.tutorials.mvp --device cpu
+# 接下来把步号依次改成 01 ... 13；每步只运行小型功能核对。
+uv run --locked transformer-lab lesson --step 01
+```
+
+先读 [最小 MVP：公式、Shape 与完整数据流](docs/mvp.md)，再按 [00–13 步演进路线](docs/evolution.md) 运行示例。MVP 固定为单头、单层 Encoder–Decoder；第一步用相同权重验证它与统一模型的输出、梯度一致，然后才增加多头与层数。后续按机制演进，而不是一开始启用全部现代配置。
+
+路线：MVP → 多头/多层 → 三类模型 → RoPE → KV Cache → 现代 Block → MQA/GQA → MLA。之后分支研究长上下文、MoE/MTP、递归 Hybrid、因果 Encoder–Decoder 与推理存储。每一步说明新增机制、代码入口、Shape 和核对依据。
+
 ## 使用 uv
 
 ```bash
@@ -57,21 +71,19 @@ with torch.no_grad():
 
 ## 模块与实验
 
-| 模块 | 实现 |
+| 子包 / 模块 | 职责 |
 | --- | --- |
-| `config.py` | 位置、Attention、Block、Model 的显式 dataclass 配置与检查 |
-| `position.py` | Sinusoidal、RoPE、固定 Linear/NTK/YaRN Scaling |
-| `masks.py` | Global/Causal、Sliding、分块 Local、Block/Token Sparse mask |
-| `attention.py` | MHA/MQA/GQA、MLA、显式 SDPA、真正 gather 的稀疏原语 |
-| `recurrent.py` | 归一化 Linear Attention、DeltaNet、Gated DeltaNet 的递归方程 |
-| `layers.py` | LayerNorm/RMSNorm、ReLU/GELU/GLU/GeGLU/SwiGLU、Top-K MoE |
-| `model.py` | Pre/Post-Norm、标准/门控残差、三类模型、Encoder/Cross/Self 缓存 |
-| `objectives.py` | Teacher Forcing、NTP、顺序 MTP 和联合训练目标 |
-| `cache.py` | KV/Latent/Recurrent 状态、分页与 prefix fork、int8 量化、序列池化 |
-| `inference.py` | 因果序列压缩 Attention、draft/target greedy 投机验证 |
-| `analysis.py` | 参数、激活参数、matmul FLOPs、KV 字节与理想访存账本 |
-| `presets.py` | 主流模型核心思想的小型组合，不兼容官方权重 |
-| `experiments.py` | 数值核对、可选小任务训练、理论账本、可选基准入口 |
+| `attention/` | 基础 SDPA、MHA/MQA/GQA、MLA、递归注意力、位置编码与可见关系 |
+| `layers/` | LayerNorm/RMSNorm、Dense/Gated FFN、Router/Expert/Dispatch/Combine |
+| `models/` | Transformer Block、三类模型、Encoder Memory、模型级缓存与生成 |
+| `cache/` | KV/Latent/Recurrent 状态、分页、prefix fork、int8 存储 |
+| `training/` | Teacher Forcing、NTP/MTP 与损失对齐 |
+| `inference/` | 因果序列压缩、greedy draft/target 推测解码 |
+| `experiments/` | 统一 CLI、思想预设、数值检查、理论账本与可选基准 |
+| `tutorials/` | 最小 MVP，以及复用核心实现的逐步演进示例 |
+| `config.py` / `analysis.py` | 配置检查；参数、激活参数、FLOPs、KV 和访存账本 |
+
+完整文件树、依赖方向、接口和修改入口见 [子包规划](docs/architecture.md)。例如位置编码在 `attention/position.py`，MLA 在 `attention/mla.py`，MoE 在 `layers/moe.py`；常用 `from transformer_lab import Transformer` 接口保持不变。
 
 ```bash
 # 可选训练示例；检查功能不需要运行这些训练或性能实验。
@@ -88,8 +100,8 @@ uv run --no-sync transformer-lab benchmark --device cuda --length 4096
 
 ## 学习路径与验收
 
-从 [数学、Shape 与实现对照](docs/principles.md) 开始，再阅读 [推理与成本分析](docs/inference.md)、[来源与模型对照](docs/research.md) 和 [实验覆盖表](docs/coverage.md)。
+依次阅读 [最小 MVP](docs/mvp.md) → [逐步演进](docs/evolution.md)，再查 [数学、Shape 与实现对照](docs/principles.md)、[推理与成本分析](docs/inference.md)、[来源与模型对照](docs/research.md) 和 [实验覆盖表](docs/coverage.md)。
 
 基础 Attention → Encoder/Decoder → Cross-Attention → Encoder–Decoder → 因果 Encoder–Decoder；MHA → MQA → GQA → MLA → Sparse/Compressed → Hybrid；Absolute PE → RoPE → Scaling → Decoupled RoPE → RoPE/NoPE 分层交替；FFN → GLU/SwiGLU → MoE；完整重算 → KV → Latent KV → 分页/量化原语 → MTP/投机。
 
-CPU 检查只覆盖数学与功能：缓存/完整前向一致、MLA 双路径输出/梯度一致、稀疏 gather 对照、padding/因果性、MTP 标签对齐和参数账本。它们不验证语言能力、长上下文泛化或吞吐。CUDA kernel、分页 allocator、Prefix 检索服务和高性能 MoE 通信需要真实硬件与独立系统工程。
+CPU 检查只覆盖数学与功能：缓存/完整前向一致、MVP/核心模型同权重输出与梯度一致、00–13 步示例可运行、MLA 双路径输出/梯度一致、稀疏 gather 对照、padding/因果性、MTP 标签对齐和参数账本。它们不验证语言能力、长上下文泛化或吞吐。CUDA kernel、分页 allocator、Prefix 检索服务和高性能 MoE 通信需要真实硬件与独立系统工程。
