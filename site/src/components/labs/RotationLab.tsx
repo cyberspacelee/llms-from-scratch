@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useId, useState } from 'react'
 import { Arrow, Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
 
@@ -33,7 +34,7 @@ export default function RotationLab() {
         <Range label="位移 Δ" value={delta} min={-8} max={8} onChange={setDelta} />
       </Controls>
       <div ref={ref}>
-        <svg viewBox={`0 0 ${view.w} ${view.h}`} className={pen.canvas} role="img"
+        <SvgCanvas viewBox={`0 0 ${view.w} ${view.h}`} className={pen.canvas} role="img"
           aria-label={`q 位于 ${p}，k 位于 ${p + delta}，相对旋转 ${fmt(phi)} 弧度，点积 ${fmt(c, 6)}`}>
           <defs>
             <Arrow id={`${id}-q`} className="fill-accent" />
@@ -69,7 +70,7 @@ export default function RotationLab() {
           })}
           <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 40} textAnchor="middle" className={`${pen.mono} ${pen.muted}`}>Δω = {fmt(phi)} rad</text>
           <text x={mx + mw / 2} y={my + cell.h * 2 + cell.gap + 66} textAnchor="middle" className={pen.mono}>qᵀR(Δω)k = {fmt(c, 6)}</text>
-        </svg>
+        </SvgCanvas>
       </div>
       <Readout>
         p = {p} · j = {p + delta} · Δ = {delta} · 两个向量一起转了 p·ω，夹角只由 Δ 决定 · cos(Δω) = {fmt(c, 6)}

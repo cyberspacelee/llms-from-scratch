@@ -1,3 +1,4 @@
+import '../components/diagram-viewport'
 /** Page behavior shared by every page: theme, sidebar drawer, section tracking, code copy, diagrams. */
 
 const root = document.documentElement

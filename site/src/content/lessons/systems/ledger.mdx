@@ -4,18 +4,19 @@ question: 给定模型形状和请求长度，怎样估算权重、KV cache、�
 description: 用一台两层小型 Decoder 逐项计算参数、prefill 与 decode，再把同一套估算代入 Llama 3 8B，分清容量、运算和实际流量。
 order: 1
 code:
-  - code/systems/ledger.py
+  - examples/systems/ledger.py
+prerequisites: ["principles/kv-cache"]
 ---
 
-import { LedgerLab } from '../../../components/labs/SystemsLabs'
+import LedgerLab from '../../../components/labs/LedgerLab'
 
-[P8 Decoder](/principles/modern-decoder/) 给出了每层的矩阵，[P10 KV cache](/principles/kv-cache/) 说明了生成时保存什么。一条提示到达后，我们要分别估算模型占用的空间、处理提示的运算量，以及下一步生成的读写量。
+[P13 Decoder](/principles/complete-transformer/) 给出了每层的矩阵，[P12 KV cache](/principles/kv-cache/) 说明了生成时保存什么。一条提示到达后，我们要分别估算模型占用的空间、处理提示的运算量，以及下一步生成的读写量。
 
 本章固定稠密、无偏置、使用 GQA 和 SwiGLU 的 Decoder。权重与 KV 都按每元素 2 字节计算。先用可手算的模型逐项计算，再代入公开模型。FLOP 是运算量，FLOP/s 是速率；一次乘加计 2 FLOP。
 
 ## 固定模型和请求：每个数字属于哪里？
 
-令教学模型 S 有两层，隐藏维度 $d=4$，查询头数 $n_q=2$，KV 头数 $n_{\mathrm{kv}}=1$，每头维度 $d_h=2$，前馈维度 $d_{\mathrm{ff}}=8$，词表大小 $n_{\mathrm{vocab}}=16$。每层有两个 RMSNorm，末尾再有一个；embedding 与输出头**绑定为同一块参数**。两个查询头共用一组 K/V，这是 GQA 共享机制的 MQA 极端情形。
+令教学模型 S 有两层，隐藏维度 $D=4$，查询头数 $H_q=2$，KV 头数 $H_{\mathrm{kv}}=1$，每头维度 $D_h=2$，前馈维度 $D_{\mathrm{ff}}=8$，词表大小 $V=16$。每层有两个 RMSNorm，末尾再有一个；embedding 与输出头**绑定为同一块参数**。两个查询头共用一组 K/V，这是 GQA 共享机制的 MQA 极端情形。
 
 固定一条请求：先对 4 个提示 token 做 **prefill**（一次处理提示并建立 KV cache），由末位置的 logits 选出下一个 token；下一次将这个新 token 输入模型，做一步 **decode**（只处理新增位置），此时可见长度是 5。这里数的是这一轮前向，不把采样操作和后续生成步骤暗中加进去。
 
@@ -24,7 +25,7 @@ import { LedgerLab } from '../../../components/labs/SystemsLabs'
 | prefill | 4 | 每层 4 个 | 4 | 只投影最后位置 |
 | decode 一步 | 1 | 每层 1 个 | 5 | 投影新增位置 |
 
-读到第五个 token 之前，虽然它已被采样出来，缓存仍只有前四个位置；这个时序在 [P10](/principles/kv-cache/#prefill-后为什么只保存-kv) 中有逐位置核对。
+读到第五个 token 之前，虽然它已被采样出来，缓存仍只有前四个位置；这个时序在 [P12](/principles/kv-cache/#prefill-后为什么只保存-kv) 中有逐位置核对。
 
 ## 参数数量：先列矩阵，再去重
 
@@ -36,13 +37,13 @@ import { LedgerLab } from '../../../components/labs/SystemsLabs'
 | $W_K,W_V$ | $4\times2$，各一块 | $8+8=16$ |
 | $W_{\mathrm{gate}},W_{\mathrm{up}},W_{\mathrm{down}}$ | 前两块 $4\times8$，后一块 $8\times4$ | $32+32+32=96$ |
 
-所以每层线性权重有 $144$ 个，两层是 $N_{\mathrm{blocks}}=288$。一般形状下，只要 $n_qd_h=d$，相同的式子是
+所以每层线性权重有 $144$ 个，两层是 $N_{\mathrm{blocks}}=288$。一般形状下，只要 $H_qD_h=D$，相同的式子是
 
 $$
-N_{\mathrm{blocks}}=n_{\mathrm{layers}}\left[2d(n_qd_h)+2d(n_{\mathrm{kv}}d_h)+3dd_{\mathrm{ff}}\right].
+N_{\mathrm{blocks}}=L\left[2D(H_qD_h)+2D(H_{\mathrm{kv}}D_h)+3DD_{\mathrm{ff}}\right].
 $$
 
-RMSNorm 每次只训练一个长度为 $d$ 的缩放向量；两层各两次、末尾一次，共 $N_{\mathrm{norm}}=(2n_{\mathrm{layers}}+1)d=20$。词表表有 $N_{\mathrm{embed}}=n_{\mathrm{vocab}}d=64$ 个参数。模型 S 绑定输出头与 embedding，所以**存储时只收一次**：
+RMSNorm 每次只训练一个长度为 $D$ 的缩放向量；两层各两次、末尾一次，共 $N_{\mathrm{norm}}=(2L+1)D=20$。词表表有 $N_{\mathrm{embed}}=VD=64$ 个参数。模型 S 绑定输出头与 embedding，所以**存储时只收一次**：
 
 <KeyEq label="模型 S 的唯一参数与权重字节">
 
@@ -57,12 +58,12 @@ $$
 
 ## KV 容量账：存了多少，与这一步读了多少不同
 
-每层每个位置保存一份 K、一份 V，各有 $n_{\mathrm{kv}}d_h$ 个数；不保存历史 Q。$b_{\mathrm{elem}}$ 表示一个缓存元素的字节数，于是
+每层每个位置保存一份 K、一份 V，各有 $H_{\mathrm{kv}}D_h$ 个数；不保存历史 Q。$b_{\mathrm{elem}}$ 表示一个缓存元素的字节数，于是
 
 <KeyEq label="每个已处理 token 的 KV 容量">
 
 $$
-m_{\mathrm{KV/token}}=2n_{\mathrm{layers}}n_{\mathrm{kv}}d_hb_{\mathrm{elem}}
+m_{\mathrm{KV/token}}=2LH_{\mathrm{kv}}D_hb_{\mathrm{elem}}
 =2\times2\times1\times2\times2=16\text{ 字节}.
 $$
 
@@ -86,11 +87,11 @@ $$
 
 若训练要对四个位置全部算 logits，前一式会变为 $2\times4(N_{\mathrm{blocks}}+N_{\mathrm{head}})=2816$；不要把输入 embedding 按整张词表矩阵乘重复收费。计数省略了 RMSNorm、SiLU、RoPE、softmax、残差和采样的元素级运算。
 
-注意力另算。一个查询与一个键求点积约需 $2d_h$ FLOP，再用注意力权重加权一个值约需 $2d_h$ FLOP，合计每个**可见的查询-键对**约 $4d_h$ FLOP。prefill 的 4 个因果查询分别看见 1、2、3、4 个键，合计 $4(4+1)/2=10$ 对；decode 的新查询看见 5 个键。两层、每层两个查询头，因此
+注意力另算。一个查询与一个键求点积约需 $2D_h$ FLOP，再用注意力权重加权一个值约需 $2D_h$ FLOP，合计每个**可见的查询-键对**约 $4D_h$ FLOP。prefill 的 4 个因果查询分别看见 1、2、3、4 个键，合计 $4(4+1)/2=10$ 对；decode 的新查询看见 5 个键。两层、每层两个查询头，因此
 
 $$
-F_{\mathrm{attn,prefill}}=4d_hn_qn_{\mathrm{layers}}\frac{4(4+1)}2=320,\qquad
-F_{\mathrm{attn,decode}}=4d_hn_qn_{\mathrm{layers}}\times5=160.
+F_{\mathrm{attn,prefill}}=4D_hH_qL\frac{4(4+1)}2=320,\qquad
+F_{\mathrm{attn,decode}}=4D_hH_qL\times5=160.
 $$
 
 GQA 让两个查询头共享缓存，却没有减少这两个头各自的点积与加权运算。上式按因果可见对计理论乘加；若实现仍计算整块 $4\times4$ 分数再 mask，实际执行的 FLOP 会更多。若 softmax 与中间分数写回 HBM，流量也更多。[S3](/systems/flash-attention/) 再看如何减少这种中间搬移。
@@ -131,7 +132,7 @@ $$
 
 ## 代入公开形状：Llama 3 8B 的量级
 
-这一步**换模型而不换公式**。Meta 的 [Llama 3 模型配置](https://github.com/meta-llama/llama-models/blob/main/models/sku_list.py) 列出 8B 的 $d=4096$、$n_{\mathrm{layers}}=32$、$n_q=32$、$n_{\mathrm{kv}}=8$、词表大小 128256、前馈系数 1.3 与 1024 对齐。[官方实现](https://github.com/meta-llama/llama3/blob/main/llama/model.py) 以 $d_h=d/n_q=128$ 计算头维度，按 $\lceil\lfloor1.3\lfloor(2/3)(4d)\rfloor\rfloor/1024\rceil\times1024$ 得到 $d_{\mathrm{ff}}=14336$，并分别创建 embedding 与输出头。本段来源于 2026-09-28 核对；以下是结构估算，不是读取 checkpoint 或测 GPU 峰值。
+这一步**换模型而不换公式**。Meta 的 [Llama 3 模型配置](https://github.com/meta-llama/llama-models/blob/main/models/sku_list.py) 列出 8B 的 $D=4096$、$L=32$、$H_q=32$、$H_{\mathrm{kv}}=8$、词表大小 128256、前馈系数 1.3 与 1024 对齐。[官方实现](https://github.com/meta-llama/llama3/blob/main/llama/model.py) 以 $D_h=D/H_q=128$ 计算头维度，按 $\lceil\lfloor1.3\lfloor(2/3)(4D)\rfloor\rfloor/1024\rceil\times1024$ 得到 $D_{\mathrm{ff}}=14336$，并分别创建 embedding 与输出头。本段来源于 2026-09-28 核对；以下是结构估算，不是读取 checkpoint 或测 GPU 峰值。
 
 | 项目 | 按上面公式得到 |
 | --- | ---: |
@@ -158,7 +159,7 @@ $$
 
 脚本先核对模型 S 的绑定参数与四加一负载，再核对 Llama 3 8B 的公开形状；断言只覆盖上述结构与算式，不声称 CPU 运行测得 GPU 性能。
 
-<CodeFile path="code/systems/ledger.py" />
+<CodeFile path="examples/systems/ledger.py" symbol="ledger" />
 
 ## 练习与核对
 

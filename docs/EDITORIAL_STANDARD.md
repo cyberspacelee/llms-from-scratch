@@ -50,6 +50,6 @@
 
 ## 逐页交付
 
-一个页面由一个 subagent 独立负责。交付时简述该页原有的断点、遗漏的必要内容、重写后的主线、术语选择与验证结果。主代理检查相邻页面的前后承接，并统一运行站点构建与相关代码验证。导读页也要明确读者路线，但不把它写成术语大全或正文功能说明。
+每个页面都要有明确作者与独立复审记录；并行实施按互不重叠的目录分工，避免多人同时覆盖正文。交付时逐页记录原有断点、必要内容、当前主线与验证结果。复审者阅读实际文章与源码，不能仅采信作者的覆盖清单。主代理检查相邻页面的前后承接，并统一运行站点构建与相关代码验证。导读页也要明确读者路线，但不把它写成术语大全或正文功能说明。
 
 依据：[CMU Eberly Center 学习原则](https://www.cmu.edu/teaching/principles/learning.html)、[IES 教学实践指南](https://ies.ed.gov/ncee/wwc/PracticeGuide/1)、[OpenStax Calculus 编写说明](https://openstax.org/books/calculus-volume-1/pages/preface)。

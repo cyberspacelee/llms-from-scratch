@@ -4,12 +4,13 @@ question: 每轮前向该处理哪些请求，怎样在请求进出时保持输�
 description: 从一条请求的已生成与已缓存计数出发，手算三条请求的分块 prefill 和逐步 decode，再讨论预算、抢占、取消与不同引擎的调度策略。
 order: 4
 code:
-  - code/systems/scheduling.py
+  - examples/systems/scheduling.py
+prerequisites: ["principles/kv-cache", "systems/ledger"]
 ---
 
 import SchedulerLab from '../../../components/labs/SchedulerLab'
 
-[P9 生成](/principles/generation/)解释从 logits 选下一个 token，[P10 KV cache](/principles/kv-cache/)证明已经计算的历史可以复用。[S1 资源估算](/systems/ledger/)则说明每条请求的 KV 占用多少显存。现在假设 A、B 两条请求同时到达，C 稍后加入：**每轮只允许处理 4 个输入 token，调度器该交给模型哪些位置？** 回答这个问题，需要同时跟踪请求的输出和真正写入的 KV。
+[P11 生成](/principles/generation/)解释从 logits 选下一个 token，[P12 KV cache](/principles/kv-cache/)证明已经计算的历史可以复用。[S1 资源估算](/systems/ledger/)则说明每条请求的 KV 占用多少显存。现在假设 A、B 两条请求同时到达，C 稍后加入：**每轮只允许处理 4 个输入 token，调度器该交给模型哪些位置？** 回答这个问题，需要同时跟踪请求的输出和真正写入的 KV。
 
 本章把 KV 容量当作抽象资源：调度器先保留、前向写入、结束后释放。[S5](/systems/paged-cache/)再解释这些位置如何映射到物理块，[S6](/systems/engine-execution/)解释一轮清单如何变成 GPU 张量。
 
@@ -38,7 +39,7 @@ flowchart TD
 | prefill 后 | [A,B,C,D]，4 | 3 | [A,B,C]，0–2 | D |
 | decode 后 | [A,B,C,D,E]，5 | 4 | [D]，3 | E，达到输出上限 |
 
-第二轮不能再次输入 C：C 的 KV 已经存在，且 D 的查询必须使用绝对位置 3 并读到 A–D 的 K/V。终止后 E 虽然还没有自己的 KV，却不再需要下一次前向。EOS（结束 token）也可使请求在采样后结束。[P10](/principles/kv-cache/)给出了整段与分块计算等价所需的位置、mask 和逐层缓存条件。
+第二轮不能再次输入 C：C 的 KV 已经存在，且 D 的查询必须使用绝对位置 3 并读到 A–D 的 K/V。终止后 E 虽然还没有自己的 KV，却不再需要下一次前向。EOS（结束 token）也可使请求在采样后结束。[P12](/principles/kv-cache/)给出了整段与分块计算等价所需的位置、mask 和逐层缓存条件。
 
 三个计数不能混称。对于 prompt 长 $P$、输出数 $G$，$N=P+G$；常见生成状态是 $K=N-1$，分块 prefill 时可能有 $K<P$。调度器安排的新增输入数 $S$ 还只是**计划**；只有前向成功写完，才能令 $K\leftarrow K+S$。这也是异步执行时必须等待在途写入完成再复用缓存的原因。
 
@@ -57,7 +58,7 @@ flowchart TD
 
 第三轮的总输入数是 $1+2=3$，两条请求，均未越预算。B 的前四个提示 token 在第二轮虽已写 KV，**不能**从 x 的 logits 采样：那会忽略 prompt 最后的 y。第三轮处理 y 时，其查询能读位置 0–4，之后才有完整提示的第一个输出 F。C 加入时，A 的 KV 与未计算的 D 都保留在自己的请求状态中；C 不读取 A、B 的缓存。第四轮 A 和 B 可共享一次权重前向，但注意力仍按各自的请求边界、位置与 KV 长度执行。
 
-读表时可逐行检查三个不变量：本轮输入恰好是该请求的 $[K,N)$ 的前缀；只有本轮处理到 $N$ 才采样；结束的请求不会再进调度清单。这里的字母输出是固定的教学结果，真实采样规则由 [P9](/principles/generation/)决定。
+读表时可逐行检查三个不变量：本轮输入恰好是该请求的 $[K,N)$ 的前缀；只有本轮处理到 $N$ 才采样；结束的请求不会再进调度清单。这里的字母输出是固定的教学结果，真实采样规则由 [P11](/principles/generation/)决定。
 
 ## 预算：分块与延迟交换了什么
 
@@ -91,7 +92,7 @@ KV 容量不足时，调度器可以延后接纳；也可以**抢占**某条已�
 
 CPU 脚本固定复现上表和抢占变式，逐轮断言输入 token、绝对位置、KV 长度、输出及终态；它不模拟 logits、GPU 执行或真实物理块。
 
-<CodeFile path="code/systems/scheduling.py" />
+<CodeFile path="examples/systems/scheduling.py" symbol="Scheduler.step" />
 
 ## 常见误区
 

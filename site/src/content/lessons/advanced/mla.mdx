@@ -4,14 +4,16 @@ question: 同一组 MLA 参数下，只缓存短向量怎样得到与显式恢�
 description: 沿三个位置、两个头推导共享潜变量、投影吸收、解耦 RoPE 和缓存字节，并用代码核对两种执行方式。
 order: 2
 code:
-  - code/advanced/mla.py
+  - examples/advanced/mla.py
+prerequisites: ["principles/head-sharing", "principles/rope", "principles/kv-cache"]
+optional: true
 ---
 
-import { MlaPathsLab } from '../../../components/labs/AdvancedLabs'
+import MlaPathsLab from '../../../components/labs/MlaPathsLab'
 
-[P10](/principles/kv-cache/) 的 KV cache 为每层每个已处理 token 保存键和值。[P8](/principles/modern-decoder/) 的 GQA 让多个查询头共享一组完整的键和值。现在换一个问题：**若每个历史位置只保存一条较短的向量，当前查询能否仍算出模型定义的注意力？**多头潜在注意力（multi-head latent attention，MLA）通过在训练时就规定这种参数化来做到这一点。
+[P12](/principles/kv-cache/) 的 KV cache 为每层每个已处理 token 保存键和值。[P13](/principles/complete-transformer/) 的 GQA 让多个查询头共享一组完整的键和值。现在换一个问题：**若每个历史位置只保存一条较短的向量，当前查询能否仍算出模型定义的注意力？**多头潜在注意力（multi-head latent attention，MLA）通过在训练时就规定这种参数化来做到这一点。
 
-本章使用 [M6 的矩阵乘法](/math/linear-algebra/)、[P7 的 RoPE](/principles/rope/) 和 P10 的因果缓存。读完应能区分两件事：同一组 MLA 参数下，显式恢复键和值与吸收投影的计算相等；把已有 MHA 权重事后压成 MLA 则没有这个等价保证。
+本章使用 [M6 的矩阵乘法](/math/linear-algebra/)、[P7 的 RoPE](/principles/rope/) 和 [P12 的因果缓存](/principles/kv-cache/)。读完应能区分两件事：同一组 MLA 参数下，显式恢复键和值与吸收投影的计算相等；把已有 MHA 权重事后压成 MLA 则没有这个等价保证。
 
 ## 从缓存出发：每个位置留下什么
 
@@ -125,22 +127,22 @@ $$
 
 10 与 12 的差别来自同一位置键是否重复存储，注意力计算没有改变。若另外用一个 KV 头共享完整键和值，假想 GQA 对照为每位置 6 个元素；这只比较状态形状，不声称 GQA 与本例 MLA 有相同输出或质量。
 
-一般地，若潜变量宽度 $d_c$，共享位置键宽度 $d_{\mathrm R}$，元素各占 $b_{\mathrm{elem}}$ 字节，则历史长度 $T_{\mathrm{past}}$、batch 大小 $B$、层数 $n_{\mathrm{layers}}$ 的持久缓存为
+一般地，若潜变量宽度 $D_c$，共享位置键宽度 $D_{\mathrm R}$，元素各占 $b_{\mathrm{elem}}$ 字节，则历史长度 $T_{\mathrm{past}}$、batch 大小 $B$、层数 $L$ 的持久缓存为
 
 $$
-M_{\mathrm{MLA}}=B\,n_{\mathrm{layers}}\,T_{\mathrm{past}}
-(d_c+d_{\mathrm R})b_{\mathrm{elem}}.
+M_{\mathrm{MLA}}=B\,L\,T_{\mathrm{past}}
+(D_c+D_{\mathrm R})b_{\mathrm{elem}}.
 $$
 
-这里没有额外乘查询头数，也没有 K/V 两份的系数 2：潜变量供各头的内容键和值共同使用，位置键跨头共享。[DeepSeek-V3 报告 §2.1.1](https://arxiv.org/html/2412.19437v2#S2.SS1.SSS1) 给出 $d_c=512,d_{\mathrm R}=64,n_q=128$、内容头维 128；因此其每位置每层保存 **576 个元素**。若这两部分都按 2 字节计，则为 1152 字节。报告还给出 61 层和查询压缩宽度 1536；查询压缩可减训练激活，不作为历史 KV 的第三份缓存。
+这里没有额外乘查询头数，也没有 K/V 两份的系数 2：潜变量供各头的内容键和值共同使用，位置键跨头共享。[DeepSeek-V3 报告 §2.1.1](https://arxiv.org/html/2412.19437v2#S2.SS1.SSS1) 给出 $D_c=512,D_{\mathrm R}=64,H_q=128$、内容头维 128；因此其每位置每层保存 **576 个元素**。若这两部分都按 2 字节计，则为 1152 字节。报告还给出 61 层和查询压缩宽度 1536；查询压缩可减训练激活，不作为历史 KV 的第三份缓存。
 
 这个容量式没有计分页块表、分配碎片、不同精度的 metadata 或 prefill 临时张量。[S5](/systems/paged-cache/) 负责物理块地址，[S1](/systems/ledger/) 区分容量、读取流量和乘法量。较短的缓存并不保证所有 batch、长度或 GPU kernel 上都更快：吸收后的潜在点积维度、权重读取、融合方式和实现路径仍影响执行时间。训练或 prefill 也可能临时恢复完整 K/V，以使用已有高效注意力 kernel；临时工作区不等于 decode 时必须持久缓存它们。
 
 ## 用同一例子核对两条路径
 
-运行 `python code/advanced/mla.py`。脚本直接使用本页的 $X,D,U_K,U_V$ 和两个查询，断言两头的显式分数与吸收分数相等，再比较最终输出；另给出一个矩阵与旋转不交换的反例。`float64` 降低舍入差异；断言覆盖这组参数的计算与形状，不是 MLA 对任何既有 MHA 的无损转换证明。
+运行 `uv run python -m examples.advanced.mla`。脚本直接使用本页的 $X,D,U_K,U_V$ 和两个查询，断言两头的显式分数与吸收分数相等，再比较最终输出；另给出一个矩阵与旋转不交换的反例。`float64` 降低舍入差异；断言覆盖这组参数的计算与形状，不是 MLA 对任何既有 MHA 的无损转换证明。
 
-<CodeFile path="code/advanced/mla.py" />
+<CodeFile path="examples/advanced/mla.py" region="absorbed_decode" />
 
 ## 练习与核对
 
@@ -165,7 +167,7 @@ $16\times10000\times61\times(512+64)\times2=11{,}243{,}520{,}000$ 字节，约 $
 
 </details>
 
-下一章 [A3 DPO](/advanced/dpo/) 转向训练目标；若继续研究缓存执行，可回读 [S5](/systems/paged-cache/) 的地址与所有权。
+继续 [A3 长上下文](/advanced/long-context/) 可以区分位置外推与缓存容量；缓存地址与所有权见 [S5](/systems/paged-cache/)。
 
 ## 原始资料
 

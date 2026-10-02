@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 逐页重写进度
 
 范围：`site/src/content/lessons/` 下 58 章正文和 7 篇导读，共 65 页。每页交给一个独立 subagent。勾选表示该页已完成内容重写、主代理检查衔接，并通过相关验证；仅启动或仅完成草稿不勾选。标准见 [课程章节重写规范](EDITORIAL_STANDARD.md)。

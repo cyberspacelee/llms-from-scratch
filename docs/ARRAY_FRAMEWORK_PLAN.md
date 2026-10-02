@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 数组与框架：大纲、资料与实施
 
 设计日期：2026-09-27。基线：`b2d763c`。状态：已按大纲完成正文、配套实验与验收，见 [完成记录](ARRAY_FRAMEWORK_PROGRESS.md)。

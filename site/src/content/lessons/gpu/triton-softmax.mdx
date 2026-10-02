@@ -1,0 +1,68 @@
+---
+title: Triton 行 softmax 实践
+question: 怎样在一个 program 内完成同行归约，并区分地址边界和语义 mask
+description: 用 logits (1000,1001,1002) 核对稳定 softmax，再验证非连续输入、masked 位置和零有效行策略。
+order: 7
+optional: true
+prerequisites: ["gpu/kernel-design", "math/information"]
+code:
+  - examples/gpu/kernel_design.py
+  - examples/gpu/examples/triton_kernels.py
+---
+
+本实践从 [G3 的融合依赖](/gpu/kernel-design/) 转入同一行的归约。一个 CUDA GEMM 线程的输出只依赖自己的 K 累加；softmax 中每个概率依赖这一行所有有效 logits。目标是核对输入、mask 与归约语义，再运行一个真实 GPU program。
+
+## 一行的最大值与分母
+
+矩阵乘的输出彼此独立，但同行 softmax 的各个输出共同依赖这一行的最大值与指数和。给定一行有限 logits $x_j$，有效位置集合 $\mathcal V$ 非空时，先取 $a=\max_{j\in\mathcal V}x_j$，再计算
+
+$$
+y_j=
+\begin{cases}
+\exp(x_j-a)\big/\sum_{r\in\mathcal V}\exp(x_r-a),&j\in\mathcal V,\\
+0,&j\notin\mathcal V.
+\end{cases}
+$$
+
+例如 $(1000,1001,1002)$ 减去最大值 1002，得到指数约 $(0.135335,0.367879,1)$，概率约 $(0.090031,0.244728,0.665241)$。减去同一个最大值不改变比值，却避免直接计算 $e^{1002}$ 的溢出。这里的语义 mask 指定哪些输入参与分母；地址边界 mask 则防止宽度不足数据块时越界读取，两者作用不同。
+
+若 $\mathcal V$ 为空，普通概率分布没有定义。本章示例明确约定整行输出零：这不是概率和为 1 的分布。Triton 示例由一个 program 处理一行，在片上连续完成 max、exp、sum 和输出，避免把每个中间结果写回全局内存；它支持最多 4096 列的教学范围以及正 stride 的输入视图。更宽的行需要分段归约；注意力进一步融合值向量时，还需跨块维护最大值和分母，见 [S3 FlashAttention](/systems/flash-attention/)。
+
+<CodeFile path="examples/gpu/examples/triton_kernels.py" symbol={["softmax_kernel", "row_softmax"]} />
+
+在有兼容 PyTorch、Triton 和 NVIDIA GPU 的环境中运行该可选脚本。它检查向量尾部、非连续 softmax 输入、被 mask 的位置以及全屏蔽行；本章未声称这些 GPU 示例已在当前环境实测。
+
+
+## 先运行独立 CPU 参考
+
+<CodeFile path="examples/gpu/kernel_design.py" symbol="stable_softmax" run="uv run python -m examples.gpu.kernel_design" />
+
+参考使用 float64，检查普通行、部分 mask 和全屏蔽行；将每个有限 logit 同加 10000 后，输出仍保持一致。CPU 路径核对数值，不模拟 Triton 的编译、warp 映射或性能。
+
+## GPU 的输入契约与检查
+
+`row_softmax` 接受 float32 CUDA 二维输入和同形状 bool mask，二者 stride 必须为正，所有 logits 有限，列数在 1–4096。输出是新分配的连续矩阵。host 根据真实列数选择二的幂 block 宽度；`offsets < cols` 保护地址，`active` 决定分母，不能把两种 mask 混成一项。
+
+按 [模型 profiling 实践](/gpu/model-profiling/#cuda-使用独立-gpu-环境)和 README 建立独立 GPU 环境，安装匹配的 CUDA-enabled PyTorch、Triton 后运行：
+
+```sh
+.venv-gpu/bin/python -m examples.gpu.examples.triton_kernels
+```
+
+脚本测试 1003 元素向量尾部；softmax 选择列数 1、7、781、4096，同时切片行列，强制包含全屏蔽行，并与独立 float64 参考按容差比较。验证通过不等于更快；性能比较仍需 [G4](/gpu/measurement/) 的预热、同步和计时边界。
+
+## 练习与核对
+
+<details>
+<summary>三列数据分配四个地址 lane，语义 mask 只允许第 0、2 项。第四项和第 1 项分别为什么不进分母？</summary>
+
+第四项是超出真实列数的地址 lane，禁止读取；第 1 项是合法地址，但当前语义不允许参与。前者是内存安全条件，后者是概率目标的定义，二者都不参与分母但原因不同。
+</details>
+
+<details>
+<summary>全屏蔽行输出都是 0，是否是合法概率分布？</summary>
+
+不是，输出和为 0。示例明确选择零行作为工程接口结果，调用方必须知道它不代表一个归一化分布；不能用它作为普通采样概率。
+</details>
+
+正式 program 级归约见 [Triton Fused Softmax](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html)。更宽的行需要分块归约；注意力中继续融合 V 的过程见 [S3 在线 softmax](/systems/flash-attention/)。

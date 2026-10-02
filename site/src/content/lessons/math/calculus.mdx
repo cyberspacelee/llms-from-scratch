@@ -4,7 +4,8 @@ question: 损失怎样随参数变化，更新一步该走多远
 description: 沿一个二参数损失，从差商推到梯度和一步更新，再用精确计算区分下降、振荡与发散。
 order: 7
 code:
-  - code/math/calculus.py
+  - examples/math/calculus.py
+prerequisites: ["math/linear-algebra"]
 ---
 
 import DescentLab from '../../../components/labs/DescentLab'
@@ -172,7 +173,7 @@ np.testing.assert_allclose(next_x, [1.6, 0.2], rtol=1e-9)
 np.testing.assert_allclose(loss(next_x), 1.36, rtol=1e-9)
 ~~~
 
-差分是对手算的数值检查，不是训练时逐参数求梯度的常规方法：步长太大会带来近似误差，太小又会放大浮点减法误差。完整的 CPU 验证脚本在 code/math/calculus.py。
+差分是对手算的数值检查，不是训练时逐参数求梯度的常规方法：步长太大会带来近似误差，太小又会放大浮点减法误差。完整的 CPU 验证脚本在 examples/math/calculus.py。
 
 ## 常用求导规则：以后怎样处理复合损失
 
@@ -234,7 +235,7 @@ $$
 
 所以平方项正是 $\tfrac12\Delta x^\top\mathcal H\Delta x$。对二阶连续可微的一般损失，二阶 Taylor 公式还要加比 $\|\Delta x\|_2^2$ 更快趋零的余项；本例是二次函数，余项恰好为零。曲率是局部信息，不能凭它断言整个非凸网络的优化结果。
 
-若 $A$ 是对称正定矩阵，即所有非零 $v$ 都满足 $v^\top Av>0$，更一般的二次损失 $L(x)=x^\top Ax/2$ 有梯度 $Ax$。满足 $Av=\lambda v$ 的非零 $v$ 是特征向量，$\lambda$ 是对应特征值；沿这个方向反复更新，每步乘 $1-\eta\lambda$。所有方向都缩小时需 $0<\eta<2/\lambda_{\max}$。本例两个坐标方向的特征值是 $1$ 和 $4$，重新得到 $\eta<1/2$。这个谱分析在 [M11 谱分解与低秩](/math/spectral/)继续展开。
+若 $A$ 是对称正定矩阵，即所有非零 $v$ 都满足 $v^\top Av>0$，更一般的二次损失 $L(x)=x^\top Ax/2$ 有梯度 $Ax$。满足 $Av=\lambda v$ 的非零 $v$ 是特征向量，$\lambda$ 是对应特征值；沿这个方向反复更新，每步乘 $1-\eta\lambda$。所有方向都缩小时需 $0<\eta<2/\lambda_{\max}$。本例两个坐标方向的特征值是 $1$ 和 $4$，重新得到 $\eta<1/2$。这个谱分析在 [M11 特征分解](/math/spectral/)继续展开。
 
 ## 常见误区
 

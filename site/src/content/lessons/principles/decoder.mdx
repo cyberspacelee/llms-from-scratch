@@ -2,20 +2,23 @@
 title: 从注意力到基础 Decoder
 question: 怎样把注意力组成可以前向、反向和预测词表的模型
 description: 沿一段四 token 文档追踪 embedding、位置、注意力、FFN、LM head、损失与梯度，组装可训练的 Decoder。
+prerequisites:
+  - principles/attention
+  - math/backprop
 order: 4
 code:
-  - code/principles/decoder.py
+  - examples/principles/decoder.py
 ---
 
 在 [P2](/principles/language-modeling/) 中，`[BOS,A,B,EOS]` 变成了三个下一 token 分类问题；[P3](/principles/attention/) 已算出一个位置如何读取先前位置。现在缺的是把读取结果变成词表上的 logits，并让三个目标的 loss 能传回所有参数。我们仍用同一段文档，先做一次完整前向，再沿一条梯度路径反向检查。阅读前建议掌握 [M9](/math/backprop/) 的链式法则。
 
-本章的基础教学 Decoder 采用学习式位置表、Pre-LayerNorm、普通多头注意力和 GELU FFN。这是一种明确的配置；[P8](/principles/modern-decoder/) 才比较 RMSNorm、RoPE 后的模块和 GQA，[P11](/principles/complete-transformer/) 才组装带缓存的现代实现。
+本章的基础教学 Decoder 采用学习式位置表、Pre-LayerNorm、普通多头注意力和 GELU FFN。这是一种明确的配置；[P8 归一化](/principles/normalization/)、[P9 头共享](/principles/head-sharing/) 和 [P10 门控 FFN](/principles/gated-ffn/) 才逐项比较结构，[P13](/principles/complete-transformer/) 才组装带缓存的现代实现。
 
-import { ResidualTraceLab } from '../../../components/labs/PrinciplesTraceLabs'
+import ResidualTraceLab from '../../../components/labs/ResidualTraceLab'
 
 ## 输入：三个已知 token 怎样进入模型
 
-仍令 `BOS=0,A=1,B=2,EOS=3`。输入是 `[BOS,A,B]`，目标是 `[A,B,EOS]`；第 $i$ 个输入位置必须预测第 $i+1$ 个 token。先固定一套**只供手算**的小参数：词表大小 4、隐藏维度 $d=2$、一个注意力头、FFN 中间维度 $d_{\mathrm{ff}}=2$、一个 Decoder 块、最大位置数 3。只有一个头是多头注意力的合法特例，后面再说明增加头数只改变内部轴。
+仍令 `BOS=0,A=1,B=2,EOS=3`。输入是 `[BOS,A,B]`，目标是 `[A,B,EOS]`；第 $i$ 个输入位置必须预测第 $i+1$ 个 token。先固定一套**只供手算**的小参数：词表大小 4、隐藏维度 $D=2$、一个注意力头、FFN 中间维度 $D_{\mathrm{ff}}=2$、一个 Decoder 块、最大位置数 3。只有一个头是多头注意力的合法特例，后面再说明增加头数只改变内部轴。
 
 embedding 是按 ID 选参数表的一行；位置表按位置再选一行。取
 
@@ -39,28 +42,28 @@ $$
 
 例如位置 1 的 A 从 $(1,2)$ 加上位置向量 $(-1,0)$ 得到 $(0,2)$。位置表是可训练参数，不是 token ID；它只定义了 $0\le i<T_{\max}$ 的行。为何除了 causal mask 还要显式提供位置，将由 [P5](/principles/attention-order/) 分析。这里用无 padding、从位置 0 开始的窗口；不同位置编号规则必须另行定义。
 
-一般情形下，输入 ID $U$ 的形状是 $(B,T)$，$E$ 是 $(n_{\mathrm{vocab}},d)$，$P$ 是 $(T_{\max},d)$，因此 $X$ 是 $(B,T,d)$。先记住这个形状：每个块必须把它原样交给下一个块。
+一般情形下，输入 ID $U$ 的形状是 $(B,T)$，$E$ 是 $(V,D)$，$P$ 是 $(T_{\max},D)$，因此 $X$ 是 $(B,T,D)$。先记住这个形状：每个块必须把它原样交给下一个块。
 
-<Figure src="principles/decoder-block.svg" alt="token ID 经 embedding 与位置表进入残差流，依次经过注意力分支和 FFN 分支，最后由 LayerNorm 与 LM head 输出 logits">沿粗绿线读残差流，它始终是 (B,T,d)；蓝色注意力分支读取当前位置以前的行，橙色 FFN 分支逐行处理，两个分支都先经 LayerNorm 再把结果加回。右侧的形状标注说明词表维度只在 LM head 后出现。</Figure>
+<Figure src="principles/decoder-block.svg" alt="token ID 经 embedding 与位置表进入残差流，依次经过注意力分支和 FFN 分支，最后由 LayerNorm 与 LM head 输出 logits">沿粗绿线读残差流，它始终是 (B,T,D)；蓝色注意力分支读取当前位置以前的行，橙色 FFN 分支逐行处理，两个分支都先经 LayerNorm 再把结果加回。右侧的形状标注说明词表维度只在 LM head 后出现。</Figure>
 
 ## LayerNorm：每行先按特征求均值和方差
 
-注意力即将读取 $X$。Pre-LayerNorm 块先对每个位置**自己的特征轴**做 LayerNorm；不跨 token、不跨 batch 求统计量。对单个向量 $x\in\mathbb R^d$，定义
+注意力即将读取 $X$。Pre-LayerNorm 块先对每个位置**自己的特征轴**做 LayerNorm；不跨 token、不跨 batch 求统计量。对单个向量 $x\in\mathbb R^D$，定义
 
 $$
-\mu(x)=\frac1d\sum_a x_a,\quad
-v(x)=\frac1d\sum_a(x_a-\mu(x))^2,\quad
+\mu(x)=\frac1D\sum_a x_a,\quad
+v(x)=\frac1D\sum_a(x_a-\mu(x))^2,\quad
 \operatorname{LN}(x)_a=\gamma_a\frac{x_a-\mu(x)}{\sqrt{v(x)+\epsilon}}+b_a.
 $$
 
-$\gamma,b\in\mathbb R^d$ 可训练，$\epsilon>0$ 防止除零；方差的分母是 $d$，因为这里在定义一个算子，不是在做样本方差估计。本例所有 LayerNorm 均取 $\gamma=(1,1),b=(0,0),\epsilon=1$。例如 BOS 的 $(2,0)$ 均值为 1、方差为 1，因此输出 $(s,-s)$，其中 $s=1/\sqrt2\approx0.7071$。另两行分别为 $(-s,s)$ 和 $(-s,s)$。于是
+$\gamma,b\in\mathbb R^D$ 可训练，$\epsilon>0$ 防止除零；方差的分母是 $D$，因为这里在定义一个算子，不是在做样本方差估计。本例所有 LayerNorm 均取 $\gamma=(1,1),b=(0,0),\epsilon=1$。例如 BOS 的 $(2,0)$ 均值为 1、方差为 1，因此输出 $(s,-s)$，其中 $s=1/\sqrt2\approx0.7071$。另两行分别为 $(-s,s)$ 和 $(-s,s)$。于是
 
 $$
 N_1=\operatorname{LN}_1(X)=
 \begin{bmatrix}s&-s\\-s&s\\-s&s\end{bmatrix}.
 $$
 
-较大的 $\epsilon=1$ 只为让手算清楚；脚本采用 PyTorch 默认 $10^{-5}$。所以本例数值不能直接与脚本的随机模型逐位比较。若错误地沿时间轴求均值，位置 0 会受尚未看到的 B 影响，causal mask 也救不回因果性。
+较大的 $\epsilon=1$ 只为让手算清楚；随机 268 参数核对模型采用 $10^{-5}$，手算验证函数仍取 $1$。所以本例数值不能直接与脚本的随机模型逐位比较。若错误地沿时间轴求均值，位置 0 会受尚未看到的 B 影响，causal mask 也救不回因果性。
 
 ## 注意力与第一次残差：把历史写回当前位置
 
@@ -74,7 +77,7 @@ a_2&=\tfrac13(v_0+v_1+v_2)=(-s/3,s/3).
 \end{aligned}
 $$
 
-这是一组**人为固定的参数**，只用来核对完整路径；训练后的 Q/K 通常会让可见位置权重不等。即使本例 $a_1=0$，位置 1 也执行了注意力计算。这里的 $v_i=N_{1,i}$；矩阵形式仍是 $Q=N_1W_Q,K=N_1W_K,V=N_1W_V$，按行做 $\operatorname{softmax}(QK^\top/\sqrt{d_h}+\text{causal mask})V W_O$。使用多头时各头分别算完再拼回 $d$，参见 P3。
+这是一组**人为固定的参数**，只用来核对完整路径；训练后的 Q/K 通常会让可见位置权重不等。即使本例 $a_1=0$，位置 1 也执行了注意力计算。这里的 $v_i=N_{1,i}$；矩阵形式仍是 $Q=N_1W_Q,K=N_1W_K,V=N_1W_V$，按行做 $\operatorname{softmax}(QK^\top/\sqrt{D_h}+\text{causal mask})V W_O$。使用多头时各头分别算完再拼回 $D$，参见 P3。
 
 可以用同一组值做反例：若误删 causal mask，位置 0 会平均读到三行，得到 $(-s/3,s/3)$，而正确值是 $(s,-s)$。这时未来的 A、B 已改变 BOS 位置的预测输入；只在 loss 中排除某些位置，无法修复这种信息泄漏。
 
@@ -84,7 +87,7 @@ $$
 H=\begin{bmatrix}2+s&-s\\0&2\\2-s/3&4+s/3\end{bmatrix}.
 $$
 
-注意力输出和 $X$ 都是 $(B,T,d)$；若分头结果没有投影回 $d$，这里就无法逐元素相加。此处保留原输入也很关键：即使某位置的注意力结果为零，它仍有自己的隐藏状态。
+注意力输出和 $X$ 都是 $(B,T,D)$；若分头结果没有投影回 $D$，这里就无法逐元素相加。此处保留原输入也很关键：即使某位置的注意力结果为零，它仍有自己的隐藏状态。
 
 ## FFN 与第二次残差：逐位置变换
 
@@ -92,11 +95,11 @@ $$
 
 $$
 \operatorname{FFN}(u)=W_2\operatorname{GELU}(W_1u+b_1)+b_2,
-\quad W_1\in\mathbb R^{d_{\mathrm{ff}}\times d},\quad
-W_2\in\mathbb R^{d\times d_{\mathrm{ff}}}.
+\quad W_1\in\mathbb R^{D_{\mathrm{ff}}\times D},\quad
+W_2\in\mathbb R^{D\times D_{\mathrm{ff}}}.
 $$
 
-先从 $d$ 扩展到 $d_{\mathrm{ff}}$，再写回 $d$。GELU 是 $g(t)=t\Phi(t)$，其中 $\Phi$ 为标准正态分布的累积分布函数；$g(1)\approx0.841345$，$g(0)=0$。它不会像 ReLU 一样把所有负输入截成零。
+先从 $D$ 扩展到 $D_{\mathrm{ff}}$，再写回 $D$。GELU 是 $g(t)=t\Phi(t)$，其中 $\Phi$ 为标准正态分布的累积分布函数；$g(1)\approx0.841345$，$g(0)=0$。它不会像 ReLU 一样把所有负输入截成零。
 
 为了让这一步也可手算，取 $W_1=0,b_1=(1,0)$，$W_2=\begin{bmatrix}1&0\\0&0\end{bmatrix},b_2=0$。记 $g=g(1)$，此时每行 FFN 都写入 $(g,0)$。虽然该特例的 FFN 输出不依赖输入，计算顺序仍包含第二个 LayerNorm 和 GELU；一般参数会使写入量随位置而变。第二次残差得
 
@@ -181,30 +184,33 @@ $$
 
 ## 残差流：每个子层只往同一条通道里写
 
-每个 Decoder 块包含两个残差子层。令子层总数为 $n_{\mathrm{sub}}=2n_{\mathrm{layers}}$，并在下面的公式中用 $\ell$ 编号子层。每个子层接收 $X_\ell$，写回后得到 $X_{\ell+1}$：
+每个 Decoder 块包含两个残差子层。令子层总数为 $n_{\mathrm{sub}}=2L$，其中 $L$ 是 Decoder 块数；下面的公式用 $\ell$ 编号子层。每个子层接收 $X_\ell$，写回后得到 $X_{\ell+1}$：
 
 $$
 X_{n_{\mathrm{sub}}}=X_0+\sum_{\ell=0}^{n_{\mathrm{sub}}-1}f_\ell(\operatorname{LN}_\ell(X_\ell)).
 $$
 
-这条始终保持 $(B,T,d)$ 的通道叫 residual stream（残差流）。后层读到的是先前分支写入后的状态；等式只表示加法结构，不表示各分支学到互不重叠的特征。每层位置 $i$ 的注意力只读到先前位置，LayerNorm 与 FFN 又逐位置计算，因此堆叠后位置 $i$ 的 logits 仍不能依赖未来输入。
+这条始终保持 $(B,T,D)$ 的通道叫 residual stream（残差流）。后层读到的是先前分支写入后的状态；等式只表示加法结构，不表示各分支学到互不重叠的特征。每层位置 $i$ 的注意力只读到先前位置，LayerNorm 与 FFN 又逐位置计算，因此堆叠后位置 $i$ 的 logits 仍不能依赖未来输入。
 
-一般模型的形状如下。$n_q$ 是查询头数，普通 MHA 中键和值头数与它相同，$d_h=d/n_q$。
+一般模型的形状如下。$H_q$ 是查询头数，普通 MHA 中键和值头数与它相同，$D_h=D/H_q$。
 
 | 计算 | 形状 | 与输入相比改变了什么 |
 | --- | --- | --- |
-| token ID、输入 embedding | $(B,T)$、$(B,T,d)$ | ID 变成隐藏向量 |
-| Q/K/V 分头 | 各 $(B,n_q,T,d_h)$ | $d$ 拆为头轴和头宽 |
-| 注意力分数 | $(B,n_q,T,T)$ | 最后两轴是查询、键位置 |
-| 注意力输出、两次残差 | $(B,T,d)$ | 拼头及输出投影后写回原宽度 |
-| FFN 中间、块输出 | $(B,T,d_{\mathrm{ff}})$、$(B,T,d)$ | 中途扩宽，再写回原宽度 |
-| LM head logits | $(B,T,n_{\mathrm{vocab}})$ | 每个位置各预测一个词表分布 |
+| token ID、输入 embedding | $(B,T)$、$(B,T,D)$ | ID 变成隐藏向量 |
+| Q/K/V 分头 | 各 $(B,H_q,T,D_h)$ | $D$ 拆为头轴和头宽 |
+| 注意力分数 | $(B,H_q,T,T)$ | 最后两轴是查询、键位置 |
+| 注意力输出、两次残差 | $(B,T,D)$ | 拼头及输出投影后写回原宽度 |
+| FFN 中间、块输出 | $(B,T,D_{\mathrm{ff}})$、$(B,T,D)$ | 中途扩宽，再写回原宽度 |
+| LM head logits | $(B,T,V)$ | 每个位置各预测一个词表分布 |
 
-若 $d$ 不能被 $n_q$ 整除，这个普通 MHA 拆法不成立。注意力 mask 的形状针对查询和键位置；loss mask 的形状针对预测位置，两者解决不同问题。
+若 $D$ 不能被 $H_q$ 整除，这个普通 MHA 拆法不成立。注意力 mask 的形状针对查询和键位置；loss mask 的形状针对预测位置，两者解决不同问题。
 
 ## 参数数量：手算模型有多少可训练数
 
-手算时把不少权重设为零，**零值仍然占一个可训练参数**。按照本章的独立输入 embedding、独立带偏置 LM head、全部线性层带偏置、三个 LayerNorm 各有缩放与平移，$n_{\mathrm{vocab}}=4,d=2,d_{\mathrm{ff}}=2,T_{\max}=3$ 的账是：
+<details>
+<summary>展开 74 参数手算模型与 268 参数核对模型的账</summary>
+
+手算时把不少权重设为零，**零值仍然占一个可训练参数**。按照本章的独立输入 embedding、独立带偏置 LM head、全部线性层带偏置、三个 LayerNorm 各有缩放与平移，$V=4,D=2,D_{\mathrm{ff}}=2,T_{\max}=3$ 的账是：
 
 | 部件 | 计算 | 参数数 |
 | --- | --- | --- |
@@ -215,27 +221,22 @@ $$
 | LM head | $4\times2+4$ | 12 |
 | 合计 | | **74** |
 
-causal mask、softmax 权重、输入 ID 和中间隐藏状态都不是参数。若把头数从 1 改成 2 而固定 $d=2$，Q/K/V 与输出投影的总尺寸不变，只是每头宽度变成 1；参数数目仍是 74，计算与可表示的模式则会变化。
+causal mask、softmax 权重、输入 ID 和中间隐藏状态都不是参数。若把头数从 1 改成 2 而固定 $D=2$，Q/K/V 与输出投影的总尺寸不变，只是每头宽度变成 1；参数数目仍是 74，计算与可表示的模式则会变化。
 
-`decoder.py` 还用一个更宽的自动核对配置：词表 8、$d=4,d_{\mathrm{ff}}=8,n_q=2,T_{\max}=4$，共 268 个参数。它和上面的 74 参数手算例是**两套明确区分的配置**：前者检查多头轴、随机参数梯度与因果性，后者检查本页所有数值。不能把 268 当作刚才四词表例题的参数数。
+`decoder.py` 还用一个更宽的自动核对配置：词表 8、$D=4,D_{\mathrm{ff}}=8,H_q=2,T_{\max}=4$，共 268 个参数。它和上面的 74 参数手算例是**两套明确区分的配置**：前者检查多头轴、随机参数梯度与因果性，后者检查本页所有数值。不能把 268 当作刚才四词表例题的参数数。
 
-## 结构边界：Pre-Norm 与三类 Transformer
 
-本章的块是 $H=X+\operatorname{MHA}(\operatorname{LN}_1(X))$，$Y=H+\operatorname{FFN}(\operatorname{LN}_2(H))$。LayerNorm 放在分支输入端，称 Pre-Norm。原论文使用的 Post-Norm 将 LayerNorm 放在相加后；此时主残差路径也经过归一化，梯度计算图不同。2017 年原始 Transformer 还有 encoder 与 cross-attention，所以本章的 Decoder 不是原论文整套架构。
+</details>
 
-<Figure src="principles/pre-post-norm.svg" alt="Pre-Norm 在注意力和 FFN 分支入口归一化，Post-Norm 在残差相加后归一化">顺着绿色主路径看：左图经过两次加法即可进入下一块，右图每次相加后还要经过 LayerNorm。这说明两种权重和执行顺序不能直接互换。</Figure>
+## 配置边界：这是本课程的基础预测器
 
-三类 Transformer 的差别还在于输入的条件结构。encoder 通常让每个位置双向读取源文本；decoder-only 使用 causal attention，从已有前缀预测下一 token；encoder-decoder 先编码源文本，再以 causal attention 读取目标前缀，并通过 cross-attention 读取源表示。
-
-<Figure src="principles/attention-visibility.svg" alt="encoder 双向可见全部位置，decoder 只能看到当前及之前位置，cross-attention 的矩阵以目标和源长度为两轴">图中的行都是查询、列都是键。双向和因果自注意力都是方阵，cross-attention 的查询来自 decoder、键和值来自 encoder，所以可以是长方形。</Figure>
-
-若源长与目标长不同，cross-attention 分数形状是 $(T_{\mathrm{target}},T_{\mathrm{source}})$，不能照搬自注意力的 $(T,T)$。本课随后转向 decoder-only 模型；[P8](/principles/modern-decoder/) 会逐项比较新的 norm、FFN 与注意力设计，[P11](/principles/complete-transformer/) 才给出带缓存的现代 Decoder。
+本章采用 Pre-LayerNorm、GELU、学习式位置表与独立带偏置 head，统一包中的 `basic_decoder_config` 表达这组选择。2017 Transformer 使用 Post-LayerNorm、ReLU、sin/cos，并包括 encoder 和 cross-attention；本章没有复刻该完整架构。[P8](/principles/normalization/) 会比较 norm 顺序，[P14 经典分支](/principles/encoder-cross-attention/) 再推导源文本与目标文本的条件结构。
 
 ## 验证：前向、反向与因果性同时成立
 
-运行 `.venv/bin/python code/principles/decoder.py`。脚本先检查随机 268 参数模型的输出形状、改变未来 token 不影响过去 logits、batch 样本隔离、全部参数梯度有限、逐查询参考与多头矩阵计算一致；再用本章 d=2 参数核对三行 logits、平均 loss 和一条 logit 梯度。两套检查都复用 P2 的 `sequence_loss`。
+运行 `uv run python -m examples.principles.decoder`。脚本先检查随机 268 参数模型的输出形状、改变未来 token 不影响过去 logits、batch 样本隔离、全部参数梯度有限、逐查询参考与多头矩阵计算一致；再用本章 D=2 参数核对三行 logits、平均 loss 和一条 logit 梯度。两套检查使用 P2 的移位目标；独立 `ReferenceDecoder` 与统一 `Transformer(basic_decoder_config(...))` 在同结构、同权重下比较 logits 与梯度。训练调用只使用统一模型，参考类用于捕获轴、转置和重组错误。
 
-<CodeFile path="code/principles/decoder.py" />
+<CodeFile path="examples/principles/decoder.py" symbol="verify_hand_path" />
 
 脚本能输出 logits 并核对反向传播，不代表参数已经在数据上训练好。数据窗口、优化器和独立验证协议将在 [T1](/training/data/) 至 [T4](/training/evaluation/) 建立。
 
@@ -272,9 +273,9 @@ causal mask、softmax 权重、输入 ID 和中间隐藏状态都不是参数。
 </details>
 
 <details>
-<summary>若扩为两个头，令 $B=2,T=3,d=4,n_q=2$，注意力分数与块输出各是什么形状？</summary>
+<summary>若扩为两个头，令 $B=2,T=3,D=4,H_q=2$，注意力分数与块输出各是什么形状？</summary>
 
-每头宽度 $d_h=2$。分头 Q/K 形状各是 $(2,2,3,2)$，分数是 $(2,2,3,3)$；各头加权结果拼回并经输出投影，残差块输出仍是 $(2,3,4)$。头数不应误作 batch 数或序列长度。
+每头宽度 $D_h=2$。分头 Q/K 形状各是 $(2,2,3,2)$，分数是 $(2,2,3,3)$；各头加权结果拼回并经输出投影，残差块输出仍是 $(2,3,4)$。头数不应误作 batch 数或序列长度。
 
 </details>
 

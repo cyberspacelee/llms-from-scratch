@@ -1,0 +1,665 @@
+{
+  "schemaVersion": 1,
+  "dtype": "float64",
+  "atol": 1e-12,
+  "sourceHash": "deff01424bd488e52d63360975dec3c649d5b5472aee224853021d69396058d2",
+  "sources": [
+    "examples/frameworks/autograd.py",
+    "src/llms_from_scratch/attention/position.py",
+    "src/llms_from_scratch/attention/softmax.py",
+    "src/llms_from_scratch/attention/patterns.py",
+    "src/llms_from_scratch/config.py",
+    "src/llms_from_scratch/chapters/ch10_flash_attention.py",
+    "src/llms_from_scratch/inference/sampling.py",
+    "src/llms_from_scratch/training/losses.py"
+  ],
+  "sampling": [
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.4,
+        0.3,
+        0.2,
+        0.10000000000000003
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 0.6,
+        "minP": 0.0,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.5714285714285715,
+        0.42857142857142855,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 2,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.5714285714285715,
+        0.42857142857142855,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.6,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.5714285714285715,
+        0.4285714285714286,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 0.5,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.5333333333333333,
+        0.2999999999999999,
+        0.13333333333333333,
+        0.03333333333333335
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 2.0,
+        "history": [
+          0,
+          0
+        ]
+      },
+      "probabilities": [
+        0.2105263157894737,
+        0.3947368421052631,
+        0.2631578947368421,
+        0.1315789473684211
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 2.0,
+        "history": [
+          0,
+          1
+        ]
+      },
+      "probabilities": [
+        0.29090909090909095,
+        0.16363636363636358,
+        0.36363636363636365,
+        0.18181818181818185
+      ]
+    },
+    {
+      "logits": [
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003,
+        -2.3025850929940455
+      ],
+      "options": {
+        "temperature": 0.5,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.6,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "logits": [
+        -2.3025850929940455,
+        -0.916290731874155,
+        -1.2039728043259361,
+        -1.6094379124341003
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.6,
+        "penalty": 1.0,
+        "history": [
+          0,
+          1
+        ]
+      },
+      "probabilities": [
+        0.0,
+        0.5714285714285715,
+        0.4285714285714286,
+        0.0
+      ]
+    },
+    {
+      "logits": [
+        2.0,
+        0.0,
+        -1.0,
+        1.0
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 4,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 2.0,
+        "history": [
+          0,
+          1,
+          2,
+          2
+        ]
+      },
+      "probabilities": [
+        0.4136219764199625,
+        0.1521630215416033,
+        0.02059302561847168,
+        0.4136219764199625
+      ]
+    },
+    {
+      "logits": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "options": {
+        "temperature": 1.0,
+        "topK": 2,
+        "topP": 1.0,
+        "minP": 0.0,
+        "penalty": 1.0,
+        "history": []
+      },
+      "probabilities": [
+        0.5,
+        0.5,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "cachedAttention": [
+    {
+      "past": 0,
+      "length": 3,
+      "row": 0,
+      "output": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "past": 0,
+      "length": 3,
+      "row": 1,
+      "output": [
+        0.5805557848615206,
+        0.0
+      ]
+    },
+    {
+      "past": 0,
+      "length": 3,
+      "row": 2,
+      "output": [
+        1.3027101501815075,
+        0.0
+      ]
+    },
+    {
+      "past": 2,
+      "length": 1,
+      "row": 0,
+      "output": [
+        1.3027101501815075,
+        0.0
+      ]
+    },
+    {
+      "past": 2,
+      "length": 3,
+      "row": 0,
+      "output": [
+        1.3027101501815075,
+        0.0
+      ]
+    },
+    {
+      "past": 2,
+      "length": 3,
+      "row": 1,
+      "output": [
+        2.06122252101854,
+        0.0
+      ]
+    },
+    {
+      "past": 2,
+      "length": 3,
+      "row": 2,
+      "output": [
+        2.7018045538313427,
+        0.0
+      ]
+    },
+    {
+      "past": 3,
+      "length": 2,
+      "row": 0,
+      "output": [
+        2.06122252101854,
+        0.0
+      ]
+    },
+    {
+      "past": 3,
+      "length": 2,
+      "row": 1,
+      "output": [
+        2.7018045538313427,
+        0.0
+      ]
+    },
+    {
+      "past": 4,
+      "length": 2,
+      "row": 0,
+      "output": [
+        2.7018045538313427,
+        0.0
+      ]
+    },
+    {
+      "past": 4,
+      "length": 2,
+      "row": 1,
+      "output": [
+        3.015001692238741,
+        0.0
+      ]
+    }
+  ],
+  "onlineAttention": [
+    {
+      "position": 0,
+      "block": 1,
+      "output": 1.0
+    },
+    {
+      "position": 0,
+      "block": 2,
+      "output": 1.0
+    },
+    {
+      "position": 0,
+      "block": 3,
+      "output": 1.0
+    },
+    {
+      "position": 0,
+      "block": 4,
+      "output": 1.0
+    },
+    {
+      "position": 1,
+      "block": 1,
+      "output": 1.7310585786300048
+    },
+    {
+      "position": 1,
+      "block": 2,
+      "output": 1.7310585786300048
+    },
+    {
+      "position": 1,
+      "block": 3,
+      "output": 1.7310585786300048
+    },
+    {
+      "position": 1,
+      "block": 4,
+      "output": 1.7310585786300048
+    },
+    {
+      "position": 2,
+      "block": 1,
+      "output": 2.5752103826044412
+    },
+    {
+      "position": 2,
+      "block": 2,
+      "output": 2.5752103826044412
+    },
+    {
+      "position": 2,
+      "block": 3,
+      "output": 2.5752103826044412
+    },
+    {
+      "position": 2,
+      "block": 4,
+      "output": 2.5752103826044412
+    },
+    {
+      "position": 3,
+      "block": 1,
+      "output": 3.49265273458577
+    },
+    {
+      "position": 3,
+      "block": 2,
+      "output": 3.492652734585769
+    },
+    {
+      "position": 3,
+      "block": 3,
+      "output": 3.49265273458577
+    },
+    {
+      "position": 3,
+      "block": 4,
+      "output": 3.492652734585769
+    },
+    {
+      "position": 4,
+      "block": 1,
+      "output": 4.451941567662194
+    },
+    {
+      "position": 4,
+      "block": 2,
+      "output": 4.451941567662194
+    },
+    {
+      "position": 4,
+      "block": 3,
+      "output": 4.451941567662194
+    },
+    {
+      "position": 4,
+      "block": 4,
+      "output": 4.451941567662194
+    },
+    {
+      "position": 5,
+      "block": 1,
+      "output": 5.432932763071741
+    },
+    {
+      "position": 5,
+      "block": 2,
+      "output": 5.432932763071741
+    },
+    {
+      "position": 5,
+      "block": 3,
+      "output": 5.432932763071741
+    },
+    {
+      "position": 5,
+      "block": 4,
+      "output": 5.432932763071741
+    }
+  ],
+  "maskedLoss": [
+    {
+      "targets": [
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+      ],
+      "ignored": [
+        false,
+        false,
+        true,
+        false,
+        false,
+        true
+      ],
+      "total": 3.2066682117656193,
+      "valid": 4,
+      "mean": 0.8016670529414048
+    },
+    {
+      "targets": [
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+      ],
+      "ignored": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "total": 4.810002317648429,
+      "valid": 6,
+      "mean": 0.8016670529414048
+    },
+    {
+      "targets": [
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+      ],
+      "ignored": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "total": 0.0,
+      "valid": 0,
+      "mean": null
+    },
+    {
+      "targets": [
+        0,
+        1,
+        0,
+        1,
+        0,
+        0
+      ],
+      "ignored": [
+        true,
+        false,
+        true,
+        true,
+        true,
+        true
+      ],
+      "total": 0.8016670529414048,
+      "valid": 1,
+      "mean": 0.8016670529414048
+    }
+  ],
+  "vectorBranch": [
+    {
+      "w0": 1.0,
+      "w1": 2.0,
+      "bias": 1.0,
+      "seed": 1.0,
+      "u": [
+        3.0,
+        -1.0
+      ],
+      "loss": 8.0,
+      "gu": [
+        20.0,
+        12.0
+      ],
+      "gw": [
+        40.0,
+        -12.0
+      ],
+      "gb": 32.0
+    },
+    {
+      "w0": 1.0,
+      "w1": 2.0,
+      "bias": 1.0,
+      "seed": 0.5,
+      "u": [
+        3.0,
+        -1.0
+      ],
+      "loss": 8.0,
+      "gu": [
+        10.0,
+        6.0
+      ],
+      "gw": [
+        20.0,
+        -6.0
+      ],
+      "gb": 16.0
+    },
+    {
+      "w0": -1.0,
+      "w1": 0.5,
+      "bias": 2.0,
+      "seed": -1.0,
+      "u": [
+        0.0,
+        1.5
+      ],
+      "loss": 2.0,
+      "gu": [
+        3.0,
+        0.0
+      ],
+      "gw": [
+        6.0,
+        -0.0
+      ],
+      "gb": 3.0
+    },
+    {
+      "w0": 0.0,
+      "w1": 0.0,
+      "bias": 0.0,
+      "seed": 1.0,
+      "u": [
+        0.0,
+        0.0
+      ],
+      "loss": 2.0,
+      "gu": [
+        0.0,
+        0.0
+      ],
+      "gw": [
+        0.0,
+        -0.0
+      ],
+      "gb": 0.0
+    }
+  ]
+}

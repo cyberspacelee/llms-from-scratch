@@ -2,9 +2,12 @@
 title: 多频率 sin/cos 位置编码
 question: 固定正弦位置编码为什么使用多频率的正弦和余弦
 description: 从三个位置的手算出发，解释 sin/cos 双通道怎样表示固定偏移、多频率怎样扩展位置尺度，以及加法位置编码与 RoPE 的边界。
+prerequisites:
+  - principles/attention-order
 order: 6
 code:
-  - code/principles/position_encoding.py
+  - examples/principles/position_encoding.py
+  - src/llms_from_scratch/attention/position.py
 ---
 
 import RotationLab from '../../../components/labs/RotationLab'
@@ -100,14 +103,14 @@ $$
 
 ## 多频率：让不同维度观察不同尺度
 
-单频率的十六步重复是手算例特有的，但任何一个周期都会反复绕圈。原始 Transformer 把多个 sin/cos 对拼起来，每一对采用自己的角频率。令隐藏维度 $d$ 为正偶数，维度对编号 $r=0,\ldots,d/2-1$，底数 $\beta=10000$：
+单频率的十六步重复是手算例特有的，但任何一个周期都会反复绕圈。原始 Transformer 把多个 sin/cos 对拼起来，每一对采用自己的角频率。令隐藏维度 $D$ 为正偶数，维度对编号 $r=0,\ldots,D/2-1$，底数 $\beta=10000$：
 
 <KeyEq label="原始 Transformer 位置编码">
 
 $$
 \mathrm{PE}(p,2r)=\sin(p\omega_r),\qquad
 \mathrm{PE}(p,2r+1)=\cos(p\omega_r),\qquad
-\omega_r=\beta^{-2r/d},\qquad \beta=10000.
+\omega_r=\beta^{-2r/D},\qquad \beta=10000.
 $$
 
 </KeyEq>
@@ -116,9 +119,9 @@ $p$ 仍是 token 位置；$2r,2r+1$ 是同一频率的两个坐标。第 0 对�
 
 ### 为什么频率按几何级数排列
 
-对 $d=8$，频率相邻相差十倍，覆盖几步到几千步的尺度。将 $\ln\omega_r=-(2r/d)\ln\beta$ 画成 $r$ 的函数是一条直线，因此等间隔维度对对应等间隔对数频率；$\beta$ 是设计选择，不是由位置编码定理唯一推出的常数。
+对 $D=8$，频率相邻相差十倍，覆盖几步到几千步的尺度。将 $\ln\omega_r=-(2r/D)\ln\beta$ 画成 $r$ 的函数是一条直线，因此等间隔维度对对应等间隔对数频率；$\beta$ 是设计选择，不是由位置编码定理唯一推出的常数。
 
-| $d=8$ 的维度对 | 角频率 $\omega_r$ | 波长 $2\pi/\omega_r$，单位 token |
+| $D=8$ 的维度对 | 角频率 $\omega_r$ | 波长 $2\pi/\omega_r$，单位 token |
 |---|---|---|
 | 0、1 | 1 | 约 6.28 |
 | 2、3 | 0.1 | 约 62.83 |
@@ -140,30 +143,30 @@ $$
 
 ### 编码如何加入原始 Transformer
 
-把所有 $d/2$ 对拼成 $\mathrm{PE}(p)\in\mathbb R^d$，它在每个位置都可以由公式算出。每一对的平方长度是 1，所以 $\|\mathrm{PE}(p)\|_2^2=d/2$。原论文在输入端把 token 的 embedding 乘 $\sqrt d$，与同形状位置向量相加，再做 dropout：
+把所有 $D/2$ 对拼成 $\mathrm{PE}(p)\in\mathbb R^D$，它在每个位置都可以由公式算出。每一对的平方长度是 1，所以 $\|\mathrm{PE}(p)\|_2^2=D/2$。原论文在输入端把 token 的 embedding 乘 $\sqrt D$，与同形状位置向量相加，再做 dropout：
 
 $$
-z_p=\operatorname{Dropout}\left(\sqrt d\,e_{u_p}+\mathrm{PE}(p)\right).
+z_p=\operatorname{Dropout}\left(\sqrt D\,e_{u_p}+\mathrm{PE}(p)\right).
 $$
 
 其中 $u_p$ 是位置 $p$ 的 token ID，$e_{u_p}$ 是按 ID 查到的可训练 embedding；`dropout` 在训练时随机置零部分输入，推理时不置零。它们与位置编码的生成公式是不同操作。把位置 0、4、8 的编码按行堆起来，就得到“位置 × 维度”的矩阵；下图用更多行展示同一件事。
 
 <EncodingMatrixLab client:visible />
 
-选中同一个 $p$，横向读一整行；每相邻两列是一对 sin/cos。$d=8$ 时每行平方范数应为 4。首对在整数位置上的连续周期不是恰好 6.28 步；这只是把位置看成实数时的周期长度。
+选中同一个 $p$，横向读一整行；每相邻两列是一对 sin/cos。$D=8$ 时每行平方范数应为 4。首对在整数位置上的连续周期不是恰好 6.28 步；这只是把位置看成实数时的周期长度。
 
 ## 性质边界：位置向量与注意力分数不是一回事
 
-固定偏移关系对每一对成立，把各对放在对角块里，也就得到整个 $\mathrm{PE}(p+\Delta)=A_d(\Delta)\mathrm{PE}(p)$。这里 $A_d$ 是由各频率的 $A_r(\Delta)$ 组成的分块矩阵。两个完整编码直接做点积，则各对的点积相加：
+固定偏移关系对每一对成立，把各对放在对角块里，也就得到整个 $\mathrm{PE}(p+\Delta)=A_D(\Delta)\mathrm{PE}(p)$。这里 $A_D$ 是由各频率的 $A_r(\Delta)$ 组成的分块矩阵。两个完整编码直接做点积，则各对的点积相加：
 
 $$
 \begin{aligned}
 &\mathrm{PE}(i)^\top\mathrm{PE}(j)\\
-&=\sum_{r=0}^{d/2-1}\cos((i-j)\omega_r).
+&=\sum_{r=0}^{D/2-1}\cos((i-j)\omega_r).
 \end{aligned}
 $$
 
-这条式子说明未经学习投影的编码点积只含位置差，且是偶函数。回到 [P5](/principles/attention-order/) 的注意力：令输入 $z_i=x_i+\mathrm{PE}(i)$，学习投影的乘积为 $M=W_QW_K^\top$（省略统一的 $1/\sqrt{d_h}$）。分数展开后含 $x_i^\top Mx_j$、两个内容位置交叉项，以及 $\mathrm{PE}(i)^\top M\mathrm{PE}(j)$。这些项不必都只取决于 $j-i$。
+这条式子说明未经学习投影的编码点积只含位置差，且是偶函数。回到 [P5](/principles/attention-order/) 的注意力：令输入 $z_i=x_i+\mathrm{PE}(i)$，学习投影的乘积为 $M=W_QW_K^\top$（省略统一的 $1/\sqrt{D_h}$）。分数展开后含 $x_i^\top Mx_j$、两个内容位置交叉项，以及 $\mathrm{PE}(i)^\top M\mathrm{PE}(j)$。这些项不必都只取决于 $j-i$。
 
 只保留一对频率并选择 $M=\operatorname{diag}(1,0)$，令 $u(i)=(\sin(i\omega),\cos(i\omega))^\top$，就有明确反例：
 
@@ -180,9 +183,16 @@ causal mask 则决定查询可以看哪些键，不能用本节的位置向量�
 
 本章将 $\mathrm{PE}(p)$ **加到输入**，投影 $W_Q,W_K$ 可以改变相对点积结构。如果先得到内容查询与键，再分别按位置旋转，前面的恒等式直接给出 $(R(i\omega)q_i)^\top(R(j\omega)k_j)=q_i^\top R((j-i)\omega)k_j$。这只保证**给定内容向量时显式位置项**依赖 $j-i$，并不保证文本搬到别的上下文后 $q_i,k_j$ 不变；也不改变 causal mask 的可见集合。[P7](/principles/rope/) 将它扩展到多频率、具体张量布局与代码。这便是加法位置编码和 RoPE 在应用位置时的关键差别。
 
-运行 `python code/principles/position_encoding.py` 可核对 `sinusoidal_pe` 的形状、固定偏移、位置点积和范数；脚本还测试 P5/P7 的对应性质。它用有限数组验证实现，普遍成立的依据仍是上面的三角恒等式。
+运行 `uv run python -m examples.principles.position_encoding` 可核对 `sinusoidal_pe` 的形状、固定偏移、位置点积和范数；脚本还测试 P5/P7 的对应性质。它用有限数组验证实现，普遍成立的依据仍是上面的三角恒等式。
+
+<CodeFile path="src/llms_from_scratch/attention/position.py" symbol="sinusoidal" />
+
+共享函数为任意位置生成编码；本页只研究偶数 D 的成对结构，实现对奇数 D 保留最后一个 sin 坐标。独立参考 `sinusoidal_pe` 限制偶数宽，以避免将这种尾维选择混进证明。
 
 ## 选读：旋转、极坐标与矩阵指数
+
+<details>
+<summary>展开极坐标、连续旋转和矩阵指数的推导</summary>
 
 前面的主问题已得到答案。以下解释旋转为何自然出现，不作为 [P7](/principles/rope/) 的先修。需要 [M7](/math/calculus/) 的导数与乘积法则；无限幂级数和微分方程在此给出所用事实。
 
@@ -210,6 +220,9 @@ e^{t\omega S}=
 $$
 
 这说明在**连续、可组合、保长**这些附加要求下，二维旋转及 sin/cos 是自然的构造；单凭“表示位置”并不能推出唯一方案。把 $I+\varepsilon S$ 当作精确旋转也会错：其转置乘积是 $(1+\varepsilon^2)I$，仅是一阶近似。复数与欧拉公式的等价写法留在 P7 选读。
+
+
+</details>
 
 ## 常见误区
 
@@ -249,7 +262,7 @@ $u(12)=(\sin(3\pi/2),\cos(3\pi/2))^\top=(-1,0)^\top$。$A(4)=\begin{bmatrix}0&1\
 </details>
 
 <details>
-<summary>原论文 d = 8 时，第 4、5 维的频率是多少？从 p = 4 到 p = 8，这一对增加多少相位？</summary>
+<summary>原论文 D = 8 时，第 4、5 维的频率是多少？从 p = 4 到 p = 8，这一对增加多少相位？</summary>
 
 第 4、5 维是 $r=2$，$\omega_2=10000^{-4/8}=0.01$；四步相位增加 $4\omega_2=0.04$ 弧度，连续位置视角的波长为 $2\pi/0.01\approx628.32$。它与手算的 $\omega=\pi/8$ 不同，不能把两个例子的数值混算。
 

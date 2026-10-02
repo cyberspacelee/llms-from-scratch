@@ -4,7 +4,8 @@ question: 怎样从一张两行三列的输入选取、修改和重排数据，�
 description: 用同一张 2×3 数组追踪坐标、dtype、stride 与共享存储，解释切片和高级索引的写入差异，以及 reshape 与 transpose 的不同。
 order: 1
 code:
-  - code/frameworks/numpy_arrays.py
+  - examples/frameworks/numpy_arrays.py
+prerequisites: []
 ---
 
 import NumpyStorageLab from '../../../components/labs/NumpyStorageLab'
@@ -136,9 +137,9 @@ assert np.shares_memory(A, swapped)
 
 配套脚本重建 A 后再做每组变换，用断言分别检查数字、shape 与共享关系；每组重建能防止前一次修改影响后续结论。
 
-<CodeFile path="code/frameworks/numpy_arrays.py" />
+<CodeFile path="examples/frameworks/numpy_arrays.py" region="storage" />
 
-运行 `python code/frameworks/numpy_arrays.py` 会输出实际 NumPy 版本与检查结果。别把本例的 `(24,8)` stride 或转置后 reshape 必须复制推广到任意数组布局；脚本验证的是这里明确定义的输入。
+运行 `uv run python -m examples.frameworks.numpy_arrays` 会输出实际 NumPy 版本与检查结果。别把本例的 `(24,8)` stride 或转置后 reshape 必须复制推广到任意数组布局；脚本验证的是这里明确定义的输入。
 
 ## 常见误区
 

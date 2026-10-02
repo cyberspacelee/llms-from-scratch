@@ -1,24 +1,46 @@
 ---
-/** A verification script from code/, shown whole so the page and the file cannot drift apart. */
 import { Code } from 'astro:components'
+import { execFileSync } from 'node:child_process'
+import extractor from './extract-source.py?raw'
 import { repoUrl } from '../../lib/lessons'
 
 interface Props {
-  /** Repository path, e.g. "code/principles/position_encoding.py". */
   path: string
+  /** Qualified Python definition(s), e.g. Decoder.forward. */
+  symbol?: string | string[]
+  /** A named # region / # endregion (or // for CUDA), with optional named closing marker. */
+  region?: string
+  run?: string
 }
-
-const { path } = Astro.props
-const files = import.meta.glob<string>(['../../../../code/**/*.py', '../../../../code/**/*.cu'], { query: '?raw', import: 'default', eager: true })
+const { path, symbol, region, run } = Astro.props
+const files = import.meta.glob<string>(['../../../../examples/**/*.py', '../../../../examples/**/*.cu', '../../../../src/**/*.py'], { query: '?raw', import: 'default', eager: true })
 const source = files[`../../../../${path}`]
 if (source === undefined) throw new Error(`Code file not found: ${path}`)
+if (symbol && region) throw new Error(`CodeFile accepts symbol or region, not both: ${path}`)
+let excerpts: { code: string; start: number; end: number }[] = []
+if (symbol || region) {
+  if (symbol && !path.endsWith('.py')) throw new Error(`Python symbol extraction requires .py: ${path}`)
+  excerpts = JSON.parse(execFileSync('python3', ['-c', extractor], {
+    input: JSON.stringify({ source, symbols: typeof symbol === 'string' ? [symbol] : symbol, region }), encoding: 'utf8',
+  }))
+}
+const themes = { light: 'github-light', dark: 'github-dark' } as const
+const lang = path.endsWith('.cu') ? 'cpp' : 'python'
 ---
-<div class="not-prose my-6 overflow-hidden rounded-lg border border-rule bg-code-bg">
+<div class="source-file not-prose my-6 overflow-hidden rounded-lg border border-rule bg-code-bg">
   <div class="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-4 py-2 text-xs text-muted">
-    <code class="font-semibold text-ink">{path}</code>
-    <a href={`${repoUrl}/blob/master/${path}`} class="text-muted hover:text-accent">在 GitHub 查看</a>
+    <code class="font-semibold text-ink wrap-anywhere">{path}</code>
+    <a href={`${repoUrl}/blob/master/${path}`} class="text-muted hover:text-accent">查看源码</a>
   </div>
-  <div class="prose prose-lesson max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
-    <Code code={source.trimEnd()} lang={path.endsWith('.cu') ? 'cpp' : 'python'} themes={{ light: 'github-light', dark: 'github-dark' }} defaultColor={false} />
-  </div>
+  {run && <p class="m-0 border-b border-rule px-4 py-3 text-sm">运行：<code class="font-mono wrap-anywhere">{run}</code></p>}
+  {excerpts.map(excerpt => <div class="prose prose-lesson max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!" data-source-start={excerpt.start} data-source-end={excerpt.end}>
+    <p class="m-0 px-4 py-2 text-xs text-muted">源码第 {excerpt.start}–{excerpt.end} 行</p>
+    <Code code={excerpt.code} lang={lang} themes={themes} defaultColor={false} />
+  </div>)}
+  <details class="m-0! rounded-none! border-0! bg-transparent!">
+    <summary class="px-4 py-3 text-sm font-semibold">完整源码 · {source.trimEnd().split('\n').length} 行</summary>
+    <div class="prose prose-lesson m-0! max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
+      <Code code={source.trimEnd()} lang={lang} themes={themes} defaultColor={false} />
+    </div>
+  </details>
 </div>

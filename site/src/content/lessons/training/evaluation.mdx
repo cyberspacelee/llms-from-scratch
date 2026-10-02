@@ -4,13 +4,14 @@ question: 两个 checkpoint 的分数不同，差异究竟支持什么结论
 description: 用四篇独立来源的文档贯穿有效目标、NLL、PPL、滑动窗口、任务评分、配对不确定性和模型选择。
 order: 4
 code:
-  - code/training/evaluation.py
-  - code/training/ablation.py
+  - examples/training/evaluation.py
+  - examples/training/ablation.py
+prerequisites: ["training/pretraining"]
 ---
 
-[T3 训练、保存与恢复](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。阅读前建议掌握 [M3 概率与抽样](/math/probability/)、[M5 负对数似然](/math/distributions/) 和 [P9 生成](/principles/generation/)；不要求亲自训练模型。
+[T3 文本训练](/training/pretraining/) 会保存多个 checkpoint。现在 A 和 B 都在验证文本上给出了损失，B 的数字较低：该选 B 吗？回答之前要知道损失算在哪些 token 上、各文档怎样合并、上下文有多长，以及换成实际生成任务后是否仍改善。本章把这些问题放在同一组四篇文档上计算。阅读前建议掌握 [M3 概率与抽样](/math/probability/)、[M5 负对数似然](/math/distributions/) 和 [P11 生成](/principles/generation/)；不要求亲自训练模型。
 
-import { EvaluationReplayLab } from '../../../components/labs/TrainingTraceLabs'
+import EvaluationReplayLab from '../../../components/labs/EvaluationReplayLab'
 
 ## 固定比较对象：四篇文档和两个 checkpoint
 
@@ -68,7 +69,7 @@ $$
 
 一般地，对新增目标区间 $[a,b)$（$a\geq1$，$b=\min(a+s,N)$），输入取 $[u,b-1)$，其中 $u=\max(0,b-1-K)$。只累加 $j\in[a,b)$ 的目标损失。D2 的三组刚好覆盖 1 到 6；D1/D3 的短文档一次完成。代码断言每篇目标无重复也无遗漏。
 
-**步幅会改变条件分布。** 如果 $s=1$，某些目标可得到比本例更长的可见前缀；若 $s=K$，每组开头的历史较短。即使计分集合相同，A/B 的实际损失也可能变化。因此表中的 NLL 必须视为在固定 $K=4,s=2$ 协议下记录的值；不能拿它预测另一个步幅的结果。文档之间重新开始，位置编号按模型约定处理。用 [P10 KV cache](/principles/kv-cache/) 加速时，也必须核对缓存淘汰和位置规则是否保持同样的可见历史；删掉旧缓存项不一定等价于重算截短窗口。
+**步幅会改变条件分布。** 如果 $s=1$，某些目标可得到比本例更长的可见前缀；若 $s=K$，每组开头的历史较短。即使计分集合相同，A/B 的实际损失也可能变化。因此表中的 NLL 必须视为在固定 $K=4,s=2$ 协议下记录的值；不能拿它预测另一个步幅的结果。文档之间重新开始，位置编号按模型约定处理。用 [P12 KV cache](/principles/kv-cache/) 加速时，也必须核对缓存淘汰和位置规则是否保持同样的可见历史；删掉旧缓存项不一定等价于重算截短窗口。
 
 <EvaluationReplayLab client:visible />
 
@@ -100,13 +101,13 @@ $$
 
 要归因“B 的某个架构改动造成改善”，还需要受控消融：固定 tokenizer、训练/验证来源、模型主干、有效目标预算、优化器和评估协议，只改变目标组件，并比较多个 seed。相同步数不一定是相同目标数或 FLOP；结果只能支持当前预算与组合。ablation.py 展示一个独立例子：把 KV 头数从 1 改为 2，复制形状相同分支的初始权重，并保留逐文档得分。它有自己的两篇验证文本，与上表四篇教学数据**不是同一次实验**；其样本量不足以宣称配置优劣。
 
-<CodeFile path="code/training/ablation.py" />
+<CodeFile path="examples/training/ablation.py" region="matched_branches" />
 
 ## CPU 核对：每个数字来自同一份记录
 
-<CodeFile path="code/training/evaluation.py" />
+<CodeFile path="examples/training/evaluation.py" symbol="target_windows" />
 
-运行 python code/training/evaluation.py，可核对四篇的目标数、A/B 损失和、NLL、PPL、D2 三组窗口、复制任务逐来源差值与配对 bootstrap。脚本把表中的教学数值当作固定输入；它检查算术和计分协议，不声称运行了真实 checkpoint。接入模型时，先在短文档上比较完整前向与滑窗，确认上下文完全相同时逐目标 logits 一致，再报告长文档成绩。
+运行 uv run python -m examples.training.evaluation，可核对四篇的目标数、A/B 损失和、NLL、PPL、D2 三组窗口、复制任务逐来源差值与配对 bootstrap。脚本把表中的教学数值当作固定输入；它检查算术和计分协议，不声称运行了真实 checkpoint。接入模型时，先在短文档上比较完整前向与滑窗，确认上下文完全相同时逐目标 logits 一致，再报告长文档成绩。
 
 ## 常见误区
 
@@ -135,7 +136,7 @@ $$
 
 </details>
 
-下一章 [T5 指令微调](/training/instruction-tuning/) 将把“哪些 token 应计入损失”和“生成时如何评分”用于对话回复。
+下一章 [H1 指令微调](/post-training/instruction-tuning/) 将把“哪些 token 应计入损失”和“生成时如何评分”用于对话回复。
 
 ## 原始资料
 

@@ -2,9 +2,13 @@
 title: 生成、采样与对话格式
 question: 下一 token 的概率怎样变成一段可停止的输出
 description: 用一段四 token 生成任务贯通自回归、采样分布、停止规则和对话输入，核对温度与候选过滤的实际效果。
-order: 9
+prerequisites:
+  - principles/decoder
+  - principles/language-modeling
+order: 11
 code:
-  - code/principles/generation.py
+  - examples/principles/generation.py
+  - src/llms_from_scratch/inference/sampling.py
 ---
 
 import SamplingLab from '../../../components/labs/SamplingLab'
@@ -77,7 +81,7 @@ top-k 与 top-p 在这组数上碰巧相同，规则并不相同。将第一步�
 
 若抽到 EOS，就把它接到输出并停止。另一种停止是调用方的 `max_new_tokens` 预算：例如从 `[BOS,A]` 开始只允许 1 个新 token，即使这一步选中 B，也会停止在 `[BOS,A,B]`；这是**预算截断**，不是模型选择了结束。预算为 0 时原样返回 prompt，不应多采一次。
 
-还要检查上下文容量。示例 Decoder 的学习式位置表若只容纳 4 个输入位置，本章保守接口要求 `prompt 长度 + 最大新 token 数 <= 4`。只有两项位置可用时，不能要求三个新输出后还继续前向。RoPE 虽可计算更远位置，也不意味着模型在那里可靠；长上下文边界见 [A4](/advanced/long-context/)。
+还要检查上下文容量。示例 Decoder 的学习式位置表若只容纳 4 个输入位置，本章保守接口要求 `prompt 长度 + 最大新 token 数 <= 4`。只有两项位置可用时，不能要求三个新输出后还继续前向。RoPE 虽可计算更远位置，也不意味着模型在那里可靠；长上下文边界见 [A3](/advanced/long-context/)。
 
 EOS 是一个 token ID；“遇到字符串就停止”是另外的文本级协议。停止字符串可能跨多个 token，流式输出还需处理未完成的解码字节。批处理也不能因为一条请求生成 EOS 就停止全部请求，每条请求有自己的结束状态和输出预算。
 
@@ -85,11 +89,11 @@ EOS 是一个 token ID；“遇到字符串就停止”是另外的文本级协�
 
 min-p 相对于当前最大概率设门槛：保留 $q_c\ge p_{\min}\max_a q_a$ 的项。它与 top-p 的累计质量门槛不同。对本例原始分布取 $p_{\min}=0.6$，门槛是 $0.6\times0.4=0.24$，只留下 A、B，仍得 $(0,4/7,3/7,0)$。若先降温到 0.5，最大概率是 0.5333，门槛变为 0.32，仅 A 留下。最大项总能通过门槛，所以它不会产生空集合。
 
-上方实验的 min-p 滑块最高为 0.5，正文的 0.6 案例由脚本核对。用实验时，保持 top-k 为 4、top-p 为 1、重复惩罚为 1，再设置 min-p 为 0.5。温度为 1 时，门槛是 0.2，A、B、EOS 留下；温度为 0.5 时，门槛约为 0.2667，只留下 A、B。
+上方实验允许直接设置 min-p 为 0.6。保持 top-k 为 4、top-p 为 1、重复惩罚为 1；先令温度为 1，确认 A、B 留下，再降到 0.5，确认只剩 A。两次都重新归一化，不改变原模型的空心概率框。
 
 本例 A 已出现在 prompt 中，而模型又给 A 最大概率 0.4。采用 CTRL 形式、系数 $\theta\ge1$ 的重复惩罚时，只对历史中已出现的 ID 修改**原始 logits**：正分数除以 $\theta$，零或负分数乘以 $\theta$；同一 ID 重复出现也只处理一次。我们的 $z_A=\ln0.4<0$，取 $\theta=2$ 后变为 $\ln0.16$。BOS 也在历史中且 $z_{BOS}=\ln0.1<0$，因此同时变成 $\ln0.01$；归一化后的四项为 $(0.01,0.16,0.30,0.20)/0.67$。B 的排序升到第一。惩罚不会识别语义上合理的重复，例如代码里再次出现的变量名。
 
-实验的“历史里已出现 A”选项只将 A 纳入惩罚集合，BOS 未纳入。把所有过滤恢复为关闭、温度恢复为 1，再将惩罚系数设为 2，实验分布应为 $(0.10,0.16,0.30,0.20)/0.76$。正文与脚本使用完整历史 `[BOS,A]`，所以分母为 0.67。比较结果前，要先核对哪些 ID 接受了惩罚。
+实验默认历史 `[BOS,A]`，两个 ID 都进入惩罚集合。恢复过滤为关闭、温度为 1，设惩罚系数为 2，核对分布为 $(0.01,0.16,0.30,0.20)/0.67$。然后关闭“BOS 也参与惩罚”，分布改为 $(0.10,0.16,0.30,0.20)/0.76$。是否排除特殊 token 是明确的采样协议，实验读数同时展示完整历史与实际惩罚集合。
 
 按 logits 正负分段的规则不保持 softmax 的平移不变性：原始 $z$ 全部加上相同常数时，未经惩罚的 softmax 不变，但某些历史项会从“乘”切换到“除”，惩罚后的分布便改变。实际调用需要记录具体惩罚公式和应用顺序。本文参考实现依次做重复惩罚、除以温度、top-k、top-p、min-p，最后归一化；例如先做 top-k 再惩罚，已删掉的候选就无法因为惩罚 A 而回到集合。
 
@@ -112,15 +116,17 @@ flowchart LR
 
 例如用户消息内容为 A，一个假设模板可能输出 `[BOS,USER,A,END_TURN,ASSISTANT]`，然后从 ASSISTANT 后开始生成。这里的 `USER` 等符号代表模板的控制项，未包含在前面四类教学词表中。角色边界、每轮结束项和 assistant 起始项都依模型而异。它们属于输入序列，不增加神经网络层。使用对应模型的模板，并核对是否已经插入 BOS，避免重复添加。
 
-指令微调让模型学习如何依据角色和任务回答；裸文本续写权重不一定具备同样行为。[T5](/training/instruction-tuning/) 再讨论训练数据与 loss mask。思考段落、停止标记和输出展示规则也应按具体模型的模板与训练协议处理。
+指令微调让模型学习如何依据角色和任务回答；裸文本续写权重不一定具备同样行为。[H1](/post-training/instruction-tuning/) 再讨论训练数据与 loss mask。思考段落、停止标记和输出展示规则也应按具体模型的模板与训练协议处理。
 
 ## 代码：把分布接到生成循环
 
-`distribution` 用本章四个 logits 验证温度、截断和惩罚的数值，`generate` 在每一步取最后位置、按指定协议采样、追加 ID，并检查 EOS。代码分别测试固定随机源的复现、零预算、上下文限制，以及实际 Decoder 的调用形状。随机初始化的 Decoder 只用来验证循环，不能据此评价语言质量。
+统一包的 `distribution` 按本章顺序处理四个 logits；`sample_generate` 每步读取 `ModelOutput.logits` 的最后有效行，选取 ID、检查 EOS，并可复用 `ModelOutput.cache`。本章例题先用整段重算解释循环，缓存机制见 P12；教学例脚本检查同一分布、随机源与停止协议。代码分别测试固定随机源的复现、零预算、上下文限制，以及实际 Decoder 的调用形状。随机初始化的 Decoder 只用来验证循环，不能据此评价语言质量。
 
-<CodeFile path="code/principles/generation.py" />
+<CodeFile path="src/llms_from_scratch/inference/sampling.py" symbol="distribution" />
 
-在仓库根目录运行 `python code/principles/generation.py`。代码每一步重算历史；[P10 KV cache](/principles/kv-cache/) 将说明何时可复用历史的 K/V 而保持相同的下一步分布。
+<CodeFile path="examples/principles/generation.py" run="uv run python -m examples.principles.generation" />
+
+在仓库根目录运行 `uv run python -m examples.principles.generation`。统一生成入口支持缓存调用；整段重算仍是等价性参照，[P12 KV cache](/principles/kv-cache/) 将说明何时可复用历史的 K/V 而保持相同的下一步分布。
 
 ## 常见误区
 

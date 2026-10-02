@@ -1,38 +1,49 @@
 ---
 title: 模型原理导读
-question: 一段文本怎样用于预测下一 token，并继续生成文本
-description: 从文本编码和预测目标出发，搭起基础 Decoder，解决位置与生成问题，再组装可训练、可缓存的现代模型。
+question: 一段文本怎样进入同一个可训练、可生成、可缓存的模型
+description: 先建立下一 token 预测器，再逐项理解位置与结构，最后用统一实现核对训练和缓存生成；经典 encoder–decoder 另设选读分支。
 order: 0
 ---
 
-数学路线已经训练过分类器：输入一个向量，输出各类别的分数，再用损失更新参数。语言模型面对的是一段文本。它要根据已有内容预测下一个 **token**（文本切分后的单位）；生成一段话，则要把这次预测反复接到新的输入后面。本路线沿着这一个任务，先建出能训练的模型，再弄清顺序、现代结构与逐步生成。
+从一段字符串到可训练语言模型，需要连续回答四件事：输入怎样编号，每个位置预测什么，怎样读取合法历史，怎样把损失传回参数。本路线先用 `[BOS,A,B,EOS]` 建立这条链，再分别研究位置和现代结构。原理终章将这些单元放入同一个 `Transformer`，后续训练、适配和系统实验都使用这份实现。
 
-## 主线：从文本到下一 token
+进入路线需要 [M6 向量与矩阵](/math/linear-algebra/) 的轴、点积和索引，以及 [M5 分布与预测损失](/math/distributions/) 的 softmax 与交叉熵。反向传播需要 [M9](/math/backprop/)。数组或 PyTorch API 成为障碍时，按问题回读 [框架路线](/frameworks/)，不必先读完编译等选读内容。
+
+## 先建出第一个预测器
+
+[P1 文本、token 与 embedding](/principles/tokenization/) 从 `猫 sat` 的字节 BPE 走到参数查表，固定 tokenizer 的合并与特殊 ID 契约。为了能手算，[P2 下一 token 预测](/principles/language-modeling/) 明确改用四项教学词表，将 `[BOS,A,B,EOS]` 分成三个移位目标，再训练 bigram。词表更换是例题尺寸的选择，不是复用既有模型权重。
+
+[P3 注意力与多头](/principles/attention/) 补上 bigram 无法读取的历史，先算单头，再处理 causal mask、拆合头和 batch 隔离。[P4 基础 Decoder](/principles/decoder/) 仍用四项文档，把 embedding、位置表、残差、FFN 和 head 连到一次完整前向与反向。到这里已经能训练模型；接下来的结构不是让“不能训练”变成“能训练”的必要条件。
 
 <CourseMap track="principles" />
 
-[P1 文本、token 与 embedding](/principles/tokenization/) 把字符串切分、编号，再通过可训练的 embedding 查表变成向量。[P2 下一 token 预测](/principles/language-modeling/) 用 `[BOS,A,B,EOS]` 说明标签为什么要错开一位，以及每个位置的预测如何汇成一次损失。到这里，问题已经明确，但最小的 bigram 模型只能根据当前 token 查表，不能利用更早的上下文。
+## 逐项解释位置与结构
 
-[P3 注意力与多头](/principles/attention/) 解决“当前的位置怎样读取已有历史”，同时用 causal mask 排除未来位置。[P4 基础 Decoder](/principles/decoder/) 将 embedding、位置、注意力、前馈网络和输出层接起来，沿同一段输入算到词表 **logits**（softmax 前的分数）、损失和梯度。这是本路线第一个具备完整训练计算的模型；它故意采用容易手算的尺寸和学习式位置表。
+先沿 [P5 顺序来源](/principles/attention-order/) → [P6 sin/cos](/principles/sinusoidal/) → [P7 RoPE](/principles/rope/) 回答显式位置与因果可见性各做什么。P6 的矩阵指数、P7 的复数写法是选读，不作为后文的必要先修。
 
-## 顺序与生成：模型怎样用于真实文本
+结构变化分三章，每次只研究一个单元：[P8 归一化与残差路径](/principles/normalization/) 对照 LayerNorm/RMSNorm 与 Pre/Post-Norm；[P9 查询头共享 K/V](/principles/head-sharing/) 对照 MHA/MQA/GQA；[P10 门控前馈网络](/principles/gated-ffn/) 算清 gate/up 的乘积和预算。权重绑定在完整组装时再引入，因为它连接输入表与输出词表头两种职责。
 
-[P5 注意力从哪里得到顺序](/principles/attention-order/) 区分两件常混淆的事：不带位置信息的双向注意力如何随输入重排，以及固定的 causal mask 如何改变可见历史。[P6 多频率 sin/cos 位置编码](/principles/sinusoidal/) 从二维旋转推到不同频率的位置向量；[P7 相对位置与 RoPE](/principles/rope/) 再把旋转放到查询和键上，使位置对分数的显式影响取决于相对位移。P6 的矩阵指数和 P7 的复数写法都放在选读部分，不妨碍实数主线。
+| 配置 | 基础预测器 P4 | 组合预测器 P13 | 经典分支 P14 |
+| --- | --- | --- | --- |
+| 条件结构 | decoder-only | decoder-only | encoder–decoder |
+| 位置 | 学习式表 | RoPE | 加法 sin/cos |
+| norm | Pre-LayerNorm | Pre-RMSNorm | Post-LayerNorm |
+| 注意力 | MHA | GQA | MHA、cross-attention |
+| FFN | GELU | SwiGLU | ReLU |
+| 输入/输出词表表 | 独立 | 参数绑定 | 独立输出 head |
 
-[P8 常见 Decoder 结构选择](/principles/modern-decoder/) 在 P4 的模型上逐项替换归一化、注意力头和前馈计算，弄清 RMSNorm、GQA、SwiGLU 与权重绑定改变了什么。[P9 生成、采样与对话格式](/principles/generation/) 把一次预测接成可停止的生成循环；[P10 KV cache](/principles/kv-cache/) 证明只计算新增 token 时，怎样保持与整段重算相同的结果。最后，[P11 可训练、可缓存的 Decoder](/principles/complete-transformer/) 用一个采用上述结构的两层教学模型，将前面分别推导的模块放到同一条训练和缓存生成路径中。P4 完成基础模型的训练计算，P11 检查组合后的训练与生成。
+表中的差异是本课程明确选定的实验配置，不是模型类别的必然属性。变更结构或词表后不能直接沿用原权重并期待 logits 不变。
 
-## 按问题选择入口
+## 两条调用路线在完整模型处汇合
 
-首次学习按 P1–P11 的顺序走。已有部分基础时，可以按下面的问题选择入口：
+希望理解训练，先完成上述单元，再读 [P13 组装完整 Decoder](/principles/complete-transformer/) 的训练部分。希望理解生成，则从 P4 进入 [P11 生成与采样](/principles/generation/)，完成位置机制后读 [P12 KV cache](/principles/kv-cache/)，最后回到 P13 核对同参数的整段、分块和逐 token logits。P13 的缓存部分需要 P12，页头列出实际先修。
 
-| 要解决的问题 | 先核对哪项能力 | 接着读 |
-| --- | --- | --- |
-| 位置怎样改变注意力 | [P3](/principles/attention/) 的分数定义与 causal mask | [P5](/principles/attention-order/) → [P6](/principles/sinusoidal/) → [P7](/principles/rope/) |
-| 怎样实现逐步生成 | [P2](/principles/language-modeling/) 的预测目标、[P4](/principles/decoder/) 的前向过程 | [P9](/principles/generation/) → [P10](/principles/kv-cache/) |
-| 怎样对照现代模型代码 | 基础 Decoder 与 RoPE 的计算路径 | [P8](/principles/modern-decoder/) → [P11](/principles/complete-transformer/) |
+P13 主例改用 `[BOS,春,风,来,EOS]` 和两层模型，目的在于检验组装接口、头宽与残差宽不相等、共享参数和逐层缓存。二维组合手算放在选读 trace 中，不能把两套配置的数值混算。真正文本训练从 [T1 数据与窗口](/training/data/) 到 [T3 文本预训练](/training/pretraining/) 使用 P1 的 tokenizer 工件与同一 Python 模型入口。
 
-上方路线图中的每个节点对应一个章节问题。选择一个入口前，先确认自己能完成表中的先修计算。各章的手算和脚本核对具体案例；推广结论时，还要检查推导中的条件。
+[P14 双向 Encoder 与 Cross-Attention](/principles/encoder-cross-attention/) 是独立选读分支：完整源文本与未知目标前缀对应三种可见矩阵，再连接经典参考实验和统一模型。encoder-only 的遮挡监督也在该分支解释，不打断 decoder-only 的首次学习。
 
-进入 P1 前，需要 [M6 向量与矩阵](/math/linear-algebra/) 中的矩阵、轴和索引，以及 [M10 神经网络训练](/math/training/) 中预测与参数更新的关系。[M2 贝叶斯与序列概率](/math/bayes/) 的链式法则、[M4 信息量与熵](/math/information/) 的条件交叉熵，以及 [M5 分布与预测损失](/math/distributions/) 的 softmax 会在 P2 用到；[M9 反向传播](/math/backprop/) 帮助理解 P4 的梯度。不熟悉数组轴、PyTorch 的自动求导或模块 API，可按遇到的障碍回读 [数组与框架路线](/frameworks/)。
+## 运行代码与机制实验
 
-读完 P11，可以进入 [训练与评估](/training/) 处理语料、优化和模型评估，或进入 [推理系统](/systems/) 估算生成成本并研究服务实现。
+各页只展示与问题直接相关的源码片段，完整源码可以展开。`examples/principles/` 保存可运行的教学例与独立手算参考，`src/llms_from_scratch/` 保存训练、生成和机制实验共同使用的实现。机制实验沿原 Transformer Lab 的章节编号运行，例如 `uv run llms-from-scratch chapter --chapter 11` 核对 GQA；该编号是实验 ID，与本站 P9 学习顺序不同。
+
+代码与交互实验各说明实际固定的输入、权重和配置。相同形状只证明接口能接上；共享参数是否正确、缓存是否等价，还要比较同权重的数值和梯度。读完 P13，可进入 [训练与评估](/training/)、[后训练](/post-training/) 或 [推理系统](/systems/)，将已建立的模型用于新问题。

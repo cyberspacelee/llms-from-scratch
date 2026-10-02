@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useId, useState } from 'react'
 import { Arrow, Button, Controls, fmt, LabFrame, pen, Range, Readout } from './Lab'
 
@@ -32,7 +33,7 @@ export default function DotProductLab() {
         <Range label="b 的额外旋转 φ" value={state.relative} min={-180} max={180} onChange={set('relative')} format={(v) => `${v}°`} />
         <div><Button onClick={() => setState(initial)}>恢复初始值</Button></div>
       </Controls>
-      <svg viewBox="0 0 440 330" className={pen.canvas} role="img"
+      <SvgCanvas viewBox="0 0 440 330" className={pen.canvas} role="img"
         aria-label={`a 长 ${state.a.toFixed(1)}，b 长 ${state.b.toFixed(1)}，夹角 ${fmt(theta / deg, 1)} 度，点积 ${fmt(score)}`}>
         <defs>
           <Arrow id={`${id}-a`} className="fill-accent" />
@@ -50,7 +51,7 @@ export default function DotProductLab() {
         <text x={ax} y={ay - 12} textAnchor="middle" className={pen.textA}>a</text>
         <text x={bx} y={by + 22} textAnchor="middle" className={pen.textB}>b</text>
         <text x={cx} y={322} textAnchor="middle" className={pen.muted}>圆的半径是长度；蓝色虚线是 b 在 a 方向上的投影</text>
-      </svg>
+      </SvgCanvas>
       <Readout>
         相位差 δ + φ = {state.phase + state.relative}° · 夹角 θ = {fmt(theta / deg, 1)}° · 有符号投影 = {fmt(state.b * cosine)}
         <br />

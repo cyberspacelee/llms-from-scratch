@@ -4,7 +4,8 @@ question: PyTorch 怎样沿计算图求导，梯度为何有时累加、有时�
 description: 用一个带分支和共享偏置的损失贯穿手算、backward、计算图生命周期、存储别名与梯度模式。
 order: 4
 code:
-  - code/frameworks/autograd.py
+  - examples/frameworks/autograd.py
+prerequisites: ["frameworks/torch-tensors", "math/backprop"]
 ---
 
 import AutogradBranchLab from '../../../components/labs/AutogradBranchLab'
@@ -73,6 +74,8 @@ assert b.grad.item() == 32.
 assert x.grad is None
 ```
 
+<CodeFile path="examples/frameworks/autograd.py" region="branch" />
+
 `loss` 是单元素实数，`backward()` 默认从数值 1 的种子开始；它按照刚才的链式计算得到各叶子的梯度。它**不更新** `w` 或 `b`，也不读取学习率。`u.retain_grad()` 只让我们查看本次经过中间量的梯度；常规训练不需要对每个中间量都调用它。
 
 `torch.autograd.grad(loss, (w,b))` 则直接返回所选输入的梯度元组，不把结果写入这两个叶子的 `.grad`。当你需要核对局部公式或在程序里直接使用梯度值时，这个接口很方便。脚本用一次新的前向核对返回值，再用中心有限差分核对同一个 $L(w,b)$：分别扰动一个参数，比较 $[L(\theta+\epsilon)-L(\theta-\epsilon)]/(2\epsilon)$ 与自动微分。有限差分是近似检查，不能把步长无限缩小，也不能换一个损失后仍比较旧梯度。
@@ -89,11 +92,9 @@ assert x.grad is None
 
 如果连续两批的损失各自已经求了平均，直接分别反向得到的是两个平均梯度之和。若目标是合并后的大批平均，两个等大小批次各应乘 $1/2$；大小不同则按各批样本数占总数的比例。autograd 只计算你写出的标量，不猜测训练目标的分母。
 
-下面用一个标量叶子观察图内相加与跨调用累积，函数改为 $y=x^2+3x$。它和正文的向量损失不同，但使用同样的局部求导规则。每次点击“重新前向并 backward”都重新前向，再把本次梯度加到叶子缓冲区。
+下面的实验仍使用正文的向量损失。先清空梯度，保持 $w=(1,2),b=1$。预测两次重新前向并反向后，`w.grad` 与 `b.grad` 分别为多少，再操作核对 $(40,-12),32$ 与 $(80,-24),64$。把反向种子改为 0.5 后再执行一次，新增贡献应减半，已有缓冲区保持到显式清空为止。
 
-保持 x=2、种子 g=1，先清空梯度。预测两次点击后 `x.grad` 分别是多少，再操作核对 $7\to14$。随后只把 x 改为 1，保持旧梯度不清空：新前向贡献为 $2\times1+3=5$，下一次点击应得到 19。最后清空并再点击，解释这次为什么只剩 5。
-
-这个实验不会复用已释放的同一张图。修改 x 或种子只改变下一次贡献，不自动清除已经存入缓冲区的旧贡献。
+实验的每次操作都会创建一张新图。默认反向后旧图保存值已释放的报错，在下方 Python 脚本中核对。改参数与改种子影响下一次计算，不能自动清除过去的梯度。
 
 <AutogradBranchLab client:visible />
 
@@ -126,9 +127,7 @@ assert x.grad is None
 
 ## 用脚本核对数值与状态
 
-脚本用固定的 float64 参数复现 $u=(3,-1)$、$L=8$、$g_w=(40,-12)$ 和 $g_b=32$。它还断言新的前向会累积梯度、同一损失重复反向会失败、`detach()` 共享存储、`clone()` 保留求导路径、原地改写保存值会触发错误，并分别检查 `no_grad` 与 `eval`。运行于仓库根目录：`python code/frameworks/autograd.py`。
-
-<CodeFile path="code/frameworks/autograd.py" />
+脚本用固定的 float64 参数复现 $u=(3,-1)$、$L=8$、$g_w=(40,-12)$ 和 $g_b=32$。它还断言新的前向会累积梯度、同一损失重复反向会失败、`detach()` 共享存储、`clone()` 保留求导路径、原地改写保存值会触发错误，并分别检查 `no_grad` 与 `eval`。运行于仓库根目录：`uv run python -m examples.frameworks.autograd`。
 
 ## 常见误区
 

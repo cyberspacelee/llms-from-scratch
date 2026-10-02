@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 数学与框架路线逐页整改记录
 
 日期：2026-10-02。范围：`math/` 的 12 页与 `frameworks/` 的 8 页。

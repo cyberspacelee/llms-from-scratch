@@ -2,16 +2,19 @@
 title: KV cache：复用历史而保持同一计算
 question: 只计算新增 token，怎样得到与整段重算相同的 logits
 description: 沿五个 token 的因果注意力，从整段重算推到 prefill、逐步解码与分块追加，再核对位置、mask 和多层缓存的正确性。
-order: 10
+prerequisites:
+  - principles/generation
+  - principles/rope
+order: 12
 code:
-  - code/principles/kv_cache.py
-  - code/principles/decoder.py
+  - examples/principles/kv_cache.py
+  - examples/principles/decoder.py
 ---
 
 import CacheIndexLab from '../../../components/labs/CacheIndexLab'
 import CachedAttentionLab from '../../../components/labs/CachedAttentionLab'
 
-在 [P9](/principles/generation/) 中，生成一个新 token 后，朴素做法是把增长后的整段历史再次送进 Decoder。这样当然能得到下一步 logits，却把早已算过的历史位置重复计算了一遍。本章使用同一段 `[BOS,A,B,C,D]`：先读 `[BOS,A,B]`，再加入 C、D，说明怎样只算新增位置，同时保留整段重算的结果。先假设模型权重固定、处于 eval 模式、没有 padding 或窗口，且每步采用同一套 RoPE 频率。
+在 [P11](/principles/generation/) 中，生成一个新 token 后，朴素做法是把增长后的整段历史再次送进 Decoder。这样当然能得到下一步 logits，却把早已算过的历史位置重复计算了一遍。本章使用同一段 `[BOS,A,B,C,D]`：先读 `[BOS,A,B]`，再加入 C、D，说明怎样只算新增位置，同时保留整段重算的结果。先假设模型权重固定、处于 eval 模式、没有 padding 或窗口，且每步采用同一套 RoPE 频率。
 
 **KV cache** 是每层保存历史键 K 和值 V 的状态；**prefill** 是一次处理已有提示并建立缓存；**decode** 是随后用新 token 继续前向。采样出 C 的那一刻，缓存仍只包含 `[BOS,A,B]`。下一次以前向输入 C，才会写入它的 K/V 并得到预测 D 所用的 logits。采样出的最后一个 token 若不再进入前向，就不在缓存里。
 
@@ -20,20 +23,20 @@ import CachedAttentionLab from '../../../components/labs/CachedAttentionLab'
 先看一个注意力头。设位置 $i=0,\ldots,4$ 分别是 BOS、A、B、C、D。每个位置的查询、键、值由该层输入投影得到；[P7](/principles/rope/) 的 RoPE 把位置 $i$ 的查询和键旋转，记为 $\widetilde q_i=R(i)q_i$、$\widetilde k_i=R(i)k_i$。每对二维坐标有自己的频率；下面的数值例只有一对，其频率为 1 弧度/位置。注意力分数是
 
 $$
-s_{ij}=\frac{\widetilde q_i^\top\widetilde k_j}{\sqrt{d_h}}+M_{ij},\qquad
+s_{ij}=\frac{\widetilde q_i^\top\widetilde k_j}{\sqrt{D_h}}+M_{ij},\qquad
 M_{ij}=\begin{cases}0,&j\le i,\\-\infty,&j>i.\end{cases}
 $$
 
 这里的 **causal mask** 只屏蔽未来键；它不是训练损失中排除目标位置的 mask。softmax 使未来键的权重为零，所以第 $i$ 行输出仅依赖位置 $0,\ldots,i$：
 
 $$
-y_i=\frac{\sum_{j=0}^{i}\exp(\widetilde q_i^\top\widetilde k_j/\sqrt{d_h})v_j}
-{\sum_{\ell=0}^{i}\exp(\widetilde q_i^\top\widetilde k_\ell/\sqrt{d_h})}.
+y_i=\frac{\sum_{j=0}^{i}\exp(\widetilde q_i^\top\widetilde k_j/\sqrt{D_h})v_j}
+{\sum_{\ell=0}^{i}\exp(\widetilde q_i^\top\widetilde k_\ell/\sqrt{D_h})}.
 $$
 
 如果在三项提示后追加 C，原来 BOS、A、B 三行的可见集合都不变。注意力不会回头改写它们；逐位置的归一化、FFN 和残差也不会让未来 token 流入旧行。这是缓存成立的因果条件。若使用双向注意力或跨位置统计，不能直接套用这个结论。
 
-为了看到具体的数，在本头令 $d_h=2$，所有未旋转的 $q_i=k_i=(1,0)^\top$，而 $v_i=(i,0)^\top$。于是 C 位于 $i=3$，它对四个可见键的缩放分数依次为
+为了看到具体的数，在本头令 $D_h=2$，所有未旋转的 $q_i=k_i=(1,0)^\top$，而 $v_i=(i,0)^\top$。于是 C 位于 $i=3$，它对四个可见键的缩放分数依次为
 
 $$
 (s_{30},s_{31},s_{32},s_{33})
@@ -62,14 +65,14 @@ $$
 
 每一行只在**输入该 token 时**进入缓存。若 prefill 的末行 logits 先采样出 C，采样完成与下一次输入 C 之间，返回文本已有 C，而缓存仍只到 B。
 
-本章缓存**已旋转的 K**和未旋转的 V。旧注意力权重也不能复用：新 Q 改变了整行分数。缓存未旋转 K 也可行，但读取时必须用每个键原有的位置旋转；两种缓存契约不可混用。上面的短式省略了 $1/\sqrt{d_h}$ 缩放，实际计算始终保留它。
+本章缓存**已旋转的 K**和未旋转的 V。旧注意力权重也不能复用：新 Q 改变了整行分数。缓存未旋转 K 也可行，但读取时必须用每个键原有的位置旋转；两种缓存契约不可混用。上面的短式省略了 $1/\sqrt{D_h}$ 缩放，实际计算始终保留它。
 
 | 阶段 | Q 的形状 | 可用 K/V 的形状 | 分数形状 |
 |---|---|---|---|
-| Prefill，提示长 3 | $(B,n_q,3,d_h)$ | $(B,n_{\mathrm{kv}},3,d_h)$ | $(B,n_q,3,3)$ |
-| Decode C，已有 3 个位置 | $(B,n_q,1,d_h)$ | $(B,n_{\mathrm{kv}},4,d_h)$ | $(B,n_q,1,4)$ |
+| Prefill，提示长 3 | $(B,H_q,3,D_h)$ | $(B,H_{\mathrm{kv}},3,D_h)$ | $(B,H_q,3,3)$ |
+| Decode C，已有 3 个位置 | $(B,H_q,1,D_h)$ | $(B,H_{\mathrm{kv}},4,D_h)$ | $(B,H_q,1,4)$ |
 
-轴顺序是 batch、头、位置、特征。本页数值例只有一个头，令值宽也为 $d_h$。一般模型若使用 [P8](/principles/modern-decoder/) 的 GQA，$n_{\mathrm{kv}}<n_q$，多个 Q 头共享一组 K/V；这减少缓存量，却不改变每个头的可见位置。每层缓存形状为两份 $(B,n_{\mathrm{kv}},T_{\mathrm{past}},d_h)$，未量化总元素数为 $2Bn_{\mathrm{layers}}T_{\mathrm{past}}n_{\mathrm{kv}}d_h$。缓存不包括 Q，也不包括已算出的完整注意力矩阵。
+轴顺序是 batch、头、位置、特征。本页数值例只有一个头，令值宽也为 $D_h$。一般模型若使用 [P9 查询头共享](/principles/head-sharing/) 的 GQA，$H_{\mathrm{kv}}<H_q$，多个 Q 头共享一组 K/V；这减少缓存量，却不改变每个头的可见位置。每层缓存形状为两份 $(B,H_{\mathrm{kv}},T_{\mathrm{past}},D_h)$，未量化总元素数为 $2BLT_{\mathrm{past}}H_{\mathrm{kv}}D_h$。缓存不包括 Q，也不包括已算出的完整注意力矩阵。
 
 <CacheIndexLab client:visible />
 
@@ -152,9 +155,9 @@ $$
 
 `kv_cache.py` 先用本章固定的五行 Q/K/V 验证 C 行 **2.061223**、`[3,1,1]` 与 `[3,2]` 切分，并用错误的左上对齐 mask 做反例。然后用更大、更随机的张量检查其他切分，避免一种对称输入碰巧掩盖错误。这部分复用 [P7](/principles/rope/) 的 `apply_rope`，核对的是单层注意力。
 
-<CodeFile path="code/principles/kv_cache.py" />
+<CodeFile path="examples/principles/kv_cache.py" symbol="cached_attention" />
 
-在仓库根目录执行 `python code/principles/kv_cache.py`。脚本还故意把 decode 查询位置重置为零，验证这条错误路径与整段计算不同。数值检查用 float64，允许 $10^{-10}$ 容差；不同 kernel 或求和顺序可能造成舍入差异，数学等价不要求逐 bit 相同。
+在仓库根目录执行 `uv run python -m examples.principles.kv_cache`。脚本还故意把 decode 查询位置重置为零，验证这条错误路径与整段计算不同。数值检查用 float64，允许 $10^{-10}$ 容差；不同 kernel 或求和顺序可能造成舍入差异，数学等价不要求逐 bit 相同。
 
 代码里的 `torch.cat` 便于观察追加语义，但每步会复制缓存；生产实现一般用预分配或分页存储。存储方式不改变“旧 K/V 保持原值、新 K/V 按位置追加”的正确性条件。
 
@@ -162,11 +165,14 @@ $$
 
 单层 Q/K/V 只能核对一处机制。脚本还实例化 [P4](/principles/decoder/) 的三层完整 Decoder，在固定的五项 ID 输入上比较整段、逐项、`3/1/1` 和 `3/2` 分块产生的**每个位置全部词表 logits**。这个随机初始化的教学 Decoder 用学习式绝对位置表；上面的单层案例用 RoPE。二者各自比较同一模型的 full/cached 路径，并不宣称两种位置编码彼此数值相等。
 
-`forward_cached` 返回新增位置的 logits 和逐层缓存。每次进入新块时，各层旧缓存长度必须一致，且新位置按历史长度递增。随机模型只验证实现等价性，不衡量生成质量；同一采样随机种子也不足以证明两条路径等价，尤其在 logits 接近并列时，应先直接比较 logits。
+统一调用 `model(new_ids, cache=past, use_cache=True)` 返回 `ModelOutput`，其中 `.logits` 只覆盖新增位置，`.cache.layers` 存放逐层缓存。每次进入新块时，各层旧缓存长度必须一致，且新位置按历史长度递增。随机模型只验证实现等价性，不衡量生成质量；同一采样随机种子也不足以证明两条路径等价，尤其在 logits 接近并列时，应先直接比较 logits。
 
 预分配、分页和请求间共享在 [S5](/systems/paged-cache/) 研究。本章只检查逻辑缓存内容及逐层长度。
 
 ## 扩展边界：padding、窗口与物理槽位
+
+<details>
+<summary>展开 padding、窗口与位置坐标的边界案例</summary>
 
 ### 左侧 padding
 
@@ -216,7 +222,10 @@ $$
 
 ### 改变 RoPE 频率属于新计算规则
 
-若只把 C 的频率改了，旧 K 仍按原频率旋转，点积不再由同一组相对位置规则给出。要改变频率，需重新计算或按可证明等价的方式转换旧缓存。即使公式能代入更大位置，也不保证模型在那里有可靠预测；位置插值和频率缩放留给 [A4 长上下文](/advanced/long-context/)。
+若只把 C 的频率改了，旧 K 仍按原频率旋转，点积不再由同一组相对位置规则给出。要改变频率，需重新计算或按可证明等价的方式转换旧缓存。即使公式能代入更大位置，也不保证模型在那里有可靠预测；位置插值和频率缩放留给 [A3 长上下文](/advanced/long-context/)。
+
+
+</details>
 
 ## 常见误区
 
@@ -248,7 +257,7 @@ E 的逻辑位置为 5，不是物理槽位数 3。写入 E 后，窗口层的 E
 
 </details>
 
-下一章 [P11 完整现代 Transformer](/principles/complete-transformer/) 把这些位置和 mask 约束接入 RoPE、GQA、RMSNorm 与 SwiGLU 组成的完整模型；[S5](/systems/paged-cache/) 再研究怎样在有限显存中管理缓存。
+下一章 [P13 完整现代 Transformer](/principles/complete-transformer/) 把这些位置和 mask 约束接入 RoPE、GQA、RMSNorm 与 SwiGLU 组成的完整模型；[S5](/systems/paged-cache/) 再研究怎样在有限显存中管理缓存。
 
 ## 原始资料
 

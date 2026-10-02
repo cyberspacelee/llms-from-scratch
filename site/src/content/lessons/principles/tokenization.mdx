@@ -2,13 +2,16 @@
 title: 文本、token 与 embedding
 question: 字符串怎样成为可训练的网络输入
 description: 用同一段中英混合文本走完 UTF-8、BPE、ID、embedding 查表与梯度，分清教学算法和实际 tokenizer。
+prerequisites:
+  - math/linear-algebra
+  - math/training
 order: 1
 code:
-  - code/principles/tokenization.py
+  - examples/principles/tokenization.py
 ---
 
 import TokenMergeLab from '../../../components/labs/TokenMergeLab'
-import { TokenLookupLab } from '../../../components/labs/PrinciplesTraceLabs'
+import TokenLookupLab from '../../../components/labs/TokenLookupLab'
 
 在 [M10](/math/training/) 中，网络输入已经是实数；这里从字符串 `猫 sat` 出发，一直走到可训练的向量序列。先修只用到 [M6 的矩阵索引](/math/linear-algebra/) 和 M10 的参数更新。我们会让教学 tokenizer 在四份相同的 `猫 sat` 上学习两次合并，用它编码原句，再追踪同一组 ID 如何选取 embedding 行。生产 tokenizer 的额外规则放在这条链完成之后。
 
@@ -57,13 +60,13 @@ BPE 的训练把相邻 token 对按频次计数，选中一对后给连接后的
 
 特殊 token 的**拼写**与**控制含义**也必须分开：用户输入字面字符串 `<eos>`，普通 `encode` 将它当作普通文本的字节来编码；只有调用 `encode(text, allowed_special=True)` 才把它识别为控制 ID。`decode` 可以显示两者同样的拼写，但不能从显示文本反推当初是哪种 ID 序列。模型是否自动加标记、对话模板如何插入标记，都须看对应模型约定。
 
-两个合并项使基础词表大小为 258，再加两个特殊 token 才是 $n_{\mathrm{vocab}}=260$。先固定合并规则与特殊 ID，再创建模型；额外学一次合并会移动特殊 ID。脚本的 `save` 把算法类型、合并顺序和特殊项写入 JSON，`load` 恢复并检查非法引用。训练和推理应读取同一份状态，不能只凭词表大小重新构造映射。
+两个合并项使基础词表大小为 258，再加两个特殊 token 才是 $V=260$。先固定合并规则与特殊 ID，再创建模型；额外学一次合并会移动特殊 ID。脚本的 `save` 把算法类型、合并顺序和特殊项写入 JSON，`load` 恢复并检查非法引用。训练和推理应读取同一份状态，不能只凭词表大小重新构造映射。
 
 ## embedding：ID 怎样选到可训练向量
 
-embedding 是按 ID 查表的可训练矩阵。当前完整词表有 260 项；若隐藏维度暂取 $d=2$，矩阵 $E\in\mathbb R^{260\times2}$ 有 260 行，每行两个实数。对正文序列 `[231,140,171,256,257]`，输出的形状是 $(5,2)$：第一个位置取 $E_{231,:}$，第四个位置取 $E_{256,:}$。例如设 $E_{256,:}=(0.2,-0.1)$，该位置的输出就是 $(0.2,-0.1)$；数字 256 本身不会乘入向量。加上 BOS/EOS 后则是七个位置，形状 $(7,2)$。
+embedding 是按 ID 查表的可训练矩阵。当前完整词表有 260 项；若隐藏维度暂取 $D=2$，矩阵 $E\in\mathbb R^{260\times2}$ 有 260 行，每行两个实数。对正文序列 `[231,140,171,256,257]`，输出的形状是 $(5,2)$：第一个位置取 $E_{231,:}$，第四个位置取 $E_{256,:}$。例如设 $E_{256,:}=(0.2,-0.1)$，该位置的输出就是 $(0.2,-0.1)$；数字 256 本身不会乘入向量。加上 BOS/EOS 后则是七个位置，形状 $(7,2)$。
 
-对 batch 中 $B$ 条等长序列，每条长度 $T$，ID 数组形状是 $(B,T)$，查表后是 $(B,T,d)$。令 $e_u$ 为仅第 $u$ 项为 1 的 one-hot 列向量，则单个输出列向量也可写成 $x=E^\top e_u$。这只是解释索引的等价式；实现直接取行，无需真的建 260 维 one-hot 向量。
+对 batch 中 $B$ 条等长序列，每条长度 $T$，ID 数组形状是 $(B,T)$，查表后是 $(B,T,D)$。令 $e_u$ 为仅第 $u$ 项为 1 的 one-hot 列向量，则单个输出列向量也可写成 $x=E^\top e_u$。这只是解释索引的等价式；实现直接取行，无需真的建 260 维 one-hot 向量。
 
 现在把 `猫 sat` 放入同一个 batch 两次。两条样本第四个位置都是 ID 256，都读取**同一参数行** $E_{256,:}$。若损失对两个输出位置传回的梯度分别是 $g_1=(1,2)$ 与 $g_2=(3,-1)$，链式法则在共享行汇合，得到
 
@@ -73,7 +76,7 @@ $$
 
 这是 [M9](/math/backprop/) 的共享节点梯度相加。ID 是离散地址，不对 ID 求导；未被查到的行对**这一次输入查表**没有梯度贡献。若 $L$ 是两个样本的平均损失，平均因子已经包含在上游 $g_1,g_2$ 中，不应在相加后再除以 2。随机初始化的 embedding 也没有天然词义，只有经过后续预测目标训练，行向量才可能学到有用表示。
 
-这样，开篇问题已经闭合：`猫 sat` → 七个 UTF-8 字节 → 五个普通 token ID → 五行可训练向量。若附加控制 ID，则序列从五个位置变成七个位置。下一章在这些位置上定义“预测哪一个 ID”。
+这样，开篇问题已经闭合：`猫 sat` → 七个 UTF-8 字节 → 五个普通 token ID → 五行可训练向量。若附加控制 ID，则序列从五个位置变成七个位置。下一章在这些位置上定义“预测哪一个 ID”。为了使整个模型前向能手算，P2–P4 明确改用 `{BOS,A,B,EOS}` 四项教学词表；它不承接本页 260 行的权重。进入真实文本训练时则继续使用这里保存的 tokenizer 工件，训练、恢复和生成都不能重新拟合或变更 ID。
 
 <TokenLookupLab client:visible />
 
@@ -87,13 +90,13 @@ $$
 
 GPT-2 的字节级 tokenizer 使用正则预分词；配套脚本用简化的 ASCII 规则比较 `a b`，说明跨边界合并为何会改变。SentencePiece 则把空格表示为可见的 `▁`，支持 BPE 和另一种 Unigram 训练算法。Unigram 为候选片段赋概率，在编码时寻找整体得分最好的切分，并不使用本章的逐轮合并优先级。它是否支持未知字符的字节回退还要看配置。这些实现都可以把**同一字符串**切成不同 token；训练与推理必须使用对应模型的同一 tokenizer。
 
-词表与模型也是一份契约：只重排 ID 会改变输入 embedding 的行与输出类别的含义。embedding 参数量为 $n_{\mathrm{vocab}}d$；词表变大通常有机会缩短序列，也会扩大输入表和输出 LM head。具体计算成本取决于模型结构，不能只看 token 数；[S1](/systems/ledger/) 会分别记账。
+词表与模型也是一份契约：只重排 ID 会改变输入 embedding 的行与输出类别的含义。embedding 参数量为 $VD$；词表变大通常有机会缩短序列，也会扩大输入表和输出 LM head。具体计算成本取决于模型结构，不能只看 token 数；[S1](/systems/ledger/) 会分别记账。
 
 ## 代码核对：同一文本走完输入链
 
-脚本复现 `猫 sat` 的两次合并、往返、特殊 ID、查表形状与重复行的梯度；另用 `aaa` 和 `a b` 核对重叠与预分词边界。运行 `.venv/bin/python code/principles/tokenization.py`。断言覆盖这个教学实现，不证明它与任何公开模型 tokenizer 的切分相同。
+脚本复现 `猫 sat` 的两次合并、往返、特殊 ID、查表形状与重复行的梯度；另用 `aaa` 和 `a b` 核对重叠与预分词边界。运行 `uv run python -m examples.principles.tokenization`。断言覆盖这个教学实现，不证明它与任何公开模型 tokenizer 的切分相同。
 
-<CodeFile path="code/principles/tokenization.py" />
+<CodeFile path="examples/principles/tokenization.py" symbol={["ByteBPE.fit", "ByteBPE.encode"]} />
 
 ## 常见误区
 

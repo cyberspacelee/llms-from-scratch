@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
 
@@ -15,7 +16,7 @@ export default function WindowCacheLab() {
       <Range label="当前查询位置" value={position} min={0} max={11} onChange={setPosition} />
       <Range label="窗口（包含当前）" value={window} min={1} max={6} onChange={setWindow} />
     </Controls>
-    <svg viewBox="0 0 460 200" className={pen.canvas} role="img" aria-label={`查询 ${position} 可见 ${visible.join('、')}，窗口 ${window}`}>
+    <SvgCanvas viewBox="0 0 460 200" className={pen.canvas} role="img" aria-label={`查询 ${position} 可见 ${visible.join('、')}，窗口 ${window}`}>
       {Array.from({ length: 12 }, (_, i) => <g key={i}>
         <rect x={12 + i * 37} y="30" width="30" height="34" rx="3" className={i >= first && i <= position ? 'fill-accent/20 stroke-accent' : 'fill-sunken stroke-rule'} />
         <text x={27 + i * 37} y="53" textAnchor="middle">{i}</text>
@@ -27,7 +28,7 @@ export default function WindowCacheLab() {
         <text x={50 + slot * 72} y="142" textAnchor="middle">{tag === null ? '空' : tag}</text>
         <text x={50 + slot * 72} y="176" textAnchor="middle">slot {slot}</text>
       </g>)}
-    </svg>
+    </SvgCanvas>
     <Readout>可见集合 {'{' + visible.join(', ') + '}'} · 当前 slot {position % window} · RoPE 逻辑位置 {position} · 有效缓存 {visible.length}/{window}</Readout>
   </LabFrame>
 }

@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import Formula from './Formula'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
@@ -12,7 +13,7 @@ export default function CoalescingLab() {
       <Range label="元素步长" value={stride} min={1} max={8} onChange={setStride} />
       <Range label="元素偏移" value={offset} min={0} max={7} onChange={setOffset} />
     </Controls>
-    <svg viewBox="0 0 360 300" className={pen.canvas} role="img" aria-label={`32 个 lane 覆盖 ${sectors.size} 个地址段`}>
+    <SvgCanvas viewBox="0 0 360 300" className={pen.canvas} role="img" aria-label={`32 个 lane 覆盖 ${sectors.size} 个地址段`}>
       <text x="12" y="20">lane → 元素编号 / 地址段</text>
       {words.map((word, lane) => {
         const x = 12 + lane % 4 * 88, y = 36 + Math.floor(lane / 4) * 31
@@ -22,7 +23,7 @@ export default function CoalescingLab() {
         </g>
       })}
       <text x="12" y="294">每段含 8 个 float32；段号相同即共享覆盖段。</text>
-    </svg>
+    </SvgCanvas>
     <Readout><Formula>{String.raw`a_\ell=4(${offset}+${stride}\ell)`}</Formula> 字节 · 覆盖 {sectors.size} 段 · 请求 128 字节 · 段覆盖 {32 * sectors.size} 字节</Readout>
   </LabFrame>
 }

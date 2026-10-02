@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 数学公式排版排查
 
 ## 修复结果

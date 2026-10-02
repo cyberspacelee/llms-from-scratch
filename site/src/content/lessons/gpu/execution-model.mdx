@@ -4,15 +4,14 @@ question: 一个 kernel 怎样让每个输出有唯一负责人，并让 GPU 有
 description: 用 100 个元素的向量加法贯穿 CUDA 的索引、warp 分歧、block 调度与延迟隐藏，并区分正确性和吞吐。
 order: 1
 code:
-  - code/gpu/execution_model.py
+  - examples/gpu/execution_model.py
+prerequisites: ["frameworks/numpy-arrays"]
 ---
 
 import ThreadIndexLab from '../../../components/labs/ThreadIndexLab'
 import WarpBranchLab from '../../../components/labs/WarpBranchLab'
 import BlockScheduleLab from '../../../components/labs/BlockScheduleLab'
 import MatrixThreadLab from '../../../components/labs/MatrixThreadLab'
-import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
-import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
 
 设两个数组各有 100 个元素，我们要计算 $c_i=a_i+b_i$。CPU 循环逐个推进 $i$；CUDA kernel 让许多 thread 执行同一段代码，各自用编号确定 $i$。
 
@@ -94,7 +93,7 @@ const size_t stride = size_t(blockDim.x) * gridDim.x;
 for (size_t i = start; i < n; i += stride) c[i] = a[i] + b[i];
 ```
 
-两种映射的输出相同，但循环次数、启动规模与资源使用不同，性能需要测量。[G2 的归约](/gpu/memory-and-sync/) 会让每个 thread 先累加自己的一串输入，再在 block 内合并。
+两种映射的输出相同，但循环次数、启动规模与资源使用不同，性能需要测量。[归约实践](/gpu/reduction-practice/) 会让每个 thread 先累加自己的一串输入，再在 block 内合并。
 
 ## 迁移：从一维下标到矩阵坐标
 
@@ -112,35 +111,22 @@ $$
 
 默认选中 block $(1,0)$ 的 thread $(3,0)$。矩阵的灰色尾格对应越界列，即使线性偏移 7 看起来合法，也不能执行访问。将 thread x 改为 2，行列检查才通过；再选最右下的 block $(1,2)$，核对最后一个合法元素 34 的负责人。
 
-### 选读：二维与三维布局如何分成 warp
-
-改变 block 的形状时，warp 仍按照 x 最快变化的线性编号分组。下面三个布局都含 64 个 thread；编号 32 总属于 warp 1、lane 0，但二维坐标不同。
-
-<details>
-<summary>同样的 64 个 thread，比较二维布局与三维切片</summary>
-
-<WarpLayoutLab client:visible />
-
-三维 block 的线性编号为 $t=t_x+T_x(t_y+T_yt_z)$。下面单独用 $(8,4,2)$ 布局：一个 z 切片恰好有 32 个 thread，因此切换 z 时坐标相同的 thread 会进入另一个 warp。切片与轴测图都表示逻辑坐标，并非 GPU 核心排列。
-
-<BlockVolumeLab client:visible />
-
-</details>
+二维与三维 block 的坐标展开可继续在[索引布局实践](/gpu/indexing-practice/)中核对。它是选读，不影响本章一维唯一负责人的证明。
 
 ## 用代码核对归属
 
 CPU 脚本枚举逻辑 thread，检查一次映射与 grid-stride 映射都恰好覆盖 100 个下标，还核对尾部 warp 的活跃 lane 和二维越界反例。它验证索引，不模拟 SM 调度或速度。
 
-<CodeFile path="code/gpu/execution_model.py" />
+<CodeFile path="examples/gpu/execution_model.py" symbol={["owners", "stride_owners"]} run="uv run python -m examples.gpu.execution_model" />
 
-运行 `python3 code/gpu/execution_model.py`，应报告索引检查通过。下面的 CUDA 版本用同样的 64-thread 配置，测试长度 0、1、100 和更长数组；它检查启动错误、同步错误及逐项输出。
+运行 `uv run python -m examples.gpu.execution_model`，应报告索引检查通过。下面的 CUDA 版本用同样的 64-thread 配置，测试长度 0、1、100 和更长数组；它检查启动错误、同步错误及逐项输出。
 
-<CodeFile path="code/gpu/examples/vector_add.cu" />
+<CodeFile path="examples/gpu/examples/vector_add.cu" region="add" />
 
 在配有 NVIDIA GPU、驱动和 CUDA Toolkit 的环境里运行：
 
 ```bash
-nvcc -O2 -std=c++17 code/gpu/examples/vector_add.cu -o /tmp/vector_add
+nvcc -O2 -std=c++17 examples/gpu/examples/vector_add.cu -o /tmp/vector_add
 /tmp/vector_add
 compute-sanitizer --tool memcheck /tmp/vector_add
 ```

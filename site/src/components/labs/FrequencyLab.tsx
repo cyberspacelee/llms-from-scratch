@@ -1,5 +1,6 @@
+import SvgCanvas from './SvgCanvas'
 import { useId, useState } from 'react'
-import { Arrow, Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
+import { Select, Arrow, Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
 
 export const frequencies = Array.from({ length: 4 }, (_, r) => 10000 ** (-2 * r / 8))
 
@@ -26,22 +27,15 @@ export default function FrequencyLab() {
   return (
     <LabFrame title="一个频率对，两种看法" hint="d = 8，四个维度对 r = 0…3">
       <Controls>
-        <label className="block text-sm">
-          <span>维度对 r</span>
-          <select
-            value={r}
-            onChange={(event) => setR(Number(event.target.value))}
-            className="mt-1 block w-full rounded-sm border border-rule-strong bg-paper px-2 py-1"
-          >
+        <Select label="维度对 r" value={r} onChange={(event) => setR(Number(event.target.value))}>
             {frequencies.map((value, index) => (
               <option key={index} value={index}>r = {index} · d{2 * index}/d{2 * index + 1} · ω = {value}</option>
             ))}
-          </select>
-        </label>
+          </Select>
         <Range label="位置 p" value={p} min={0} max={64} onChange={setP} />
       </Controls>
       <div ref={ref}>
-        <svg viewBox={`0 0 ${view.w} ${view.h}`} className={pen.canvas} role="img"
+        <SvgCanvas viewBox={`0 0 ${view.w} ${view.h}`} className={pen.canvas} role="img"
           aria-label={`第 ${r} 对在位置 ${p} 的正弦 ${fmt(sin)}、余弦 ${fmt(cos)}`}>
           <defs>
             <clipPath id={`${id}-clip`}><rect x={plot.l} y={plot.t} width={plot.r - plot.l} height={plot.b - plot.t} /></clipPath>
@@ -81,7 +75,7 @@ export default function FrequencyLab() {
           <text x={circle.x + circle.r + 16} y={circle.y - 8} textAnchor="end" className={pen.muted}>sin</text>
           <text x={circle.x + 8} y={circle.y - circle.r - 12} className={pen.muted}>cos</text>
           <text x={circle.x} y={circle.y + circle.r + 44} textAnchor="middle" className={pen.mono}>u(p) = (sin, cos)</text>
-        </svg>
+        </SvgCanvas>
       </div>
       <Readout>
         PE[{p}, {2 * r}] = sin({fmt(p * omega)}) = {fmt(sin, 6)} · PE[{p}, {2 * r + 1}] = cos({fmt(p * omega)}) = {fmt(cos, 6)}

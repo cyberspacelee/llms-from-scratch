@@ -4,10 +4,11 @@ question: 同一张 GPU 为什么处理长提示和逐 token 生成时表现不�
 description: 把 S1 对 8B 模型的运算量和字节数代入 H100 SXM 的屋顶线，分别计算 decode 与 prefill 的理想下界，再设计能检验瓶颈的测量。
 order: 2
 code:
-  - code/systems/accelerator.py
+  - examples/systems/accelerator.py
+prerequisites: ["systems/ledger"]
 ---
 
-import { RooflineLab } from '../../../components/labs/SystemsLabs'
+import RooflineLab from '../../../components/labs/RooflineLab'
 
 [S1](/systems/ledger/) 为同一个 8B 形状算出两种负载：8192 token 的提示一次进入 prefill；随后一次 decode 只生成一个新 token，却读回已有 KV。两者都运行在 GPU 上，为什么优化方向会不同？本章把 S1 的运算量和字节数放进 [G3 屋顶线](/gpu/kernel-design/)；[G4 测量](/gpu/measurement/) 已介绍计时边界，这里把它用于推理实验。
 
@@ -81,7 +82,7 @@ F_{\mathrm{linear,prefill}}=2T N_{\mathrm{blocks}}+2N_{\mathrm{head}}
 \approx114.35\ \mathrm{TFLOP}.
 $$
 
-这里不能用 $2T N_{\mathrm{linear}}$：那会把只在末位置执行的输出头乘上 8192。若 causal attention 的实现跳过未来位置，其 $QK^\top$ 与 $AV$ 主项约为 $2n_{\mathrm{layers}}dT(T+1)=17.59$ TFLOP；若按完整方阵执行，则约 35.18 TFLOP。前一种理想计算时间下界为 $(114.35+17.59)/989.5\approx0.133$ s。
+这里不能用 $2T N_{\mathrm{linear}}$：那会把只在末位置执行的输出头乘上 8192。若 causal attention 的实现跳过未来位置，其 $QK^\top$ 与 $AV$ 主项约为 $2LDT(T+1)=17.59$ TFLOP；若按完整方阵执行，则约 35.18 TFLOP。前一种理想计算时间下界为 $(114.35+17.59)/989.5\approx0.133$ s。
 
 Prefill 把许多位置一起交给大矩阵乘，让同一块层权重服务更多输入，因而**有机会**比 decode 更接近计算平台。但 $0.133$ s 只是用全部 FLOP 和 FP16 Tensor Core 峰值相除；它并未计算 prefill 的全部 HBM 流量，不能单凭这一个数断言整段 prefill 已经计算受限，更不能当作 TTFT。是否真正使用 Tensor Core、因果 tile 是否跳过、激活的读写和实际执行时间都需测量。
 
@@ -118,7 +119,7 @@ occupancy 和 GPU utilization 高，不代表接近 Tensor Core 或 HBM 峰值�
 
 下面的 CPU 脚本从 S1 的模型形状重新计算线性权重、KV、decode 合计和 prefill 主项，再检查脊点与时间下界。它没有运行 GPU，输出绝不是性能测量。
 
-<CodeFile path="code/systems/accelerator.py" />
+<CodeFile path="examples/systems/accelerator.py" symbol="roofline_time" />
 
 ## 练习与核对
 

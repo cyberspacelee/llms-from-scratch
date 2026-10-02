@@ -4,7 +4,8 @@ question: 怎样用同一组权重处理一批输入
 description: 从逐元素计算推到点积、矩阵乘法和 batch 线性层，学会按轴检查形状与广播。
 order: 6
 code:
-  - code/math/linear_algebra.py
+  - examples/math/linear_algebra.py
+prerequisites: []
 ---
 
 import MathLinearLab from '../../../components/labs/MathLinearLab'
@@ -183,7 +184,7 @@ np.testing.assert_allclose(position_scores[0, 0, 1], X[0] @ X[1])
   矩阵的秩是其列向量中最多能选出多少个线性无关的向量，等于输出能够覆盖的独立方向数；$W\in\mathbb R^{m\times d}$ 的秩不超过 $\min(m,d)$。
 </Definition>
 
-例子 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$ 的第二列是第一列的两倍。它将 $(u,v)^\top$ 映为 $(u+2v)(1,2)^\top$，输出总在一条直线上，故秩为 1；$(2,-1)^\top$ 和 $(0,0)^\top$ 都映为零，原输入无法仅凭输出恢复。若写成 $A=UV$，其中 $U$ 为 `(m,r)`、$V$ 为 `(r,d)`，映射先经过 $r$ 维中间表示，秩至多为 $r$。这只说明乘积矩阵的限制；[T6 LoRA](/training/lora/) 限制的是增量矩阵的 rank，不能据此说原有权重本身低秩。较完整的谱分解留到 [M11](/math/spectral/)。
+例子 $A=\left[\begin{smallmatrix}1&2\\2&4\end{smallmatrix}\right]$ 的第二列是第一列的两倍。它将 $(u,v)^\top$ 映为 $(u+2v)(1,2)^\top$，输出总在一条直线上，故秩为 1；$(2,-1)^\top$ 和 $(0,0)^\top$ 都映为零，原输入无法仅凭输出恢复。若写成 $A=UV$，其中 $U$ 为 `(m,r)`、$V$ 为 `(r,d)`，映射先经过 $r$ 维中间表示，秩至多为 $r$。这只说明乘积矩阵的限制；[H2 LoRA](/post-training/lora/) 限制的是增量矩阵的 rank，不能据此说原有权重本身低秩。较完整的谱分解留到 [M11](/math/spectral/)。
 
 <Definition term="正交矩阵" source="https://zh.wikipedia.org/wiki/正交矩阵">
   实方阵 $Q$ 若满足 $Q^\top Q=I$，便是正交矩阵；它保持任意两个向量的点积，因此也保持长度与距离。
@@ -241,4 +242,4 @@ $$
 - [NumPy `matmul` 文档](https://numpy.org/doc/stable/reference/generated/numpy.matmul.html)：高阶输入在最后两轴执行矩阵乘法。
 - [NumPy 广播规则](https://numpy.org/doc/stable/user/basics.broadcasting.html)：从右对齐各轴并决定输出形状。
 - [PyTorch `nn.Linear` 文档](https://docs.pytorch.org/docs/stable/generated/torch.nn.Linear.html)：权重形状、偏置与输出特征轴。
-- 仓库脚本 `code/math/linear_algebra.py` 验证本章的几何与线性层算例，并包含 [M8](/math/matrix-calculus/) 使用的梯度检验；M8 的推导不是阅读本章的前提。
+- 仓库脚本 `examples/math/linear_algebra.py` 验证本章的几何与线性层算例，并包含 [M8](/math/matrix-calculus/) 使用的梯度检验；M8 的推导不是阅读本章的前提。

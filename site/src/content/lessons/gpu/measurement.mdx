@@ -4,9 +4,9 @@ question: 同一矩阵乘改大 tile 后，怎样判断它是否真的更快
 description: 沿 G3 的分块矩阵乘，核算驻留资源、stream 依赖和计时区间，再用正确性检查与 profiler 解释一次性能差异。
 order: 4
 code:
-  - code/gpu/measurement.py
-  - code/gpu/examples/event_timing.py
-  - code/gpu/model_profile.py
+  - examples/gpu/measurement.py
+  - examples/gpu/examples/tiled_gemm.cu
+prerequisites: ["gpu/kernel-design"]
 ---
 
 import OccupancyLab from '../../../components/labs/OccupancyLab'
@@ -15,9 +15,9 @@ import TimingBoundaryLab from '../../../components/labs/TimingBoundaryLab'
 
 [G3](/gpu/kernel-design/) 用共享内存分块计算 $C=AB$，证明了分块能复用输入。本章检验另一个问题：增大 tile 后，执行时间是否缩短？
 
-固定连续 float32 矩阵乘，A、B、C 都是 $1024\times1024$。基线是 G3 CUDA kernel 的 $t=16$，候选只把 tile 边长改为 $t=32$。比较时，两者须输出同一个 C，并使用同一设备、编译选项和计时区间。
+固定连续 float32 矩阵乘，A、B、C 都是 $256\times256$。基线是 G3 CUDA kernel 的 $t=16$，候选只把 tile 边长改为 $t=32$。比较时，两者须输出同一个 C，并使用同一设备、编译选项和计时区间。
 
-仓库 CUDA 示例只实现并验证了 $t=16$。下文对 $t=32$ 的资源分析是待设备实验检验的预测。没有 GPU 时，只核对资源与依赖的教学模型。
+仓库 CUDA 示例已提供 $t=16$ 和 $t=32$ 两个真实模板实例，以及 `--benchmark` 入口。每版先与同一 double CPU 参考核对输出，再预热 10 次、采集 31 个同 stream CUDA event 时间，报告最小值、中位数和最大值。当前环境没有 CUDA 设备，尚未执行 GPU 正确性与性能实验；下文驻留数是明确假设下的预测。
 
 阅读前建议掌握 [G1 的 block/warp](/gpu/execution-model/)、[G2 的 shared memory 与屏障](/gpu/memory-and-sync/) 和 [G3 的 tile](/gpu/kernel-design/#一个-tile-怎样累计沿-k-分段复用输入)。读完后，应能解释：大 tile 少搬了哪些逻辑数据，又多占了哪些资源；两个 kernel 能否并发；一个时间数字究竟包住了哪些工作。
 
@@ -25,7 +25,7 @@ import TimingBoundaryLab from '../../../components/labs/TimingBoundaryLab'
 
 G3 的教学映射让一个 thread 累计一个输出。每次沿 K 前进 $t$，一个 block 读 A、B 各 $t^2$ 个 float32，在这些值上做约 $t^3$ 次乘加。只算输入读取，局部算术强度为 $2t^3/(2t^2\cdot4)=t/4$ FLOP/byte。$t=16$ 是 4，$t=32$ 是 8。后者让一份输入在 block 内服务更多乘加，所以有理由试它。
 
-但这个比值不计输出、边缘补零、跨 block 的缓存复用，也不是 HBM 计数器读数。对本例，两个版本的数学运算量同为 $2MNK=2\cdot1024^3\approx2.15$ GFLOP。若只按每个 block 从 global memory 请求的输入元素计，且忽略缓存命中，$t=16$ 约请求 $2MNK/t=134{,}217{,}728$ 个 float32，$t=32$ 约为其一半；两个版本都另外写 $MN$ 个 C 元素。相邻 block 可能从 L2 取得数据，所以这些请求数不能直接当成 HBM 字节或预言运行时间。G3 的[屋顶线](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)也只是上界。
+但这个比值不计输出、边缘补零、跨 block 的缓存复用，也不是 HBM 计数器读数。对本例，两个版本的数学运算量同为 $2MNK=2\cdot256^3\approx0.03355$ GFLOP。若只按每个 block 从 global memory 请求的输入元素计，且忽略缓存命中，$t=16$ 约请求 $2MNK/t=2{,}097{,}152$ 个 float32，$t=32$ 约为其一半；两个版本都另外写 $MN$ 个 C 元素。相邻 block 可能从 L2 取得数据，所以这些请求数不能直接当成 HBM 字节或预言运行时间。G3 的[屋顶线](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)也只是上界。
 
 这就留下可证伪的问题：**减少请求是否抵过更大 block 的资源代价？** 先算驻留，再在设备上测同一个工作负载。
 
@@ -93,13 +93,19 @@ $$
 
 第一次运行还可能包含上下文初始化、分配、JIT 编译或库算法选择。要报告稳定的重复 GEMM，先完成这些准备，再预热、同步，并在相同矩阵、dtype、布局、输出分配策略下重复测量。记录至少中位数和样本范围，说明是否复用同一输入；复用可能改变缓存命中。小 kernel 的 event 间隙还可能包含 host 尚未提交下一项工作的空档。
 
-本仓库现有的可选 [CUDA event 示例](https://docs.pytorch.org/docs/stable/generated/torch.cuda.Event.html)用**预分配的向量加法**单独演示这些计时边界：它报告 event 中位数、最小/最大值以及整批 CPU 提交加等待时间。向量加法不是本节 GEMM 的 tile 对照，也不能拿它的 GB/s 预测矩阵乘。该脚本需要 CUDA-enabled PyTorch 和 NVIDIA GPU：
+同一 GEMM 的真实测量入口已经实现。数据分配、输入拷贝和逐元素 CPU 参考均位于 event 区间之外；event 只包住同一默认 stream 上的一次 kernel。编译和检查后，再开启计时：
 
 ```sh
-python code/gpu/examples/event_timing.py --elements 1000003 --warmup 10 --repeats 30
+nvcc -O2 -std=c++17 examples/gpu/examples/tiled_gemm.cu -o /tmp/tiled_gemm
+/tmp/tiled_gemm
+/tmp/tiled_gemm --benchmark
 ```
 
-<CodeFile path="code/gpu/examples/event_timing.py" />
+<CodeFile path="examples/gpu/examples/tiled_gemm.cu" region="benchmark" />
+
+程序先检查设备能否支持 32×32 的 1024-thread block，再对两版分别检查三个小尺寸，最后在同样的 256³ 输入上计时。记录设备名、计算能力、CUDA runtime、编译命令和两组 event 样本；这些字段不是加速结果，需在设备上真正运行。计时顺序固定为 tile16 后 tile32，热状态或时钟漂移仍可能带来顺序偏差，严肃性能结论应交换顺序复测。Sanitizer 与 profiler 运行独立于正常计时。
+
+向量加法的 event 教学脚本仍可用于隔离计时边界，完整源码在 `examples/gpu/examples/event_timing.py`；它的 GB/s 与本节 GEMM 的 FLOP/s 使用不同工作负载，不能混用。
 
 ### 对照：只改变时钟包住的范围
 
@@ -120,16 +126,16 @@ python code/gpu/examples/event_timing.py --elements 1000003 --warmup 10 --repeat
 
 ## 从时间换算速率：先说清分母与分子
 
-若实际测到一次 $1024^3$ GEMM 的设备区间为 $t$ 秒，按每次乘加算 2 FLOP，计算速率是 $2\cdot1024^3/t$ FLOP/s。假设 $t=1$ ms，结果约为 2.15 TFLOP/s；**1 ms 只是单位换算示例，不是本仓库的测量**。如果这次运行涉及 A/B 布局准备，算子速率的分母不能偷偷改用只包住 C 的 event 区间。
+若实际测到一次 $256^3$ GEMM 的设备区间为 $t$ 秒，按每次乘加算 2 FLOP，计算速率是 $2\cdot256^3/t$ FLOP/s。假设 $t=1$ ms，结果约为 0.03355 TFLOP/s；**1 ms 只是单位换算示例，不是本仓库的测量**。如果这次运行涉及 A/B 布局准备，算子速率的分母不能偷偷改用只包住 C 的 event 区间。
 
-有效带宽同样要求明确字节口径。G3 两个版本的“逐 block 输入请求”不同，但它们的数学最少输入/输出数组容量相同：A、B 各 4 MiB，C 4 MiB，合计 12 MiB。该容量既不是实际 HBM 流量，也不是 tile 版本的全部 global load 请求。缓存命中、写分配和读放大会使物理计数不同；要判断瓶颈，结合 profiler 的内存指标与[屋顶线模型](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)的相应字节定义。向量加法示例按两个输入读、一个输出写算 12 byte/元素；若一百万元素假设耗时 0.1 ms，逻辑有效带宽是 120 GB/s，依然不是实测 HBM 带宽。
+有效带宽同样要求明确字节口径。G3 两个版本的“逐 block 输入请求”不同，但它们的数学最少输入/输出数组容量相同：A、B 各 256 KiB，C 256 KiB，合计 768 KiB。该容量既不是实际 HBM 流量，也不是 tile 版本的全部 global load 请求。缓存命中、写分配和读放大会使物理计数不同；要判断瓶颈，结合 profiler 的内存指标与[屋顶线模型](/gpu/kernel-design/#屋顶线强度决定上限贴着哪条线)的相应字节定义。向量加法示例按两个输入读、一个输出写算 12 byte/元素；若一百万元素假设耗时 0.1 ms，逻辑有效带宽是 120 GB/s，依然不是实测 HBM 带宽。
 
 ## 从错误检查到 profiler：工具分别回答什么
 
-先用 [G3 的 CUDA 程序](/gpu/kernel-design/#验证与边界把三类结论分开)验证 $5\times7$ 乘 $7\times6$、非整除尺寸和整除尺寸。小矩阵暴露越界、边缘补零与同步问题；性能实验再换到固定的 $1024^3$，并比较相同输出与参考实现。float32 累加顺序可不同，所以按 dtype 与 K 长度选择合理容差；不能只看程序没有报错。
+先用 [G3 的 CUDA 程序](/gpu/kernel-design/#验证与边界把三类结论分开)验证 $5\times7$ 乘 $7\times6$、非整除尺寸和整除尺寸。小矩阵暴露越界、边缘补零与同步问题；性能实验再换到固定的 $256^3$，并比较相同输出与参考实现。float32 累加顺序可不同，所以按 dtype 与 K 长度选择合理容差；不能只看程序没有报错。
 
 ```sh
-nvcc -O2 -std=c++17 code/gpu/examples/tiled_gemm.cu -o /tmp/tiled_gemm
+nvcc -O2 -std=c++17 examples/gpu/examples/tiled_gemm.cu -o /tmp/tiled_gemm
 /tmp/tiled_gemm
 compute-sanitizer --tool memcheck /tmp/tiled_gemm
 compute-sanitizer --tool racecheck /tmp/tiled_gemm
@@ -147,20 +153,12 @@ Nsight Compute 可能为了收集计数器重放 kernel、序列化执行、清�
 CPU 脚本核对上面的简化资源用量、event 依赖时间线和单位换算；它没有读取设备属性，也没有测 GPU：
 
 ```sh
-python code/gpu/measurement.py
+uv run python -m examples.gpu.measurement
 ```
 
-<CodeFile path="code/gpu/measurement.py" />
+<CodeFile path="examples/gpu/measurement.py" symbol={["resident_blocks", "stream_schedule"]} run="uv run python -m examples.gpu.measurement" />
 
-### 完整模型：先对齐输出与梯度，再观察执行路径
-
-另一个[完整模型实验](/principles/complete-transformer/)用相同权重比较显式注意力与 PyTorch SDPA，先核对 logits 和梯度，再看 profiler。它回答的是“一个算子选择改变后完整模型如何运行”，不是 $t=16$ 对 $t=32$ 的 GEMM 实验。SDPA 后端随设备、dtype、形状与 mask 改变；若看到融合 kernel，仍不能把完整模型耗时全部归给注意力。无 CUDA 时可运行 CPU 路径：
-
-```sh
-python code/gpu/model_profile.py
-```
-
-<CodeFile path="code/gpu/model_profile.py" />
+完整模型的算子路径和梯度核对是另一项工作，接[模型 profiling 实践](/gpu/model-profiling/)。本章到此始终比较同一个 GEMM 的两种 tile，不用完整模型的时间替代 kernel 对照。
 
 ## 练习与核对
 
@@ -171,7 +169,7 @@ python code/gpu/model_profile.py
 </details>
 
 <details>
-<summary>只把 GEMM 从 $1024^3$ 改成 G3 的 $5\times7$ 乘 $7\times6$，大 tile 仍应减少一半 global 输入请求吗？</summary>
+<summary>只把 GEMM 从 $256^3$ 改成 G3 的 $5\times7$ 乘 $7\times6$，大 tile 仍应减少一半 global 输入请求吗？</summary>
 
 不应。两个尺寸下都只需一个输出 block，输入有效元素只有 $5\cdot7+7\cdot6=77$ 个。更大的 tile 增加无效 thread 和填零位置，无法利用“多个输出 block 重复请求”的那部分收益。算强度时必须重新写明形状与边缘条件。
 </details>

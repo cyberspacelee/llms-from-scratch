@@ -2,16 +2,18 @@
 title: 分布式训练与状态分片
 question: 两个进程处理不同数量的目标时，怎样仍做同一次全局更新
 description: 用十四个目标和一个参数手算全局损失、DDP 梯度与微批累积，再追踪数据分片、ZeRO/FSDP 显存和 checkpoint。
-order: 9
+order: 8
 code:
-  - code/training/distributed_training.py
+  - examples/training/distributed_training.py
+prerequisites: ["training/optimization", "training/checkpoint"]
 ---
 
 [T2](/training/optimization/) 已经说明：把有效目标拆成微批时，每个目标仍应在一次更新中占相同权重。现在把同一批目标交给两个进程。rank 0 处理 5 个，rank 1 处理 9 个；如果两个进程各算平均损失，再平均它们的梯度，5 个目标和 9 个目标就各占一半。参数可以保持同步，训练目标却已经改变。
 
 本章沿用一组十四个目标，从单进程参考更新出发，逐步得到 DDP 同步与累积规则，再看复制和分片各占多少状态。只需知道 [M9 反向传播](/math/backprop/) 的梯度相加和 [T2](/training/optimization/) 的有效目标分母；[S9 集合通信](/systems/cluster/) 可在理解公式后回读。
 
-import { DdpReplayLab, StateAllocationLab } from '../../../components/labs/TrainingTraceLabs'
+import DdpReplayLab from '../../../components/labs/DdpReplayLab'
+import StateAllocationLab from '../../../components/labs/StateAllocationLab'
 
 ## 单进程参考：十四个目标定义哪一次更新
 
@@ -74,9 +76,9 @@ $$
 
 进程组调用有共同顺序：每个 rank 先参加计数归约，再走各自的第一个 <code>no_sync()</code> 微批和第二个同步微批，最后更新参数。少一个 rank 参加 collective，其他进程可能等待或超时。脚本对进程组设超时，并在退出时销毁进程组；两个 rank 更新后还互相核对参数。
 
-<CodeFile path="code/training/distributed_training.py" />
+<CodeFile path="examples/training/distributed_training.py" symbol="worker" />
 
-运行 <code>python code/training/distributed_training.py</code>。它先让单进程对全部十四个目标执行一次 SGD，再启动两个真实 DDP rank。断言同时检查全局损失 $43/14$、梯度 $-32/14$、更新参数 $3.2/14$、两个 rank 的参数一致，以及错误的 rank 均值确实不同。float64 容差允许规约顺序带来的末位差异；这个实验验证的是数学与 CPU 集合通信，不是 GPU 吞吐。
+运行 <code>uv run python -m examples.training.distributed_training</code>。它先让单进程对全部十四个目标执行一次 SGD，再启动两个真实 DDP rank。断言同时检查全局损失 $43/14$、梯度 $-32/14$、更新参数 $3.2/14$、两个 rank 的参数一致，以及错误的 rank 均值确实不同。float64 容差允许规约顺序带来的末位差异；这个实验验证的是数学与 CPU 集合通信，不是 GPU 吞吐。
 
 ### 分片数据时，还需核对哪些事件
 
@@ -115,7 +117,7 @@ DDP 让每个 rank 都有完整参数、梯度和优化器状态；增加 rank �
 
 ## checkpoint：恢复的也是同一次全局更新吗
 
-单进程的 [T3 checkpoint](/training/pretraining/) 已经保存模型、优化器、RNG 和数据游标。多进程还需要知道各 rank 的数据顺序与游标、随机状态、world size、分片配置及已完成的全局更新数。只有 rank 0 的模型参数相同，不保证其他 rank 恢复后取到同样的目标。保存点若落在两个微批之间，还需保存未完成梯度与累计有效目标数；选择完整 <code>optimizer.step()</code> 后作为保存边界更容易核对。
+单进程的 [T5 checkpoint](/training/checkpoint/) 已经保存模型、优化器、RNG 和数据游标。多进程还需要知道各 rank 的数据顺序与游标、随机状态、world size、分片配置及已完成的全局更新数。只有 rank 0 的模型参数相同，不保证其他 rank 恢复后取到同样的目标。保存点若落在两个微批之间，还需保存未完成梯度与累计有效目标数；选择完整 <code>optimizer.step()</code> 后作为保存边界更容易核对。
 
 FSDP 保存时需声明是完整 state dict 还是分片 state dict，以及加载时怎样重分片。临时聚合完整权重可能提高保存峰值；分片格式需要匹配对应 API。这里的脚本只验证一步 DDP，并未演示故障恢复或 FSDP checkpoint，所以实际训练应对一次中断后的**下一步损失和参数**再做独立核对。
 

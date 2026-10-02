@@ -9,21 +9,21 @@ import FigureShell from '../FigureShell.astro'
 interface Props {
   /** Path under src/assets/figures, e.g. "math/04-matrix.svg". */
   src: string
+  /** Reflowed layout for narrow screens, sharing one caption and figure number. */
+  mobileSrc?: string
   /** What the figure shows, for screen readers. */
   alt: string
   /** Smallest readable width; narrower screens scroll the figure sideways. */
   minWidth?: string
 }
 
-const { src, alt, minWidth = '36rem' } = Astro.props
+const { src, mobileSrc, alt, minWidth = '0' } = Astro.props
 
 const files = import.meta.glob<string>('../../assets/figures/**/*.svg', {
   query: '?raw',
   import: 'default',
   eager: true,
 })
-const raw = files[`../../assets/figures/${src}`]
-if (!raw) throw new Error(`Figure not found: ${src}`)
 
 const palette: Record<string, string> = {
   '#263a34': 'var(--ink)', '#1c2926': 'var(--ink)', '#000000': 'var(--ink)',
@@ -39,15 +39,23 @@ const palette: Record<string, string> = {
   '#e2eaf7': 'var(--info-soft)', '#e8eef8': 'var(--info-soft)', '#8eafd4': 'var(--info-soft)',
 }
 
-const prefix = `fig-${src.replace(/\.svg$/, '').replace(/[^a-z0-9]+/gi, '-')}`
+// Sequential heatmaps retain their ordering while adapting both ends to the theme.
+for (const [index, hex] of ['#eef5fc','#d9e8f5','#c6dbef','#a6cee4','#7fb9da','#5ba3d0','#3b8bc2','#2070b4','#0d57a1','#083c7d'].entries()) {
+  palette[hex] = `color-mix(in oklch, var(--info) ${10 + index * 10}%, var(--raised))`
+}
+palette['#f7fbff'] = 'var(--raised)'
+palette['#08306b'] = 'var(--info)'
+
+function inline(path: string) {
+  const raw = files[`../../assets/figures/${path}`]
+  if (!raw) throw new Error(`Figure not found: ${path}`)
+const prefix = `fig-${path.replace(/\.svg$/, '').replace(/[^a-z0-9]+/gi, '-')}-${crypto.randomUUID()}`
 const ids = [...raw.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1])
 
 let svg = raw
   .replace(/<\?xml[^>]*>\s*/, '')
   .replace(/<!DOCTYPE[^>]*>\s*/, '')
   .replace(/<metadata>[\s\S]*?<\/metadata>\s*/, '')
-  .replace(/<title[^>]*>[\s\S]*?<\/title>\s*/g, '')
-  .replace(/<desc[^>]*>[\s\S]*?<\/desc>\s*/g, '')
   .replace(/\sfont-family="[^"]*"/g, '')
   .replace(/#[0-9a-fA-F]{6}\b/g, (hex) => palette[hex.toLowerCase()] ?? hex)
 
@@ -62,14 +70,20 @@ for (const id of ids) {
 svg = svg.replace(/<svg\b([^>]*)>/, (_, attributes: string) => {
   const kept = attributes
     .replace(/\s(?:width|height|role|aria-labelledby|aria-label)="[^"]*"/g, '')
-  return `<svg${kept} role="img" aria-label="${alt.replace(/"/g, '&quot;')}">`
+  return `<svg${kept} role="img" aria-label="${alt.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')}">`
 })
+return svg
+}
+const svg = inline(src)
+const mobileSvg = mobileSrc ? inline(mobileSrc) : undefined
+
 ---
 <FigureShell label={alt}>
   <div
-    class="[&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:w-full [&>svg]:min-w-(--fig-min) [&>svg]:font-sans"
+    class:list={[mobileSrc && 'hidden sm:block', '[&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:w-full [&>svg]:min-w-(--fig-min) [&>svg]:font-sans']}
     style={`--fig-min: ${minWidth}`}
     set:html={svg}
   ></div>
+  {mobileSvg && <div class="sm:hidden [&>svg]:mx-auto [&>svg]:block [&>svg]:h-auto [&>svg]:w-full [&>svg]:font-sans" set:html={mobileSvg}></div>}
   <slot slot="caption" />
 </FigureShell>

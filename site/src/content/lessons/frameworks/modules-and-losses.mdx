@@ -4,7 +4,8 @@ question: 一组 token ID 怎样经过模块登记的参数，变成形状和分
 description: 用两条短序列追踪 Module 的参数、Embedding、LayerNorm、Dropout、Linear、logits 与有效目标交叉熵。
 order: 5
 code:
-  - code/frameworks/modules_and_losses.py
+  - examples/frameworks/modules_and_losses.py
+prerequisites: ["frameworks/autograd", "math/information"]
 ---
 
 import MaskedLossLab from '../../../components/labs/MaskedLossLab'
@@ -156,13 +157,13 @@ $$
 
 若一批目标全是 `-100`，有效数量为零，数学上的有效平均没有定义；直接用 `reduction='mean'` 会得到 NaN。这个示例选择返回**与 logits 计算图相连的零损失**，使该项的梯度为零。做法是先以 `reduction='sum'` 求有效和，再除以 `valid.sum().clamp_min(1)`；有有效目标时与通常 mean 相同，全忽略时为 $0/1=0$。它不代表训练循环应照常做优化器更新：若还有其他损失或权重衰减，整步行为要另行决定。
 
-完整脚本的 `token_loss` 还检查目标形状、long dtype、设备和有效类别范围。训练数据进入信任边界后，这些错误应尽早报出，而不是等到框架在错误轴上计算。这里没有把概率目标、类别权重、标签平滑或空 batch 混入示例；需要这些功能时先明确新的目标和分母。
+完整脚本的 `reference_token_loss` 还检查目标形状、long dtype、设备和有效类别范围。训练数据进入信任边界后，这些错误应尽早报出，而不是等到框架在错误轴上计算。这里没有把概率目标、类别权重、标签平滑或空 batch 混入示例；需要这些功能时先明确新的目标和分母。
 
 ## 运行核对与常见错误
 
-<CodeFile path="code/frameworks/modules_and_losses.py" />
+<CodeFile path="examples/frameworks/modules_and_losses.py" symbol="reference_token_loss" />
 
-在仓库根运行 `python code/frameworks/modules_and_losses.py`。脚本核对 20 个参数、六行固定 logits、四个有效损失、两种类别轴调用、eval 仍可求导、train 的 Dropout 行为，以及全忽略零梯度。它也构造普通 list 持有层的反例：子层得到梯度，父模块却没有登记任何参数。即使当前模型的单个损失数值正确，仍需分别核对这些结构和轴契约。
+在仓库根运行 `uv run python -m examples.frameworks.modules_and_losses`。脚本核对 20 个参数、六行固定 logits、四个有效损失、两种类别轴调用、eval 仍可求导、train 的 Dropout 行为，以及全忽略零梯度。它也构造普通 list 持有层的反例：子层得到梯度，父模块却没有登记任何参数。即使当前模型的单个损失数值正确，仍需分别核对这些结构和轴契约。
 
 ## 练习与核对
 

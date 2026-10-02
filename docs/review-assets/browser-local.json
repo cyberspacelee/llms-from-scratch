@@ -1,0 +1,2243 @@
+[
+  {
+    "route": "principles/attention-order",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前输入 (2.0000, 1.0000, 3.0000)查询行概率 (0.2447, 0.0900, 0.6652) · 输出 (2.8509, 2.5752, 2.9480)单纯重排旧输出 (2.8509, 2.5752, 2.9480) · 最大差 0.000000"
+    ],
+    "controls": [
+      {
+        "label": "交换 BOS 与 A",
+        "value": "on"
+      },
+      {
+        "label": "causal mask",
+        "value": "on"
+      },
+      {
+        "label": "加位置表",
+        "value": "on"
+      },
+      {
+        "label": "mask / 位置表随身份移动",
+        "value": "on"
+      },
+      {
+        "label": "查询槽位1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/attention",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "允许 j ≤ 2 · 权重和 1.000000 · 未来权重 0",
+      "查询 吃（i=2）· 头 0 权重 [0.205, 0.591, 0.205, 0.000] · 头 1 权重 [0.807, 0.097, 0.097, 0.000] · 长度倍数越大，softmax 越接近硬选择",
+      "d = n_q·d_h = 4 · 元素 1·2 → 坐标 (1, 1, 0)，存储偏移 6，读作 token 1 / 头 1 · 每条样本分数元素 n_q·T² = 32 · Q/K/V/O 权重 4d² = 64，与头数无关"
+    ],
+    "controls": [
+      {
+        "label": "查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "分数温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "可见关系因果：只看 j ≤ i双向：看全部位置",
+        "value": "causal"
+      },
+      {
+        "label": "q、k 长度倍数3.0",
+        "value": "3"
+      },
+      {
+        "label": "查看查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "序列长 T4",
+        "value": "4"
+      },
+      {
+        "label": "头数 n_q2",
+        "value": "2"
+      },
+      {
+        "label": "头维度 d_h2",
+        "value": "2"
+      },
+      {
+        "label": "步骤1 · 线性投影输出2 · 拆出头轴3 · 头轴换到前面4 · 注意力后合并错误 · 直接 reshape",
+        "value": "heads"
+      },
+      {
+        "label": "跟踪 token t1",
+        "value": "1"
+      },
+      {
+        "label": "跟踪特征列 c2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前操作（省略上下文）：x = self.embedding(ids)形状：(1, 4, 12)总参数 2748 · 全部两层缓存 128 个元素 · 每层当前分数 64 个元素选中行 0 的绝对位置 0；四行分别预测春、风、来、EOS，全部参与目标。",
+      "gate=(0.6785, 1.0131)。倍数 1 恢复正文 Y≈(1.644970,2.752987)；倍数 0 令 FFN 写入为零；负 gate 可以产生负写入，不是仅用 sigmoid(gate)×up。"
+    ],
+    "controls": [
+      {
+        "label": "调用预设训练：[BOS,春,风,来]prefill：[BOS,春]decode：追加风自定义长度",
+        "value": "training"
+      },
+      {
+        "label": "计算阶段1 · 输入嵌入2 · 注意力前 RMSNorm3 · Q / K / V 与 RoPE4 · 读取每层 KV 缓存5 · 分数、因果 mask、softmax6 · 加权 V、合头、输出投影7 · 第一条残差8 · FFN 前 RMSNorm 与 SwiGLU9 · 第二条残差10 · 末层 RMSNorm 与词表头",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · MQA2 · GQA4 · MHA",
+        "value": "2"
+      },
+      {
+        "label": "新增长度 U4",
+        "value": "4"
+      },
+      {
+        "label": "历史长度 P0",
+        "value": "0"
+      },
+      {
+        "label": "选择本次有效查询行0",
+        "value": "0"
+      },
+      {
+        "label": "gate 权重倍数1",
+        "value": "1"
+      },
+      {
+        "label": "执行阶段残差输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/decoder",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "目标 A · 正确类别概率 0.506919 · NLL 0.679403。注意力写入为零的 A 位置仍保留原状态 (0,2)。"
+    ],
+    "controls": [
+      {
+        "label": "输入位置0",
+        "value": "0"
+      },
+      {
+        "label": "前向阶段输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/generation",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "惩罚集合 [BOS,A] · 顺序：惩罚 → ÷τ → top-k → top-p → min-p → 归一化 · 保留 4/4 项 · 最大概率 0.400 · 熵 1.280 nat（原始 1.280）"
+    ],
+    "controls": [
+      {
+        "label": "温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "top-k4",
+        "value": "4"
+      },
+      {
+        "label": "top-p1.00",
+        "value": "1"
+      },
+      {
+        "label": "min-p0.00",
+        "value": "0"
+      },
+      {
+        "label": "重复惩罚 θ1.0",
+        "value": "1"
+      },
+      {
+        "label": "BOS 也参与惩罚",
+        "value": "on"
+      },
+      {
+        "label": "历史里已出现 A",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "2×B×L×T×H_kv×D_h = 2×1×1×2×1×2 = 8 个缓存元素。Q/O 参数仍为 16；K/V 为 8。共享 KV 不强制两个 Q 使用相同 softmax 权重。"
+    ],
+    "controls": [
+      {
+        "label": "选择 Q 头0",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · 共用 KV2 · 独立 KV",
+        "value": "1"
+      },
+      {
+        "label": "缓存长度 T2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/index",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "Q: (B,nq,1,dh)(B, n_q, 1, d_h)(B,nq​,1,dh​) · K/V: (B,nkv,4,dh)(B, n_kv, 4, d_h)(B,nk​v,4,dh​) · 分数: (B,nq,1,4)(B, n_q, 1, 4)(B,nq​,1,4)",
+      "Σ概率 = 1.000 · Yᵢ = Σⱼ aᵢⱼVⱼ = (2.061, 0.000) · 正确位置偏移决定读取范围。"
+    ],
+    "controls": [
+      {
+        "label": "解码位置 t3",
+        "value": "3"
+      },
+      {
+        "label": "缓存长度 P3",
+        "value": "3"
+      },
+      {
+        "label": "新增长度 U2",
+        "value": "2"
+      },
+      {
+        "label": "当前查询行 i0",
+        "value": "0"
+      },
+      {
+        "label": "使用错误的左上角 tril",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "数组长度 5，PAD 不改变有效分母。整段 P(A,B,EOS|BOS)=0.252 · 有效概率的连乘 0.252000"
+    ],
+    "controls": [
+      {
+        "label": "预测行 i0",
+        "value": "0"
+      },
+      {
+        "label": "PAD 占位数2",
+        "value": "2"
+      },
+      {
+        "label": " 计分目标 A",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 B",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/normalization",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/rope",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "相位差 δ + φ = -30° · 夹角 θ = 30.0° · 有符号投影 = 0.866aᵀb = 1.0 × 1.0 × 0.866 = 0.866 · 只由内容决定的原点积 = 0.866"
+    ],
+    "controls": [
+      {
+        "label": "a 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "b 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "内容相位差 δ30°",
+        "value": "30"
+      },
+      {
+        "label": "共同旋转 γ90°",
+        "value": "90"
+      },
+      {
+        "label": "b 的额外旋转 φ-60°",
+        "value": "-60"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "p = 2 · j = 5 · Δ = 3 · 两个向量一起转了 p·ω，夹角只由 Δ 决定 · cos(Δω) = 0.382683",
+      "PE[12, 0] = sin(12.000) = -0.536573 · PE[12, 1] = cos(12.000) = 0.843854",
+      "PE(12) = [-0.537, 0.844, 0.932, 0.362, 0.120, 0.993, 0.012, 1.000] · 平方范数 = 4.0000"
+    ],
+    "controls": [
+      {
+        "label": "起点 p2",
+        "value": "2"
+      },
+      {
+        "label": "位移 Δ3",
+        "value": "3"
+      },
+      {
+        "label": "维度对 rr = 0 · d0/d1 · ω = 1r = 1 · d2/d3 · ω = 0.1r = 2 · d4/d5 · ω = 0.01r = 3 · d6/d7 · ω = 0.001",
+        "value": "0"
+      },
+      {
+        "label": "位置 p12",
+        "value": "12"
+      },
+      {
+        "label": "选中位置 p12",
+        "value": "12"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "七个基础字节 · 词表大小 256",
+      "ID 是行地址，不乘入向量。两份输入的 ID 256 共用参数行；上游 (1,2) 与 (3,−1) 汇合为 (4,1)。其余四行数值仅为本实验补充的查表例。"
+    ],
+    "controls": [
+      {
+        "label": "合并次数0",
+        "value": "0"
+      },
+      {
+        "label": "正文 token 位置3",
+        "value": "3"
+      },
+      {
+        "label": "附加 BOS / EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "G=⌈100/64⌉=2G=\\lceil 100/64\\rceil=2G=⌈100/64⌉=2 · 启动 128 个线程 · 总尾部 28 个 · 当前有效 36 个选中 threadIdx.x=0；global i=1×64+0=64；负责一个有效元素。",
+      "有效 32/32 · A 16 · B 16 · 非空路径 2 · 图示活跃集合，不代表机器指令数或耗时",
+      "待执行 2 · 驻留 4 · 完成 0四个 block 驻留；编号没有规定分配顺序。",
+      "r=0×2+0=0,c=1×4+3=7r=0\\times2+0=0,\\quad c=1\\times4+3=7r=0×2+0=0,c=1×4+3=7p=0×7+7=7p=0\\times7+7=7p=0×7+7=7 · 行列检查 拒绝 · 仅检查 p < 35：通过 · 偏移合法但坐标越界，会误写下一行"
+    ],
+    "controls": [
+      {
+        "label": "元素数100",
+        "value": "100"
+      },
+      {
+        "label": "每块线程数64",
+        "value": "64"
+      },
+      {
+        "label": "查看 block1",
+        "value": "1"
+      },
+      {
+        "label": "选中块内线程0",
+        "value": "0"
+      },
+      {
+        "label": "有效 lane 数32",
+        "value": "32"
+      },
+      {
+        "label": "A 分支阈值16",
+        "value": "16"
+      },
+      {
+        "label": "分支条件lane 小于阈值偶数 lane",
+        "value": "threshold"
+      },
+      {
+        "label": "调度步骤1",
+        "value": "1"
+      },
+      {
+        "label": "block x1",
+        "value": "1"
+      },
+      {
+        "label": "block y0",
+        "value": "0"
+      },
+      {
+        "label": "thread x3",
+        "value": "3"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "线程 32 · warp 1 · lane 08×8：(0,4)16×4：(0,2)32×2：(0,1)",
+      "t=0+8(0+4×1)=32t=0+8(0+4\\times1)=32t=0+8(0+4×1)=32 · warp 1 · lane 0x 每加 1，t 加 1 · y 每加 1，t 加 8 · z 每加 1，t 加 32"
+    ],
+    "controls": [
+      {
+        "label": "块内线性线程号32",
+        "value": "32"
+      },
+      {
+        "label": "thread x0",
+        "value": "0"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      },
+      {
+        "label": "z 切片1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "aℓ=4(0+1ℓ)a_\\ell=4(0+1\\ell)aℓ​=4(0+1ℓ) 字节 · 覆盖 4 段 · 请求 128 字节 · 段覆盖 128 字节",
+      "A2,5→tile2,5→B5,2A_{2,5}\\to\\mathrm{tile}_{2,5}\\to B_{5,2}A2,5​→tile2,5​→B5,2​ · 输入元素偏移 139，输出元素偏移 177 · shared 元素偏移 71，bank 7 · 同一写回 warp 的 shared 列读：32 个活跃 lane，1 路冲突模型",
+      "bank⁡(w)=w mod 32\\operatorname{bank}(w)=w\\bmod32bank(w)=wmod32 · 最大不同地址数 32 · 32 路教学冲突模型",
+      "初始 · shared 保留旧值 0尚未消费 shared全部消费者读完后，生产者才覆盖。"
+    ],
+    "controls": [
+      {
+        "label": "元素步长1",
+        "value": "1"
+      },
+      {
+        "label": "元素偏移0",
+        "value": "0"
+      },
+      {
+        "label": "tile 内输入行 r2",
+        "value": "2"
+      },
+      {
+        "label": "tile 内输入列 c5",
+        "value": "5"
+      },
+      {
+        "label": "共享行跨度32 列：无填充33 列：填充一列",
+        "value": "33"
+      },
+      {
+        "label": "输入 tile左上：32×32 全有效右下：3×3 有效",
+        "value": "full"
+      },
+      {
+        "label": "访问方式连续读取：步长 1读取 32 列 tile 的一列读取 33 列 tile 的一列所有 lane 读取元素 7",
+        "value": "32"
+      },
+      {
+        "label": "同步场景发布与回收都正确缺少发布屏障缺少回收屏障",
+        "value": "protected"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "C0:4,0:4+=A0:4,0:4B0:4,0:4C_{0:4,0:4}\\mathrel{+}=A_{0:4,0:4}B_{0:4,0:4}C0:4,0:4​+=A0:4,0:4​B0:4,0:4​ · 完整矩阵有效输入读取：朴素 420，分块 154 · 只计逻辑元素访问，不代表 DRAM 流量或实测速度。",
+      "C0,0=0C_{0,0}=0C0,0​=0 · 尚未写回 · 本轮装载阶段 · 教学顺序，非 GPU 时间线",
+      "C[0,0]=112 → +1 → max(0, 113)=11330 个输出的最终逻辑读写：120 B；融合为 4MN。不计 A/B、偏置读取、缓存、launch 或真实耗时。"
+    ],
+    "controls": [
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "K 维分块编号0",
+        "value": "0"
+      },
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      },
+      {
+        "label": "右下边缘输出块",
+        "value": "on"
+      },
+      {
+        "label": "输出行 i0",
+        "value": "0"
+      },
+      {
+        "label": "输出列 j0",
+        "value": "0"
+      },
+      {
+        "label": "偏置 bⱼ1",
+        "value": "1"
+      },
+      {
+        "label": "阶段累计完成",
+        "value": "0"
+      },
+      {
+        "label": "融合写回",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "驻留 6 block · 48/64 warp · 理论 occupancy 75.0%",
+      "A 完成于 5 · C 开始于 5 · 总完成时刻 7A → C 依赖已建立",
+      "C 的设备区间：6.4 → 8.4，差值 2.0A/B 在准备后开始，C 等到两者完成；CPU 提交结束时结果尚未就绪。橙色区间是当前分母，各种范围不可混用。"
+    ],
+    "controls": [
+      {
+        "label": "每块线程数256",
+        "value": "256"
+      },
+      {
+        "label": "每线程寄存器数32",
+        "value": "32"
+      },
+      {
+        "label": "每块 shared memory（KiB）16",
+        "value": "16"
+      },
+      {
+        "label": "SM warp 上限",
+        "value": "64"
+      },
+      {
+        "label": "SM 32-bit 寄存器数",
+        "value": "65536"
+      },
+      {
+        "label": "SM shared memory（KiB）",
+        "value": "96"
+      },
+      {
+        "label": "SM block 上限",
+        "value": "32"
+      },
+      {
+        "label": "执行队列同一 stream两个 stream",
+        "value": "two"
+      },
+      {
+        "label": "C 等待 A 的完成 event",
+        "value": "on"
+      },
+      {
+        "label": "A 生产数据5",
+        "value": "5"
+      },
+      {
+        "label": "B 独立任务3",
+        "value": "3"
+      },
+      {
+        "label": "C 消费 A 的结果2",
+        "value": "2"
+      },
+      {
+        "label": "计时对象CPU 提交C 的设备区间A/B/C 的设备区间端到端",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 390,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/attention-order",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前输入 (2.0000, 1.0000, 3.0000)查询行概率 (0.2447, 0.0900, 0.6652) · 输出 (2.8509, 2.5752, 2.9480)单纯重排旧输出 (2.8509, 2.5752, 2.9480) · 最大差 0.000000"
+    ],
+    "controls": [
+      {
+        "label": "交换 BOS 与 A",
+        "value": "on"
+      },
+      {
+        "label": "causal mask",
+        "value": "on"
+      },
+      {
+        "label": "加位置表",
+        "value": "on"
+      },
+      {
+        "label": "mask / 位置表随身份移动",
+        "value": "on"
+      },
+      {
+        "label": "查询槽位1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/attention",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "允许 j ≤ 2 · 权重和 1.000000 · 未来权重 0",
+      "查询 吃（i=2）· 头 0 权重 [0.205, 0.591, 0.205, 0.000] · 头 1 权重 [0.807, 0.097, 0.097, 0.000] · 长度倍数越大，softmax 越接近硬选择",
+      "d = n_q·d_h = 4 · 元素 1·2 → 坐标 (1, 1, 0)，存储偏移 6，读作 token 1 / 头 1 · 每条样本分数元素 n_q·T² = 32 · Q/K/V/O 权重 4d² = 64，与头数无关"
+    ],
+    "controls": [
+      {
+        "label": "查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "分数温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "可见关系因果：只看 j ≤ i双向：看全部位置",
+        "value": "causal"
+      },
+      {
+        "label": "q、k 长度倍数3.0",
+        "value": "3"
+      },
+      {
+        "label": "查看查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "序列长 T4",
+        "value": "4"
+      },
+      {
+        "label": "头数 n_q2",
+        "value": "2"
+      },
+      {
+        "label": "头维度 d_h2",
+        "value": "2"
+      },
+      {
+        "label": "步骤1 · 线性投影输出2 · 拆出头轴3 · 头轴换到前面4 · 注意力后合并错误 · 直接 reshape",
+        "value": "heads"
+      },
+      {
+        "label": "跟踪 token t1",
+        "value": "1"
+      },
+      {
+        "label": "跟踪特征列 c2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前操作（省略上下文）：x = self.embedding(ids)形状：(1, 4, 12)总参数 2748 · 全部两层缓存 128 个元素 · 每层当前分数 64 个元素选中行 0 的绝对位置 0；四行分别预测春、风、来、EOS，全部参与目标。",
+      "gate=(0.6785, 1.0131)。倍数 1 恢复正文 Y≈(1.644970,2.752987)；倍数 0 令 FFN 写入为零；负 gate 可以产生负写入，不是仅用 sigmoid(gate)×up。"
+    ],
+    "controls": [
+      {
+        "label": "调用预设训练：[BOS,春,风,来]prefill：[BOS,春]decode：追加风自定义长度",
+        "value": "training"
+      },
+      {
+        "label": "计算阶段1 · 输入嵌入2 · 注意力前 RMSNorm3 · Q / K / V 与 RoPE4 · 读取每层 KV 缓存5 · 分数、因果 mask、softmax6 · 加权 V、合头、输出投影7 · 第一条残差8 · FFN 前 RMSNorm 与 SwiGLU9 · 第二条残差10 · 末层 RMSNorm 与词表头",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · MQA2 · GQA4 · MHA",
+        "value": "2"
+      },
+      {
+        "label": "新增长度 U4",
+        "value": "4"
+      },
+      {
+        "label": "历史长度 P0",
+        "value": "0"
+      },
+      {
+        "label": "选择本次有效查询行0",
+        "value": "0"
+      },
+      {
+        "label": "gate 权重倍数1",
+        "value": "1"
+      },
+      {
+        "label": "执行阶段残差输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/decoder",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "目标 A · 正确类别概率 0.506919 · NLL 0.679403。注意力写入为零的 A 位置仍保留原状态 (0,2)。"
+    ],
+    "controls": [
+      {
+        "label": "输入位置0",
+        "value": "0"
+      },
+      {
+        "label": "前向阶段输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/generation",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "惩罚集合 [BOS,A] · 顺序：惩罚 → ÷τ → top-k → top-p → min-p → 归一化 · 保留 4/4 项 · 最大概率 0.400 · 熵 1.280 nat（原始 1.280）"
+    ],
+    "controls": [
+      {
+        "label": "温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "top-k4",
+        "value": "4"
+      },
+      {
+        "label": "top-p1.00",
+        "value": "1"
+      },
+      {
+        "label": "min-p0.00",
+        "value": "0"
+      },
+      {
+        "label": "重复惩罚 θ1.0",
+        "value": "1"
+      },
+      {
+        "label": "BOS 也参与惩罚",
+        "value": "on"
+      },
+      {
+        "label": "历史里已出现 A",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "2×B×L×T×H_kv×D_h = 2×1×1×2×1×2 = 8 个缓存元素。Q/O 参数仍为 16；K/V 为 8。共享 KV 不强制两个 Q 使用相同 softmax 权重。"
+    ],
+    "controls": [
+      {
+        "label": "选择 Q 头0",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · 共用 KV2 · 独立 KV",
+        "value": "1"
+      },
+      {
+        "label": "缓存长度 T2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/index",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "Q: (B,nq,1,dh)(B, n_q, 1, d_h)(B,nq​,1,dh​) · K/V: (B,nkv,4,dh)(B, n_kv, 4, d_h)(B,nk​v,4,dh​) · 分数: (B,nq,1,4)(B, n_q, 1, 4)(B,nq​,1,4)",
+      "Σ概率 = 1.000 · Yᵢ = Σⱼ aᵢⱼVⱼ = (2.061, 0.000) · 正确位置偏移决定读取范围。"
+    ],
+    "controls": [
+      {
+        "label": "解码位置 t3",
+        "value": "3"
+      },
+      {
+        "label": "缓存长度 P3",
+        "value": "3"
+      },
+      {
+        "label": "新增长度 U2",
+        "value": "2"
+      },
+      {
+        "label": "当前查询行 i0",
+        "value": "0"
+      },
+      {
+        "label": "使用错误的左上角 tril",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "数组长度 5，PAD 不改变有效分母。整段 P(A,B,EOS|BOS)=0.252 · 有效概率的连乘 0.252000"
+    ],
+    "controls": [
+      {
+        "label": "预测行 i0",
+        "value": "0"
+      },
+      {
+        "label": "PAD 占位数2",
+        "value": "2"
+      },
+      {
+        "label": " 计分目标 A",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 B",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/normalization",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/rope",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "相位差 δ + φ = -30° · 夹角 θ = 30.0° · 有符号投影 = 0.866aᵀb = 1.0 × 1.0 × 0.866 = 0.866 · 只由内容决定的原点积 = 0.866"
+    ],
+    "controls": [
+      {
+        "label": "a 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "b 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "内容相位差 δ30°",
+        "value": "30"
+      },
+      {
+        "label": "共同旋转 γ90°",
+        "value": "90"
+      },
+      {
+        "label": "b 的额外旋转 φ-60°",
+        "value": "-60"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "p = 2 · j = 5 · Δ = 3 · 两个向量一起转了 p·ω，夹角只由 Δ 决定 · cos(Δω) = 0.382683",
+      "PE[12, 0] = sin(12.000) = -0.536573 · PE[12, 1] = cos(12.000) = 0.843854",
+      "PE(12) = [-0.537, 0.844, 0.932, 0.362, 0.120, 0.993, 0.012, 1.000] · 平方范数 = 4.0000"
+    ],
+    "controls": [
+      {
+        "label": "起点 p2",
+        "value": "2"
+      },
+      {
+        "label": "位移 Δ3",
+        "value": "3"
+      },
+      {
+        "label": "维度对 rr = 0 · d0/d1 · ω = 1r = 1 · d2/d3 · ω = 0.1r = 2 · d4/d5 · ω = 0.01r = 3 · d6/d7 · ω = 0.001",
+        "value": "0"
+      },
+      {
+        "label": "位置 p12",
+        "value": "12"
+      },
+      {
+        "label": "选中位置 p12",
+        "value": "12"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "七个基础字节 · 词表大小 256",
+      "ID 是行地址，不乘入向量。两份输入的 ID 256 共用参数行；上游 (1,2) 与 (3,−1) 汇合为 (4,1)。其余四行数值仅为本实验补充的查表例。"
+    ],
+    "controls": [
+      {
+        "label": "合并次数0",
+        "value": "0"
+      },
+      {
+        "label": "正文 token 位置3",
+        "value": "3"
+      },
+      {
+        "label": "附加 BOS / EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "G=⌈100/64⌉=2G=\\lceil 100/64\\rceil=2G=⌈100/64⌉=2 · 启动 128 个线程 · 总尾部 28 个 · 当前有效 36 个选中 threadIdx.x=0；global i=1×64+0=64；负责一个有效元素。",
+      "有效 32/32 · A 16 · B 16 · 非空路径 2 · 图示活跃集合，不代表机器指令数或耗时",
+      "待执行 2 · 驻留 4 · 完成 0四个 block 驻留；编号没有规定分配顺序。",
+      "r=0×2+0=0,c=1×4+3=7r=0\\times2+0=0,\\quad c=1\\times4+3=7r=0×2+0=0,c=1×4+3=7p=0×7+7=7p=0\\times7+7=7p=0×7+7=7 · 行列检查 拒绝 · 仅检查 p < 35：通过 · 偏移合法但坐标越界，会误写下一行"
+    ],
+    "controls": [
+      {
+        "label": "元素数100",
+        "value": "100"
+      },
+      {
+        "label": "每块线程数64",
+        "value": "64"
+      },
+      {
+        "label": "查看 block1",
+        "value": "1"
+      },
+      {
+        "label": "选中块内线程0",
+        "value": "0"
+      },
+      {
+        "label": "有效 lane 数32",
+        "value": "32"
+      },
+      {
+        "label": "A 分支阈值16",
+        "value": "16"
+      },
+      {
+        "label": "分支条件lane 小于阈值偶数 lane",
+        "value": "threshold"
+      },
+      {
+        "label": "调度步骤1",
+        "value": "1"
+      },
+      {
+        "label": "block x1",
+        "value": "1"
+      },
+      {
+        "label": "block y0",
+        "value": "0"
+      },
+      {
+        "label": "thread x3",
+        "value": "3"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "线程 32 · warp 1 · lane 08×8：(0,4)16×4：(0,2)32×2：(0,1)",
+      "t=0+8(0+4×1)=32t=0+8(0+4\\times1)=32t=0+8(0+4×1)=32 · warp 1 · lane 0x 每加 1，t 加 1 · y 每加 1，t 加 8 · z 每加 1，t 加 32"
+    ],
+    "controls": [
+      {
+        "label": "块内线性线程号32",
+        "value": "32"
+      },
+      {
+        "label": "thread x0",
+        "value": "0"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      },
+      {
+        "label": "z 切片1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "aℓ=4(0+1ℓ)a_\\ell=4(0+1\\ell)aℓ​=4(0+1ℓ) 字节 · 覆盖 4 段 · 请求 128 字节 · 段覆盖 128 字节",
+      "A2,5→tile2,5→B5,2A_{2,5}\\to\\mathrm{tile}_{2,5}\\to B_{5,2}A2,5​→tile2,5​→B5,2​ · 输入元素偏移 139，输出元素偏移 177 · shared 元素偏移 71，bank 7 · 同一写回 warp 的 shared 列读：32 个活跃 lane，1 路冲突模型",
+      "bank⁡(w)=w mod 32\\operatorname{bank}(w)=w\\bmod32bank(w)=wmod32 · 最大不同地址数 32 · 32 路教学冲突模型",
+      "初始 · shared 保留旧值 0尚未消费 shared全部消费者读完后，生产者才覆盖。"
+    ],
+    "controls": [
+      {
+        "label": "元素步长1",
+        "value": "1"
+      },
+      {
+        "label": "元素偏移0",
+        "value": "0"
+      },
+      {
+        "label": "tile 内输入行 r2",
+        "value": "2"
+      },
+      {
+        "label": "tile 内输入列 c5",
+        "value": "5"
+      },
+      {
+        "label": "共享行跨度32 列：无填充33 列：填充一列",
+        "value": "33"
+      },
+      {
+        "label": "输入 tile左上：32×32 全有效右下：3×3 有效",
+        "value": "full"
+      },
+      {
+        "label": "访问方式连续读取：步长 1读取 32 列 tile 的一列读取 33 列 tile 的一列所有 lane 读取元素 7",
+        "value": "32"
+      },
+      {
+        "label": "同步场景发布与回收都正确缺少发布屏障缺少回收屏障",
+        "value": "protected"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "C0:4,0:4+=A0:4,0:4B0:4,0:4C_{0:4,0:4}\\mathrel{+}=A_{0:4,0:4}B_{0:4,0:4}C0:4,0:4​+=A0:4,0:4​B0:4,0:4​ · 完整矩阵有效输入读取：朴素 420，分块 154 · 只计逻辑元素访问，不代表 DRAM 流量或实测速度。",
+      "C0,0=0C_{0,0}=0C0,0​=0 · 尚未写回 · 本轮装载阶段 · 教学顺序，非 GPU 时间线",
+      "C[0,0]=112 → +1 → max(0, 113)=11330 个输出的最终逻辑读写：120 B；融合为 4MN。不计 A/B、偏置读取、缓存、launch 或真实耗时。"
+    ],
+    "controls": [
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "K 维分块编号0",
+        "value": "0"
+      },
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      },
+      {
+        "label": "右下边缘输出块",
+        "value": "on"
+      },
+      {
+        "label": "输出行 i0",
+        "value": "0"
+      },
+      {
+        "label": "输出列 j0",
+        "value": "0"
+      },
+      {
+        "label": "偏置 bⱼ1",
+        "value": "1"
+      },
+      {
+        "label": "阶段累计完成",
+        "value": "0"
+      },
+      {
+        "label": "融合写回",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "驻留 6 block · 48/64 warp · 理论 occupancy 75.0%",
+      "A 完成于 5 · C 开始于 5 · 总完成时刻 7A → C 依赖已建立",
+      "C 的设备区间：6.4 → 8.4，差值 2.0A/B 在准备后开始，C 等到两者完成；CPU 提交结束时结果尚未就绪。橙色区间是当前分母，各种范围不可混用。"
+    ],
+    "controls": [
+      {
+        "label": "每块线程数256",
+        "value": "256"
+      },
+      {
+        "label": "每线程寄存器数32",
+        "value": "32"
+      },
+      {
+        "label": "每块 shared memory（KiB）16",
+        "value": "16"
+      },
+      {
+        "label": "SM warp 上限",
+        "value": "64"
+      },
+      {
+        "label": "SM 32-bit 寄存器数",
+        "value": "65536"
+      },
+      {
+        "label": "SM shared memory（KiB）",
+        "value": "96"
+      },
+      {
+        "label": "SM block 上限",
+        "value": "32"
+      },
+      {
+        "label": "执行队列同一 stream两个 stream",
+        "value": "two"
+      },
+      {
+        "label": "C 等待 A 的完成 event",
+        "value": "on"
+      },
+      {
+        "label": "A 生产数据5",
+        "value": "5"
+      },
+      {
+        "label": "B 独立任务3",
+        "value": "3"
+      },
+      {
+        "label": "C 消费 A 的结果2",
+        "value": "2"
+      },
+      {
+        "label": "计时对象CPU 提交C 的设备区间A/B/C 的设备区间端到端",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 768,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/attention-order",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前输入 (2.0000, 1.0000, 3.0000)查询行概率 (0.2447, 0.0900, 0.6652) · 输出 (2.8509, 2.5752, 2.9480)单纯重排旧输出 (2.8509, 2.5752, 2.9480) · 最大差 0.000000"
+    ],
+    "controls": [
+      {
+        "label": "交换 BOS 与 A",
+        "value": "on"
+      },
+      {
+        "label": "causal mask",
+        "value": "on"
+      },
+      {
+        "label": "加位置表",
+        "value": "on"
+      },
+      {
+        "label": "mask / 位置表随身份移动",
+        "value": "on"
+      },
+      {
+        "label": "查询槽位1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/attention",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "允许 j ≤ 2 · 权重和 1.000000 · 未来权重 0",
+      "查询 吃（i=2）· 头 0 权重 [0.205, 0.591, 0.205, 0.000] · 头 1 权重 [0.807, 0.097, 0.097, 0.000] · 长度倍数越大，softmax 越接近硬选择",
+      "d = n_q·d_h = 4 · 元素 1·2 → 坐标 (1, 1, 0)，存储偏移 6，读作 token 1 / 头 1 · 每条样本分数元素 n_q·T² = 32 · Q/K/V/O 权重 4d² = 64，与头数无关"
+    ],
+    "controls": [
+      {
+        "label": "查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "分数温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "可见关系因果：只看 j ≤ i双向：看全部位置",
+        "value": "causal"
+      },
+      {
+        "label": "q、k 长度倍数3.0",
+        "value": "3"
+      },
+      {
+        "label": "查看查询位置 i2",
+        "value": "2"
+      },
+      {
+        "label": "序列长 T4",
+        "value": "4"
+      },
+      {
+        "label": "头数 n_q2",
+        "value": "2"
+      },
+      {
+        "label": "头维度 d_h2",
+        "value": "2"
+      },
+      {
+        "label": "步骤1 · 线性投影输出2 · 拆出头轴3 · 头轴换到前面4 · 注意力后合并错误 · 直接 reshape",
+        "value": "heads"
+      },
+      {
+        "label": "跟踪 token t1",
+        "value": "1"
+      },
+      {
+        "label": "跟踪特征列 c2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "当前操作（省略上下文）：x = self.embedding(ids)形状：(1, 4, 12)总参数 2748 · 全部两层缓存 128 个元素 · 每层当前分数 64 个元素选中行 0 的绝对位置 0；四行分别预测春、风、来、EOS，全部参与目标。",
+      "gate=(0.6785, 1.0131)。倍数 1 恢复正文 Y≈(1.644970,2.752987)；倍数 0 令 FFN 写入为零；负 gate 可以产生负写入，不是仅用 sigmoid(gate)×up。"
+    ],
+    "controls": [
+      {
+        "label": "调用预设训练：[BOS,春,风,来]prefill：[BOS,春]decode：追加风自定义长度",
+        "value": "training"
+      },
+      {
+        "label": "计算阶段1 · 输入嵌入2 · 注意力前 RMSNorm3 · Q / K / V 与 RoPE4 · 读取每层 KV 缓存5 · 分数、因果 mask、softmax6 · 加权 V、合头、输出投影7 · 第一条残差8 · FFN 前 RMSNorm 与 SwiGLU9 · 第二条残差10 · 末层 RMSNorm 与词表头",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · MQA2 · GQA4 · MHA",
+        "value": "2"
+      },
+      {
+        "label": "新增长度 U4",
+        "value": "4"
+      },
+      {
+        "label": "历史长度 P0",
+        "value": "0"
+      },
+      {
+        "label": "选择本次有效查询行0",
+        "value": "0"
+      },
+      {
+        "label": "gate 权重倍数1",
+        "value": "1"
+      },
+      {
+        "label": "执行阶段残差输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/decoder",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "目标 A · 正确类别概率 0.506919 · NLL 0.679403。注意力写入为零的 A 位置仍保留原状态 (0,2)。"
+    ],
+    "controls": [
+      {
+        "label": "输入位置0",
+        "value": "0"
+      },
+      {
+        "label": "前向阶段输入",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/generation",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "惩罚集合 [BOS,A] · 顺序：惩罚 → ÷τ → top-k → top-p → min-p → 归一化 · 保留 4/4 项 · 最大概率 0.400 · 熵 1.280 nat（原始 1.280）"
+    ],
+    "controls": [
+      {
+        "label": "温度 τ1.0",
+        "value": "1"
+      },
+      {
+        "label": "top-k4",
+        "value": "4"
+      },
+      {
+        "label": "top-p1.00",
+        "value": "1"
+      },
+      {
+        "label": "min-p0.00",
+        "value": "0"
+      },
+      {
+        "label": "重复惩罚 θ1.0",
+        "value": "1"
+      },
+      {
+        "label": "BOS 也参与惩罚",
+        "value": "on"
+      },
+      {
+        "label": "历史里已出现 A",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "2×B×L×T×H_kv×D_h = 2×1×1×2×1×2 = 8 个缓存元素。Q/O 参数仍为 16；K/V 为 8。共享 KV 不强制两个 Q 使用相同 softmax 权重。"
+    ],
+    "controls": [
+      {
+        "label": "选择 Q 头0",
+        "value": "0"
+      },
+      {
+        "label": "KV 头数1 · 共用 KV2 · 独立 KV",
+        "value": "1"
+      },
+      {
+        "label": "缓存长度 T2",
+        "value": "2"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/index",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "Q: (B,nq,1,dh)(B, n_q, 1, d_h)(B,nq​,1,dh​) · K/V: (B,nkv,4,dh)(B, n_kv, 4, d_h)(B,nk​v,4,dh​) · 分数: (B,nq,1,4)(B, n_q, 1, 4)(B,nq​,1,4)",
+      "Σ概率 = 1.000 · Yᵢ = Σⱼ aᵢⱼVⱼ = (2.061, 0.000) · 正确位置偏移决定读取范围。"
+    ],
+    "controls": [
+      {
+        "label": "解码位置 t3",
+        "value": "3"
+      },
+      {
+        "label": "缓存长度 P3",
+        "value": "3"
+      },
+      {
+        "label": "新增长度 U2",
+        "value": "2"
+      },
+      {
+        "label": "当前查询行 i0",
+        "value": "0"
+      },
+      {
+        "label": "使用错误的左上角 tril",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "数组长度 5，PAD 不改变有效分母。整段 P(A,B,EOS|BOS)=0.252 · 有效概率的连乘 0.252000"
+    ],
+    "controls": [
+      {
+        "label": "预测行 i0",
+        "value": "0"
+      },
+      {
+        "label": "PAD 占位数2",
+        "value": "2"
+      },
+      {
+        "label": " 计分目标 A",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 B",
+        "value": "on"
+      },
+      {
+        "label": " 计分目标 EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/normalization",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/rope",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "相位差 δ + φ = -30° · 夹角 θ = 30.0° · 有符号投影 = 0.866aᵀb = 1.0 × 1.0 × 0.866 = 0.866 · 只由内容决定的原点积 = 0.866"
+    ],
+    "controls": [
+      {
+        "label": "a 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "b 的长度1.0",
+        "value": "1"
+      },
+      {
+        "label": "内容相位差 δ30°",
+        "value": "30"
+      },
+      {
+        "label": "共同旋转 γ90°",
+        "value": "90"
+      },
+      {
+        "label": "b 的额外旋转 φ-60°",
+        "value": "-60"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "p = 2 · j = 5 · Δ = 3 · 两个向量一起转了 p·ω，夹角只由 Δ 决定 · cos(Δω) = 0.382683",
+      "PE[12, 0] = sin(12.000) = -0.536573 · PE[12, 1] = cos(12.000) = 0.843854",
+      "PE(12) = [-0.537, 0.844, 0.932, 0.362, 0.120, 0.993, 0.012, 1.000] · 平方范数 = 4.0000"
+    ],
+    "controls": [
+      {
+        "label": "起点 p2",
+        "value": "2"
+      },
+      {
+        "label": "位移 Δ3",
+        "value": "3"
+      },
+      {
+        "label": "维度对 rr = 0 · d0/d1 · ω = 1r = 1 · d2/d3 · ω = 0.1r = 2 · d4/d5 · ω = 0.01r = 3 · d6/d7 · ω = 0.001",
+        "value": "0"
+      },
+      {
+        "label": "位置 p12",
+        "value": "12"
+      },
+      {
+        "label": "选中位置 p12",
+        "value": "12"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "七个基础字节 · 词表大小 256",
+      "ID 是行地址，不乘入向量。两份输入的 ID 256 共用参数行；上游 (1,2) 与 (3,−1) 汇合为 (4,1)。其余四行数值仅为本实验补充的查表例。"
+    ],
+    "controls": [
+      {
+        "label": "合并次数0",
+        "value": "0"
+      },
+      {
+        "label": "正文 token 位置3",
+        "value": "3"
+      },
+      {
+        "label": "附加 BOS / EOS",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "G=⌈100/64⌉=2G=\\lceil 100/64\\rceil=2G=⌈100/64⌉=2 · 启动 128 个线程 · 总尾部 28 个 · 当前有效 36 个选中 threadIdx.x=0；global i=1×64+0=64；负责一个有效元素。",
+      "有效 32/32 · A 16 · B 16 · 非空路径 2 · 图示活跃集合，不代表机器指令数或耗时",
+      "待执行 2 · 驻留 4 · 完成 0四个 block 驻留；编号没有规定分配顺序。",
+      "r=0×2+0=0,c=1×4+3=7r=0\\times2+0=0,\\quad c=1\\times4+3=7r=0×2+0=0,c=1×4+3=7p=0×7+7=7p=0\\times7+7=7p=0×7+7=7 · 行列检查 拒绝 · 仅检查 p < 35：通过 · 偏移合法但坐标越界，会误写下一行"
+    ],
+    "controls": [
+      {
+        "label": "元素数100",
+        "value": "100"
+      },
+      {
+        "label": "每块线程数64",
+        "value": "64"
+      },
+      {
+        "label": "查看 block1",
+        "value": "1"
+      },
+      {
+        "label": "选中块内线程0",
+        "value": "0"
+      },
+      {
+        "label": "有效 lane 数32",
+        "value": "32"
+      },
+      {
+        "label": "A 分支阈值16",
+        "value": "16"
+      },
+      {
+        "label": "分支条件lane 小于阈值偶数 lane",
+        "value": "threshold"
+      },
+      {
+        "label": "调度步骤1",
+        "value": "1"
+      },
+      {
+        "label": "block x1",
+        "value": "1"
+      },
+      {
+        "label": "block y0",
+        "value": "0"
+      },
+      {
+        "label": "thread x3",
+        "value": "3"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "线程 32 · warp 1 · lane 08×8：(0,4)16×4：(0,2)32×2：(0,1)",
+      "t=0+8(0+4×1)=32t=0+8(0+4\\times1)=32t=0+8(0+4×1)=32 · warp 1 · lane 0x 每加 1，t 加 1 · y 每加 1，t 加 8 · z 每加 1，t 加 32"
+    ],
+    "controls": [
+      {
+        "label": "块内线性线程号32",
+        "value": "32"
+      },
+      {
+        "label": "thread x0",
+        "value": "0"
+      },
+      {
+        "label": "thread y0",
+        "value": "0"
+      },
+      {
+        "label": "z 切片1",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "aℓ=4(0+1ℓ)a_\\ell=4(0+1\\ell)aℓ​=4(0+1ℓ) 字节 · 覆盖 4 段 · 请求 128 字节 · 段覆盖 128 字节",
+      "A2,5→tile2,5→B5,2A_{2,5}\\to\\mathrm{tile}_{2,5}\\to B_{5,2}A2,5​→tile2,5​→B5,2​ · 输入元素偏移 139，输出元素偏移 177 · shared 元素偏移 71，bank 7 · 同一写回 warp 的 shared 列读：32 个活跃 lane，1 路冲突模型",
+      "bank⁡(w)=w mod 32\\operatorname{bank}(w)=w\\bmod32bank(w)=wmod32 · 最大不同地址数 32 · 32 路教学冲突模型",
+      "初始 · shared 保留旧值 0尚未消费 shared全部消费者读完后，生产者才覆盖。"
+    ],
+    "controls": [
+      {
+        "label": "元素步长1",
+        "value": "1"
+      },
+      {
+        "label": "元素偏移0",
+        "value": "0"
+      },
+      {
+        "label": "tile 内输入行 r2",
+        "value": "2"
+      },
+      {
+        "label": "tile 内输入列 c5",
+        "value": "5"
+      },
+      {
+        "label": "共享行跨度32 列：无填充33 列：填充一列",
+        "value": "33"
+      },
+      {
+        "label": "输入 tile左上：32×32 全有效右下：3×3 有效",
+        "value": "full"
+      },
+      {
+        "label": "访问方式连续读取：步长 1读取 32 列 tile 的一列读取 33 列 tile 的一列所有 lane 读取元素 7",
+        "value": "32"
+      },
+      {
+        "label": "同步场景发布与回收都正确缺少发布屏障缺少回收屏障",
+        "value": "protected"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "C0:4,0:4+=A0:4,0:4B0:4,0:4C_{0:4,0:4}\\mathrel{+}=A_{0:4,0:4}B_{0:4,0:4}C0:4,0:4​+=A0:4,0:4​B0:4,0:4​ · 完整矩阵有效输入读取：朴素 420，分块 154 · 只计逻辑元素访问，不代表 DRAM 流量或实测速度。",
+      "C0,0=0C_{0,0}=0C0,0​=0 · 尚未写回 · 本轮装载阶段 · 教学顺序，非 GPU 时间线",
+      "C[0,0]=112 → +1 → max(0, 113)=11330 个输出的最终逻辑读写：120 B；融合为 4MN。不计 A/B、偏置读取、缓存、launch 或真实耗时。"
+    ],
+    "controls": [
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "K 维分块编号0",
+        "value": "0"
+      },
+      {
+        "label": "tile 边长4",
+        "value": "4"
+      },
+      {
+        "label": "执行步骤0",
+        "value": "0"
+      },
+      {
+        "label": "右下边缘输出块",
+        "value": "on"
+      },
+      {
+        "label": "输出行 i0",
+        "value": "0"
+      },
+      {
+        "label": "输出列 j0",
+        "value": "0"
+      },
+      {
+        "label": "偏置 bⱼ1",
+        "value": "1"
+      },
+      {
+        "label": "阶段累计完成",
+        "value": "0"
+      },
+      {
+        "label": "融合写回",
+        "value": "on"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [
+      "驻留 6 block · 48/64 warp · 理论 occupancy 75.0%",
+      "A 完成于 5 · C 开始于 5 · 总完成时刻 7A → C 依赖已建立",
+      "C 的设备区间：6.4 → 8.4，差值 2.0A/B 在准备后开始，C 等到两者完成；CPU 提交结束时结果尚未就绪。橙色区间是当前分母，各种范围不可混用。"
+    ],
+    "controls": [
+      {
+        "label": "每块线程数256",
+        "value": "256"
+      },
+      {
+        "label": "每线程寄存器数32",
+        "value": "32"
+      },
+      {
+        "label": "每块 shared memory（KiB）16",
+        "value": "16"
+      },
+      {
+        "label": "SM warp 上限",
+        "value": "64"
+      },
+      {
+        "label": "SM 32-bit 寄存器数",
+        "value": "65536"
+      },
+      {
+        "label": "SM shared memory（KiB）",
+        "value": "96"
+      },
+      {
+        "label": "SM block 上限",
+        "value": "32"
+      },
+      {
+        "label": "执行队列同一 stream两个 stream",
+        "value": "two"
+      },
+      {
+        "label": "C 等待 A 的完成 event",
+        "value": "on"
+      },
+      {
+        "label": "A 生产数据5",
+        "value": "5"
+      },
+      {
+        "label": "B 独立任务3",
+        "value": "3"
+      },
+      {
+        "label": "C 消费 A 的结果2",
+        "value": "2"
+      },
+      {
+        "label": "计时对象CPU 提交C 的设备区间A/B/C 的设备区间端到端",
+        "value": "1"
+      }
+    ],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 1440,
+    "errors": [],
+    "hydration": [],
+    "tiny": [],
+    "overflow": false,
+    "readouts": [],
+    "controls": [],
+    "remainingSSR": 0
+  }
+]

@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 数组与框架：完成记录
 
 完成日期：2026-09-27。按 [设计大纲](ARRAY_FRAMEWORK_PLAN.md) 实施。新增 F 路线置于数学 M 与模型原理 P 之间，原有章节编号和 URL 保留。

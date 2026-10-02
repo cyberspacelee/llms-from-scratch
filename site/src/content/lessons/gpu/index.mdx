@@ -34,9 +34,18 @@ kernel 是提交给 GPU 执行的函数。thread 是执行它的逻辑实例，b
 | [G1 执行模型](/gpu/execution-model/) | 100 个元素的加法交给两块、每块 64 个 thread，谁负责第 99 个元素？ | 用索引证明每个有效输出恰好写一次，并挡住 28 个越界位置；区分逻辑 thread、warp 与 SM。 |
 | [G2 内存与同步](/gpu/memory-and-sync/) | 矩阵转置的读取连续，写入为何分散？ | 数清一条 warp 指令访问的地址段；用 shared memory 换写入者，并证明屏障与边缘 tile 正确。 |
 | [G3 分块与融合](/gpu/kernel-design/) | 矩阵乘的每个输出都算对后，怎样减少重复读取？ | 对非整除的小矩阵逐项核对 tile、补零和复用，再用算术强度估计理论上限。 |
-| [G4 测量与分析](/gpu/measurement/) | 减少搬运、提高 occupancy 后，为什么还不能说更快？ | 计算驻留限制，写清 stream 依赖与计时区间，在真实设备上检查结果、测量并分析瓶颈。 |
+| [G4 测量与分析](/gpu/measurement/) | 减少搬运、提高 occupancy 后，为什么还不能说更快？ | 计算驻留限制，写清 stream 依赖与计时区间，在真实设备上对相同 256³ GEMM 比较 tile16/32 的结果与 event 样本。 |
 
 G1 的索引证明是后面三章的共同起点：G2 延续唯一写入要求，重新安排转置的读写者；G3 把这种协作放进矩阵乘的循环；G4 检查节省的数据流量是否抵得上资源和执行代价。读 G3 前还需要 G2 的 block 屏障；读 G4 时带上 G3 的分块资源用量估算。
+
+## 按需要进入四项实践
+
+主线四章不要求先完成这些分支：
+
+- [多维索引与 warp 布局](/gpu/indexing-practice/)：G1 后核对二维、三维编号的双射。
+- [树形归约](/gpu/reduction-practice/)：G2 后检验 shared 生命周期、尾部中性值与跨 block 阶段。
+- [Triton 行 softmax](/gpu/triton-softmax/)：G3 后处理同行归约与两种 mask。
+- [完整模型 profiling](/gpu/model-profiling/)：G4 与完整 Decoder 后，核对输出、梯度和算子轨迹。
 
 ## 两种证据：算对与跑快
 

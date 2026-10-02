@@ -1,0 +1,142 @@
+---
+title: 指令微调
+question: 下一 token 的续写目标怎样训练成对话回复
+description: 沿一段两轮对话追踪 chat template、生成前缀、assistant-only loss、反向传播和 SFT 更新。
+order: 1
+code:
+  - examples/post_training/instruction_tuning.py
+prerequisites: ["training/evaluation", "training/data"]
+---
+
+预训练模型已经能按 [P2](/principles/language-modeling/) 的目标续写下一个 token。现在希望它在看见 system 规则和 user 请求后，按 assistant 身份回复：训练序列应怎样构造，哪些预测要计分？监督式微调（supervised fine-tuning，SFT）仍使用下一 token 交叉熵；真正要确定的是输入协议和损失位置。
+
+阅读前建议掌握 [T3 文本训练](/training/pretraining/)、[T4 评估](/training/evaluation/) 与 [P11 生成](/principles/generation/)。我们沿一段两轮短对话完成序列化、移位、mask、反向传播和一次 SFT 实验。
+
+import ChatMaskLab from '../../../components/labs/ChatMaskLab'
+
+## 固定会话：角色消息怎样变成模型输入
+
+设 system 规则是“用 OK 确认”，user 先发请求 Q1，assistant 回答 OK；user 再发 Q2，assistant 再回答 OK。它只是一个可逐行核对的格式任务，Q1、Q2 的内容不同，回复却相同。真实模型的 chat template（对话序列化规则）会把消息的角色、内容、边界排成一条 token 流；模型读取的是这条流，不会直接读取 API 字典的 `role` 字段。
+
+本章的教学模板把每个符号视为一个 token：`SYS=0`、`规则=1`、`USER=2`、`Q1=3`、`ASSISTANT=4`、`OK=5`、`Q2=6`、`END=7`。两轮复用同一个 `USER`、`ASSISTANT`、`OK` 和 `END` ID：
+
+```text
+位置 j   0   1    2   3   4          5   6    7   8   9          10  11
+token   SYS 规则 USER Q1  ASSISTANT  OK  END  USER Q2  ASSISTANT  OK  END
+ID       0   1    2   3   4          5   7    2   6   4           5   7
+```
+
+`END` 在此表示一条 assistant 消息结束；它未必是整个序列的 EOS。真实模板可能把一个角色头编码为多个 token，也可能在 user 消息后加入单独的结束标记。因此这些 ID 只是教学约定，不能直接替换某个 checkpoint 自带的 tokenizer 和模板。[Hugging Face 的模板说明](https://huggingface.co/docs/transformers/main/en/chat_templating)给出了实际的序列化接口和生成前缀行为。
+
+## 生成前缀：从哪个位置开始续写回复
+
+训练时包含完整对话；第一次生成只给模型位置 0 到 4，即 `[SYS,规则,USER,Q1,ASSISTANT]`。末尾尚未完成的 `ASSISTANT` 头是 generation prompt（生成前缀），下一 token 才是回复的首项 `OK`。生成 `OK,END` 后，再接 `[USER,Q2,ASSISTANT]`，模型才能生成第二轮回复。
+
+“新增一个 assistant 头”和“继续已有 assistant 内容”是两种不同任务。若提示已经含 `ASSISTANT,OK`，再追加一个 assistant 头就会改变历史。真实模板若负责添加 BOS 等特殊 token，后续 tokenizer 不应再自动重复添加；停止条件也要对应模板的消息结束项。模板在训练与生成中不一致时，同一条自然语言请求会变成不同 token 历史，采样温度无法修复这个输入差异。
+
+## 移位与 mask：哪些目标真正计入损失
+
+模型第 $i$ 行 logits 读取 $t_{\leq i}$，预测 $t_{i+1}$。先在完整序列上标注 token 的归属，再按目标而非输入归属建立 loss mask。我们约定只监督 assistant 的内容和它的 `END`，不直接监督 system、user 或角色头；若 $r_j$ 是完整流中位置 $j$ 的归属，则
+
+$$
+x_i=t_i,\qquad y_i=t_{i+1},\qquad
+v_i=\mathbf 1[r_{i+1}=\mathrm{assistant}]\,
+\mathbf 1[t_{i+1}\ne\mathrm{PAD}].
+$$
+
+| 输入行 $i$ | 读到的最后 token | 预测目标 $t_{i+1}$ | $v_i$ | 理由 |
+| --- | --- | --- | --- | --- |
+| 3 | Q1 | ASSISTANT | 0 | 角色头不监督 |
+| 4 | ASSISTANT | OK | 1 | 第一轮首个回复 token |
+| 5 | OK | END | 1 | 第一轮回复结束 |
+| 8 | Q2 | ASSISTANT | 0 | 角色头不监督 |
+| 9 | ASSISTANT | OK | 1 | 第二轮首个回复 token |
+| 10 | OK | END | 1 | 第二轮回复结束 |
+
+<Figure src="training/sft-mask.svg" alt="两轮对话的完整 token 位置与四个有效预测行">上排数字是完整序列的位置，不是 token ID；下排 1 表示该行预测的是 assistant 内容或 END。第 4 和第 9 行虽然以角色头作为输入，却必须计入首个回复 token 的损失。</Figure>
+
+其余行同样运行前向计算，只是没有直接损失项。若按“输入行是否属于 assistant 内容”做 mask，就会漏掉行 4 和 9；若把角色头也算入，则改变了本章的训练目标。不同模板可以有其他规则，但必须从模板实际产生的 token span 核对首项、结束项和 padding，不能靠字符串搜索猜测。
+
+## 分母与梯度：四个目标怎样形成一次更新
+
+这段流有 12 个 token、11 行下一 token 预测，却只有行 4、5、9、10 计分。于是 SFT 损失是四个负对数概率的平均：
+
+<KeyEq label="assistant-only SFT 目标">
+$$
+L_{\mathrm{SFT}}=-\frac{1}{4}\left[
+\ln P(\mathrm{OK}\mid t_{\leq4})+
+\ln P(\mathrm{END}\mid t_{\leq5})+
+\ln P(\mathrm{OK}\mid t_{\leq9})+
+\ln P(\mathrm{END}\mid t_{\leq10})\right]
+=-\frac{\sum_i v_i\ln P(t_{i+1}\mid t_{\leq i})}{\sum_i v_i}.
+$$
+</KeyEq>
+
+除以 11 会让长提示额外压低梯度；除以 2 则变成另一种按回复计权的目标。多样本和梯度累积时，先加总有效 token 的损失，再除以有效目标总数；长回复在按 token 平均的协议下自然提供更多监督项。若截断后 $\sum_i v_i=0$，本章目标没有定义，应在数据管道中跳过或报错，而不能把空平均送进优化器。
+
+loss mask 只令无效行的**直接 logits 梯度**为零。它没有阻止后面的回复位置读取 prompt。用一个透明的因果平均作例子，令 $u_i=\sum_{j\leq i}h_j/(i+1)$，则有效的行 4 对位置 0 的表示仍有 $\partial u_4/\partial h_0=I/5$；损失的梯度可沿这条路径回到 `SYS` 的 embedding。真正的注意力还通过 Q/K/V 建立更多路径，结论相同：哪些目标计分和哪些较早位置参与梯度是两件事。若冻结基座参数，只训练 [H2 LoRA](/post-training/lora/) 的 adapter，提示仍参与前向依赖，但冻结参数不会累积可更新的梯度。
+
+<ChatMaskLab client:visible />
+
+先选行 4，核对 `ASSISTANT → OK` 的 loss mask 为 1；再选 SYS 所在的行 0，核对它没有直接 logits 损失，却能影响后面的有效预测行 `4、5、9、10`。
+
+勾选“只监督第二轮”后，有效分母从 4 变成 2。保持选中行 0，检查它仍能影响第二轮的预测行 `9、10`。再勾选“截断至第一个 assistant 头”：序列没有回复目标，分母为零，平均损失未定义。
+
+图下的数值梯度来自独立标量探针：`h_j=(j+1)/10`、因果平均 `u_i` 和目标为 1 的平方损失。它核对前述依赖路径，不是 Decoder 的参数梯度。
+
+## 一次 SFT：同一段会话在更新前后怎样变化
+
+脚本把上述 12 个 ID 送入 [P4 Decoder](/principles/decoder/) 的两层模型，用有效行的平均交叉熵反向传播并更新权重。固定随机种子下，训练这**同一条**会话 40 步后，用真实前缀计算的回复 NLL 从 2.115084 降到 0.006339；两轮自由生成从 `[[7,6],[7,5]]` 变为 `[[5,7],[5,7]]`。自由生成的第二轮使用第一轮实际生成的结果作为历史，因此它和用真实历史评分的 NLL 是两种不同检查。
+
+这仅说明模型能记住这条格式样本，甚至可能完全忽略 Q1 与 Q2 的差异。Base 指主要经预训练的模型，Instruct 通常指又经过指令或对话训练及可能其他后训练的 checkpoint；二者仍可使用同一因果 Decoder。要证明未见请求也能得到正确的**不同**答案，必须依 [T4 评估](/training/evaluation/) 把会话划分为独立训练和测试来源，固定模板、生成规则与评分器。脚本没有提供这种证据。
+
+同一批回复位置也可以接收教师的软目标；[蒸馏](/post-training/distillation/) 单独比较这一目标与本章硬标签监督。
+
+## 质量边界：标签正确不等于行为可靠
+
+混入错误回复、互相矛盾的 system 规则或不同 chat template，会让训练目标冲突。同一会话的改写版本也不应散落到训练与测试两边；划分、去重和来源记录沿用 [T1 数据](/training/data/)。改进本任务的回复损失不能说明旧任务能力没有下降，应另外保留旧能力评估集，并清楚说明 Base 与 Instruct 的输入模板怎样对齐。较小学习率、混入原分布数据或限制更新参数都要通过受控对照检验，LoRA 并不自动防止遗忘。
+
+## 完整 CPU 核对
+
+<CodeFile path="examples/post_training/instruction_tuning.py" region="prompt_gradient" />
+
+运行 `uv run python -m examples.post_training.instruction_tuning`。它先断言有效行 `[4,5,9,10]`、prompt 表示的梯度路径和 `ignore_index` 的等价性，再对同一会话进行更新与自由生成。
+
+## 常见误区
+
+- assistant-only loss 选择的是被预测 token 的归属，不能按当前输入 token 的角色错位一行。
+- 被屏蔽的 prompt logits 没有直接损失，不意味着 prompt embedding 不受后续回复损失影响。
+- `END` 是否结束一条消息或整个生成，由实际模板决定；不能把教学 ID 套到任意模型。
+- 本页的训练集只有一条会话，训练集上的正确生成不能代替泛化评估。
+
+## 练习与核对
+
+<details>
+<summary>若第一轮回复改为 `OK,OK,END`，第二轮仍为 `OK,END`，按本章协议应有几个有效目标？</summary>
+
+有 $3+2=5$ 个。每段的首个 `OK` 由各自的 `ASSISTANT` 头预测，`END` 也计分；角色头不计分。新的损失分母是 5，而不是输入序列长度。
+
+</details>
+
+<details>
+<summary>只监督第二轮回复时，哪些输入行仍可能收到第二轮损失的反向影响？</summary>
+
+直接计分的是行 9、10；第一轮及 system、user 的较早表示仍可能通过因果注意力影响第二轮的隐藏状态，因此存在反向路径。把第一轮的 loss mask 设为 0 不会删除这些前向依赖。
+
+</details>
+
+<details>
+<summary>反例：若截断后只剩 `[SYS,规则,USER,Q1,ASSISTANT]`，能否用该样本做 assistant-only 更新？</summary>
+
+不能。移位目标里没有任何回复内容或 `END`，有效目标数为零，平均损失无定义。应按数据管道的约定跳过或重新截取，不能把 `ASSISTANT` 头误计成回复来凑一个目标。
+
+</details>
+
+下一章 [H2 LoRA 与参数高效适配](/post-training/lora/) 保留同样的回复监督目标，改变允许更新的参数。
+
+## 原始资料
+
+- [Hugging Face：Chat templates](https://huggingface.co/docs/transformers/main/en/chat_templating)：角色序列化、生成前缀、特殊 token 与训练模板。
+- [Hugging Face TRL：SFT Trainer](https://huggingface.co/docs/trl/sft_trainer)：完整序列、completion 与 assistant 监督选择的工程接口。
+
+- [Kim 和 Rush：Sequence-Level Knowledge Distillation](https://arxiv.org/abs/1606.07947)：教师生成序列再训练学生。

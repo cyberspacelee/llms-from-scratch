@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useId, useState } from 'react'
 import { descend } from '../../lib/math-labs-model'
 import { localDifference } from '../../lib/math-linear-model'
@@ -22,7 +23,7 @@ export default function DescentLab() {
       <Range label="迭代步数" value={steps} min={1} max={20} onChange={setSteps} />
       <Range label="局部改变量 h（只改 x₁）" value={h} min={0.001} max={0.5} step={0.001} onChange={setH} format={v => fmt(v, 3)} />
     </Controls>
-    <svg viewBox="0 0 440 260" className={`${pen.canvas} max-w-120`} role="img" aria-label={`学习率 ${eta}，${steps} 步后位于 (${fmt(last[0])}, ${fmt(last[1])})`}>
+    <SvgCanvas viewBox="0 0 440 260" className={`${pen.canvas} max-w-120`} role="img" aria-label={`学习率 ${eta}，${steps} 步后位于 (${fmt(last[0])}, ${fmt(last[1])})`}>
       <defs><clipPath id={clip}><rect x="0" y="0" width="440" height="260" /></clipPath></defs>
       <line x1="0" x2="440" y1={cy} y2={cy} className={pen.grid} />
       <line x1={cx} x2={cx} y1="0" y2="260" className={pen.grid} />
@@ -33,12 +34,12 @@ export default function DescentLab() {
       </g>
       <text x="430" y={cy - 6} textAnchor="end" className={pen.muted}>x₁</text>
       <text x={cx + 6} y="14" className={pen.muted}>x₂</text>
-    </svg>
-    <svg viewBox="0 0 320 110" className={`${pen.canvas} max-w-96`} role="img" aria-label={`局部线性预测 ${difference.predicted}，实际值 ${difference.actual}`}>
+    </SvgCanvas>
+    <SvgCanvas viewBox="0 0 320 110" className={`${pen.canvas} max-w-96`} role="img" aria-label={`局部线性预测 ${difference.predicted}，实际值 ${difference.actual}`}>
       <text x="10" y="20">从 L(2,1)=4 出发，只把 x₁ 加 h</text>
       <rect x="10" y="38" width={240 * (difference.predicted - 4)} height="20" className="fill-accent" /><text x="10" y="76">线性增量 {fmt(difference.predicted - 4)}</text>
       <rect x="10" y="87" width={240 * (difference.actual - difference.predicted)} height="15" className="fill-accent2" /><text x="120" y="100">额外二阶项 h²/2</text>
-    </svg>
+    </SvgCanvas>
     <Readout>差商 [L(2+h,1)−4]/h={fmt(difference.quotient, 6)} → 导数 2 · 局部预测={fmt(difference.predicted, 6)} · 实际={fmt(difference.actual, 6)}<br />每步 x₁ ← {fmt(run.factors[0], 2)}·x₁，x₂ ← {fmt(run.factors[1], 2)}·x₂ · {verdicts[run.verdict]} · 第 {steps} 步损失 {run.losses[steps].toExponential(3)} · 收敛条件 0 &lt; η &lt; 2/λ_max = 0.5</Readout>
   </LabFrame>
 }

@@ -2,12 +2,14 @@
 title: 状态空间与递归模型
 question: 只保留有限状态，怎样处理越来越长的序列
 description: 用同一段四步输入推导状态递推、选择性更新和并行扫描，再辨认 Mamba 的实现与记忆边界。
-order: 6
+order: 4
 code:
-  - code/advanced/state_space.py
+  - examples/advanced/state_space.py
+prerequisites: ["principles/attention", "math/linear-algebra"]
+optional: true
 ---
 
-import { StateScanLab } from '../../../components/labs/AdvancedLabs'
+import StateScanLab from '../../../components/labs/StateScanLab'
 
 [P3 注意力](/principles/attention/) 在 decode 时保存历史 token 的键和值，让新查询重新读取不同位置。能否只保存一个固定大小的状态？本章要算清这种递推的输出、它为何可以并行处理整段输入，以及固定状态付出的代价。只需先会 [M6 矩阵乘法](/math/linear-algebra/) 和 [P4 Decoder](/principles/decoder/) 的逐 token 生成；连续时间模型留到章末选读。
 
@@ -54,13 +56,13 @@ $$
 
 第一维沿用刚才的半衰减，第二维累加至今所有输入。因此四步后的状态是 $s_3=(3.125,5)^\top$：$5=1+2-1+3$。若读出矩阵为 $C=(1,0)$，则 $y_t=Cs_t$ 仍是上一节的输出；换成 $C=(0,1)$ 才会读到累加值。状态更新决定**存什么**，读出矩阵决定**取什么**，两者不可混同。
 
-一般情况下，$s_t\in\mathbb R^{d_s}$、$u_t\in\mathbb R^{d_u}$、$y_t\in\mathbb R^{d_y}$：
+一般情况下，$s_t\in\mathbb R^{D_s}$、$u_t\in\mathbb R^{D_u}$、$y_t\in\mathbb R^{D_y}$：
 
 $$
 s_t=As_{t-1}+Bu_t,\qquad y_t=Cs_t,
 $$
 
-其中 $A$ 为 $d_s\times d_s$，$B$ 为 $d_s\times d_u$，$C$ 为 $d_y\times d_s$。这里的 $B$ 是输入矩阵，不是 batch size。零初态时反复代入得到 $y_t=\sum_{j=0}^t CA^{t-j}Bu_j$，与标量展开完全同理。**只有系数固定**时，同一时间差才使用同一权重：每步输出用这组系数对当前及过去的输入加权，不读取未来输入，因此可以把整段运算看成一个因果卷积。下面的选择性模型不再有固定卷积核。
+其中 $A$ 为 $D_s\times D_s$，$B$ 为 $D_s\times D_u$，$C$ 为 $D_y\times D_s$。这里的 $B$ 是输入矩阵，不是 batch size。零初态时反复代入得到 $y_t=\sum_{j=0}^t CA^{t-j}Bu_j$，与标量展开完全同理。**只有系数固定**时，同一时间差才使用同一权重：每步输出用这组系数对当前及过去的输入加权，不读取未来输入，因此可以把整段运算看成一个因果卷积。下面的选择性模型不再有固定卷积核。
 
 ## 选择性：当前输入可以改变更新规则吗
 
@@ -102,15 +104,15 @@ $$
 
 [Mamba-2 论文](https://arxiv.org/abs/2405.21060)研究带特定结构约束的状态空间对偶（SSD），利用递推形式和分块矩阵形式计算同一类算子。这里的“对偶”有结构条件，**不**表示任意状态模型等于 softmax attention。我们的标量组合说明了跨块传状态的基本理由；论文的实际块算法、head 组织和吞吐结论不能由这个小例子直接推出。
 
-对一层维度为 $d_s$ 的状态，单样本 decode 至少保留 $d_s b_{\mathrm{elem}}$ 字节状态值；本章的标量 float64 例子为 8 字节，与已处理多少步无关。$B_{\mathrm{batch}}$ 个样本、$n_{\mathrm{layers}}$ 层且每层相同维度时，纯递归状态值共 $B_{\mathrm{batch}}n_{\mathrm{layers}}d_sb_{\mathrm{elem}}$ 字节。真实模块可能有多个状态通道、短卷积历史和其他缓存，应逐项加上；训练反向传播所需激活也不能用 decode 的状态大小代替。
+对一层维度为 $D_s$ 的状态，单样本 decode 至少保留 $D_s b_{\mathrm{elem}}$ 字节状态值；本章的标量 float64 例子为 8 字节，与已处理多少步无关。$B_{\mathrm{batch}}$ 个样本、$L$ 层且每层相同维度时，纯递归状态值共 $B_{\mathrm{batch}}LD_sb_{\mathrm{elem}}$ 字节。真实模块可能有多个状态通道、短卷积历史和其他缓存，应逐项加上；训练反向传播所需激活也不能用 decode 的状态大小代替。
 
 固定维度、固定精度的状态不能精确保留任意长历史。本例两个序列 $(1,2,-1,3)$ 与 $(1,2,-2,3)$ 都跳过第三个输入，最终状态同为 $4.25$；后续若只收到这个状态，就无从知道被跳过的是 $-1$ 还是 $-2$。即使没有显式跳过，不同历史也可能压成同一有限状态。softmax attention 保留逐位置 K/V，可让新查询重新选择旧位置；两类算子的输出和缓存规律应分别分析。
 
 ## 用脚本核对四步计算
 
-运行 `python code/advanced/state_space.py`。它用同一四步输入检查固定递推的循环与展开、二维状态的两个读数、选择性递推的循环与前缀组合，并检查交换顺序会改变结果。所有断言只验证本章的教学算子。
+运行 `uv run python -m examples.advanced.state_space`。它用同一四步输入检查固定递推的循环与展开、二维状态的两个读数、选择性递推的循环与前缀组合，并检查交换顺序会改变结果。所有断言只验证本章的教学算子。
 
-<CodeFile path="code/advanced/state_space.py" />
+<CodeFile path="examples/advanced/state_space.py" symbol="compose" />
 
 ## 选读：连续时间参数从哪里来
 
@@ -139,7 +141,7 @@ $$
 
 </details>
 
-[A7 递归式线性注意力与混合层](/advanced/hybrid-attention/) 会让递归状态与逐位置 KV cache 在不同层共存，继续按算子逐层算缓存。
+[A5 递归式线性注意力与混合层](/advanced/hybrid-attention/) 会让递归状态与逐位置 KV cache 在不同层共存，继续按算子逐层算缓存。
 
 ## 原始资料
 

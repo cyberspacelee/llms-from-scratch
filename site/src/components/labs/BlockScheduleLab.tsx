@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { schedulerFrames } from '../../lib/gpu-models'
 import { LabFrame, Range, Readout, pen } from './Lab'
@@ -9,7 +10,7 @@ export default function BlockScheduleLab() {
   const pending = Array.from({ length: 6 }, (_, i) => i).filter(i => !resident.includes(i) && !frame.done.includes(i))
   return <LabFrame title="从待执行 block 到可运行 warp" hint="一种合法调度 · 步骤不代表时间">
     <Range label="调度步骤" value={step} min={0} max={schedulerFrames.length - 1} onChange={setStep} />
-    <svg viewBox="0 0 360 436" className={pen.canvas} role="img" aria-label={`步骤 ${step}，待执行 ${pending.length}，驻留 ${resident.length}，完成 ${frame.done.length}`}>
+    <SvgCanvas viewBox="0 0 360 436" className={pen.canvas} role="img" aria-label={`步骤 ${step}，待执行 ${pending.length}，驻留 ${resident.length}，完成 ${frame.done.length}`}>
       <text x="12" y="25">kernel → grid → 6 blocks → 每块 2 warps</text>
       <text x="12" y="57">待执行</text>
       {Array.from({ length: 6 }, (_, block) => <g key={block}>
@@ -37,7 +38,7 @@ export default function BlockScheduleLab() {
       </g>)}
       <text x="12" y="388">已完成：{frame.done.length ? frame.done.map(i => `B${i}`).join('、') : '无'}</text>
       <text x="12" y="417" className={pen.muted}>等待数据的 warp 仍占用驻留资源。</text>
-    </svg>
+    </SvgCanvas>
     <Readout>待执行 {pending.length} · 驻留 {resident.length} · 完成 {frame.done.length}<br />{frame.note}</Readout>
   </LabFrame>
 }

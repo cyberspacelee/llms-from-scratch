@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # Training 与 Advanced MDX 逐页整改记录
 
 本批审阅 20 页，按 training、advanced 两批修改。修改前的问题已交给主代理，汇总见 [全站审计](MDX_READABILITY_AUDIT.md)。本记录对照逐页实际内容及现有交互控件，不以句长统计代替阅读。

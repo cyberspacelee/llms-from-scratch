@@ -1,13 +1,14 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { headCost, locate, misplacedRows, stageLayout, type HeadStage } from '../../lib/multihead-model'
-import { Controls, LabFrame, Range, Readout, pen } from './Lab'
+import { Select, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 const stages: { id: HeadStage; label: string; code: string }[] = [
   { id: 'linear', label: '1 · 线性投影输出', code: 'q = self.q(x)' },
-  { id: 'split', label: '2 · 拆出头轴', code: 'q.reshape(B, T, n_q, d_h)' },
+  { id: 'split', label: '2 · 拆出头轴', code: 'q.reshape(B, T, H_q, D_h)' },
   { id: 'heads', label: '3 · 头轴换到前面', code: '.transpose(1, 2)' },
-  { id: 'merged', label: '4 · 注意力后合并', code: 'y.transpose(1, 2).contiguous().reshape(B, T, d)' },
-  { id: 'wrong', label: '错误 · 直接 reshape', code: 'q.reshape(B, n_q, T, d_h)' },
+  { id: 'merged', label: '4 · 注意力后合并', code: 'y.transpose(1, 2).contiguous().reshape(B, T, D)' },
+  { id: 'wrong', label: '错误 · 直接 reshape', code: 'q.reshape(B, H_q, T, D_h)' },
 ]
 
 const headFill = [
@@ -67,17 +68,15 @@ export default function MultiHeadLab() {
   return <LabFrame title="多头注意力里的轴变换" hint="每格写“来源 token·特征列”，颜色是它原本属于的头">
     <Controls>
       <Range label="序列长 T" value={length} min={2} max={6} onChange={setLength} />
-      <Range label="头数 n_q" value={heads} min={1} max={4} onChange={setHeads} />
-      <Range label="头维度 d_h" value={headWidth} min={1} max={3} onChange={setHeadWidth} />
-      <label className="text-sm">步骤
-        <select value={stage} onChange={event => setStage(event.target.value as HeadStage)} className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2">
+      <Range label="头数 H_q" value={heads} min={1} max={4} onChange={setHeads} />
+      <Range label="头维度 D_h" value={headWidth} min={1} max={3} onChange={setHeadWidth} />
+      <Select label="步骤" value={stage} onChange={event => setStage(event.target.value as HeadStage)}>
           {stages.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
-        </select>
-      </label>
+        </Select>
       <Range label="跟踪 token t" value={t} min={0} max={length - 1} onChange={setToken} />
       <Range label="跟踪特征列 c" value={c} min={0} max={d - 1} onChange={setFeature} />
     </Controls>
-    <svg viewBox={`0 0 ${width} ${height}`} className={`${pen.canvas} max-w-150`} role="img" aria-label={`${stages.find(item => item.id === stage)!.label}：形状 ${shape}，元素 ${t}·${c} 位于坐标 ${place.coord.join(',')}`}>
+    <SvgCanvas viewBox={`0 0 ${width} ${height}`} className={`${pen.canvas} max-w-150`} role="img" aria-label={`${stages.find(item => item.id === stage)!.label}：形状 ${shape}，元素 ${t}·${c} 位于坐标 ${place.coord.join(',')}`}>
       <text x="20" y="16" className={pen.mono}>{stages.find(item => item.id === stage)!.code}</text>
       {labels}
       {cells}
@@ -85,10 +84,10 @@ export default function MultiHeadLab() {
       <text x="20" y={top + length * cell + 44} className={stage === 'wrong' && misplaced ? pen.textB : pen.muted}>
         {stage === 'wrong' ? (misplaced ? `${misplaced}/${heads * length} 行的内容不是“该行 token 的该头特征”：形状对了，含义错了` : '只有一头时两种写法恰好相同') : `形状 ${shape} · 样本内 stride ${layout.stride.join(', ')} · ${layout.contiguous ? '连续' : '非连续：只换了 stride，没搬数据'}`}
       </text>
-    </svg>
+    </SvgCanvas>
     <Readout>
-      d = n_q·d_h = {d} · 元素 {t}·{c} → 坐标 ({place.coord.join(', ')})，存储偏移 {place.offset}，读作 token {place.token} / 头 {place.head}
-      {' · '}每条样本分数元素 n_q·T² = {cost.scoreElements} · Q/K/V/O 权重 4d² = {cost.projectionWeights}，与头数无关
+      D = H_q·D_h = {d} · 元素 {t}·{c} → 坐标 ({place.coord.join(', ')})，存储偏移 {place.offset}，读作 token {place.token} / 头 {place.head}
+      {' · '}每条样本分数元素 H_q·T² = {cost.scoreElements} · Q/K/V/O 权重 4D² = {cost.projectionWeights}，与头数无关
     </Readout>
   </LabFrame>
 }

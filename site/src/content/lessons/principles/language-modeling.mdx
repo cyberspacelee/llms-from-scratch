@@ -2,16 +2,20 @@
 title: 下一 token 预测
 question: 怎样把整段文本变成每个位置的分类目标
 description: 用一段四 token 文档贯穿序列概率、标签移位、有效位置损失和可训练的 bigram 模型。
+prerequisites:
+  - principles/tokenization
+  - math/distributions
 order: 2
 code:
-  - code/principles/language_model.py
+  - examples/principles/language_model.py
+  - src/llms_from_scratch/training/losses.py
 ---
 
 [P1](/principles/tokenization/) 已经将文本变成 token ID，[M5](/math/distributions/) 说明了怎样用 logits 和交叉熵训练一次分类。现在假设只拿到一段文档 `[BOS,A,B,EOS]`：怎样让模型从这四个 ID 学到下一 token 预测？本章会一直使用这段文档，把它变成三个分类问题，算出损失，再训练一个最小模型。这里还不需要注意力。
 
 令词表为 `BOS=0,A=1,B=2,EOS=3`。BOS 标记文档开始，EOS 标记结束；它们和 A、B 一样占据词表中的类别。这个人为词表只用于把每一步算清楚，不代表真实 tokenizer 会按字符切分。
 
-import { SequencePplLab } from '../../../components/labs/PrinciplesTraceLabs'
+import SequencePplLab from '../../../components/labs/SequencePplLab'
 
 ## 序列概率：为什么每个位置都是一次条件预测
 
@@ -47,7 +51,7 @@ $$
 
 因此 `inputs = [BOS,A,B]`，`targets = [A,B,EOS]`。位置 1 输入 A，预测 B；用 A 作为该位置的标签，会让模型学习复制输入。EOS 是最后一个目标；这段样本不需要再用 EOS 预测一个未定义的后继。
 
-批量代码常写 `inputs = documents[:, :-1]`、`targets = documents[:, 1:]`。批大小为 $B$、输入长度为 $T$ 时，两者形状都是 $(B,T)$，logits 的形状是 $(B,T,n_{\mathrm{vocab}})$。这里的 $B$ 是批大小，和例子中的 token 名称 `B` 没有关系。若某模型接口已在内部移位，调用方不可再移位一次；必须先确认接口约定。
+批量代码常写 `inputs = documents[:, :-1]`、`targets = documents[:, 1:]`。批大小为 $B$、输入长度为 $T$ 时，两者形状都是 $(B,T)$，logits 的形状是 $(B,T,V)$。这里的 $B$ 是批大小，和例子中的 token 名称 `B` 没有关系。若某模型接口已在内部移位，调用方不可再移位一次；必须先确认接口约定。
 
 ### Teacher forcing 解决训练时的等待问题
 
@@ -84,34 +88,34 @@ $$
 
 </KeyEq>
 
-$y_{b,i}$ 是**移位后**的目标 ID，$p_{b,i,c}$ 是该位置对词表类别 $c$ 的预测概率。对本例，loss mask 是 `[1,1,1,0,0]`；不管补几个 PAD，分子仍是 $1.378326$，分母仍是 3。若错误地除以扩展后的长度 5，损失和对应梯度都会缩小为原来的 $3/5$。若整个 batch 没有有效目标，就没有可定义的平均值，应报错或明确跳过。
+$y_{b,i}$ 是**移位后**的目标 ID，$p_{b,i,c}$ 是该位置对词表类别 $c$ 的预测概率。对本例，loss mask 是 `[1,1,1,0,0]`；不管补几个 PAD，分子仍是 $1.378326$，分母仍是 3。若错误地除以扩展后的长度 5，损失和对应梯度都会缩小为原来的 $3/5$。若整个评估集没有有效目标，就没有可定义的平均 NLL 或 PPL。训练时先累计损失和与有效数；一个局部 batch/rank 无目标可以贡献可微零，但若整个更新窗口的有效数为零且无其他目标，应跳过整次参数更新，不执行 AdamW 的权重衰减或改变优化器步数。
 
-损失 mask 只决定哪些**预测位置**进入目标。把 prompt 的目标排除，并不意味着回答位置不能读取 prompt；这个区别在 [T5](/training/instruction-tuning/) 还会用到。
+损失 mask 只决定哪些**预测位置**进入目标。把 prompt 的目标排除，并不意味着回答位置不能读取 prompt；这个区别在 [H1](/post-training/instruction-tuning/) 还会用到。
 
 ## Cross Entropy Loss：序列 NLL 怎样变成分类接口
 
 每个有效位置的目标 ID $y_{b,i}$ 对应一个 one-hot 分布 $q_{b,i,c}=\mathbf1[c=y_{b,i}]$。按 [M5](/math/distributions/) 的定义，词表上的交叉熵为
 
 $$
-\ell_{b,i}=-\sum_{c=0}^{n_{\mathrm{vocab}}-1}q_{b,i,c}\ln p_{b,i,c}
+\ell_{b,i}=-\sum_{c=0}^{V-1}q_{b,i,c}\ln p_{b,i,c}
 =-\ln p_{b,i,y_{b,i}}.
 $$
 
 one-hot 让求和只保留正确 token 的一项。因此先沿词表轴算每个位置的交叉熵，再对有效位置求平均，恰好得到上面的 $L$。这是最大似然目标通过分类接口实现的原因；词表类别数没有进入平均分母。
 
-PyTorch 的 `F.cross_entropy` 接收原始 logits；对于 $(B,T,n_{\mathrm{vocab}})$ 的输出，可以把有效位置选成 $(N_{\mathrm{valid}},n_{\mathrm{vocab}})$，并提供同样选出的目标 ID：
+PyTorch 的 `F.cross_entropy` 接收原始 logits；对于 $(B,T,V)$ 的输出，可以把有效位置选成 $(N_{\mathrm{valid}},V)$，并提供同样选出的目标 ID：
 
 ```python
 import torch
 from torch.nn import functional as F
 
-# logits: [B, T, n_vocab], targets: [B, T], valid: [B, T] bool
+# logits: [B, T, V], targets: [B, T], valid: [B, T] bool
 if not valid.any():
     raise ValueError("a loss needs at least one valid target")
 loss = F.cross_entropy(logits[valid], targets[valid])
 ```
 
-专属脚本使用另一种等价写法：将 logits 转为 $(B,n_{\mathrm{vocab}},T)$，把无效目标替换为 `ignore_index`，再求有效位置平均。两种写法都必须在求损失前处理无效 ID，不能先用 PAD 目标索引概率再指望乘零消除错误。默认无类别权重、无标签平滑、使用类别索引目标时，该接口与逐位置 NLL 相等；增加权重或 label smoothing 会改变目标，不能直接拿修改后的训练损失计算标准 PPL。
+统一实现先选有效目标，再输出 `TokenLoss(loss_sum, valid_count)`。调用 `.mean()` 要求有效数大于零；跨文档、梯度累积或多 rank 先加分子和分母，再求平均。无效 ID 必须在索引概率前排除，不能先用 PAD 目标索引再指望乘零消除错误。默认无类别权重、无标签平滑、使用类别索引目标时，该接口与逐位置 NLL 相等；增加权重或 label smoothing 会改变目标，不能直接拿修改后的训练损失计算标准 PPL。
 
 真实语言中同一历史可能对应多种后继。one-hot 只表示本次观测，不表示真实条件熵为零。若真实分布为 $P$、模型为 $Q_\theta$，固定评估协议下的期望损失为
 
@@ -183,7 +187,7 @@ $$
 
 训练时，我们一次给出真实输入 `[BOS,A,B]`，并用三个真实目标计算损失。生成时只有起点 `[BOS]`：先从 BOS 行的概率选择一个 token，再把**模型选出的** token 接到历史后面，重复直到 EOS 或长度上限。一个针对本样本已训练的 bigram 可能依次选择 A、B、EOS，但它每一步仍只查最后一个 ID 的行。训练时可并行评价多个已知目标，生成时下一个输入依赖上一步的输出。
 
-生成偏离真实历史后，模型可能碰到训练时未见过的转移。把这段文档拟合得很准，并不能证明它会生成自然语言，也不能说明验证集效果。完整采样策略在 [P9](/principles/generation/)，独立数据上的评估在 [T4](/training/evaluation/)。
+生成偏离真实历史后，模型可能碰到训练时未见过的转移。把这段文档拟合得很准，并不能证明它会生成自然语言，也不能说明验证集效果。完整采样策略在 [P11](/principles/generation/)，独立数据上的评估在 [T4](/training/evaluation/)。
 
 ## 三类 mask：目标和可见历史分别由谁控制
 
@@ -201,11 +205,13 @@ causal mask 保证 $j\le i$，padding attention mask 剔除无内容的键；两
 
 ## 验证：把手算接到代码
 
-专属脚本核对三项手算 NLL、故意不移位时的错误目标、补 PAD 前后损失不变与无效位置梯度为零，并复现零初始化表格的一步 SGD。然后它用随机初始化的 bigram 拟合这**同一段**文档；拟合成功仅验证训练循环，不是泛化测试。运行 `python code/principles/language_model.py`。
+专属脚本核对三项手算 NLL、故意不移位时的错误目标、补 PAD 前后损失不变与无效位置梯度为零，并复现零初始化表格的一步 SGD。然后它用随机初始化的 bigram 拟合这**同一段**文档；拟合成功仅验证训练循环，不是泛化测试。运行 `uv run python -m examples.principles.language_model`。
 
-<CodeFile path="code/principles/language_model.py" />
+<CodeFile path="src/llms_from_scratch/training/losses.py" symbol="token_loss_sum" />
 
-PyTorch 的 `cross_entropy` 接受原始 logits；先做 softmax 再传入会改变目标计算。脚本将词表轴移到 API 要求的位置，并用 `ignore_index` 排除 PAD 目标；有效目标 ID 仍须落在词表内。
+<CodeFile path="examples/principles/language_model.py" symbol="BigramLM" run="uv run python -m examples.principles.language_model" />
+
+PyTorch 的 `cross_entropy` 接受原始 logits；先做 softmax 再传入会改变目标计算。脚本用共享的 `token_loss_sum` 排除无效目标并累计有效数；有效目标 ID 仍须落在词表内。评估调用明确拒绝空平均，局部可微零不等于“模型预测完全正确”。
 
 ## 常见误区
 

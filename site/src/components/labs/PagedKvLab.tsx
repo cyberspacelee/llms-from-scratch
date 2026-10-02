@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
 import { pageSnapshot } from '../../lib/systems-interactive-model'
@@ -40,12 +41,12 @@ export default function PagedKvLab() {
         <Blocks name="A" table={stage.a} />
         <Blocks name="B" table={stage.b} />
       </div>
-      <svg viewBox="0 0 280 218" className={pen.canvas} role="img" aria-label={`物理块、槽内容与空闲块；引用数 ${stage.refs.join(', ')}`}>
+      <SvgCanvas viewBox="0 0 280 218" className={pen.canvas} role="img" aria-label={`物理块、槽内容与空闲块；引用数 ${stage.refs.join(', ')}`}>
         {[0, 1, 2].map(block => {
           const values = snapshot.memory[block]
           return <g key={block}><text x="8" y={20 + block * 68}>块 {block} · ref={stage.refs[block]} · {stage.refs[block] ? '持有' : '空闲'}</text>{values.map((value, slot) => <g key={slot}><rect x={8 + slot * 65} y={28 + block * 68} width="58" height="33" className={stage.refs[block] ? 'fill-accent/15 stroke-accent' : 'fill-sunken stroke-rule [stroke-dasharray:3_3]'} /><text x={37 + slot * 65} y={50 + block * 68} textAnchor="middle">{stage.refs[block] && value !== null ? value : '—'}</text></g>)}</g>
         })}
-      </svg>
+      </SvgCanvas>
       <Readout>物理块 0/1/2 引用数：{stage.refs.join(' / ')}。{stage.next}。</Readout>
       <Readout>A 逻辑读取=[{snapshot.aValues.join(', ')}]；B 逻辑读取=[{snapshot.bValues.join(', ')}]<br />空闲块=[{snapshot.free.join(', ')}]；只有有效且持有的槽可读。释放不保证清零旧内存，重新分配必须重建有效长度与身份。</Readout>
     </LabFrame>

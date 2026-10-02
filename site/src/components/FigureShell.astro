@@ -10,10 +10,8 @@ const { label, padded = false } = Astro.props
 ---
 <figure class="not-prose my-8 [counter-increment:figure]">
   <div
-    class:list={['overflow-x-auto rounded-lg border border-rule bg-raised text-ink', padded && 'p-4']}
-    tabindex="0"
-    role="region"
-    aria-label={`${label}（可横向滚动）`}
+    class:list={['diagram-viewport rounded-lg border border-rule bg-raised text-ink', padded && 'p-4']}
+    data-diagram-label={label}
   >
     <slot />
   </div>
@@ -21,3 +19,7 @@ const { label, padded = false } = Astro.props
     <slot name="caption" />
   </figcaption>
 </figure>
+
+<script>
+  import './diagram-viewport'
+</script>

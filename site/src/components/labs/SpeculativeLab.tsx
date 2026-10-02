@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { Controls, fmt, LabFrame, pen, Range, Readout, useWidth } from './Lab'
 
@@ -30,7 +31,7 @@ export default function SpeculativeLab() {
           <span className="text-accent2">右侧：残差质量</span>
           <span className="text-info">虚线框：草稿概率</span>
         </div>
-        <svg viewBox={`0 0 ${canvasWidth} 244`} className={pen.canvas} role="img"
+        <SvgCanvas viewBox={`0 0 ${canvasWidth} 244`} className={pen.canvas} role="img"
           aria-label={`草稿分布 ${draft.map(value => fmt(value)).join(', ')}；接受率 ${fmt(acceptance)}；接受与补偿后等于目标分布`}>
           {[0, 0.5, 1].map(value => (
             <g key={value}>
@@ -55,7 +56,7 @@ export default function SpeculativeLab() {
               </g>
             )
           })}
-        </svg>
+        </SvgCanvas>
         <Readout>
           q = ({draft.map(value => fmt(value, 2)).join(', ')})<br />
           总接受率 = {fmt(acceptance)}；总拒绝率 = {fmt(rejected)}<br />

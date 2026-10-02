@@ -1,0 +1,67 @@
+---
+title: 多维索引与 warp 布局实践
+question: 改变 block 形状后，怎样恢复同一 thread 的坐标、warp 与 lane
+description: 对照三个 64-thread 二维布局与 8×4×2 三维 block，检验线性编号的双射与边界条件。
+order: 5
+optional: true
+prerequisites: ["gpu/execution-model"]
+code:
+  - examples/gpu/execution_model.py
+---
+
+import WarpLayoutLab from '../../../components/labs/WarpLayoutLab'
+import BlockVolumeLab from '../../../components/labs/BlockVolumeLab'
+
+[G1](/gpu/execution-model/) 已给每个输出建立唯一负责人。本实践固定一个含 64 个逻辑 thread 的 block，改变它的二维、三维形状，核对同一个线性编号的坐标与 warp 身份。形状影响邻接访问，warp 的编号规则仍按 x 最快变化展开。
+
+## 同一编号，三个二维坐标
+
+对二维 block，线性编号为 $t=t_x+T_xt_y$。因此 $t_x=t\bmod T_x$，$t_y=\lfloor t/T_x\rfloor$。取 $t=32$：
+
+| block 形状 | 坐标 $(t_x,t_y)$ | warp / lane |
+| --- | --- | --- |
+| $(8,8)$ | $(0,4)$ | $1/0$ |
+| $(16,4)$ | $(0,2)$ | $1/0$ |
+| $(32,2)$ | $(0,1)$ | $1/0$ |
+
+<WarpLayoutLab client:visible />
+
+先预测编号 31 与 32 在三个布局中的位置，再操作核对。坐标不同，不代表 warp 的成员数改变；一个 warp 不必总与矩阵的一行相同。
+
+## 三维展开与逆变换
+
+三维 block 固定 $(T_x,T_y,T_z)=(8,4,2)$，范围内坐标按
+
+$$
+t=t_x+T_x(t_y+T_yt_z)
+$$
+
+展开。反过来先取 $t_x=t\bmod T_x$，再令 $q=\lfloor t/T_x\rfloor$，得到 $t_y=q\bmod T_y$、$t_z=\lfloor q/T_y\rfloor$。三个坐标分别在 $[0,T_x)$、$[0,T_y)$、$[0,T_z)$ 内，这组映射就是 64 个编号的双射。
+
+<BlockVolumeLab client:visible />
+
+默认坐标 $(0,0,1)$ 给 $t=32$，即 warp 1、lane 0。保持 x、y 不变，切换 z：每次跨过 32 个 thread，恰好换一个 warp。图中的切片和轴测表示逻辑坐标，不能读作 GPU 核心的空间排列。
+
+## 运行索引核对
+
+一维覆盖、grid-stride 和二维越界由 Python 参考检查：
+
+<CodeFile path="examples/gpu/execution_model.py" symbol="demo" run="uv run python -m examples.gpu.execution_model" />
+
+三维展开、逆变换及 warp 布局使用网页同一计算模型的独立检查入口：
+
+```sh
+node --experimental-strip-types site/scripts/check-gpu-indexing.mjs
+```
+
+它逐个枚举 64 个三维坐标，检查 round-trip、编号唯一性以及二维布局。源码位于 [GpuIndexModel.ts](https://github.com/cyberspacelee/llms-from-scratch/blob/master/site/src/components/labs/GpuIndexModel.ts)。这些检查不需要 GPU，不测量真实调度和访存性能。
+
+## 练习与核对
+
+<details>
+<summary>把三维 block 改成 (4,4,4)，固定 (x,y)=(0,0)。相邻 z 切片总进入不同 warp 吗？</summary>
+
+一个切片只有 16 个 thread。z=0 的编号为 0，z=1 为 16，二者仍在 warp 0、lane 分别为 0 和 16；z=2 的编号为 32 才进入 warp 1。切片边界不是一般的 warp 边界。
+</details>
+
+下一步回到 [G2 的地址与同步](/gpu/memory-and-sync/)，按每条 warp 指令中的实际坐标分析访问。正式定义见 [CUDA 线程层次](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/writing-cuda-kernels.html)。

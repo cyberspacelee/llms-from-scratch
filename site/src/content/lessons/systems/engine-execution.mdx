@@ -4,12 +4,12 @@ question: 一轮请求清单怎样变成正确的 GPU 前向，并在满足图�
 description: 用三条请求追踪 packed token、绝对位置、KV 槽位和注意力边界，再核对 nano-vLLM 的 eager 路径与 CUDA Graph 重放。
 order: 6
 code:
-  - code/systems/engine_execution.py
+  - examples/systems/engine_execution.py
+prerequisites: ["systems/paged-cache"]
 ---
 
-import { PackedExecutionLab } from '../../../components/labs/SystemsLabs'
+import PackedExecutionLab from '../../../components/labs/PackedExecutionLab'
 import NanoOverview from '../../../components/diagrams/NanoOverview.astro'
-import Qwen3Layer from '../../../components/diagrams/Qwen3Layer.astro'
 import LaunchTimeline from '../../../components/diagrams/LaunchTimeline.astro'
 
 [S4](/systems/engine-runtime/) 决定本轮处理哪些 token，[S5](/systems/paged-cache/) 给每个请求分配 KV 块。执行器要为扁平张量中的每个 token 保留四项信息：所属请求、逻辑位置、K/V 写入槽位和可读历史长度。
@@ -66,7 +66,7 @@ B 的 `cu_seqlens_k` 区间长度是 6，却没有再输入旧 token 21–24；�
 
 1. prefill 中把“packed 下标”设为 3，检查 B 的第一格：逻辑位置为 4、物理槽为 28。三个编号的用途不同。
 2. 勾选“下一轮 decode”，依次选择下标 0、1、2。A、B、C 的新 ID 分别进入位置 3、6、4，槽位分别为 11、30、40。
-3. 把“执行阶段”调到 capture、replay，读图下的缓冲区说明：Graph 共四行，三行有效，padding 行槽号为 -1。该行的上下文长度按下文规则置为 0；实验不展示这一字段。
+3. 把“执行阶段”调到 capture、replay，读图下的缓冲区说明：Graph 共四行，三行有效，padding 行槽号为 -1、context_len为0。两者分别控制不写KV和不读取历史。
 
 Graph 场景只展示本快照的 decode 固定地址缓冲区。无效行必须跳过 KV 写入；丢弃它的输出不能撤销已经发生的缓存写入。
 
@@ -125,15 +125,11 @@ flowchart LR
 
 ## 源码如何串起来
 
-<Qwen3Layer />
-
-此图是固定快照的 Qwen3 层路径：Q/K 还需按头归一化，MLP 使用合并 gate/up 投影。两个残差相加都保留；实现可将待相加的残差交给下一次 RMSNorm 一起处理。这是融合调用的组织变化，不是删去模型里的残差。
-
-在固定快照的 [`ModelRunner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py) 中，阅读顺序是 `__init__` 加载权重与分配 KV → `prepare_prefill` 或 `prepare_decode` 装配元数据 → `run_model` 选择 eager/graph → `Attention.forward` 写读 KV → LM head 取隐藏状态并生成 logits → `Sampler` 给 rank 0 返回 token ID。单卡只需跟踪上述数据；多 rank 的权重切片、`all_reduce` 与词表 gather 留给 [S9](/systems/cluster/)。采样分布及策略见 [P9](/principles/generation/)，本章只需要知道 logits 与下一 ID 的接口。
+在固定快照的 [`ModelRunner`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py) 中，阅读顺序是 `__init__` 加载权重与分配 KV → `prepare_prefill` 或 `prepare_decode` 装配元数据 → `run_model` 选择 eager/graph → `Attention.forward` 写读 KV → LM head 取隐藏状态并生成 logits → `Sampler` 给 rank 0 返回 token ID。单卡只需跟踪上述数据；多 rank 的权重切片、`all_reduce` 与词表 gather 留给 [S9](/systems/cluster/)。采样分布及策略见 [P11](/principles/generation/)，本章只需要知道 logits 与下一 ID 的接口。
 
 下面的脚本独立重算两轮元数据，断言 packed 边界、绝对位置、物理槽位、末位置索引及 padding 不写 KV。它不证明 FlashAttention、Triton kernel 或 CUDA Graph 在本机正确或更快。GPU 验收应固定相同权重、输入与初始 KV，比较 eager 与 graph 的有效行 logits 和写入后的 KV；覆盖块边界、含前缀的 prefill、不同 batch bucket，再按 G4 同步和计时。随机采样 ID 不能用作浮点前向逐项相等的唯一证据。
 
-<CodeFile path="code/systems/engine_execution.py" />
+<CodeFile path="examples/systems/engine_execution.py" symbol={["prefill", "decode"]} />
 
 ## 常见误区
 

@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # torch.compile：大纲与实施
 
 设计日期：2026-09-28。沿用 [讲义规范](CONVENTIONS.md)，正文放在数组与框架路线 F7 `frameworks/torch-compile`，先设计本大纲，再按表中顺序补充正文。

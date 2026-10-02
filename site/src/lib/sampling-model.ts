@@ -1,5 +1,5 @@
 /**
- * The filtering order of code/principles/generation.py: repetition penalty on raw logits,
+ * The filtering order of src/llms_from_scratch/inference/sampling.py: repetition penalty on raw logits,
  * then temperature, top-k, top-p (keeping the crossing token), and min-p.
  */
 export type SamplingOptions = {
@@ -24,7 +24,7 @@ const descending = (scores: number[]) => scores.map((s, i) => [s, i] as const).s
 export function sampleDistribution(logits: readonly number[], options: SamplingOptions) {
   const { temperature, topK, topP, minP, penalty, history } = options
   if (!logits.length || !logits.every(Number.isFinite)) throw new RangeError('Finite logits required')
-  if (!(temperature > 0) || !(topP > 0 && topP <= 1) || !(minP >= 0 && minP <= 1) || !(penalty > 0)
+  if (![temperature, topP, minP, penalty].every(Number.isFinite) || !(temperature > 0) || !(topP > 0 && topP <= 1) || !(minP >= 0 && minP <= 1) || !(penalty >= 1)
       || !Number.isInteger(topK) || topK < 1 || topK > logits.length) throw new RangeError('Invalid sampling options')
   const scores = [...logits]
   for (const id of new Set(history)) {

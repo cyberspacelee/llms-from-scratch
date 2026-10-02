@@ -1,3 +1,4 @@
+import { TokenSequence } from './DataViews'
 import { useState } from 'react'
 import Formula from './Formula'
 import { Controls, LabFrame, Range, Readout } from './Lab'
@@ -10,29 +11,10 @@ export default function CacheIndexLab() {
       <Controls>
         <Range label="解码位置 t" value={t} min={0} max={8} onChange={setT} />
       </Controls>
-      <ol className="mt-4 grid list-none grid-cols-9 gap-1 p-0" aria-label="键的位置">
-        {Array.from({ length: 9 }, (_, j) => {
-          const state = j < t ? 'past' : j === t ? 'current' : 'future'
-          return (
-            <li
-              key={j}
-              className={[
-                'rounded-sm py-2 text-center font-mono text-xs leading-normal',
-                state === 'past' && 'bg-accent-soft text-accent-strong',
-                state === 'current' && 'bg-accent2-soft font-semibold text-accent2',
-                state === 'future' && 'bg-sunken text-muted',
-              ].filter(Boolean).join(' ')}
-            >
-              j={j}
-              <br />
-              {j <= t ? `Δ=${j - t}` : '屏蔽'}
-            </li>
-          )
-        })}
-      </ol>
+      <TokenSequence label="键的位置与相对位移" tokens={Array.from({ length: 9 }, (_, j) => ({ label: `j=${j}`, detail: j <= t ? `Δ=${j-t}` : '屏蔽', state: j < t ? 'past' : j === t ? 'current' : 'future' }))} />
       <p className="mt-3 mb-0 text-xs text-muted">绿色是缓存里的历史键，橙色是这一步新写入的键，灰色是还不存在的未来位置。</p>
       <Readout>
-        Q: <Formula>{'(B, n_q, 1, d_h)'}</Formula> · K/V: <Formula>{`(B, n_kv, ${t + 1}, d_h)`}</Formula> · 分数: <Formula>{`(B, n_q, 1, ${t + 1})`}</Formula>
+        Q: <Formula>{'(B, H_q, 1, D_h)'}</Formula> · K/V: <Formula>{`(B, H_{kv}, ${t + 1}, D_h)`}</Formula> · 分数: <Formula>{`(B, H_q, 1, ${t + 1})`}</Formula>
       </Readout>
     </LabFrame>
   )

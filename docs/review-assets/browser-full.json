@@ -1,0 +1,6266 @@
+[
+  {
+    "route": "/",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/conditional-memory",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/hybrid-attention",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/long-context",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/mla",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/moe",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multi-token-prediction",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multimodal",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/residual-streams",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sequence-compression",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/shared-kv",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sparse-attention",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/state-space",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/autograd",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/data-and-training",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/modules-and-losses",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-arrays",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-computation",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-compile",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-tensors",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/backprop",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/bayes",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/calculus",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/distributions",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/events",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/information",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/linear-algebra",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/low-rank",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/matrix-calculus",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/probability",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/spectral",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/training",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/distillation",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/dpo",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/instruction-tuning",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/lora",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/reasoning-rl",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention-order",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/decoder",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/generation",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/normalization",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/rope",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/accelerator",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/cluster",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-execution",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-runtime",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/flash-attention",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/hybrid-cache",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/ledger",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/paged-cache",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/quantization",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/serving-evaluation",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/speculative-decoding",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/window-cache",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/checkpoint",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data-engineering",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/distributed-training",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/evaluation",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/optimization",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/pretraining",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/scaling-laws",
+    "width": 390,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "/",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/conditional-memory",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/hybrid-attention",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/long-context",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/mla",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/moe",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multi-token-prediction",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multimodal",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/residual-streams",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sequence-compression",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/shared-kv",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sparse-attention",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/state-space",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/autograd",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/data-and-training",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/modules-and-losses",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-arrays",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-computation",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-compile",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-tensors",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/backprop",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/bayes",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/calculus",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/distributions",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/events",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/information",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/linear-algebra",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/low-rank",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/matrix-calculus",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/probability",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/spectral",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/training",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/distillation",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/dpo",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/instruction-tuning",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/lora",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/reasoning-rl",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention-order",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/decoder",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/generation",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/normalization",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/rope",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/accelerator",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/cluster",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-execution",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-runtime",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/flash-attention",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/hybrid-cache",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/ledger",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/paged-cache",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/quantization",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/serving-evaluation",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/speculative-decoding",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/window-cache",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/checkpoint",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data-engineering",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/distributed-training",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/evaluation",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/optimization",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/pretraining",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/scaling-laws",
+    "width": 768,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "/",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/conditional-memory",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/hybrid-attention",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/long-context",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/mla",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 15,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/moe",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multi-token-prediction",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/multimodal",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/residual-streams",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sequence-compression",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/shared-kv",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/sparse-attention",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "advanced/state-space",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/autograd",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/data-and-training",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/modules-and-losses",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-arrays",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/numpy-computation",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-compile",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "frameworks/torch-tensors",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/execution-model",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/indexing-practice",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/kernel-design",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/measurement",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/memory-and-sync",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/model-profiling",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/reduction-practice",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "gpu/triton-softmax",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/backprop",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/bayes",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/calculus",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/distributions",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 6,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/events",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/information",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/linear-algebra",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/low-rank",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/matrix-calculus",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/probability",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/spectral",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "math/training",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/distillation",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/dpo",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/instruction-tuning",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/lora",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 5,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "post-training/reasoning-rl",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention-order",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 11,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/attention",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 20,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/complete-transformer",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/decoder",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 13,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/encoder-cross-attention",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 7,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/gated-ffn",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/generation",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/head-sharing",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 8,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/kv-cache",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/language-modeling",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/normalization",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 17,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/rope",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 40,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/sinusoidal",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 14,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "principles/tokenization",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/accelerator",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/cluster",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-execution",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/engine-runtime",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/flash-attention",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 10,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/hybrid-cache",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/ledger",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/paged-cache",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 3,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/quantization",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 12,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/serving-evaluation",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/speculative-decoding",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 9,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "systems/window-cache",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/checkpoint",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 2,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data-engineering",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/data",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 1,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/distributed-training",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/evaluation",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/optimization",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 16,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/pretraining",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 0,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  },
+  {
+    "route": "training/scaling-laws",
+    "width": 1440,
+    "status": 200,
+    "errors": [],
+    "light": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    },
+    "dark": {
+      "overflow": false,
+      "svgCount": 4,
+      "small": [],
+      "duplicateIds": [],
+      "unhydrated": 0,
+      "diagramFailures": [],
+      "scrollRegions": []
+    }
+  }
+]

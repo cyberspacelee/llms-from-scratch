@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import Formula from './Formula'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
@@ -20,7 +21,7 @@ export default function TileReuseLab() {
       <Range label="tile 边长" value={tile} min={1} max={4} onChange={value => { setTile(value); setStep(0) }} />
       <Range label="K 维分块编号" value={phase} min={0} max={steps - 1} onChange={setStep} />
     </Controls>
-    <svg viewBox="0 0 320 686" className={`${pen.canvas} max-w-96`} role="img" aria-label={`边长 ${tile}，第一输出 tile 正累计 K 索引 ${start} 至 ${Math.min(6, start + tile - 1)}`}>
+    <SvgCanvas viewBox="0 0 320 686" className={`${pen.canvas} max-w-96`} role="img" aria-label={`边长 ${tile}，第一输出 tile 正累计 K 索引 ${start} 至 ${Math.min(6, start + tile - 1)}`}>
       {matrices.map((matrix, id) => <g key={matrix.name}>
         <text x={matrix.x} y={matrix.y - 14}>{matrix.name}</text>
         {Array.from({ length: matrix.rows }, (_, row) => Array.from({ length: matrix.cols }, (_, col) =>
@@ -33,7 +34,7 @@ export default function TileReuseLab() {
       <text x="26" y="206">A 的列 × B 的行 → 当前贡献</text>
       <text x="26" y="458">寄存器累计，再处理下一段 K</text>
       <text x="26" y="661">蓝色：同一组输出，直到全部 K 完成</text>
-    </svg>
+    </SvgCanvas>
     <Readout><Formula>{String.raw`C_{0:${tile},0:${tile}}\mathrel{+}=A_{0:${tile},${start}:${Math.min(7, start + tile)}}B_{${start}:${Math.min(7, start + tile)},0:${tile}}`}</Formula> · 完整矩阵有效输入读取：朴素 {naiveReads}，分块 {tiledReads} · 只计逻辑元素访问，不代表 DRAM 流量或实测速度。</Readout>
   </LabFrame>
 }

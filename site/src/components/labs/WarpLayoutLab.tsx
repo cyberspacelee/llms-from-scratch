@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { threadCoordinates } from './GpuIndexModel'
 import { LabFrame, Range, Readout, pen } from './Lab'
@@ -7,7 +8,7 @@ export default function WarpLayoutLab() {
   const layouts = [[8, 8, 35], [16, 4, 277], [32, 2, 423]] as const
   return <LabFrame title="64 线程的三种布局与 warp 边界">
     <Range label="块内线性线程号" value={thread} min={0} max={63} onChange={setThread} />
-    <svg viewBox="0 0 320 544" className={`${pen.canvas} max-w-96`} role="img" aria-label={`比较 8×8、16×4、32×2 布局，选中线程 ${thread}，warp ${Math.floor(thread / 32)}，lane ${thread % 32}`}>
+    <SvgCanvas viewBox="0 0 320 544" className={`${pen.canvas} max-w-96`} role="img" aria-label={`比较 8×8、16×4、32×2 布局，选中线程 ${thread}，warp ${Math.floor(thread / 32)}，lane ${thread % 32}`}>
       {layouts.map(([width, height, top]) => {
         const selected = threadCoordinates(thread, width, height)
         return <g key={width}>
@@ -21,7 +22,7 @@ export default function WarpLayoutLab() {
       })}
       <text x="12" y="504" className={pen.textA}>绿色：warp 0</text><text x="167" y="504" className="fill-info!">蓝色：warp 1</text>
       <text x="12" y="526" className={pen.muted}>橙色：选中线程 · 虚线：warp 边界</text>
-    </svg>
+    </SvgCanvas>
     <Readout>线程 {thread} · warp {Math.floor(thread / 32)} · lane {thread % 32}<br />
       {layouts.map(([width, height]) => {
         const c = threadCoordinates(thread, width, height)

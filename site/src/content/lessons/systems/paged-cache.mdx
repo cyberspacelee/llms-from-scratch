@@ -4,13 +4,14 @@ question: 两条请求共享历史 K/V 后，怎样找到每个位置并安全�
 description: 沿两条六 token 请求推导块表、物理槽位、引用计数、写时复制和释放，再核对 nano-vLLM 的完整块前缀策略。
 order: 5
 code:
-  - code/systems/cache_pages.py
+  - examples/systems/cache_pages.py
+prerequisites: ["systems/engine-runtime"]
 ---
 
 import PagedKvLab from '../../../components/labs/PagedKvLab'
-import { PrefixIdentityLab } from '../../../components/labs/SystemsLabs'
+import PrefixIdentityLab from '../../../components/labs/PrefixIdentityLab'
 
-[P10](/principles/kv-cache/) 已证明，在固定权重与相同位置规则下，历史 K/V 不必重算。[S4](/systems/engine-runtime/) 又让多个请求在每步进入或离开运行队列。现在考虑 A 和 B：它们都已经计算相同的六个 token，接下来 A 要写入值 7，B 要写入值 70。有限的 KV 池怎样让它们共享前六项，又保证两次写入互不污染？
+[P12](/principles/kv-cache/) 已证明，在固定权重与相同位置规则下，历史 K/V 不必重算。[S4](/systems/engine-runtime/) 又让多个请求在每步进入或离开运行队列。现在考虑 A 和 B：它们都已经计算相同的六个 token，接下来 A 要写入值 7，B 要写入值 70。有限的 KV 池怎样让它们共享前六项，又保证两次写入互不污染？
 
 本章只研究 **KV 的地址与所有权**。一个 token 的真实状态包含每层的 K 和 V；手算时用一个标量代替这组向量，地址规则不变。两个请求必须使用相同模型、token ID、位置和影响前向的配置，才能讨论共享。
 
@@ -77,7 +78,7 @@ flowchart TD
 
 ## 前缀身份：局部 token 相同为何仍可能错
 
-仅比较某个块的四个 token ID 不足以复用它。[P10](/principles/kv-cache/) 的因果注意力使位置 4–7 的 K/V 依赖此前可见的上下文。即使 A 和 B 的第二块都写着同样的四个 ID，只要第一块不同，第二块的 K/V 就可能不同。
+仅比较某个块的四个 token ID 不足以复用它。[P12](/principles/kv-cache/) 的因果注意力使位置 4–7 的 K/V 依赖此前可见的上下文。即使 A 和 B 的第二块都写着同样的四个 ID，只要第一块不同，第二块的 K/V 就可能不同。
 
 前缀缓存因此按顺序建立身份：令 $u_i$ 是第 $i$ 个完整块的 token ID 序列，$h_i$ 是截至该块的身份，`hash` 是索引用的哈希函数，则可写成
 
@@ -110,7 +111,7 @@ $$
 
 CPU 参考脚本逐步断言块表、引用数、物理写入槽与逻辑读取，随后释放两条请求。它仅验证地址和所有权；真实 GPU 验收还需比较普通缓存与分页缓存的注意力输出，并覆盖跨块边界、不同有效尾长、抢占和取消。
 
-<CodeFile path="code/systems/cache_pages.py" />
+<CodeFile path="examples/systems/cache_pages.py" symbol="Pages.append" />
 
 ## 常见误区
 

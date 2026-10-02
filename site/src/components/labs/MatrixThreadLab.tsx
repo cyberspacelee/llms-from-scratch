@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import Formula from './Formula'
 import { matrixIndex } from './GpuIndexModel'
@@ -16,7 +17,7 @@ export default function MatrixThreadLab() {
       <Range label="thread x" value={tx} min={0} max={3} onChange={setTx} />
       <Range label="thread y" value={ty} min={0} max={1} onChange={setTy} />
     </Controls>
-    <svg viewBox="0 0 320 505" className={`${pen.canvas} max-w-96`} role="group" aria-label="二维网格、块内线程与带尾部位置的矩阵">
+    <SvgCanvas viewBox="0 0 320 505" className={`${pen.canvas} max-w-96`} role="group" aria-label="二维网格、块内线程与带尾部位置的矩阵">
       <text x="12" y="20">grid (2, 3) · 选择 block</text>
       {Array.from({ length: 6 }, (_, b) => {
         const x = b % 2, y = Math.floor(b / 2)
@@ -46,7 +47,7 @@ export default function MatrixThreadLab() {
         </g>
       })}
       <text x="12" y="496" className={pen.muted}>格内数字：行主序元素偏移</text>
-    </svg>
+    </SvgCanvas>
     <Readout><Formula>{`r=${by}\\times2+${ty}=${result.row},\\quad c=${bx}\\times4+${tx}=${result.col}`}</Formula><br />
       <Formula>{`p=${result.row}\\times7+${result.col}=${result.offset}`}</Formula> · 行列检查 {result.valid ? '通过' : '拒绝'} · 仅检查 p &lt; 35：{result.offsetOnly ? '通过' : '拒绝'}
       {!result.valid && result.offsetOnly && ' · 偏移合法但坐标越界，会误写下一行'}

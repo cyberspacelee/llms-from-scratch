@@ -4,7 +4,8 @@ question: 怎样从四个 XOR 样本走到一次参数更新
 description: 用同一个两单元网络贯穿非线性表示、分类损失、反向传播、SGD 更新和训练结果。
 order: 10
 code:
-  - code/math/neural_network.py
+  - examples/math/neural_network.py
+prerequisites: ["math/backprop", "math/distributions"]
 ---
 
 import SoftmaxLossLab from '../../../components/labs/SoftmaxLossLab'
@@ -124,7 +125,7 @@ $$
 
 <MathTrainingLab client:visible />
 
-<CodeFile path="code/math/neural_network.py" />
+<CodeFile path="examples/math/neural_network.py" symbol="verify_first_step" />
 
 每次 `zero_grad` 清除上一轮存入参数的梯度，`backward` 计算本轮梯度，`step` 才改变参数。这个初值和学习率下，最终四点预测为 $[0,1,1,0]$，平均交叉熵小于 $0.02$。脚本以断言检查这个结果；它没有宣称任意初值或学习率都保证收敛。
 

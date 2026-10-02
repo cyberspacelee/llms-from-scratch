@@ -4,13 +4,14 @@ question: 草稿猜出多个 token 后，怎样一次验证而不改变目标采
 description: 用同一组三类别概率推导接受与残差采样，走完两步验证、KV 提交和真实成本判断。
 order: 8
 code:
-  - code/systems/speculative.py
+  - examples/systems/speculative.py
+prerequisites: ["principles/generation", "systems/engine-runtime"]
 ---
 
 import SpeculativeLab from '../../../components/labs/SpeculativeLab'
-import { SpeculativeReplayLab } from '../../../components/labs/SystemsLabs'
+import SpeculativeReplayLab from '../../../components/labs/SpeculativeReplayLab'
 
-[P9 生成](/principles/generation/) 每选一个 token，就要用新的历史再问目标模型一次；[P10 KV cache](/principles/kv-cache/) 避免重算旧历史，却没有消除逐次等待。设一个便宜的草稿模型先提出两个候选。目标模型可以用一次因果前向同时检查它们，但草稿的概率与目标不同，直接提交候选会改变输出分布。本章从一个位置的三类别例子解决这个偏差，再把规则用于两步验证。需要 [M1 随机事件与条件概率](/math/events/) 中的条件概率；性能账接 [S1](/systems/ledger/) 和 [S2](/systems/accelerator/)。
+[P11 生成](/principles/generation/) 每选一个 token，就要用新的历史再问目标模型一次；[P12 KV cache](/principles/kv-cache/) 避免重算旧历史，却没有消除逐次等待。设一个便宜的草稿模型先提出两个候选。目标模型可以用一次因果前向同时检查它们，但草稿的概率与目标不同，直接提交候选会改变输出分布。本章从一个位置的三类别例子解决这个偏差，再把规则用于两步验证。需要 [M1 随机事件与条件概率](/math/events/) 中的条件概率；性能账接 [S1](/systems/ledger/) 和 [S2](/systems/accelerator/)。
 
 这里的目标是**分布相同**：对每段已提交历史，下一个 token 仍服从目标模型指定的采样分布。使用相同 seed 不保证与普通生成得到逐项相同的随机输出，因为两种算法消耗随机数的顺序不同。
 
@@ -28,7 +29,7 @@ $$
 
 的概率接受。比值只在 $q(x)>0$ 的候选上求值，因为草稿不可能提出 $q(x)=0$ 的类别。本例若提出 ID 0，接受概率是 $0.5/0.6=5/6$；提出 ID 1，目标概率反而更大，所以必定接受；ID 2 以 $0.2/0.3=2/3$ 接受。把提出概率乘回去，三项被接受并输出的质量分别为 $0.5,0.1,0.2$。它们还缺 ID 1 的 $0.2$。
 
-拒绝事件出现时，必须从**尚缺的目标质量**中抽一个替代 token。记缺口 $d(x)=\max(p(x)-q(x),0)$，总缺口 $D=\sum_xd(x)$，则拒绝后的条件分布为 $r(x)=d(x)/D$。本例 $d=(0,0.2,0)$，$D=0.2$，所以拒绝后必定输出 ID 1。若直接从 $p$ 重抽，会把已经接受过的质量再次分配。
+拒绝事件出现时，必须从**尚缺的目标质量**中抽一个替代 token。记缺口 $D(x)=\max(p(x)-q(x),0)$，总缺口 $D=\sum_xD(x)$，则拒绝后的条件分布为 $r(x)=D(x)/D$。本例 $D=(0,0.2,0)$，$D=0.2$，所以拒绝后必定输出 ID 1。若直接从 $p$ 重抽，会把已经接受过的质量再次分配。
 
 | 候选 ID | 草稿提出 $q(x)$ | 接受率 $\alpha(x)$ | 接受并输出 $q(x)\alpha(x)$ | 拒绝后补入 $D r(x)$ | 最终输出 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -89,7 +90,7 @@ flowchart TD
 
 ## KV cache：输出 ID 与已计算状态相差一步
 
-[P10](/principles/kv-cache/) 的关键约定是：某个 token 被**选中**时，它的 KV 不一定已经计算；下轮输入这个 token 后才得到它的 KV。目标验证草稿时写入的 KV 也有可能属于后来被拒绝的路径。沿上例，从已缓存 `[1,2]` 开始，验证暂时计算了草稿 0、2 的目标 KV。
+[P12](/principles/kv-cache/) 的关键约定是：某个 token 被**选中**时，它的 KV 不一定已经计算；下轮输入这个 token 后才得到它的 KV。目标验证草稿时写入的 KV 也有可能属于后来被拒绝的路径。沿上例，从已缓存 `[1,2]` 开始，验证暂时计算了草稿 0、2 的目标 KV。
 
 | 结果 | 已提交的完整 ID | 可保留的目标 KV 历史 | 下轮尚需输入 |
 | --- | --- | --- | --- |
@@ -118,20 +119,20 @@ $$
 
 本章三类别例子的单位置接受率是 $a=0.8$。若示意性地延长为 $k=4$ 且各位置维持独立的 0.8，期望提交数为 $1+0.8+0.64+0.512+0.4096=3.3616$；$a=1$ 时是 $k+1$，$a=0$ 时仍为 1。实际语言模型的接受事件随历史和位置变化，不能把这个独立假设当作普遍预测。
 
-设普通目标逐 token 延迟为 $c_t$，草稿每步为 $c_d$，目标批验证 $k$ 个候选所用时间为 $c_v(k)$，其他采样、同步及缓存管理时间为 $c_o$。同样输出 $\mathbb E[N]$ 个 token 的近似延迟比是
+设普通目标逐 token 延迟为 $c_t$，草稿每步为 $c_D$，目标批验证 $k$ 个候选所用时间为 $c_v(k)$，其他采样、同步及缓存管理时间为 $c_o$。同样输出 $\mathbb E[N]$ 个 token 的近似延迟比是
 
 $$
 \mathrm{speedup}\approx
-\frac{c_t\mathbb E[N]}{k c_d+c_v(k)+c_o}.
+\frac{c_t\mathbb E[N]}{k c_D+c_v(k)+c_o}.
 $$
 
-例如在上述 $k=4$ 假设下，若教学用成本为 $c_t=10$ ms、$c_d=1$ ms、$c_v(4)=12$ ms、$c_o=1$ ms，比例约为 $33.616/17=1.98$。草稿若变为每步 5 ms，分母升到 33 ms，优势几乎消失。这些数是算例，不是设备实测。验证虽并行，仍要计算注意力、激活与 KV；高并发时普通 decode 已能复用权重，额外验证也会争抢预算。选择 $k$ 应在固定目标、采样协议、请求长度分布和 SLO 下测端到端延迟及吞吐，指标边界见 [S10](/systems/serving-evaluation/)。
+例如在上述 $k=4$ 假设下，若教学用成本为 $c_t=10$ ms、$c_D=1$ ms、$c_v(4)=12$ ms、$c_o=1$ ms，比例约为 $33.616/17=1.98$。草稿若变为每步 5 ms，分母升到 33 ms，优势几乎消失。这些数是算例，不是设备实测。验证虽并行，仍要计算注意力、激活与 KV；高并发时普通 decode 已能复用权重，额外验证也会争抢预算。选择 $k$ 应在固定目标、采样协议、请求长度分布和 SLO 下测端到端延迟及吞吐，指标边界见 [S10](/systems/serving-evaluation/)。
 
 ## 代码核对与边界
 
 下面的 CPU 脚本先枚举接受质量加补偿质量是否逐类等于目标，再用固定抽数走第一处拒绝、第二处拒绝、全部接受和零支持分支。`speculative_step` 逐次调用目标回调以核对**条件历史**；真实 GPU 实现把目标位置合并成一次因果块前向，因此脚本只验证分布与控制流，不测加速。它也检查上表的 KV 有效长度和期望提交数。
 
-<CodeFile path="code/systems/speculative.py" />
+<CodeFile path="examples/systems/speculative.py" symbol={["compensation", "speculative_step"]} />
 
 本算法需要能获得目标在候选路径各位置的条件概率。若只拿到最终 token ID 或只有某些类别的分数，就不能直接计算这里的 $p(x)/q(x)$ 和完整残差。真实实现还需核对缓存前向与全量前向的有效 logits、数值精度、采样过滤顺序及 EOS 边界。
 

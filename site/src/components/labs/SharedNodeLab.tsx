@@ -1,6 +1,7 @@
+import SvgCanvas from './SvgCanvas'
 import { useId, useState } from 'react'
 import { sharedGraph } from '../../lib/math-labs-model'
-import { Arrow, Controls, LabFrame, Range, Readout, pen } from './Lab'
+import { Toggle, Arrow, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 export default function SharedNodeLab() {
   const [x, setX] = useState(2)
@@ -19,10 +20,10 @@ export default function SharedNodeLab() {
     <Controls>
       <Range label="输入 x" value={x} min={-3} max={3} step={0.5} onChange={setX} format={v => v.toFixed(1)} />
       <Range label="反向阶段" value={stage} min={0} max={3} onChange={setStage} />
-      <label className="flex h-8 items-center gap-2 self-end text-sm"><input type="checkbox" checked={direct} onChange={event => setDirect(event.target.checked)} className="accent-accent" />保留 a → ℓ 的直接路径</label>
-      <label className="flex h-8 items-center gap-2 self-end text-sm"><input type="checkbox" checked={throughB} onChange={event => setThroughB(event.target.checked)} className="accent-accent" />保留经过 b 的路径</label>
+      <Toggle label="保留 a → ℓ 的直接路径" checked={direct} onChange={value => setDirect(value)} />
+      <Toggle label="保留经过 b 的路径" checked={throughB} onChange={value => setThroughB(value)} />
     </Controls>
-    <svg viewBox="0 0 520 210" className={`${pen.canvas} hidden! max-w-140 sm:block!`} role="img" aria-label={`x=${x}，ℓ=${g.loss}，求得 dℓ/dx=${g.gradX}，正确值 ${g.exact}`}>
+    <SvgCanvas viewBox="0 0 520 210" className={`${pen.canvas} hidden! max-w-140 sm:block!`} role="img" aria-label={`x=${x}，ℓ=${g.loss}，求得 dℓ/dx=${g.gradX}，正确值 ${g.exact}`}>
       <defs><Arrow id={arrow} className="fill-muted" /></defs>
       <path d="M86 110H154" className={stage >= 3 ? pen.c : `${pen.axis} stroke-[1.5]`} markerEnd={`url(#${arrow})`} />
       <path d="M206 96L290 56" className={stage >= 2 && throughB ? pen.c : `${pen.axis} stroke-[1.5]`} markerEnd={`url(#${arrow})`} />
@@ -36,8 +37,8 @@ export default function SharedNodeLab() {
       {node(180, 110, 'a', g.a, `dℓ/da = ${g.gradA}`)}
       {node(318, 50, 'b', g.b, 'dℓ/db = 1')}
       {node(456, 110, 'ℓ', g.loss, 'dℓ/dℓ = 1')}
-    </svg>
-    <svg viewBox="0 0 320 330" className={`${pen.canvas} max-w-96 sm:hidden!`} role="img" aria-label={`共享节点 a 收到 ${g.direct}+${g.throughB}=${g.gradA}，反向阶段 ${stage}`}>
+    </SvgCanvas>
+    <SvgCanvas viewBox="0 0 320 330" className={`${pen.canvas} max-w-96 sm:hidden!`} role="img" aria-label={`共享节点 a 收到 ${g.direct}+${g.throughB}=${g.gradA}，反向阶段 ${stage}`}>
       <path d="M160 63V133" className={stage >= 3 ? pen.c : pen.axis} />
       <path d="M141 170L81 228M83 247H217" className={stage >= 2 && throughB ? pen.c : pen.axis} />
       <path d="M180 169L239 228" className={stage >= 1 && direct ? pen.c : pen.axis} />
@@ -45,7 +46,7 @@ export default function SharedNodeLab() {
       {[{ name: 'x', x: 160, y: 43, value: x }, { name: 'a', x: 160, y: 153, value: g.a }, { name: 'b', x: 60, y: 247, value: g.b }, { name: 'ℓ', x: 260, y: 247, value: g.loss }].map(n => <g key={n.name}><circle cx={n.x} cy={n.y} r="23" className="fill-sunken stroke-rule-strong" /><text x={n.x} y={n.y + 5} textAnchor="middle">{n.name}={n.value}</text></g>)}
       <text x="160" y="102" textAnchor="middle">返回 x：{g.gradA}×2x={g.gradX}</text>
       <text x="160" y="303" textAnchor="middle">a 汇合：{g.direct}+{g.throughB}={g.gradA}</text>
-    </svg>
+    </SvgCanvas>
     <Readout>{['0 · 前向值已就绪', '1 · 从 ℓ 返回两条直接依赖', '2 · 经 b 的贡献与直接贡献在 a 相加', '3 · a 的总梯度继续乘 2x 返回 x'][stage]}<br />dℓ/da = 直接 {g.direct} + 经 b {g.throughB} = {g.gradA} · dℓ/dx = {g.gradA} × 2x = {g.gradX} · 正确值 8x = {g.exact}{g.gradX === g.exact ? ' ✓' : ' ✗ 漏掉了一条路径'}</Readout>
   </LabFrame>
 }

@@ -4,7 +4,8 @@ question: 一组权重同时服务多条记录时，梯度怎样计算
 description: 沿用线性层的三条记录，逐元素推导单样本与 batch 梯度，说明广播归约，并用手算、自动微分和有限差分核对。
 order: 8
 code:
-  - code/math/linear_algebra.py
+  - examples/math/linear_algebra.py
+prerequisites: ["math/linear-algebra", "math/calculus"]
 ---
 
 import MathLinearLab from '../../../components/labs/MathLinearLab'
@@ -189,7 +190,7 @@ for actual, expected in ((xt.grad, dX), (wt.grad, dW), (bt.grad, db)):
 
 代码只调用一次 `.backward()`；若重复调用，同一个叶子张量的 `.grad` 会累加，需要先清零。自动微分能核对公式与程序是否一致，但程序若把目标错误广播，仍会忠实算出那个错误目标的梯度。
 
-<CodeFile path="code/math/linear_algebra.py" />
+<CodeFile path="examples/math/linear_algebra.py" region="batch_gradient" />
 
 中心差分只改变一个数，其余参数和输入保持固定。以开头单样本的右下权重 $W_{22}=0$ 为例，让它分别变成 $h$ 和 $-h$：
 

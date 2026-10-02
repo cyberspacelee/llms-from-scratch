@@ -2,9 +2,10 @@
 title: 预训练数据工程
 question: 原始网页怎样成为经过过滤、近重复分组和可解释混合的训练文本
 description: 逐步实现 HTML 提取、过滤审计、shingle/Jaccard、MinHash/LSH、重复组划分和来源重采样，区分精确核对与大规模管道的边界。
-order: 8
+order: 7
 code:
-  - code/training/data_engineering.py
+  - examples/training/data_engineering.py
+prerequisites: ["principles/tokenization", "training/data", "math/probability"]
 ---
 
 两个网页只差一个词，内容哈希会不同；若先把它们随机拆到训练和验证，验证损失便可能把已见文章当作新文章。[T1](/training/data/) 已说明文档身份与窗口，本章把原始 HTML 变成可划分的文档组，并用同一份小清单检查每个决策。完成后，你应能解释一条记录为何被排除、两篇文章为何被连成一组、以及来源权重对应多少次重复使用。阅读前建议掌握 T1 的文档级划分和 [M3](/math/probability/) 的简单概率。
@@ -42,7 +43,7 @@ flowchart TD
 
 每一步都保留记录 ID、决定和原因。这样可以追查一篇原文怎样成为训练目标，而不必从合并后的大字符串猜测来源。
 
-import { DuplicateGraphLab } from '../../../components/labs/TrainingTraceLabs'
+import DuplicateGraphLab from '../../../components/labs/DuplicateGraphLab'
 
 ## 提取与过滤：先得到能审计的五篇正文
 
@@ -145,15 +146,15 @@ $$
 | 原始与提取 | ID、来源、许可依据、原始版本、提取规则版本、正文指纹 | 追查 H 的许可与 A 的正文从何而来 |
 | 过滤 | 第一条删除原因、各来源保留数、抽样误删/漏删检查 | 重算 A–E 清单并检查偏差 |
 | 去重与划分 | shingle/签名/阈值版本、候选数、复核边、组 ID、seed、split | 复现 `{A,B,C}` 和训练/验证边界 |
-| tokenizer 与抽样 | 训练侧词表版本、每来源有效目标数、目标比例、实际事件数、游标 | 对齐 [T7](/training/scaling-laws/) 预算与 [T9](/training/distributed-training/) 的恢复 |
+| tokenizer 与抽样 | 训练侧词表版本、每来源有效目标数、目标比例、实际事件数、游标 | 对齐 [T6](/training/scaling-laws/) 预算与 [T8](/training/distributed-training/) 的恢复 |
 
 验证 D 的自然评估分布不能被训练来源权重悄悄重采样；若报告加权验证损失，须单独声明评估权重。接入训练前，最后检查训练/验证组不交、tokenizer 没读 D、预算使用选代表后的训练目标量，以及窗口是否遵守 [T1 的文档边界](/training/data/#packing省下-padding-会改变可见历史吗)。
 
 ## CPU 核对：从删除原因走到分组边界
 
-<CodeFile path="code/training/data_engineering.py" />
+<CodeFile path="examples/training/data_engineering.py" symbol="duplicate_groups" />
 
-运行 `python code/training/data_engineering.py`。脚本核对 A–H 的许可/过滤审计、A/B 的 $4/10$、LSH 候选与全对全基线、seed 1 的完整组划分，以及 54 次教学目标事件的来源预算。它只验证这份小清单的算法语义；真实数据的许可审查、敏感内容检测和漏召回评估仍需单独建立。
+运行 `uv run python -m examples.training.data_engineering`。脚本核对 A–H 的许可/过滤审计、A/B 的 $4/10$、LSH 候选与全对全基线、seed 1 的完整组划分，以及 54 次教学目标事件的来源预算。它只验证这份小清单的算法语义；真实数据的许可审查、敏感内容检测和漏召回评估仍需单独建立。
 
 ## 常见误区
 
@@ -186,7 +187,7 @@ web 每个目标的期望使用次数为 $0.6\times54/9=3.6$，超过上限；cu
 
 </details>
 
-下一章 [T9](/training/distributed-training/) 会把来源与窗口产生的有效目标，放入跨进程训练的全局分母。
+下一章 [T8](/training/distributed-training/) 会把来源与窗口产生的有效目标，放入跨进程训练的全局分母。
 
 ## 原始资料
 

@@ -1,0 +1,117 @@
+---
+title: n-gram 条件记忆
+question: 由局部 token 身份查到的记忆，怎样与当前隐藏状态结合而保持因果性
+description: 手算 bigram 哈希、共享表行和上下文 gate，再检查因果扩张卷积的历史范围、碰撞与新增状态。
+prerequisites:
+  - principles/tokenization
+  - principles/complete-transformer
+  - advanced/moe
+optional: true
+order: 11
+code:
+  - src/llms_from_scratch/chapters/ch23_conditional_memory.py
+---
+
+[embedding](/principles/tokenization/) 用当前 ID 查一行，[MoE](/advanced/moe/) 用隐藏状态选择计算分支。这里再研究一种入口：先用相邻 token 身份得到确定地址，从一张可训练表中查局部记忆，再让当前上下文决定如何使用它。本章只做 bigram 小表与因果卷积的机制核对，不将查表等同于模型已经记住事实。
+
+[Engram 原论文](https://arxiv.org/abs/2601.07372) 给出 n-gram 条件记忆的研究方案。本章参考类采用自己的小哈希、gate 与卷积配置，未实现论文的多阶多头布局、tokenizer 处理或异构存储系统。
+
+## 三个 ID：bigram 怎样成为表地址
+
+取单样本 ID `[1,2,3]`，$B=1,T=3,D=2$。为位置 t 取当前 ID $u_t$ 与前一个 $u_{t-1}$，首位置用 0 作为左边界填充值。本实现哈希表有 M 行，地址为
+
+$$
+h_t=(131u_{t-1}+u_t)\bmod M.
+$$
+
+为了手算令 M=5，$131\bmod5=1$。三处地址依次为 1、3、0：
+
+| 位置 | 前一个、当前 ID | 地址 |
+| --- | --- | --- |
+| 0 | `(0,1)` | 1 |
+| 1 | `(1,2)` | 3 |
+| 2 | `(2,3)` | 0 |
+
+表 $E_{\mathrm{mem}}\in\mathbb R^{M\times D}$ 与 token embedding 是不同的参数对象。它按 n-gram 哈希地址查行，输出 $\ell_t=E_{\mathrm{mem}}[h_t]$，形状为 $(B,T,D)$。首位置填 0 是本参考的边界约定；若普通 token ID 也为 0，边界与真实前项可能发生同址，不可把它称为一个独立 BOS 标记。
+
+### 碰撞：同址不等于同一个短语
+
+bigram `(1,2)` 与 `(0,3)` 都落到地址 3，必读同一行。表行不是无碰撞词典，也不保证能唯一还原原 bigram。两种上下文对共享行的梯度要相加，和 P1 重复查 embedding 的规则相同。
+
+增大表或使用多阶/多头哈希可以改变碰撞分布，但仍要分别验证地址、存储和训练协议。本页的小表故意保留碰撞，方便看清参数共享。
+
+## 上下文 gate：相同记忆可以有不同注入量
+
+查到的局部记忆再经 key/value 投影。参考实现计算隐藏状态与记忆 key 的归一化点积：
+
+$$
+a_t=\sigma\!\left(
+\frac{x_t}{\|x_t\|_2}\mathbin{\cdot}
+\frac{W_k\ell_t}{\|W_k\ell_t\|_2}
+\right),
+\qquad g_t=a_tW_v\ell_t.
+$$
+
+零向量的归一化在实现中有数值保护，上式先讨论非零向量。$a_t$ 是 $(B,T,1)$ 的单个系数，广播到 D 个特征；这里使用列向量，代码 `Linear.weight` 就按 $(D,D)$ 存储，不另作数学右乘约定。
+
+令 $E_{\mathrm{mem}}[3]=(2,0)$、$W_k=W_v=I$。若位置 1 隐藏状态为 $(1,0)$，归一化点积为 1，gate 为 $\sigma(1)\approx0.731059$，查表写入为 $(1.462118,0)$。若只改隐藏状态为 $(-1,0)$，点积为 −1，写入改成 $(0.537882,0)$。bigram 地址与表行未变，改变的是上下文使用强度。
+
+在这份参考中点积位于 $[-1,1]$，所以 gate 约在 `[0.269,0.731]`，不会仅靠该公式严格关闭记忆。这是本实现的范围，其他 gate 配方可能有不同温度、投影或缩放。
+
+## 因果扩张卷积：读取 t、t−2、t−4
+
+只按当前位置 gate 注入仍缺少短距离特征组合。参考类再对 g 做逐通道一维卷积：kernel size 为 3、dilation 为 2、groups 为 D，并仅在左侧补 4 个零。每个输出通道 t 读取自己通道的 $g_t,g_{t-2},g_{t-4}$，不读取未来，也不混合不同特征通道。
+
+最终记忆输出为
+
+$$
+y_t=g_t+\operatorname{SiLU}(\operatorname{Conv}_{\mathrm{causal}}(g)_t).
+$$
+
+先令卷积权重全零，则输出就是上面的 gated lookup。再令每个通道只取中间 tap，便只读取 $g_{t-2}$。例如设 $E_{\mathrm{mem}}[1]=(0,2)$、$E_{\mathrm{mem}}[0]=(1,0)$，三位置隐藏状态均为 $(1,0)$。位置 0 的 gate 为 1/2，$g_0=(0,1)$；位置 2 的 $g_2=(0.731059,0)$。只取中间 tap 时，位置 2 输出为
+
+$$
+y_2=(0.731059,0)+\operatorname{SiLU}(0,1)
+=(0.731059,0.731059).
+$$
+
+这一变化来自两步前的局部记忆，不能说卷积在读取整份上下文。对 t=0、1，$t-2$ 尚不存在，左补零确保安全。
+
+<CodeFile path="src/llms_from_scratch/chapters/ch23_conditional_memory.py" symbol="NGramMemory.forward" />
+
+## 参数与状态：词法表和历史缓存各算什么
+
+本参考无偏置，表有 MD 个参数，key/value 各有 $D^2$，depthwise kernel 有 3D，总计 $MD+2D^2+3D$。手算配置 M=5、D=2 共 $10+8+6=24$；运行配置 M=257、D=32 则是 10368。它不按序列长度增加参数。
+
+增量执行还需保存前一个 token 以构造 bigram，并保留足够的卷积历史以读取 t−2、t−4。这些历史状态不等于注意力 KV cache。当前参考类接受整段 IDs 与 hidden，重新计算哈希和卷积；尚未实现增量 hash/conv cache，不能用参数账声称生成状态已经恒定或吞吐提升。
+
+## 运行：用未来改动检验因果边界
+
+运行 `uv run llms-from-scratch chapter --chapter 23`。实验输入 `(1,6)` IDs 和 `(1,6,32)` hidden，输出应为 `(1,6,32)`；改变位置 4 及之后的 IDs 和 hidden，确认前四行输出不变，并检查 lookup 表梯度有限。
+
+<CodeFile path="src/llms_from_scratch/chapters/ch23_conditional_memory.py" symbol="run" run="uv run llms-from-scratch chapter --chapter 23" />
+
+这是独立记忆模块，P13 的普通 Transformer 不默认插入它。若接入模型残差，还需定义在哪一层读取 token/hidden、输出如何相加、checkpoint 如何保存，以及更新窗口何时清空局部历史。参数可训练与因果性通过，不代表表中已学到可靠知识。
+
+## 练习与核对
+
+<details>
+<summary>M=5 时，将当前 bigram 从 `(1,2)` 改成 `(2,2)`，读取哪个地址？</summary>
+
+地址变为 $(131\times2+2)\bmod5=4$，不再是 3。旧表行不会自动搬迁；若训练后改变哈希常数或 tokenizer ID，同样会改变记忆地址契约。
+
+</details>
+
+<details>
+<summary>bigram 不变，隐藏状态从 `(1,0)` 放大到 `(10,0)`，正文 gate 应变化吗？</summary>
+
+对非零向量，欧氏归一化后方向仍是 `(1,0)`，所以点积和 gate 不变。它不同于直接使用未归一化点积的 gate；长度变化不能在本例中提高记忆系数。
+
+</details>
+
+<details>
+<summary>kernel size 改成 4，dilation 仍为 2，应左补多少位置？能读哪些历史？</summary>
+
+要左补 $(4-1)\times2=6$，每通道读取 t、t−2、t−4、t−6。若仍只补 4，会改变长度或对齐；若改成对称补零，会允许未来读入。
+
+</details>

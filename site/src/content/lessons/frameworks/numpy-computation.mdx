@@ -4,7 +4,8 @@ question: 形状正确时，怎样确认计算没有沿错轴进行
 description: 用两条三特征记录完成广播、按行统计、矩阵乘和 softmax，靠具体元素与不变量识别形状正确但计算轴错误的结果。
 order: 2
 code:
-  - code/frameworks/numpy_computation.py
+  - examples/frameworks/numpy_computation.py
+prerequisites: ["frameworks/numpy-arrays", "math/linear-algebra"]
 ---
 
 import NumpyAxesLab from '../../../components/labs/NumpyAxesLab'
@@ -160,9 +161,9 @@ probabilities = weights / weights.sum(axis=1, keepdims=True)
 
 配套脚本重建 $X,W,Z$，用显式循环核对矩阵乘，检查中心化的行和、方差分母、按行收集、softmax 的行和与样本独立性。它还使用方阵证明：表达式成功且输出 shape 正确，仍可能减错方向。
 
-<CodeFile path="code/frameworks/numpy_computation.py" />
+<CodeFile path="examples/frameworks/numpy_computation.py" symbol="softmax" />
 
-运行 `python code/frameworks/numpy_computation.py`。有 Matplotlib 和中文字体的环境可加 `--plot`，从同一组 $X,W,Z$ 重建数值图；普通检查不依赖绘图包。
+运行 `uv run python -m examples.frameworks.numpy_computation`。有 Matplotlib 和中文字体的环境可加 `--plot`，从同一组 $X,W,Z$ 重建数值图；普通检查不依赖绘图包。
 
 ## 常见误区
 

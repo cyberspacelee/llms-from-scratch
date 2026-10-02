@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { Controls, fmt, LabFrame, pen, Range, Readout } from './Lab'
 import { frequencies } from './FrequencyLab'
@@ -16,7 +17,7 @@ export default function EncodingMatrixLab() {
       <Controls>
         <Range label="选中位置 p" value={selected} min={0} max={31} onChange={setSelected} />
       </Controls>
-      <svg viewBox="0 0 680 470" className={pen.canvas} role="img"
+      <SvgCanvas viewBox="0 0 680 470" className={pen.canvas} role="img"
         aria-label={`位置编码矩阵，选中位置 ${selected}`}>
         {Array.from({ length: 8 }, (_, d) => (
           <g key={d}>
@@ -57,7 +58,7 @@ export default function EncodingMatrixLab() {
           </g>
         ))}
         <text x={x0} y={y0 + 32 * ch + 92} className={pen.muted}>绿色为正、橙色为负，颜色越深绝对值越大；每个 sin/cos 对的长度平方都是 1</text>
-      </svg>
+      </SvgCanvas>
       <Readout>
         PE({selected}) = [{values.map((value) => fmt(value)).join(', ')}] · 平方范数 = {fmt(norm, 4)}
       </Readout>

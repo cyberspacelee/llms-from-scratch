@@ -1,7 +1,8 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { kernelLifecycle, kernelPhases } from '../../lib/kernel-lifecycle'
 import Formula from './Formula'
-import { Controls, LabFrame, Range, Readout, pen } from './Lab'
+import { Toggle, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 export default function KernelLifecycleLab() {
   const [tile, setTile] = useState(4)
@@ -20,14 +21,14 @@ export default function KernelLifecycleLab() {
     <Controls>
       <Range label="tile 边长" value={tile} min={1} max={4} onChange={value => { setTile(value); setStep(0) }} />
       <Range label="执行步骤" value={step} min={0} max={maximum} onChange={setStep} />
-      <label className="flex h-8 items-center gap-2 text-sm"><input type="checkbox" checked={edge} onChange={event => { setEdge(event.target.checked); setStep(0) }} className="accent-accent" />右下边缘输出块</label>
+      <Toggle label="右下边缘输出块" checked={edge} onChange={value => { setEdge(value); setStep(0) }} />
     </Controls>
     <div className="mt-3 flex items-center gap-3">
       <button type="button" title="上一步" aria-label="上一步" disabled={step === 0} onClick={() => setStep(step - 1)} className="h-9 w-9 rounded border border-rule bg-paper text-lg disabled:opacity-40">←</button>
       <output className="min-w-0 flex-1 text-center text-sm">第 {state.round + 1}/{state.rounds} 轮 · {kernelPhases[state.phase]}</output>
       <button type="button" title="下一步" aria-label="下一步" disabled={step === maximum} onClick={() => setStep(step + 1)} className="h-9 w-9 rounded border border-rule bg-paper text-lg disabled:opacity-40">→</button>
     </div>
-    <svg viewBox="0 0 340 642" className={`${pen.canvas} max-w-96`} role="img" aria-label={`当前阶段 ${kernelPhases[state.phase]}，每块 shared ${state.sharedBytes} 字节，${state.accumulatorSlots} 个累计槽，样本累计值 ${state.sample}`}>
+    <SvgCanvas viewBox="0 0 340 642" className={`${pen.canvas} max-w-96`} role="img" aria-label={`当前阶段 ${kernelPhases[state.phase]}，每块 shared ${state.sharedBytes} 字节，${state.accumulatorSlots} 个累计槽，样本累计值 ${state.sample}`}>
       <path d="M310 379H330V8H160V22m-4-5 4 5 4-5" className={pen.guide} />
       {labels.map(([label, detail, note], index) => <g key={label}>
         {index > 0 && <path d={`M160 ${22 + (index - 1) * 106 + 78}v20m-4-5 4 5 4-5`} className={pen.axis} />}
@@ -39,7 +40,7 @@ export default function KernelLifecycleLab() {
       <text x="12" y="570">每块 shared：2 × {tile}² × 4 = {state.sharedBytes} B</text>
       <text x="12" y="595">累计槽：{tile}² = {state.accumulatorSlots} 个 float32 值</text>
       <text x="12" y="620" className="text-[11px]">槽数不等于编译器报告的总寄存器数</text>
-    </svg>
+    </SvgCanvas>
     <Readout><Formula>{state.completedK === 0 ? String.raw`C_{${state.row},${state.col}}=0` : String.raw`C_{${state.row},${state.col}}=\sum_{q=0}^{${state.completedK - 1}} A_{${state.row},q} B_{q,${state.col}}=${state.sample}`}</Formula> · {state.outputWritten ? '已写回' : '尚未写回'} · {state.phase === 0 ? '本轮装载阶段' : state.phase === 3 || state.done ? '读取已回收，可进入下一轮' : '未完成回收，禁止覆盖本轮 shared'} · 教学顺序，非 GPU 时间线</Readout>
   </LabFrame>
 }

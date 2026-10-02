@@ -2,20 +2,22 @@
 title: 稀疏注意力
 question: 每个查询只读取一部分历史，怎样计算输出并判断代价
 description: 用同一组八位置的键和值，手算全注意力、固定稀疏 mask 和内容选择，再核对 gather、误差与选择成本。
-order: 8
+order: 6
 code:
-  - code/advanced/sparse_attention.py
+  - examples/advanced/sparse_attention.py
+prerequisites: ["principles/attention", "advanced/mla", "principles/kv-cache"]
+optional: true
 ---
 
-import { SparseSelectionLab } from '../../../components/labs/AdvancedLabs'
+import SparseSelectionLab from '../../../components/labs/SparseSelectionLab'
 
-[A7](/advanced/hybrid-attention/) 用固定大小状态汇总历史。本章保留 [P3](/principles/attention/) 的逐位置键和值，却让当前查询只读其中几项。这样做能减少主注意力读取的历史，但先要回答两个问题：**读取集合从哪里来，漏读的位置会怎样改变输出？**
+[A5](/advanced/hybrid-attention/) 用固定大小状态汇总历史。本章保留 [P3](/principles/attention/) 的逐位置键和值，却让当前查询只读其中几项。这样做能减少主注意力读取的历史，但先要回答两个问题：**读取集合从哪里来，漏读的位置会怎样改变输出？**
 
-阅读前建议掌握 P3 的 softmax 注意力、[P10](/principles/kv-cache/) 的历史 K/V、[A2](/advanced/mla/) 的缓存布局和 [S3](/systems/flash-attention/) 的精确注意力实现。下文始终使用一个查询、八个可见历史位置和标量键值；标量只为便于手算，一般向量公式随后给出。
+阅读前建议掌握 P3 的 softmax 注意力、[P12](/principles/kv-cache/) 的历史 K/V、[A2](/advanced/mla/) 的缓存布局和 [S3](/systems/flash-attention/) 的精确注意力实现。下文始终使用一个查询、八个可见历史位置和标量键值；标量只为便于手算，一般向量公式随后给出。
 
 ## 全部读取：建立可比较的基准
 
-历史位置编号 $j=0,\ldots,7$。设查询 $q=1$，头维度 $d_h=1$，键为 $k_j=\ln w_j$，其中 $w_j$ 是下表的正数。于是主注意力分数 $s_j=qk_j/\sqrt{d_h}=\ln w_j$，softmax 的指数恰好是 $w_j$。值 $v_j$ 也列在表中；它是加权求和的内容，不参与这个主注意力分数。
+历史位置编号 $j=0,\ldots,7$。设查询 $q=1$，头维度 $D_h=1$，键为 $k_j=\ln w_j$，其中 $w_j$ 是下表的正数。于是主注意力分数 $s_j=qk_j/\sqrt{D_h}=\ln w_j$，softmax 的指数恰好是 $w_j$。值 $v_j$ 也列在表中；它是加权求和的内容，不参与这个主注意力分数。
 
 | 位置 $j$ | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -58,15 +60,15 @@ $$
 
 上面的 `dense+mask` 是易检查的数学参考，却仍为八项算了分数。实际可按索引 **gather** 三份 K/V，再计算这三项的分数和 softmax。对于本例，它仍得到 $340/7$，因为分数、值和分母都对应同一集合。索引顺序可以改变，但键与值必须同步重排。
 
-向量情形下，单个头的查询 $q_i\in\mathbb R^{d_h}$、历史键 $k_j\in\mathbb R^{d_h}$、值 $v_j\in\mathbb R^{d_v}$。选中集合 $\mathcal S_i$ 后，对 $j\in\mathcal S_i$ 用 $s_{ij}=q_i^\top k_j/\sqrt{d_h}$ 代入上一节公式即可。单次查询的主注意力键点积从约 $T d_h$ 项减到 $k_s d_h$ 项，其中 $T$ 是可见长度、$k_s=|\mathcal S_i|$。这里尚未计选取和不规则内存读取。
+向量情形下，单个头的查询 $q_i\in\mathbb R^{D_h}$、历史键 $k_j\in\mathbb R^{D_h}$、值 $v_j\in\mathbb R^{D_v}$。选中集合 $\mathcal S_i$ 后，对 $j\in\mathcal S_i$ 用 $s_{ij}=q_i^\top k_j/\sqrt{D_h}$ 代入上一节公式即可。单次查询的主注意力键点积从约 $T D_h$ 项减到 $k_s D_h$ 项，其中 $T$ 是可见长度、$k_s=|\mathcal S_i|$。这里尚未计选取和不规则内存读取。
 
-运行 `python code/advanced/sparse_attention.py` 会复算上述全部数字，并比较 gather 与 `dense+mask`。脚本用 `float64` 检查数值误差，也拒绝重复或越界索引。
+运行 `uv run python -m examples.advanced.sparse_attention` 会复算上述全部数字，并比较 gather 与 `dense+mask`。脚本用 `float64` 检查数值误差，也拒绝重复或越界索引。
 
-<CodeFile path="code/advanced/sparse_attention.py" />
+<CodeFile path="examples/advanced/sparse_attention.py" symbol="gathered_attention" />
 
 ## 内容选择：indexer 决定集合，主注意力决定权重
 
-若有用信息可能在任意历史位置，[A4](/advanced/long-context/) 的最近窗口未必能保留它。可以先用一个较便宜的 **indexer** 给候选位置评分，再取 top-$k_s$。indexer 分数只负责选索引，不是上表的主注意力分数，也不直接作为输出权重。
+若有用信息可能在任意历史位置，[A3](/advanced/long-context/) 的最近窗口未必能保留它。可以先用一个较便宜的 **indexer** 给候选位置评分，再取 top-$k_s$。indexer 分数只负责选索引，不是上表的主注意力分数，也不直接作为输出权重。
 
 仍用这八项，令教学 indexer 的一维查询为 $u=1$，八个索引键为 $z=(8,0,0,7,0,0,0,9)$。索引分数 $I_j=uz_j$，top-3 按分数从高到低返回位置 $7,0,3$，集合仍是上一节的 $\{0,3,7\}$。将选中位置按位置升序排列，并同步排列 K/V 后，主注意力使用的指数权重是 **$w=(1,2,4)$**，得到 $340/7$；不能把索引分数 $(9,8,7)$ 当作 softmax 分数。
 
@@ -101,9 +103,9 @@ $$
 
 图下的 $2M\delta$ 只解释本章固定单层值的误差界，不能推出任务质量。
 
-对单次 decode，选取本身包括 indexer 查询投影、对 $T$ 个索引键评分、top-$k_s$、索引处理，之后才是 K/V gather 和主注意力。若索引维度为 $d_I$，朴素扫描评分约需 $O(Td_I)$；主注意力键点积约需 $O(k_sd_h)$，多个头还要乘各自头数。top-k 和 gather 的实际开销取决于算法及内存布局。八位置教学例只说明算子，不说明 GPU 一定更快。
+对单次 decode，选取本身包括 indexer 查询投影、对 $T$ 个索引键评分、top-$k_s$、索引处理，之后才是 K/V gather 和主注意力。若索引维度为 $D_I$，朴素扫描评分约需 $O(TD_I)$；主注意力键点积约需 $O(k_sD_h)$，多个头还要乘各自头数。top-k 和 gather 的实际开销取决于算法及内存布局。八位置教学例只说明算子，不说明 GPU 一定更快。
 
-对整段 prefill，每个查询都朴素扫描其历史时，索引评分仍有约 $O(T^2d_I)$ 工作量，主注意力部分约为 $O(Tk_sd_h)$。因此固定 $k_s$ 并不自动让**整个算法**成为线性序列成本。另一方面，若未来查询还能选中以前没选中的位置，历史 K/V 仍要存 $T$ 份；indexer 的历史索引键还可能增加状态。每步读取量和缓存容量必须分别算。
+对整段 prefill，每个查询都朴素扫描其历史时，索引评分仍有约 $O(T^2D_I)$ 工作量，主注意力部分约为 $O(Tk_sD_h)$。因此固定 $k_s$ 并不自动让**整个算法**成为线性序列成本。另一方面，若未来查询还能选中以前没选中的位置，历史 K/V 仍要存 $T$ 份；indexer 的历史索引键还可能增加状态。每步读取量和缓存容量必须分别算。
 
 稀疏 gather 可能产生不连续访存；按块读取有时多读一些位置却更高效。最终要在相同长度、batch、精度和硬件上同时测质量、延迟、显存与读写量，不能只用大 O 或一次 CPU 输出代替性能实验。
 
@@ -127,7 +129,7 @@ MLA 决定每个历史位置的 K/V 怎样压缩存储与恢复；DSA 决定当�
 <details>
 <summary>indexer 把位置 7 评分最高。主注意力一定给位置 7 最大权重吗？</summary>
 
-不一定。indexer 分数只决定入选；入选后的权重由主注意力的 $q_i^\top k_j/\sqrt{d_h}$ 和同集合 softmax 决定。本例位置 7 恰好也有最大的主注意力指数 4，但改变索引键而不改主注意力键即可让两个排序不同。
+不一定。indexer 分数只决定入选；入选后的权重由主注意力的 $q_i^\top k_j/\sqrt{D_h}$ 和同集合 softmax 决定。本例位置 7 恰好也有最大的主注意力指数 4，但改变索引键而不改主注意力键即可让两个排序不同。
 
 </details>
 
@@ -138,7 +140,7 @@ MLA 决定每个历史位置的 K/V 怎样压缩存储与恢复；DSA 决定当�
 
 </details>
 
-本章解决了**如何选择并计算部分历史**，也看到了选择失误与额外成本。[A9](/advanced/multimodal/) 改看输入端：图像如何变成文本 Decoder 能读取的向量序列。
+本章解决了**如何选择并计算部分历史**，也看到了选择失误与额外成本。[A7](/advanced/multimodal/) 改看输入端：图像如何变成文本 Decoder 能读取的向量序列。
 
 ## 原始资料
 

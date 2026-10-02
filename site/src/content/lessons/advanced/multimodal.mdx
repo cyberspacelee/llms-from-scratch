@@ -2,14 +2,16 @@
 title: 视觉语言模型
 question: 图像怎样进入文本 Decoder，并影响一句回答
 description: 用一张 4×4 图像追踪 patch、视觉特征、对话序列、文本损失与生成缓存。
-order: 9
+order: 7
 code:
-  - code/advanced/multimodal.py
+  - examples/advanced/multimodal.py
+prerequisites: ["principles/complete-transformer", "post-training/instruction-tuning"]
+optional: true
 ---
 
-import { MultimodalAlignmentLab } from '../../../components/labs/AdvancedLabs'
+import MultimodalAlignmentLab from '../../../components/labs/MultimodalAlignmentLab'
 
-设用户上传一张灰度图，问“上半部还是下半部更亮？”。文本 Decoder 已经会根据前面的 token 预测下一个 token，但文本 token 的 embedding 不包含这张图像的像素信息。本章要将视觉特征接入输入序列，让模型在回答“下半部”时能够利用图像。阅读前建议掌握 [P4 Decoder](/principles/decoder/) 的因果注意力、[P9 生成](/principles/generation/) 的逐 token 预测；训练部分用到 [T5 指令微调](/training/instruction-tuning/) 的回复位置损失。
+设用户上传一张灰度图，问“上半部还是下半部更亮？”。文本 Decoder 已经会根据前面的 token 预测下一个 token，但文本 token 的 embedding 不包含这张图像的像素信息。本章要将视觉特征接入输入序列，让模型在回答“下半部”时能够利用图像。阅读前建议掌握 [P4 Decoder](/principles/decoder/) 的因果注意力、[P11 生成](/principles/generation/) 的逐 token 预测；训练部分用到 [H1 指令微调](/post-training/instruction-tuning/) 的回复位置损失。
 
 我们沿用 [LLaVA 原论文](https://arxiv.org/html/2304.08485v2) 的三段结构：视觉编码器提取图像特征，连接器把特征送进语言模型的隐藏空间，文本 Decoder 读取图像和问题后生成回答。下面的数字是可复算的教学尺寸，不是 LLaVA 的参数配置。
 
@@ -40,7 +42,7 @@ $$
 
 ## 连接器：怎样接到语言模型输入
 
-假设文本 Decoder 的 embedding 宽度为 $d=8$。连接器（projector）把每个六维视觉特征映射到八维：
+假设文本 Decoder 的 embedding 宽度为 $D=8$。连接器（projector）把每个六维视觉特征映射到八维：
 
 $$
 z_r=W_{\mathrm{conn}}h_r+b_{\mathrm{conn}},\qquad
@@ -99,9 +101,9 @@ $$
 
 ## CPU 核对：同一图像走到损失
 
-运行 `python code/advanced/multimodal.py`。脚本使用本章的 0–15 图像，核对四个 patch 及其均值、四行八维视觉向量、九位置序列、位置 6/7 的监督和连接器梯度。它还把图像上下半部互换，核对同一问题的视觉输入确实改变 logits；这个检查只证明数值通路存在，不证明随机权重会选择正确答案。
+运行 `uv run python -m examples.advanced.multimodal`。脚本使用本章的 0–15 图像，核对四个 patch 及其均值、四行八维视觉向量、九位置序列、位置 6/7 的监督和连接器梯度。它通过统一 `Transformer` 的 `inputs_embeds` 接口输入这九行向量；冻结语言模型参数时，连接器仍收到文本梯度。脚本核对先 prefill 七行再续入两行与完整前向一致，并把图像上下半部互换，核对同一问题的视觉输入确实改变 logits；这个检查只证明数值通路存在，不证明随机权重会选择正确答案。
 
-<CodeFile path="code/advanced/multimodal.py" />
+<CodeFile path="examples/advanced/multimodal.py" region="visual_prefix" />
 
 ## 变体与边界：为什么不能把所有模型当成四块图
 

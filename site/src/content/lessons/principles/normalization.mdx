@@ -1,0 +1,109 @@
+---
+title: 归一化与残差路径
+question: 同样的输入换用 LayerNorm 或 RMSNorm，以及移动归一化位置，会改变什么
+description: 从基础 Decoder 的二维残差流出发，分别核对统计轴、平移与缩放，以及 Pre-Norm 和 Post-Norm 的计算图。
+prerequisites:
+  - principles/decoder
+order: 8
+code:
+  - src/llms_from_scratch/layers/normalization.py
+  - src/llms_from_scratch/chapters/ch05_normalization.py
+---
+
+[P4 基础 Decoder](/principles/decoder/) 已用两次残差把注意力和 FFN 接回隐藏状态。现在固定它的第一行输入 $x=(2,0)$，只研究分支入口的归一化：为什么 LayerNorm 要减均值，RMSNorm 不减均值又会怎样？完成这个比较后，再单独移动 norm 的位置。这样可以区分“换算子”和“换计算图”，而不把 RoPE、头共享和 FFN 一起更换。
+
+本章沿用 $D=2$、缩放 $\gamma=(1,1)$、平移 $b=(0,0)$、$\epsilon=1$ 的手算配置。$\epsilon$ 取大是为了复算，运行时配置必须记录实际值。输入一般为 $(B,T,D)$，下列统计量均沿最后的特征轴计算，输出形状不变。
+
+## 先把一行的均值、方差和平方平均算出来
+
+对 $x=(2,0)$，均值是 $\mu=1$，总体方差是 $v=((2-1)^2+(0-1)^2)/2=1$，平方平均是 $r^2=(2^2+0^2)/2=2$。平方平均与方差的关系由展开平方得到：
+
+$$
+\frac1D\sum_a x_a^2
+=\frac1D\sum_a(x_a-\mu)^2+\mu^2=v+\mu^2.
+$$
+
+所以两个分母在均值非零时通常不同。这里分母使用 $D$，因为我们定义的是层内算子，不是在估计总体方差。
+
+LayerNorm 与本课程采用的无平移 RMSNorm 分别为
+
+$$
+\operatorname{LN}(x)_a=\gamma_a\frac{x_a-\mu}{\sqrt{v+\epsilon}}+b_a,
+\qquad
+\operatorname{RMSNorm}(x)_a=\gamma_a\frac{x_a}{\sqrt{\frac1D\sum_c x_c^2+\epsilon}}.
+$$
+
+代回本行，LayerNorm 得到 $(1/\sqrt2,-1/\sqrt2)$，RMSNorm 得到 $(2/\sqrt3,0)$。换算子不仅改变尺度，也改变方向；已经训练好的投影不能直接换掉 norm 后仍期待原来的 logits。
+
+<Figure src="principles/norm-compare.svg" alt="LayerNorm 减特征均值，RMSNorm 按特征平方平均缩放">图用四维向量展示两种统计操作；数值主例仍是 `(2,0)`。每个 token 自己计算一组统计量，图中的箭头没有跨 token 传递信息。</Figure>
+
+## 平移和缩放：怎样用反例区分两种算子
+
+把输入每项加 2，得到 $x'=(4,2)$。LayerNorm 的中心化结果仍是 $(1,-1)$，所以输出不变；RMSNorm 的平方平均变成 10，输出为 $(4/\sqrt{11},2/\sqrt{11})$，第二项不再是零。RMSNorm 不消除整行均值。
+
+再把原输入乘 2，得到 $(4,0)$。RMSNorm 输出为 $(4/3,0)$，不等于原来的 $(2/\sqrt3,0)$：$\epsilon=1$ 阻止了精确的缩放不变性。忽略 $\epsilon$ 且输入非零时，对正数 $c$ 有
+
+$$
+\frac{cx}{\sqrt{\frac1D\sum_a(cx_a)^2}}
+=\frac{cx}{c\sqrt{\frac1D\sum_a x_a^2}}
+=\frac{x}{\sqrt{\frac1D\sum_a x_a^2}}.
+$$
+
+负比例缩放还会翻转符号，零向量则必须由 $\epsilon>0$ 保证安全。即使 $\gamma=1$、忽略 $\epsilon$，RMSNorm 输出的平方范数也是 $D$，而非 1；逐维可训练缩放还会进一步改变它。不能把它直接当作单位欧氏向量。
+
+### 轴错误会破坏因果性
+
+若将 $(B,T,D)$ 误当成沿时间轴归一化，BOS 的均值会包含未来 A、B 的特征。注意力虽屏蔽未来，未来信息已经通过 norm 流入 BOS。正确实现保留统计量形状 $(B,T,1)$，可广播回本行 $D$ 个特征，而不合并样本或位置。
+
+<CodeFile path="src/llms_from_scratch/layers/normalization.py" symbol="RMSNorm" />
+
+对照实现时查三件事：归约轴是 `-1`，$\epsilon$ 加在平方根里面，缩放参数只有 $D$ 项。使用低精度输入时还要核对统计计算的数据类型；这是数值协议的一部分。
+
+## Pre-Norm 与 Post-Norm：改变的是残差计算图
+
+固定同一个分支函数 $f$，P4 的 Pre-Norm 是 $h=x+f(\operatorname{LN}(x))$；Post-Norm 是 $h=\operatorname{LN}(x+f(x))$。这两种表达式既不是同一个函数，也不共享同一条梯度旁路。
+
+<Figure src="principles/pre-post-norm.svg" alt="Pre-Norm 在分支入口归一化，Post-Norm 在残差相加后归一化">沿主路径读图：Pre-Norm 的旁路从 x 直接到相加；Post-Norm 的相加结果还要通过 norm。归一化名称相同，所在位置却改变了整个块。</Figure>
+
+暂取 $f=0$，Pre-Norm 输出仍为 $(2,0)$，Post-Norm 输出为 $(1/\sqrt2,-1/\sqrt2)$。这个反例无需讨论训练，就能证明二者不能互换。
+
+从 [M9 链式法则](/math/backprop/) 看，Pre-Norm 的局部雅可比为 $I+J_fJ_{\mathrm{LN}}$，Post-Norm 为 $J_{\mathrm{LN}}(I+J_f)$。前者含直接的单位矩阵项，后者整条路径都经过 norm 的雅可比；这解释了结构差别。训练是否稳定还依赖初始化、层深和优化器，不能从旁路存在直接推出质量或收敛保证。
+
+## 运行比较：只改变 norm 和它的位置
+
+运行 `uv run llms-from-scratch chapter --chapter 05`。实验使用另一套 $D=32$ 的随机输入，将共享实现与 PyTorch 的 LayerNorm/RMSNorm 公式核对，并检查 `layer/rms × pre/post` 四种块配方。它没有采用本章 $\epsilon=1$ 的手算数值，也没有同时启用 GQA 或 SwiGLU。
+
+<CodeFile path="src/llms_from_scratch/chapters/ch05_normalization.py" symbol="run" />
+
+本课程之后的组合模型选择 Pre-RMSNorm，基础模型仍使用 Pre-LayerNorm。二者通过同一 `ModelConfig`/`BlockConfig` 表达，实验只更换实际需要比较的字段，不另造一套模型类。历史模型的默认配置是解释对象，不能作为所有现代模型的约定。
+
+## 练习与核对
+
+<details>
+<summary>保持本章参数，把输入改成 `(2,2)`。两个输出各是什么？</summary>
+
+LayerNorm 的均值为 2、方差为零，中心化后输出为 `(0,0)`。RMSNorm 的平方平均为 4，输出为 $(2/\sqrt5,2/\sqrt5)$。有 $\epsilon>0$ 时，常量向量并不会导致除零。
+
+</details>
+
+<details>
+<summary>同一 batch 的另一条样本从 `(2,0)` 改成 `(100,100)`，本行 norm 应变化吗？</summary>
+
+不应变化。每条样本、每个位置沿自己的特征轴计算统计量。若本行随另一条样本改变，说明实现把 batch 轴也放进了归约。
+
+</details>
+
+<details>
+<summary>一个块两处 norm，另有末层 norm；D=12 时，无平移 RMSNorm 与带平移 LayerNorm 各有多少参数？</summary>
+
+RMSNorm 每处 12 个缩放参数，三处共 36；LayerNorm 每处各 12 个缩放和 12 个平移，三处共 72。norm 没有跨 token 的参数表，数量不随 T 增加。
+
+</details>
+
+接下来 [P9 查询头怎样共享 K/V](/principles/head-sharing/) 固定归一化，单独研究注意力内部的投影宽度与头映射。
+
+## 原始资料
+
+- [Layer Normalization](https://arxiv.org/abs/1607.06450)：特征内统计与仿射参数。
+- [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467)：RMSNorm。
+- [On Layer Normalization in the Transformer Architecture](https://proceedings.mlr.press/v119/xiong20b.html)：Pre-Norm 与 Post-Norm 的分析条件。

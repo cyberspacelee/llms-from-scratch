@@ -4,7 +4,8 @@ question: 同一个 PyTorch 函数为何首次调用可能有编译开销，换�
 description: 用一个多项式追踪 eager 执行、图捕获、梯度、guards、图中断和后端执行，再判断编译成本何时值得付出。
 order: 7
 code:
-  - code/frameworks/torch_compile.py
+  - examples/frameworks/torch_compile.py
+prerequisites: ["frameworks/data-and-training"]
 ---
 
 import FrameworkCompileLab from '../../../components/labs/FrameworkCompileLab'
@@ -67,7 +68,7 @@ flowchart LR
 | 长度 3 | 尺寸改变 | 捕获第 2 张 | 复用 |
 | 改成 float32 | dtype 改变 | 需要相容版本 | 捕获第 2 张 |
 
-上表里静态模式最后一格没有给出脚本计数，因为脚本只在动态模式验证那一步。它表达的是旧 float64 版本不能直接充当任意 float32 输入的通用保证。重编译日志比猜测某个 guard 更可靠：`TORCH_LOGS="recompiles,guards" python3 code/frameworks/torch_compile.py`。
+上表里静态模式最后一格没有给出脚本计数，因为脚本只在动态模式验证那一步。它表达的是旧 float64 版本不能直接充当任意 float32 输入的通用保证。重编译日志比猜测某个 guard 更可靠：`TORCH_LOGS="recompiles,guards" uv run python -m examples.frameworks.torch_compile`。
 
 ## 捕获不到的部分：图中断如何改变边界
 
@@ -84,7 +85,7 @@ def segmented(value):
 
 输入 $(1,2)$ 经三步得到 $(2,4)\to(3,5)\to(9,15)$。默认允许**图中断**：Dynamo 可在禁用区域前后各捕获一段图，中间按 eager 执行；脚本的计数 backend 因此收到两张图。设 `fullgraph=True` 要求整个调用属于可捕获区域，此例会报错。这里的“两张”是同一调用被分段，上一节的“两张”是不同输入需要不同版本；原因和排查方式不同。
 
-实际图中断可能来自不支持的 Python 行为、外部调用或显式禁用。张量数值驱动的 Python 分支也要审查，因为捕获时无法只靠 shape 判断分支；具体处理能力随版本与写法变化。不要为了消除中断而无条件改写语义：`torch.where` 会计算其参数表达式，不能充当任意惰性 `if`。先用 `TORCH_LOGS="graph_breaks" python3 code/frameworks/torch_compile.py` 确定发生位置，再决定把 I/O 移到编译区域外、接受分段，或改写可捕获的计算。[Dynamo 核心概念](https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/compile/programming_model.dynamo_core_concepts.html) 给出图中断与 guards 的定义。
+实际图中断可能来自不支持的 Python 行为、外部调用或显式禁用。张量数值驱动的 Python 分支也要审查，因为捕获时无法只靠 shape 判断分支；具体处理能力随版本与写法变化。不要为了消除中断而无条件改写语义：`torch.where` 会计算其参数表达式，不能充当任意惰性 `if`。先用 `TORCH_LOGS="graph_breaks" uv run python -m examples.frameworks.torch_compile` 确定发生位置，再决定把 I/O 移到编译区域外、接受分段，或改写可捕获的计算。[Dynamo 核心概念](https://docs.pytorch.org/docs/2.14/user_guide/torch_compiler/compile/programming_model.dynamo_core_concepts.html) 给出图中断与 guards 的定义。
 
 下面的回放只用 shape 作为教学 guard，初始向量为开篇的 $(-2,0,2)$。它展示版本复用的规则；实际 PyTorch 的全部 guards 和捕获次数须由日志及计数 backend 核对。
 
@@ -114,24 +115,24 @@ $$
 
 ## 放回模型：选择稳定的编译区域
 
-在 [P8 现代 Decoder](/principles/modern-decoder/) 中，RMSNorm 与 SwiGLU 都包含可分析的张量计算；注意力还涉及矩阵乘与专用算子。可以先对模型调用编译，并把数据加载、日志、checkpoint 保存放在调用之外。保存仍使用原模型的 `state_dict()`；编译缓存不能替代 F6 中恢复模型与优化器状态的协议。
+在 [P13 现代 Decoder](/principles/complete-transformer/) 中，RMSNorm 与 SwiGLU 都包含可分析的张量计算；注意力还涉及矩阵乘与专用算子。可以先对模型调用编译，并把数据加载、日志、checkpoint 保存放在调用之外。保存仍使用原模型的 `state_dict()`；编译缓存不能替代 F6 中恢复模型与优化器状态的协议。
 
 ```python
 compiled_model = torch.compile(model)
 optimizer.zero_grad(set_to_none=True)
-logits = compiled_model(inputs)
+logits = compiled_model(inputs).logits
 loss = loss_fn(logits, targets)
 loss.backward()
 optimizer.step()
 ```
 
-这里 `compiled_model` 的前向及其求导路径可能参与编译，外面的数据、损失函数调用和优化器步骤没有因这行代码自动进入同一张图。LLM 推理的 prefill 与 decode 输入形状、缓存状态不同，也要分别核对正确性、重编译与时间；[P10 KV cache](/principles/kv-cache/) 定义缓存语义，[S6 GPU 执行器](/systems/engine-execution/) 再区分算子编译与 CUDA Graph 重放。尺寸分桶可减少形状种类，却引入 padding 计算，并要求正确处理 mask 与真实长度；不能只为减少编译次数而忽略输出语义。
+这里 `compiled_model` 的前向及其求导路径可能参与编译，外面的数据、损失函数调用和优化器步骤没有因这行代码自动进入同一张图。LLM 推理的 prefill 与 decode 输入形状、缓存状态不同，也要分别核对正确性、重编译与时间；[P12 KV cache](/principles/kv-cache/) 定义缓存语义，[S6 GPU 执行器](/systems/engine-execution/) 再区分算子编译与 CUDA Graph 重放。尺寸分桶可减少形状种类，却引入 padding 计算，并要求正确处理 mask 与真实长度；不能只为减少编译次数而忽略输出语义。
 
 ## 完整验证
 
-<CodeFile path="code/frameworks/torch_compile.py" />
+<CodeFile path="examples/frameworks/torch_compile.py" symbol="polynomial" />
 
-运行 `python3 code/frameworks/torch_compile.py`，应看到解析梯度、静态两份图、动态一份图、dtype 新版本和图中断断言均通过。使用 `--inductor` 时还会在 CPU 上核对默认后端的前向与反向；这一步生成实际代码，但仍没有测量加速。`torch.compiler.reset()` 只为隔离脚本中的实验缓存，不该放进训练循环逐步调用。
+运行 `uv run python -m examples.frameworks.torch_compile`，应看到解析梯度、静态两份图、动态一份图、dtype 新版本和图中断断言均通过。使用 `--inductor` 时还会在 CPU 上核对默认后端的前向与反向；这一步生成实际代码，但仍没有测量加速。`torch.compiler.reset()` 只为隔离脚本中的实验缓存，不该放进训练循环逐步调用。
 
 ## 常见误区
 

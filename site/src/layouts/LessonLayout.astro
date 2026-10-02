@@ -1,6 +1,6 @@
 ---
 import BaseLayout from './BaseLayout.astro'
-import { getLessons, readingMinutes, repoUrl, url, type Lesson } from '../lib/lessons'
+import { getLessons, getLessonContext, readingMinutes, repoUrl, url, type Lesson } from '../lib/lessons'
 import { tracks } from '../lib/tracks'
 
 interface Props {
@@ -10,9 +10,7 @@ interface Props {
 
 const { lesson, headings } = Astro.props
 const lessons = await getLessons()
-const index = lessons.indexOf(lesson)
-const previous = lessons[index - 1]
-const next = lessons[index + 1]
+const { previous, next, prerequisites, route } = await getLessonContext(lesson)
 const siblings = lessons.filter((item) => item.track === lesson.track)
 const sections = headings.filter((heading) => heading.depth === 2)
 const minutes = readingMinutes(lesson.entry.body ?? '')
@@ -48,7 +46,7 @@ const label = (item: Lesson) => (item.isIntro ? '导读' : item.code)
               class="grid grid-cols-[2.25rem_minmax(0,1fr)] items-baseline rounded-lg px-2 py-1 text-sm text-muted no-underline hover:bg-sunken hover:text-ink aria-[current=page]:bg-accent-soft aria-[current=page]:font-semibold aria-[current=page]:text-accent-strong"
             >
               <span class="font-mono text-xs font-medium">{label(item)}</span>
-              <span>{item.title}</span>
+              <span>{item.title}{item.entry.data.optional && <span class="ml-1 text-xs font-normal text-muted">· 选读</span>}</span>
             </a>
             {item === lesson && sections.length > 0 && (
               <ol class="mt-1 mb-3 ml-11 list-none border-l border-rule p-0">
@@ -81,20 +79,27 @@ const label = (item: Lesson) => (item.isIntro ? '导读' : item.code)
         <h1 class="text-2xl font-semibold tracking-tight">{lesson.title}</h1>
         <p class="mt-4 mb-0 text-lg text-muted">{lesson.description}</p>
         <ul class="mt-4 mb-0 flex list-none flex-wrap gap-x-5 gap-y-1 p-0 text-xs text-muted">
-          <li>阅读约 <strong class="font-semibold text-ink">{minutes}</strong> 分钟</li>
+          <li>正文阅读约 <strong class="font-semibold text-ink">{minutes}</strong> 分钟 · 实验与实践另计</li>
+          {lesson.entry.data.optional && <li>选读分支</li>}
           {sections.length > 0 && <li><strong class="font-semibold text-ink">{sections.length}</strong> 节</li>}
           {lesson.entry.data.code.map((path) => (
-            <li>验证脚本 <a href={`${repoUrl}/blob/master/${path}`} class="font-mono">{path}</a></li>
+            <li class="min-w-0">验证脚本 <a href={`${repoUrl}/blob/master/${path}`} class="font-mono wrap-anywhere">{path}</a></li>
           ))}
         </ul>
       </header>
 
-      <article class:list={['prose prose-lesson max-w-none text-base prose-headings:font-semibold prose-h2:mt-16 prose-h2:mb-4 prose-h2:text-xl prose-h3:mt-8 prose-h3:mb-3 prose-h3:text-lg prose-a:font-normal prose-a:decoration-1 prose-a:underline-offset-[0.2em] hover:prose-a:decoration-2 prose-li:my-1.5 prose-img:my-0 prose-hr:my-12', lesson.track.id === 'math' && 'math-lesson']}>
+      {prerequisites.length > 0 && <nav aria-label="本章先修" class="mb-8 text-sm text-muted">
+        <span class="mr-3 font-semibold">先修</span>
+        {prerequisites.map(item => <a href={url(item.path)} class="mr-4 inline-block text-accent underline underline-offset-4">{item.code} · {item.title}</a>)}
+      </nav>}
+
+      <article class="prose prose-lesson max-w-none text-base prose-headings:font-semibold prose-h2:mt-16 prose-h2:mb-4 prose-h2:text-xl prose-h3:mt-8 prose-h3:mb-3 prose-h3:text-lg prose-a:font-normal prose-a:decoration-1 prose-a:underline-offset-[0.2em] hover:prose-a:decoration-2 prose-li:my-1.5 prose-img:my-0 prose-hr:my-12">
         <slot />
       </article>
 
       {(previous || next) && (
         <nav aria-label="上一章与下一章" class="mt-16 grid gap-4 sm:grid-cols-2">
+          {route && <p class="col-span-full text-xs text-muted">推荐路线 · {route.title}</p>}
           {previous && (
             <a href={url(previous.path)} rel="prev" class="block rounded-lg border border-rule p-4 text-ink no-underline hover:border-accent">
               <small class="block text-xs text-muted">上一章 · {previous.track.label} {label(previous)}</small>

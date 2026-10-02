@@ -4,7 +4,8 @@ question: 一个 batch 的平均损失能代表整体吗
 description: 从四条记录的抽样规则出发，算出期望与方差，判断 batch 均值落在给定误差内的把握有多大。
 order: 3
 code:
-  - code/math/probability.py
+  - examples/math/probability.py
+prerequisites: ["math/events", "math/bayes"]
 ---
 
 import MathBatchLab from '../../../components/labs/MathBatchLab'
@@ -212,7 +213,7 @@ assert np.allclose(X.var(axis=0, ddof=0), [3., .25])
 
 </details>
 
-下一章 [M4 信息量与熵](/math/information/) 将期望用于另一个量：对每种结果的负对数概率求平均，再区分目标自身的不确定性与模型预测的代价。完整数值验证见 `code/math/probability.py`，在仓库根目录运行 `python code/math/probability.py`。
+下一章 [M4 信息量与熵](/math/information/) 将期望用于另一个量：对每种结果的负对数概率求平均，再区分目标自身的不确定性与模型预测的代价。完整数值验证见 `examples/math/probability.py`，在仓库根目录运行 `uv run python -m examples.math.probability`。
 
 ## 资料
 

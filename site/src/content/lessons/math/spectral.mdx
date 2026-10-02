@@ -1,18 +1,22 @@
 ---
-title: 谱分解、低秩与数值稳定性
-question: 特征值和奇异值怎样解释线性变换、优化与求解误差
-description: 用相联系的二维矩阵 A 与 W，区分特征值、奇异值、二次损失曲率、截断 SVD 误差和条件数。
+title: 特征分解与梯度下降
+question: 哪个方向的曲率限制梯度下降步长
+description: 沿同一个二维对称矩阵分解输入、计算梯度，判断两个特征方向的更新是否收缩。
 order: 11
 code:
-  - code/math/spectral.py
+  - examples/math/spectral.py
+prerequisites:
+  - math/linear-algebra
+  - math/calculus
+optional: true
 ---
 
 import SpectralLab from '../../../components/labs/SpectralLab'
-import LowRankLab from '../../../components/labs/LowRankLab'
 
-已知线性映射 $W:\mathbb R^d\to\mathbb R^m$，只看矩阵元素很难判断哪种单位输入使输出变化最大。平方损失 $L(x)=\tfrac12\|Wx\|_2^2$ 的 Hessian 则是另一个矩阵 $A=W^\top W$：它的哪个特征值限制梯度下降的步长？本章先求 $A$ 的特征值，再由 $W$ 的奇异值解释低秩近似和求解敏感性。
 
-阅读前建议掌握 [M6 向量与矩阵](/math/linear-algebra/) 的矩阵乘法、秩与正交，以及 [M7 微积分与梯度](/math/calculus/) 的梯度和梯度下降；本章会用二维例子推导所需的二次型梯度。先固定一对正交输入向量及相联系的 $A$、$W$；后面讨论非方阵表示的线性映射和病态求解时，会明确指出矩阵尺寸或奇异值的变化。浮点舍入放在主线完成后讨论。
+已知线性映射 $W:\mathbb R^d\to\mathbb R^m$，只看矩阵元素很难判断哪种单位输入使输出变化最大。平方损失 $L(x)=\tfrac12\|Wx\|_2^2$ 的 Hessian 则是另一个矩阵 $A=W^\top W$：它的哪个特征值限制梯度下降的步长？本章求出 $A$ 的特征值，随后沿两个特征方向判断一次梯度更新是否收缩。线性层的奇异值、压缩和求解误差在 [低秩与条件数](/math/low-rank/) 中继续讨论。
+
+阅读前建议掌握 [M6 向量与矩阵](/math/linear-algebra/) 的矩阵乘法、秩与正交，以及 [M7 微积分与梯度](/math/calculus/) 的梯度和梯度下降；本章会用二维例子推导所需的二次型梯度。以下固定二维实对称矩阵。先算一个输入的输出，再解释为什么两个特征方向让更新规则变得简单。
 
 ## 对称矩阵 A：先找特征向量与特征值
 
@@ -41,12 +45,7 @@ $$
 
 $v$ 必须非零，否则任意 $\lambda$ 都能满足等式。在本例，$Aq_1=q_1$、$Aq_2=9q_2$：这两个特征向量对应的特征值为 1 和 9。一般输入 $x=c_1q_1+c_2q_2$ 则变成 $Ax=c_1q_1+9c_2q_2$，两个分量按各自特征值变化，输出通常会转向。若特征值为负，特征向量还会翻转；若为零，该分量被压到零。
 
-<div className="sm:hidden">
-<Figure src="math/spectral-axes-mobile.svg" alt="输入向量沿两个特征向量分解，分量分别乘特征值 1 和 9 后得到输出向量" minWidth="0">同一矩阵 $A=Q\operatorname{diag}(1,9)Q^\top$。虚线是 $q_1,q_2$，两幅图采用同一比例。</Figure>
-</div>
-<div className="hidden sm:block">
-<Figure src="math/spectral-axes.svg" alt="输入向量沿两个特征向量分解，分量分别乘特征值 1 和 9 后得到输出向量" minWidth="37rem">同一矩阵 $A=Q\operatorname{diag}(1,9)Q^\top$。虚线是 $q_1,q_2$，两幅图采用同一比例。</Figure>
-</div>
+<Figure src="math/spectral-axes.svg" mobileSrc="math/spectral-axes-mobile.svg" alt="输入向量沿两个特征向量分解，分量分别乘特征值 1 和 9 后得到输出向量" minWidth="37rem">同一矩阵 $A=Q\operatorname{diag}(1,9)Q^\top$。虚线是 $q_1,q_2$，两幅图采用同一比例。</Figure>
 
 实对称矩阵都能选择这样的正交特征基，写为 $A=Q\Lambda Q^\top$。正交变换不改长度：$\|Qy\|_2^2=y^\top Q^\top Qy=\|y\|_2^2$。一般方阵则不保证实特征值或完整的正交特征基；这也是后面需要 SVD 的原因。
 
@@ -94,12 +93,7 @@ $$
 | 0.2 | 0.8 | −0.8 | 都收缩，大曲率方向振荡 |
 | 0.25 | 0.75 | −1.25 | 一个方向发散 |
 
-<div className="sm:hidden">
-<Figure src="math/spectral-steps-mobile.svg" alt="同一高曲率方向在学习率 0.1 时收敛，在 0.25 时交替翻转并放大" minWidth="0">高曲率特征值为 9，从 $y_0=1$ 出发。上下两图比较不同学习率；横轴是更新步数，横线表示零。</Figure>
-</div>
-<div className="hidden sm:block">
-<Figure src="math/spectral-steps.svg" alt="同一高曲率方向在学习率 0.1 时收敛，在 0.25 时交替翻转并放大" minWidth="37rem">高曲率特征值为 9，从 $y_0=1$ 出发。左右两图比较不同学习率；横轴是更新步数，横线表示零。</Figure>
-</div>
+<Figure src="math/spectral-steps.svg" mobileSrc="math/spectral-steps-mobile.svg" alt="同一高曲率方向在学习率 0.1 时收敛，在 0.25 时交替翻转并放大" minWidth="37rem">高曲率特征值为 9，从 $y_0=1$ 出发。左右两图比较不同学习率；横轴是更新步数，横线表示零。</Figure>
 
 这与 [M7](/math/calculus/) 用的是同一判断方法，但不是同一个步长上界：M7 的两个方向系数为 1、4，所以上界是 $2/4=1/2$；本例系数为 1、9，上界是 $2/9$。对于此二次损失，所有方向恒定不变，结论是精确的；神经网络的损失通常不是二次式，AdamW 也不是固定步长纯梯度下降，不能拿此界保证完整训练收敛。
 
@@ -118,195 +112,38 @@ Hessian $\mathcal H$（海森矩阵）的元素是二阶偏导。在二阶连续
 
 在正定二次问题中，若最小和最大特征值为 $m,M$，最坏方向的收缩率是 $\max(|1-\eta m|,|1-\eta M|)$。令两端相等得到最优固定步长 $\eta_*=2/(M+m)$、收缩因子 $(M-m)/(M+m)$。此处 $m=1,M=9$，故 $\eta_*=0.2$、因子 $0.8$。这是预条件的动机之一，不是 Adam 的收敛证明。
 
-## SVD：A 的特征向量怎样对应 W 的输入奇异向量
+## 在实验中恢复主例
 
-刚才的 $A$ 同时可以写成一个线性层的 $W^\top W$。取
+默认特征轴角度约为 $36.87^\circ$，第二特征值为 9，输入方向为零度，正好是正文 $x=(1,0)$。先算出 $Ax=(3.88,-3.84)$，再核对实验读数。只把第二特征值改成 1：此时 $A=QQ^\top=I$，转动特征轴不会再改变输出。
 
-$$
-W=\begin{bmatrix}1&0\\0&3\end{bmatrix}Q^\top
-=\begin{bmatrix}0.8&0.6\\-1.8&2.4\end{bmatrix},
-\qquad W^\top W=Q\begin{bmatrix}1&0\\0&9\end{bmatrix}Q^\top=A.
-$$
+<SpectralLab mode="eigen" client:visible />
 
-因此 $Wq_1=e_1$、$Wq_2=3e_2$，其中 $q_i\in\mathbb R^2$ 是输入向量，$e_i\in\mathbb R^2$ 是输出向量。前面的损失也可读成 $L(x)=\tfrac12\|Wx\|_2^2$：$W$ 沿这两个输入向量的奇异值为 1 和 3，损失的 Hessian $A=W^\top W$ 沿它们的特征值为 1 和 9。输入向量相同，输出向量不必与它们相同。
+接着将第二特征值改为 16，自己判断学习率 0.2 是否安全。实验显示变换，步长结论仍由 $|1-\eta\lambda_i|<1$ 逐项判断，不能靠一张椭圆猜收敛。
 
-<Definition term="奇异值分解" source="https://zh.wikipedia.org/wiki/奇异值分解">
-  任意实矩阵 $W\in\mathbb R^{m\times d}$ 都可写为 $W=U\Sigma V^\top$；输入方向 $V$、输出方向 $U$ 各自正交，$\Sigma$ 的对角元是非负奇异值。
-</Definition>
+## 代码核对
 
-按奇异值从大到小排列，本例 $s_1=3,v_1=q_2,u_1=e_2$；$s_2=1,v_2=q_1,u_2=e_1$。于是 $W=3e_2q_2^\top+e_1q_1^\top$。顺序与特征分解中先写 1 后写 9 不同，因为 SVD 惯例先列最大奇异值。$W^\top W$ 的特征值恰为奇异值的平方。
+<CodeFile path="examples/math/spectral.py" region="eigen" />
 
-线性层的权重也可以是非方阵。给本例 $W$ 右边添一列零，就得到从 $\mathbb R^3$ 到 $\mathbb R^2$ 的线性映射 $\widetilde W=[W\ \mathbf0]\in\mathbb R^{2\times3}$：前两个输入奇异向量的奇异值仍为 1、3，第三个输入坐标向量映到零。精简 SVD 的形状是 $U\in\mathbb R^{m\times k}$、$\Sigma\in\mathbb R^{k\times k}$、$V^\top\in\mathbb R^{k\times d}$，$k=\min(m,d)$；仅非零奇异值计入秩。
-
-### 左、右奇异向量为什么必须分开
-
-一般地，从 $W^\top Wv_i=s_i^2v_i$ 找到输入方向。当 $s_i>0$，定义 $u_i=Wv_i/s_i$，便有
-
-$$
-Wv_i=s_i u_i,\qquad W^\top u_i=s_i v_i,\qquad \|u_i\|_2=1.
-$$
-
-把任意输入写成 $x=\sum_{s_i>0}c_iv_i+x_0$，其中 $Wx_0=0$，就得到 $Wx=\sum_{s_i>0}s_ic_iu_i$。输入 $v_i$ 与输出 $u_i$ 可处在不同维空间，不能要求它们是同一个向量；添零列后的第三个输入方向便没有对应的非零输出方向。这个展开也说明截断 SVD 删除的是哪些输出贡献。构造 $W^\top W$ 可用于理解等式；若 $W$ 满列秩，它的条件数会被平方，不该据此手写 SVD 算法。
-
-## 截断 SVD：低秩近似的矩阵与输出误差
-
-按奇异值从大到小排序，保留前 r 项，得到
-
-$$
-W_r=\sum_{i=1}^r s_i u_i v_i^\top,
-\qquad
-\|W-W_r\|_F^2=\sum_{i>r}s_i^2.
-$$
-
-每个 $u_iv_i^\top$ 是秩一变换，彼此在 Frobenius 内积下正交，故残差的平方范数是被删除奇异值的平方和。本例保留最大项 $W_1=3e_2q_2^\top$，删除奇异值为 1 的秩一项 $e_1q_1^\top$，于是 $\|W-W_1\|_F=1$；对输入奇异向量 $q_1$，原输出为 $e_1$，近似输出却为零。
-
-Eckart–Young 定理进一步保证：在所有秩不超过 $r$ 的矩阵中，截断 SVD 的 Frobenius 误差最小，二范数误差为下一个奇异值 $s_{r+1}$。这个结论针对**矩阵本身**；若截断处奇异值相同，最优矩阵可能不唯一。它没有保证任意任务的预测质量。
-
-<div className="sm:hidden">
-<Figure src="math/spectral-rank-mobile.svg" alt="奇异值五、二、一按大小截断时的保留能量和剩余矩阵误差" minWidth="0">换成有三个非零奇异值的演示矩阵，其奇异值为 5、2、1。保留秩一得到 83.3% 的平方能量，Frobenius 误差仍为 $\sqrt5$。</Figure>
-</div>
-<div className="hidden sm:block">
-<Figure src="math/spectral-rank.svg" alt="奇异值五、二、一按大小截断时的保留能量和剩余矩阵误差" minWidth="37rem">换成有三个非零奇异值的演示矩阵，其奇异值为 5、2、1。保留秩一得到 83.3% 的平方能量，Frobenius 误差仍为 $\sqrt5$。</Figure>
-</div>
-
-图和下面的交互实验换用奇异值 5、2、1，以比较截断 SVD 保留一项或两项时的误差；它不再是前面的二维 $W$。将秩从一改为二，观察残差从 $\sqrt5$ 降到 1，而不是只盯保留能量百分比。
-
-<LowRankLab client:visible />
-
-实验矩阵的三项互相正交。保留秩一时平方能量为 $25/30\approx83.3\%$，但误差仍为 $\sqrt{2^2+1^2}=\sqrt5$；保留秩二后误差为 1。热图显示矩阵元素的差，不是模型预测质量。
-
-### 输入分布为什么会改变压缩效果
-
-对单位输入 x，截断误差满足
-
-$$
-\|(W-W_r)x\|_2^2=\sum_{i>r}s_i^2(v_i^\top x)^2\le s_{r+1}^2.
-$$
-
-最坏的单位输入沿第一条被删除的方向，输出误差为 $s_{r+1}$。回到本例 $W$：输入为 $q_2$ 时秩一近似完全准确；输入为 $q_1$ 时输出误差为 1。只报矩阵保留能量，无法说明数据究竟集中在哪条输入方向。
-
-设输入二阶矩 $C=\mathbb E[xx^\top]$，则平均平方输出误差为
-
-$$
-\mathbb E\|(W-W_r)x\|_2^2=\operatorname{tr}((W-W_r)C(W-W_r)^\top).
-$$
-
-推导只需将 $\|Ex\|_2^2=x^\top E^\top Ex$ 取期望，并用迹运算写成上式，其中 $E=W-W_r$。当 $C=I$，平均输出平方误差才等于 Frobenius 平方误差。这里的 $C$ 是二阶矩，不预设输入均值为零；只有均值为零时才等于协方差。实际压缩须在代表性激活上检查输出和任务指标。
-
-低秩还用于另一个问题：[T6 LoRA](/training/lora/) 将**可训练增量**写成 $\Delta W=BA$，使其秩至多为 $r$、参数数为 $r(m+d)$。它通过训练学习任务更新，并不对已有基座 $W$ 做截断 SVD，也不要求 $W$ 本身低秩。例如 $4096\times4096$ 层取 $r=8$，adapter 有 65,536 个参数，而完整增量有 16,777,216 个；这个比例不包含基座存储，也不保证相同质量。
-
-## 条件数：奇异值之比怎样放大求解扰动
-
-截断讨论的是正向输出 $Wx$；现在反过来，已知 $b$ 求解 $Wx=b$。正向被压小的方向，逆向就要放大。矩阵二范数 $\|W\|_2=\max_{\|x\|_2=1}\|Wx\|_2$ 等于最大奇异值；本例为 3。
-
-<Definition term="二范数条件数" source="https://zh.wikipedia.org/wiki/条件数">
-  对可逆方阵，二范数条件数是最大与最小奇异值的比，给出右端扰动导致相对解误差的上界倍数：
-
-$$
-\kappa_2(W)=\|W\|_2\|W^{-1}\|_2=\frac{s_{\max}}{s_{\min}}.
-$$
-</Definition>
-
-本例 $W$ 的奇异值为 3、1，因此 $\kappa_2(W)=3$。求解 $Wx=b$，若只有右端变成 $b+\delta b$，则 $\delta x=W^{-1}\delta b$。由 $\|\delta x\|_2\le\|W^{-1}\|_2\|\delta b\|_2$ 和 $\|b\|_2\le\|W\|_2\|x\|_2$，得到
-
-$$
-\frac{\|\delta x\|_2}{\|x\|_2}\le\kappa_2(W)\frac{\|\delta b\|_2}{\|b\|_2}.
-$$
-
-手算取 $b=e_2$，原解 $x=q_2/3$。让 $\delta b=10^{-3}e_1$，因为 $Wq_1=e_1$，解变化为 $\delta x=10^{-3}q_1$。右端相对变化 $10^{-3}$，解的相对变化 $3\times10^{-3}$，恰好达到条件数 3 的上界。若扰动换成 $10^{-3}e_2$，它沿原解方向变化，两个相对误差都为 $10^{-3}$；条件数是最坏方向的上界，并非每次都放大三倍。
-
-为了看奇异值差异很大时会发生什么，把同一 $Q$ 保留，只将 $W$ 的较小奇异值 1 改为 $10^{-4}$：$W_{\mathrm{thin}}=\operatorname{diag}(10^{-4},3)Q^\top$，条件数变成 30,000。仍取 $b=e_2$，若 $\delta b=10^{-6}e_1$，解变化为 $0.01q_1$，相对误差从 $10^{-6}$ 变成 3%。这仍是较小奇异值使逆向求解放大扰动的例子。
-
-条件数描述数学问题本身对扰动的敏感性；稳定算法可以避免额外放大，不能消除问题固有敏感性。接近零的奇异值也让数值秩取决于尺度与容差，不能仅凭精确算术中的“非零”判断工程上的可恢复性。
-
-下面的实验换用两个较小的例子。上半部仍是 $A=Q\operatorname{diag}(1,\lambda_2)Q^\top$，但 $\lambda_2$ 只在 1 到 3 之间变化，不能重现正文的特征值 9。虚线圆表示单位输入集合，椭圆表示变换后的边界。
-
-先固定输入方向，将 $\lambda_2$ 设为 1，再改变特征轴角度。操作前判断输出是否应变化，并用 $A=QQ^\top=I$ 解释结果。随后保持轴角度不变，将 $\lambda_2$ 改为 3，观察哪个方向的分量被放大。
-
-下半部改用 $D=\operatorname{diag}(1,10^{-k})$，界面中记为 A。固定原解为 $(1,0)^\top$、右端扰动为 $(0,10^{-6})^\top$。先算 k=4 与 k=5 时的解扰动，再移动滑块核对：k 增加 1，误差应放大几倍？它们不是前面的 $W_{\mathrm{thin}}$，但都检验较小奇异值如何放大求解扰动。
-
-<SpectralLab client:visible />
-
-### 选读：为什么最小二乘不用正规方程直接求解
-
-交互实验下半部另用 $D=\operatorname{diag}(1,10^{-k})$，把第二个输入奇异向量固定为第二坐标向量；$k>0$ 时，它对应较小的奇异值。原解为 $(1,0)^\top$，右端加 $(0,10^{-6})^\top$，解的第二分量增加 $10^{k-6}$；当 $k=4$ 时从百万分之一变为百分之一。它与上面的 $W_{\mathrm{thin}}$ 都说明较小奇异值会放大逆向求解的扰动，只是奇异向量和最大奇异值不同。
-
-对于非方阵拟合 $Xc\approx y$，最小二乘最小化 $\|Xc-y\|_2^2$。在满列秩条件下，将梯度设为零得到正规方程 $X^\top Xc=X^\top y$。它可以用于推导，但数值求解最好使用 `lstsq` 的分解接口。
-
-设计矩阵 $X$ 的奇异值为 $s_i$ 时，$X^\top X$ 的特征值为 $s_i^2$。满列秩下，$\kappa_2(X^\top X)=\kappa_2(X)^2$：即使取本章条件数为 3 的 $W$ 作 $X$，也从 3 变成 9。条件数为一千时则变成一百万。正规方程适合推导，不适合以显式求逆实现求解。
-
-若 $X$ 秩亏，系数可能不唯一。SVD 伪逆在非零奇异方向取倒数、零方向置零，可得到最小范数解；过小奇异值仍会放大噪声。截断容差与岭正则是不同的处理，会改变所求问题。[T7 缩放规律](/training/scaling-laws/) 的拟合因而需要变化充分的数据设计和留出点；`lstsq` 无法从不可区分的设计中恢复唯一参数。
-
-## 选读：浮点计算还会带来什么误差
-
-前面的条件数假定输入 $b$ 已有扰动，问精确解变化多少；浮点计算还会在计算过程引入舍入。实数加法满足结合律，浮点加法不一定。float32 中取 $a=10^8,b=-10^8,c=1$，先做 $a+b$ 再加 $c$ 得 1；先做 $b+c$ 时 1 被舍掉，再加 $a$ 得 0。两种现象可叠加，但“问题病态”与“计算舍入”不是同一个定义。
-
-所以不同并行归约树、矩阵内核和设备可能得到细微不同的结果。[P11](/principles/complete-transformer/) 的缓存与整段路径需要浮点容差，跨硬件不承诺逐 bit 相同；[T3](/training/pretraining/) 的精确恢复则固定 CPU、dtype、数据顺序与 RNG，在同一运行环境里核对。
-
-softmax 是另一个例子。logits 为 1000、999 时，直接指数很容易溢出；减去最大值后得到 0、−1，再求指数和对数。稳定 logsumexp 为
-
-$$
-\operatorname{LSE}(z)=a+\log\sum_i e^{z_i-a},\qquad a=\max_i z_i.
-$$
-
-其推导与 CE/KL 已在 [M5](/math/distributions/) 完成。本章把它连接到误差：减最大值改变中间数值范围，保留精确实数意义下的输出。提高 dtype 与重写计算顺序解决不同问题，不能只把“全部改 float64”当成唯一办法。
-
-### 有效数字与指数范围各管什么
-
-float32 只有有限的尾数位，1 附近相邻可表示数间距约 $1.19\times10^{-7}$；数值越大，绝对间距越大。因此“一亿加一”可能仍是一亿，而“1 加百万分之一”还能保留变化。机器 epsilon 不是任何数值都共享的绝对误差上限。
-
-FP16 与 BF16 又有不同取舍：FP16 尾数更精细，但有限值最大约 65504；BF16 的指数范围接近 float32，尾数更短。混合精度实现常将 RMSNorm 的平方均值计算提升到 float32，以扩大中间计算的可用范围；softmax 减最大值则避免不必要的大指数。这两种做法都先保护中间计算，再考虑输出 dtype。
-
-| 现象 | 首先检查 | 对应处理 |
-| --- | --- | --- |
-| 指数变成无穷 | logits 范围与 softmax 表达式 | 减最大值、稳定 logsumexp |
-| 平方均值溢出 | 归一化统计量的计算精度 | float32 统计量与 epsilon |
-| 相减后有效数字变少 | 两数是否非常接近 | 改写表达式、使用适当精度 |
-| 两种归约末位不同 | 归约顺序、dtype、尺度 | 同时声明绝对与相对容差 |
-| 残差小但系数很不稳定 | 设计矩阵的奇异值 | 改实验设计、正则化与留出检查 |
-
-`allclose(a,b)` 常判断 $|a-b|\le\mathrm{atol}+\mathrm{rtol}|b|$。在零附近主要依赖 atol，在大尺度主要依赖 rtol；把两者都设大虽然会“通过”，也会掩盖转置、位置或 mask 的错误。应先用小型双精度参考核对代数，再为低精度路径选择有依据的容差。
-
-## CPU 核对：用库函数核对性质
-
-<CodeFile path="code/math/spectral.py" />
-
-运行 `.venv/bin/python code/math/spectral.py`。`eigh` 检查本章同一个 $A$ 的正交重建和步长收缩；`svd` 用对角且添零列的 $2\times3$ 变式检查秩一误差；`solve`、`cond` 用病态对角变式检查相对误差上界。代码核对的是这些性质，而不是规定特征向量符号或用展开行列式代替大型矩阵算法。
-
-## 常见误区
-
-- 把任意方阵当成实对称矩阵，默认存在正交实特征基；$W^\top W$ 一定对称，但 $W$ 本身未必。
-- 把 $W$ 的奇异值 3、1 当成 $W^\top W$ 的特征值 9、1；或把 LoRA 当作基座截断 SVD。
-- 只凭 $\|W-W_r\|_F$ 判断任务输出，不问输入是否沿被删除方向。
-- 把条件数上界当作每次扰动的精确放大倍数，或用过大浮点容差掩盖代数错误。
+运行 `uv run python -m examples.math.spectral`。用 `eigh` 检查正交重建、特征方向和步长收缩。特征向量符号可以翻转，核对重建与关系 $AQ=Q\Lambda$，不强制每列符号。
 
 ## 练习与核对
 
 <details>
-<summary>若把本章 A 的第二个特征值从 9 改为 16，学习率 0.2 还能让两个方向都收缩吗？</summary>
+<summary>第二个特征值改为16，学习率0.2时两个方向的乘数是多少？</summary>
 
-不能。第二方向每步乘 $1-0.2\times16=-2.2$，其绝对值大于 1，因而交替翻转并放大。严格收缩要求 $0<\eta<2/16=0.125$；只看第一方向的乘数 0.8 会漏掉限制方向。
-
-</details>
-
-<details>
-<summary>将本章的 W 截断到秩一，分别输入 q₁ 和 q₂，输出误差是多少？</summary>
-
-截断矩阵是 $W_1=3e_2q_2^\top$。输入 $q_1$ 时，原输出为 $e_1$、近似输出为零，误差范数 1；输入 $q_2$ 时，原输出与近似输出同为 $3e_2$，误差为零。两者使用同一矩阵误差 $\|W-W_1\|_F=1$，说明还须知道输入方向。
+分别为0.8与−2.2。后一方向交替翻转并放大；两个方向同时严格收缩需要 $0<\eta<2/16=0.125$。
 
 </details>
 
 <details>
-<summary>仍取 Wx=b、b=e₂。若扰动沿 e₂ 而非 e₁，条件数 3 是否意味着解误差放大三倍？</summary>
+<summary>初始输入恰好沿q₁，学习率0.25会发生什么？能否据此认为整个矩阵的更新稳定？</summary>
 
-否。令 $\delta b=\varepsilon e_2$，解从 $q_2/3$ 变成 $(1+\varepsilon)q_2/3$；右端与解的相对变化都为 $|\varepsilon|$。条件数 3 是对所有扰动方向的上界，只有相应最坏方向才可能达到。
+这一输入每步乘0.75，没有q₂分量，所以本轨迹收缩。它不能保证其他输入；任何非零q₂分量都乘−1.25并放大。核对稳定性须覆盖所有方向。
 
 </details>
 
-本章对最大特征值、截断 SVD 误差与条件数的推导，分别在 [T2 优化](/training/optimization/) 的步长与精度、[T6 LoRA](/training/lora/) 的增量秩、[T7 缩放规律](/training/scaling-laws/) 的拟合敏感性中再次使用；阅读其中一章时，可直接回到对应推导。
+[低秩与条件数](/math/low-rank/) 转向一般线性映射：输入与输出的特别方向不必属于同一个空间。
 
 ## 原始资料
 
-- [NumPy eigh](https://numpy.org/doc/stable/reference/generated/numpy.linalg.eigh.html)、[SVD](https://numpy.org/doc/stable/reference/generated/numpy.linalg.svd.html)、[condition number](https://numpy.org/doc/stable/reference/generated/numpy.linalg.cond.html)：脚本使用标准库接口核对数学性质。
-- [Low-rank approximation](https://en.wikipedia.org/wiki/Low-rank_approximation)：截断 SVD、Eckart–Young 定理与矩阵误差范围。
-- [LoRA](https://arxiv.org/abs/2106.09685)：低秩参数更新的定义，不能由固定矩阵逼近替代。
+- [NumPy eigh](https://numpy.org/doc/stable/reference/generated/numpy.linalg.eigh.html)：实对称矩阵的特征分解接口。

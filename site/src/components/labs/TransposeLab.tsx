@@ -1,10 +1,10 @@
-import { useId, useState } from 'react'
+import SvgCanvas from './SvgCanvas'
+import { useState } from 'react'
 import { transposeElement } from '../../lib/transpose-model'
 import Formula from './Formula'
-import { Controls, LabFrame, Range, Readout, pen } from './Lab'
+import { Select, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 export default function TransposeLab() {
-  const id = useId()
   const [row, setRow] = useState(2)
   const [col, setCol] = useState(5)
   const [pitch, setPitch] = useState(33)
@@ -16,19 +16,15 @@ export default function TransposeLab() {
     <Controls>
       <Range label="tile 内输入行 r" value={row} min={0} max={31} onChange={setRow} />
       <Range label="tile 内输入列 c" value={col} min={0} max={31} onChange={setCol} />
-      <label className="block text-sm" htmlFor={`${id}-pitch`}>共享行跨度
-        <select id={`${id}-pitch`} value={pitch} onChange={event => setPitch(Number(event.target.value))} className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2 text-ink">
+      <Select label="共享行跨度" value={pitch} onChange={event => setPitch(Number(event.target.value))}>
           <option value={32}>32 列：无填充</option><option value={33}>33 列：填充一列</option>
-        </select>
-      </label>
-      <label className="block text-sm" htmlFor={`${id}-tile`}>输入 tile
-        <select id={`${id}-tile`} value={edge ? 'edge' : 'full'} onChange={event => setEdge(event.target.value === 'edge')} className="mt-1 block h-9 w-full rounded border border-rule bg-paper px-2 text-ink">
+        </Select>
+      <Select label="输入 tile" value={edge ? 'edge' : 'full'} onChange={event => setEdge(event.target.value === 'edge')}>
           <option value="full">左上：32×32 全有效</option><option value="edge">右下：3×3 有效</option>
-        </select>
-      </label>
+        </Select>
     </Controls>
     <div className="overflow-x-auto" tabIndex={0} role="region" aria-label="转置数据搬运图，可横向滚动">
-      <svg viewBox="0 0 360 666" className={`${pen.canvas} min-w-80`} role="img" aria-label={`元素 A(${element.inputRow},${element.inputCol}) 经 shared(${row},${col}) 写入转置输出；${element.valid ? '有效' : '边界外，不写输出'}`}>
+      <SvgCanvas viewBox="0 0 360 666" className={`${pen.canvas} min-w-80`} role="img" aria-label={`元素 A(${element.inputRow},${element.inputCol}) 经 shared(${row},${col}) 写入转置输出；${element.valid ? '有效' : '边界外，不写输出'}`}>
         {[0, 1, 2].map(stage => {
           const y = 40 + stage * 215
           const output = stage === 2
@@ -55,7 +51,7 @@ export default function TransposeLab() {
         <path d="M92 210v16m-5-5 5 5 5-5M92 425v16m-5-5 5 5 5-5" className={pen.axis} />
         <text x="115" y="222" className={pen.textB}>装载完成 → 全 block 屏障</text>
         <text x="115" y="437" className={pen.textA}>屏障后按转置映射消费</text>
-      </svg>
+      </SvgCanvas>
     </div>
     <Readout>
       <Formula>{String.raw`A_{${element.inputRow},${element.inputCol}}\to\mathrm{tile}_{${row},${col}}\to B_{${element.inputCol},${element.inputRow}}`}</Formula>

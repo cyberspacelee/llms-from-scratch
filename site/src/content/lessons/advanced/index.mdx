@@ -1,29 +1,39 @@
 ---
-title: 进阶模型导读
-question: 已会构建和训练 Decoder，怎样判断下一种模型改动解决了什么问题
-description: 从稠密文本 Decoder 出发，按计算与缓存、训练目标、序列状态和视觉输入选择进阶章节。
+title: 进阶结构导读
+question: 新结构改动了哪个算子、保留什么状态、怎样核对代价
+description: 从统一 Decoder 按前馈计算、历史状态、监督深度、残差通道和输入条件选择结构分支，并连接可运行研究机制。
 order: 0
 ---
 
-本路线以 [P8 现代 Decoder](/principles/modern-decoder/) 为基线：每个 token 经过前馈层，并在注意力中读取历史。读进阶结构时，先问清楚**改动发生在哪个算子、训练目标或输入端**，再比较输出、所需状态和代价。各章用可手算的例子建立判断方法；公开模型只用于核对这些方法如何落地。
+以 [完整Decoder](/principles/complete-transformer/) 为基线：每个token经过前馈层，注意力读取可见历史。新的结构应回答具体问题：改的是哪个算子，哪些信息仍保存，输出与哪个参考一致，省下的资源是否转移到别处。
 
-## 按问题选一条路径
+## 按问题进入
 
-先选自己要解释的问题，再按表中的入口补先修。各章开篇会列出计算所需的具体能力。
-
-| 要解释的问题 | 从哪里进入 | 阅读章节 |
+| 要解释的问题 | 入口 | 继续核对 |
 | --- | --- | --- |
-| 每个 token 怎样少算前馈层 | [P8 现代 Decoder](/principles/modern-decoder/) | [A1 MoE](/advanced/moe/) |
-| 注意力怎样少存历史状态 | [P10 KV cache](/principles/kv-cache/) | [A2 MLA](/advanced/mla/) |
-| 成对偏好怎样成为损失 | [T5 指令微调](/training/instruction-tuning/) | [A3 DPO](/advanced/dpo/) |
-| 规则奖励怎样更新生成策略 | T5 和 A3 | [A5 可验证奖励训练](/advanced/reasoning-rl/) |
-| 位置算得更远，模型为何未必用得更远 | [P7 RoPE](/principles/rope/) 和 P10 | [A4 长上下文与窗口](/advanced/long-context/) |
-| 固定状态怎样处理序列，并与 KV 共存 | [P3 注意力](/principles/attention/) | [A6 状态空间模型](/advanced/state-space/) → [A7 混合层](/advanced/hybrid-attention/) |
-| 保留逐位置状态，怎样只读取一部分 | P3；DSA 案例还需 A2 | [A8 稀疏注意力](/advanced/sparse-attention/) |
-| 图像特征怎样接入文本序列 | [P4 Decoder](/principles/decoder/)；训练部分还需 T5 | [A9 视觉语言模型](/advanced/multimodal/) |
+| 每个token只调用部分前馈参数 | [MoE](/advanced/moe/) | 原token行、路由权重、专家容量和通信 |
+| 压缩每个位置的注意力状态 | [MLA](/advanced/mla/) | naive/absorbed输出、梯度与位置分支 |
+| 更远的位置与更窄的可见窗口 | [长上下文](/advanced/long-context/) | 同频率、同可见集合、远距离任务 |
+| 固定状态处理历史 | [状态空间](/advanced/state-space/) → [混合层](/advanced/hybrid-attention/) | 递归终态、卷积历史与逐位置KV分别计账 |
+| 只读取选择出的历史位置 | [稀疏注意力](/advanced/sparse-attention/) | 选择成本、因果性与同集合dense参考 |
+| 视觉特征接入语言序列 | [视觉语言模型](/advanced/multimodal/) | patch、slot、目标行与视觉梯度 |
 
-A1 改变前馈层调用，A2 改变注意力状态；两章无须互为先修。A6–A7 先汇总历史再读取，A8 保留逐位置历史再选择读取。可以按自己的计算问题选择这两条路径。
-
-读完一条路径，可以用同一组问题检验是否理解：新结构保留什么信息、舍弃或近似什么、输出与哪种参照计算相同，以及省下的资源是否转移到了别处。不同章节的教学例并不声称这些模型可以直接替换为彼此。
+这些分支各有必要先修。MoE改变FFN调用，MLA改变历史表示；递归汇总历史，稀疏注意力保留逐位置历史再选择读取。按自己的计算问题进入，不必依次读完所有架构。
 
 <CourseMap track="advanced" />
+
+## 研究机制的入口
+
+下面五章都是选读，各从一个小张量问题出发。它们连接统一包中的机制实验，保留每项真实先修；其中独立函数不自动成为标准 `TransformerBlock` 的组成部分。
+
+| 研究问题 | 教材章节 | 可运行实验 |
+| --- | --- | --- |
+| 多加一级预测怎样对齐输入与未来标签 | [A8 多 token 预测](/advanced/multi-token-prediction/) | `chapter --chapter 14` |
+| 旧块摘要怎样与精确近期 token 拼接 | [A9 序列压缩](/advanced/sequence-compression/) | `chapter --chapter 19` |
+| 多条残差通道怎样混合并接收分支写入 | [A10 多残差流](/advanced/residual-streams/) | `chapter --chapter 22` |
+| 局部 token 身份怎样查表并受上下文调节 | [A11 条件记忆](/advanced/conditional-memory/) | `chapter --chapter 23` |
+| 多个上层查询怎样复用因果历史 | [A12 跨层共享 K/V](/advanced/shared-kv/) | `chapter --chapter 24` |
+
+在仓库根目录用 `uv run llms-from-scratch` 加表中的子命令运行。文章里的 A 编号是学习顺序，实验编号是稳定的机制入口，两者无需相等。先核对形状、因果候选、同定义的参考输出和梯度，再讨论具体模型的工程策略；这些 CPU 小张量检查不能推断生产性能。
+
+训练回复行为另走 [后训练路线](/post-training/)：DPO、RLVR和蒸馏改变监督信号。异构状态的安全前缀复用与回滚见 [混合缓存](/systems/hybrid-cache/)，在那里区分模型公式与运行期所有权。

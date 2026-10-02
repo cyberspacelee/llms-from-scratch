@@ -4,7 +4,8 @@ question: 已知记录来自 D，正类概率为什么会改变
 description: 用四条记录区分事件、联合与条件概率，手算乘法规则，并判断两个事件是否独立。
 order: 1
 code:
-  - code/math/probability.py
+  - examples/math/probability.py
+prerequisites: []
 ---
 
 import MathEventsLab from '../../../components/labs/MathEventsLab'
@@ -202,7 +203,7 @@ $$
 
 </details>
 
-本章的数值核对沿用 `code/math/probability.py`，在仓库根目录运行 `python code/math/probability.py`。先手算上述比值，再用代码中的断言检查；程序结果不能替代“分母对应哪个已知条件”的解释。
+本章的数值核对沿用 `examples/math/probability.py`，在仓库根目录运行 `uv run python -m examples.math.probability`。先手算上述比值，再用代码中的断言检查；程序结果不能替代“分母对应哪个已知条件”的解释。
 
 下一章 [M2 贝叶斯与序列概率](/math/bayes/) 从这里的乘法规则出发：先按来源汇总总体概率，再将条件方向反转，最后把多个连续结果的联合概率拆成逐步条件概率。
 

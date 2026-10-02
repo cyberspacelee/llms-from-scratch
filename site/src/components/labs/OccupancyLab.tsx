@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { residency, type ResidencyLimits } from '../../lib/gpu-models'
 import { Controls, LabFrame, Range, Readout, pen } from './Lab'
@@ -33,13 +34,13 @@ export default function OccupancyLab() {
         </label>)}
       </div>
     </fieldset>
-    <svg viewBox="0 0 440 240" className={pen.canvas} role="img" aria-label={`驻留 ${result.blocks} 个 block，${result.activeWarps} 个 warp，总容量 ${limits.warps} 个 warp`}>
+    <SvgCanvas viewBox="0 0 440 240" className={pen.canvas} role="img" aria-label={`驻留 ${result.blocks} 个 block，${result.activeWarps} 个 warp，总容量 ${limits.warps} 个 warp`}>
       <text x="12" y="18">驻留 warp</text>
       {Array.from({ length: limits.warps }, (_, index) => <rect key={index}
         x={12 + index % 8 * 53} y={32 + Math.floor(index / 8) * 24} width="45" height="16" rx="2"
         className={index >= result.activeWarps ? 'fill-sunken stroke-rule' : Math.floor(index / result.warpsPerBlock) % 2 ? 'fill-info' : 'fill-accent'} />)}
       <text x="12" y="236" className={pen.muted}>绿色与蓝色区分 block；空格是未驻留的 warp 容量。</text>
-    </svg>
+    </SvgCanvas>
     <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
       {result.bounds.map(([name, count]) => <div key={name} className="flex justify-between border-b border-rule py-1">
         <dt>{name} 允许的 block</dt><dd className="m-0 font-mono">{count}</dd>

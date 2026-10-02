@@ -1,0 +1,105 @@
+{
+  "report": [
+    {
+      "name": "all-history negative-logit penalty denominator .67",
+      "pass": true
+    },
+    {
+      "name": "BOS exclusion denominator .76",
+      "pass": true
+    },
+    {
+      "name": "min-p .6 retains A and B",
+      "pass": true
+    },
+    {
+      "name": "masked B mean .510826",
+      "pass": true
+    },
+    {
+      "name": "zero-target mean undefined",
+      "pass": true
+    },
+    {
+      "name": "permutation no positional structure",
+      "pass": true
+    },
+    {
+      "name": "fixed causal mask breaks equivariance",
+      "pass": true
+    },
+    {
+      "name": "moving causal mask restores equivariance",
+      "pass": true
+    },
+    {
+      "name": "two independent KV groups double cache",
+      "pass": true
+    },
+    {
+      "name": "cached chunk first-row output",
+      "pass": true
+    },
+    {
+      "name": "wrong upper-left mask leaves output zero with sum one",
+      "pass": true
+    },
+    {
+      "name": "chunk second-row absolute position",
+      "pass": true
+    },
+    {
+      "name": "canonical model 2748 and no training cache",
+      "pass": true
+    },
+    {
+      "name": "decode old2+new1 cache96 and scores12",
+      "pass": true
+    },
+    {
+      "name": "canonical immutable append code",
+      "pass": true
+    },
+    {
+      "name": "MHA five tokens 320 cache and +384 parameters",
+      "pass": true
+    },
+    {
+      "name": "same hand example A target probability",
+      "pass": true
+    },
+    {
+      "name": "second BPE merge vocab258",
+      "pass": true
+    },
+    {
+      "name": "token lookup shape7by2",
+      "pass": true
+    },
+    {
+      "name": "relative rotation delta4 invariant at p0",
+      "pass": true
+    },
+    {
+      "name": "relative rotation delta4 invariant at p4",
+      "pass": true
+    },
+    {
+      "name": "relative rotation delta4 invariant at p8",
+      "pass": true
+    },
+    {
+      "name": "relative rotation delta8 flips sign",
+      "pass": true
+    },
+    {
+      "name": "RoPE common rotation unchanged score",
+      "pass": true
+    },
+    {
+      "name": "RoPE content30 canceled by position-30",
+      "pass": true
+    }
+  ],
+  "errors": []
+}

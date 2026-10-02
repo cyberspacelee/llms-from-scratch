@@ -27,24 +27,39 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install CPU dependencies
-        run: pip install -r code/requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
 
-      - name: Run verification scripts
-        run: |
-          for script in code/math/probability.py code/math/linear_algebra.py code/math/calculus.py code/math/backprop.py \
-                        code/math/neural_network.py code/math/spectral.py code/frameworks/*.py code/principles/*.py code/training/*.py \
-                        code/gpu/*.py code/systems/*.py code/advanced/*.py; do
-            echo "::group::$script"
-            python "$script"
-            echo "::endgroup::"
-          done
+      - name: Install locked CPU environment
+        run: uv sync --frozen --group dev
+
+      - name: Lint Python
+        run: uv run ruff check src examples tests scripts
+
+      - name: Verify model and independent references
+        run: uv run python -m unittest discover -s tests -v
+
+      - name: Run all CPU curriculum experiments
+        run: uv run python -m examples.verify
 
   build:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Setup Python for source excerpts
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Setup uv for cross-language cases
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install locked Python environment
+        run: uv sync --frozen --group dev
 
       - name: Enable pnpm
         run: corepack enable pnpm

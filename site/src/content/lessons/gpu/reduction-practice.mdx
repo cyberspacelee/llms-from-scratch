@@ -1,0 +1,56 @@
+---
+title: 树形归约与跨 block 阶段
+question: 怎样合并所有线程的部分和，同时保持同步与边界正确
+description: 从八个整数的三层归约走到 1003 元素的两次 kernel，明确中性值、shared 屏障与浮点核对。
+order: 6
+optional: true
+prerequisites: ["gpu/memory-and-sync"]
+code:
+  - examples/gpu/memory_model.py
+---
+
+[G2](/gpu/memory-and-sync/) 用 shared memory 换了转置的写入者。本实践让 thread 交换部分和，最终由一个 thread 写出 block 结果。先固定八个输入，再核对尾块和跨 block 的阶段边界。
+
+## 八个数，三层相加
+
+转置交换的是元素位置；求和归约交换的是各 thread 的部分结果。对 $[1,2,3,4,5,6,7,8]$，8 个 thread 各把一个数写到 shared 并同步。第一层前 4 个 thread 把相距 4 的值相加，得到 $[6,8,10,12]$；下一层相距 2，得到 $[16,20]$；最后相距 1，得到 36。每层读写同一缓冲区，必须在下一层读取之前让上一层的写入完成。
+
+完整例子每 block 有 256 个 thread。输入 1003 个数时需要 4 个 block，末块只有 235 个有效数，其余 21 个 thread 从私有累加器的中性值 0 开始，仍写 shared 并参加每层屏障。第一 kernel 写出 4 个部分和，第二 kernel 在同一 stream 消费它们，形成跨 block 的阶段边界。普通 block 不能用 block 屏障等待整张 grid。求最大值时中性值应改成 $-\infty$；把全负数组的无效槽填成 0 会算错。
+
+浮点加法不严格满足结合律。树形顺序与 CPU 从左到右求和可能有末位差异；检查结果时要用合适容差，同时单独排查漏项、越界与同步错误。归约扩展了本章的方法：先列每一层的读写地址和负责人，再证明可见性，最后检查边界填充值。
+
+
+## 从参考算法核对到真实 kernel
+
+CPU 参考每层先复制旧 shared 值，再进行该层的加法，显式模拟“上一层全部完成后读取”。它能验证树形顺序和中性值，不能模拟缺少 GPU 屏障时的交错。
+
+<CodeFile path="examples/gpu/memory_model.py" symbol="block_sum" run="uv run python -m examples.gpu.memory_model" />
+
+CUDA 每个 block 使用 256 个 thread。所有 thread 在装载后和各个树层完成后共同到达屏障；第二次 kernel 消费第一次写出的部分和。
+
+<CodeFile path="examples/gpu/examples/transpose_reduce.cu" region="reduce" />
+
+```sh
+nvcc -O2 -std=c++17 examples/gpu/examples/transpose_reduce.cu -o /tmp/transpose_reduce
+/tmp/transpose_reduce
+compute-sanitizer --tool memcheck /tmp/transpose_reduce
+compute-sanitizer --tool synccheck /tmp/transpose_reduce
+```
+
+程序同时检查转置与归约，归约长度包括 0、1、257、2345。零长度由 host 处理，避免非法的零 block 启动。真实设备检查尚未在当前无 CUDA 环境执行；运行成功才可记录设备验证结果。
+
+## 练习与核对
+
+<details>
+<summary>把归约改为求最大值，末块无效槽该填什么？所有输入为负时填 0 会怎样？</summary>
+
+填 $-\infty$，使它不改变任何有限输入的最大值。填 0 会让全负数组错误地得到 0。同步只能保证读到填充值，不能修正填充值的数学含义。
+</details>
+
+<details>
+<summary>1003 个输入、每 block 256 个 thread，最后一块哪些线程必须参加屏障？</summary>
+
+最后一块有 235 个有效输入，21 个线程写中性值 0；全部 256 个线程必须参加装载与树层屏障。没有有效输入不等于没有协作职责。
+</details>
+
+树形顺序中的浮点结果应按实际 dtype 和长度使用合理容差。还应分别检查覆盖、边界和同步，不把“大容差通过”当作这些条件的替代。正式规则见 [CUDA 同步函数](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-c-programming-guide/index.html#synchronization-functions)。

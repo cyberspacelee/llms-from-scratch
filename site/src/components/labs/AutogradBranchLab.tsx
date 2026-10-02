@@ -1,30 +1,21 @@
 import { useState } from 'react'
-import { branchGradient } from '../../lib/framework-tensor-model'
-import { Controls, LabFrame, Range, Readout, pen } from './Lab'
-import Formula from './Formula'
+import { vectorBranch } from '../../lib/framework-tensor-model'
+import { Button, Controls, LabFrame, Range, Readout } from './Lab'
+import { TraceTable } from './DataViews'
 
+/** The same vector, shared bias and branched loss as the F4 Python experiment. */
 export default function AutogradBranchLab() {
-  const [x, setX] = useState(2)
+  const [w0, setW0] = useState(1), [w1, setW1] = useState(2), [bias, setBias] = useState(1)
   const [seed, setSeed] = useState(1)
-  const [grad, setGrad] = useState(0)
-  const state = branchGradient(x, seed, grad)
-  return <LabFrame title="两条路径的梯度怎样相加" hint="每次反向都重新构建前向图">
-    <Controls><Range label="叶子 x" value={x} min={-3} max={3} onChange={setX} /><Range label="反向种子 g" value={seed} min={-2} max={2} onChange={setSeed} /></Controls>
-    <svg viewBox="0 0 320 320" className={`${pen.canvas} max-w-96`} role="img" aria-label={`x平方加三x，两路梯度 ${state.squareGradient} 加 ${state.linearGradient} 等于 ${state.gradient}`}>
-      <path d="M160 55L77 115M160 55L242 115M77 163L160 222M242 163L160 222" className={pen.axis} />
-      <path d="M145 219L62 159M175 219L257 159M62 110L145 50M257 110L175 50" className={pen.guide} />
-      <rect x="105" y="18" width="110" height="38" rx="4" className="fill-accent-soft stroke-accent" /><text x="160" y="43" textAnchor="middle">叶子 x = {x}</text>
-      <rect x="12" y="115" width="130" height="48" rx="4" className="fill-sunken stroke-rule" /><text x="77" y="145" textAnchor="middle">平方 = {state.square}</text>
-      <rect x="177" y="115" width="130" height="48" rx="4" className="fill-sunken stroke-rule" /><text x="242" y="145" textAnchor="middle">3x = {state.linear}</text>
-      <rect x="100" y="221" width="120" height="38" rx="4" className="fill-accent2-soft stroke-accent2" /><text x="160" y="247" textAnchor="middle">y = {state.output}</text>
-      <text x="12" y="89" className={pen.textB}>平方路：{state.squareGradient}</text><text x="202" y="89" className={pen.textB}>线性路：{state.linearGradient}</text>
-      <text x="12" y="293">实线：前向依赖 · 蓝色虚线：反向传播</text>
-      <text x="12" y="315">图内相加；跨次累积到 .grad。</text>
-    </svg>
-    <div className="mt-3 flex flex-wrap gap-2">
-      <button type="button" onClick={() => setGrad(state.accumulated)} className="h-9 rounded border border-accent bg-accent px-3 text-sm text-paper">重新前向并 backward</button>
-      <button type="button" onClick={() => setGrad(0)} className="h-9 rounded border border-rule bg-paper px-3 text-sm">清空叶子梯度</button>
-    </div>
-    <Readout><Formula>{String.raw`J^\top g=(2x+3)g=${state.gradient}`}</Formula> · 本次种子 g={seed} · 当前 x.grad={grad} · 下一次 backward 后={state.accumulated}</Readout>
+  const [grad, setGrad] = useState<{ w: number[]; b: number } | null>(null)
+  const { u, square, product, sum, loss, upstream, branches, gu, gw, gb } = vectorBranch(w0, w1, bias, seed)
+  const display = (values: number[]) => `(${values.map(value => Number(value.toFixed(4))).join(', ')})`
+  return <LabFrame title="向量分支汇合，再归约共享偏置" hint="x=(2,−1) 固定；u=w⊙x+b；L=½(u₀²+u₀u₁−2)²">
+    <Controls><Range label="参数 w₀" value={w0} min={-2} max={3} step={0.25} onChange={setW0} /><Range label="参数 w₁" value={w1} min={-2} max={3} step={0.25} onChange={setW1} /><Range label="共享参数 b" value={bias} min={-2} max={3} step={0.25} onChange={setBias} /><Range label="标量损失反向种子 g" step={0.5} value={seed} min={-2} max={2} onChange={setSeed} /></Controls>
+    <TraceTable label="正文前向与两条分支的反向值" rows={[
+      ['前向中间向量 u', display(u)], ['平方分支 + 乘积分支 → s', `${square} + ${product} = ${sum}`], ['损失 L → 上游 gₛ', `${loss} → ${upstream}`], ['u₀：平方贡献 + 乘积贡献', `${branches[0]} + ${branches[1]} = ${gu[0]}`], ['u₁：乘积贡献', String(gu[1])], ['乘输入 / 广播归约 → 参数梯度', `g_w=${display(gw)}；g_b=${gb}`],
+    ]} />
+    <div className="mt-3 flex flex-wrap gap-2"><Button primary onClick={() => setGrad(current => ({ w: gw.map((value, i) => value + (current?.w[i] ?? 0)), b: gb + (current?.b ?? 0) }))}>重新前向并 backward</Button><Button onClick={() => setGrad(null)}>清空叶子梯度</Button><Button onClick={() => { setW0(1); setW1(2); setBias(1); setSeed(1); setGrad(null) }}>恢复正文参数</Button></div>
+    <Readout>当前 w.grad={grad ? display(grad.w) : 'None'}；b.grad={grad ? grad.b : 'None'}。本次贡献 g_w={display(gw)}，g_b={gb}。默认参数第一次反向得到 (40,−12)、32；第二次得到 (80,−24)、64。更改参数不会清空已有梯度；本实验每次重新构建前向图。</Readout>
   </LabFrame>
 }

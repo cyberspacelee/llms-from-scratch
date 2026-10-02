@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { Controls, LabFrame, pen, Range, Readout } from './Lab'
 
@@ -11,7 +12,7 @@ export default function TokenMergeLab() {
   const [step, setStep] = useState(0)
   return <LabFrame title="猫 sat 的两次 BPE 合并">
     <Controls><Range label="合并次数" value={step} min={0} max={2} onChange={setStep} /></Controls>
-    <svg viewBox="0 0 540 105" className={pen.canvas} role="img" aria-label={`猫 sat 合并 ${step} 次后的字节切分`}>
+    <SvgCanvas viewBox="0 0 540 105" className={pen.canvas} role="img" aria-label={`猫 sat 合并 ${step} 次后的字节切分`}>
       {(() => {
         let offset = 25
         return stages[step].map(([label, byteCount], index) => {
@@ -25,7 +26,7 @@ export default function TokenMergeLab() {
         })
       })()}
       <text x="25" y="88">十六进制字节；方框表示一个 token</text>
-    </svg>
+    </SvgCanvas>
     <Readout>{['七个基础字节', '合并 (32,115) → 256：空格+s', '合并 (97,116) → 257：at'][step]} · 词表大小 {256 + step}</Readout>
   </LabFrame>
 }

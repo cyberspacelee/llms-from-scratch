@@ -2,18 +2,20 @@
 title: 注意力从哪里得到顺序
 question: 交换两个 token 时，注意力何时只交换输出，何时真正改变计算
 description: 用同一段三 token 输入，对照双向注意力、causal mask 和位置向量；证明各自的置换性质与适用边界。
+prerequisites:
+  - principles/decoder
 order: 5
 code:
-  - code/principles/attention_order.py
+  - examples/principles/attention_order.py
 ---
 
 在 [P3](/principles/attention/) 中，注意力按内容读取 token；[P4](/principles/decoder/) 在输入中加入位置表，又用 causal mask 限制可见范围。为什么同时需要这两种结构？我们沿用 P4 的 `[BOS, A, B]`，每次只改变一项条件，观察交换 BOS 与 A 后输出发生什么。最后再看位置表的作用与限制。阅读前只需掌握 [M6](/math/linear-algebra/) 的矩阵乘法和 P3 的逐行 softmax。
 
-import { PermutationLab } from '../../../components/labs/PrinciplesTraceLabs'
+import PermutationLab from '../../../components/labs/PermutationLab'
 
 ## 受控对照：同一段输入，先去掉位置和 mask
 
-为让三个位置都能手算，这里把每个 token 的内容压成一个标量：$X=(1,2,3)^\top$，三行依次对应 BOS、A、B。它不是 P4 可训练模型的真实 embedding，只是对顺序来源做对照的简化输入。令 $W_Q=W_K=W_V=[1]$，头维度 $d_h=1$。在**双向、无位置、无 mask**的条件下，查询 $i$ 对键 $j$ 的分数就是 $x_ix_j$。位置 0 的三个分数是 $(1,2,3)$，所以
+为让三个位置都能手算，这里把每个 token 的内容压成一个标量：$X=(1,2,3)^\top$，三行依次对应 BOS、A、B。它不是 P4 可训练模型的真实 embedding，只是对顺序来源做对照的简化输入。令 $W_Q=W_K=W_V=[1]$，头维度 $D_h=1$。在**双向、无位置、无 mask**的条件下，查询 $i$ 对键 $j$ 的分数就是 $x_ix_j$。位置 0 的三个分数是 $(1,2,3)$，所以
 
 $$
 y_0=\frac{1e^1+2e^2+3e^3}{e^1+e^2+e^3}\approx2.575.
@@ -25,11 +27,11 @@ $$
 
 ## 双向注意力：为什么输出只跟着 token 移动
 
-下面证明刚才的现象对任意长度和向量维度都成立。设 $X\in\mathbb R^{T\times d}$ 按行存内容，暂不加入位置、mask、跨位置卷积或其他顺序结构。P3 的单头公式在此记为
+下面证明刚才的现象对任意长度和向量维度都成立。设 $X\in\mathbb R^{T\times D}$ 按行存内容，暂不加入位置、mask、跨位置卷积或其他顺序结构。P3 的单头公式在此记为
 
 $$
 Q=XW_Q,\quad K=XW_K,\quad V=XW_V,\quad
-S=\frac{QK^\top}{\sqrt{d_h}},\quad
+S=\frac{QK^\top}{\sqrt{D_h}},\quad
 F(X)=\operatorname{softmax}_{\mathrm{row}}(S)V.
 $$
 
@@ -42,7 +44,7 @@ $$
 先看三个投影：每一行用相同的权重，因此 $Q'=PQ,K'=PK,V'=PV$。分数矩阵随之**同时重排行和列**：
 
 $$
-S'=\frac{(PQ)(PK)^\top}{\sqrt{d_h}}=PSP^\top.
+S'=\frac{(PQ)(PK)^\top}{\sqrt{D_h}}=PSP^\top.
 $$
 
 逐行 softmax 的分母包含该行所有列；仅排列列不会改变和，排列行只会排列结果。所以令 $A=\operatorname{softmax}_{\mathrm{row}}(S)$，便有 $A'=PAP^\top$。最后计算加权值，$P^\top P=I$ 使中间排列抵消：
@@ -102,7 +104,7 @@ $$
 
 第一项是“移动 token，位置留在槽位”；第二项是“token 连同原来的位置向量一起搬走”。后者仍满足上一节的等变证明，但前者已经不是单纯对完整输入重排行。取 $E$ 所有行相同则 $PE=E$，这张表无法区分这些槽位；即便 $PE\ne E$，某组退化的投影也可能忽略位置，所以位置向量只是**提供可学习的区别**，并不保证每组参数都实际用到它。
 
-为什么 P4 使用相加？内容和位置向量同为 $d$ 维，便能送入原来接受 $(B,T,d)$ 的 Decoder，不改变隐藏维度。这是架构选择，拼接后投影也可提供位置信息。若令 $M=W_QW_K^\top$，把一个头的分数（暂略 $1/\sqrt{d_h}$）展开，可以看见相加后的作用：
+为什么 P4 使用相加？内容和位置向量同为 $D$ 维，便能送入原来接受 $(B,T,D)$ 的 Decoder，不改变隐藏维度。这是架构选择，拼接后投影也可提供位置信息。若令 $M=W_QW_K^\top$，把一个头的分数（暂略 $1/\sqrt{D_h}$）展开，可以看见相加后的作用：
 
 $$
 \begin{aligned}
@@ -131,9 +133,9 @@ $$
 
 ## 用脚本复查：数值例与一般性质各检验什么
 
-运行 `.venv/bin/python code/principles/attention_order.py`。脚本用本章的三个标量和固定置换复现双向、固定 causal mask、同步搬动 mask、固定位置表四组输出。它验证的是这些**具体数值**；上面的等变证明才说明在其假设下任意 $T$ 和任意共享投影都成立。[P6](/principles/sinusoidal/) 与 [P7](/principles/rope/) 共用的 `position_encoding.py` 另用随机向量检查一般矩阵实现。
+运行 `uv run python -m examples.principles.attention_order`。脚本用本章的三个标量和固定置换复现双向、固定 causal mask、同步搬动 mask、固定位置表四组输出。它验证的是这些**具体数值**；上面的等变证明才说明在其假设下任意 $T$ 和任意共享投影都成立。[P6](/principles/sinusoidal/) 与 [P7](/principles/rope/) 共用的 `position_encoding.py` 另用随机向量检查一般矩阵实现。
 
-<CodeFile path="code/principles/attention_order.py" />
+<CodeFile path="examples/principles/attention_order.py" symbol="attend" />
 
 ## 常见误区
 

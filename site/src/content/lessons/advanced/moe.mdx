@@ -4,19 +4,21 @@ question: 每个 token 只调用少量专家，怎样得到完整输出
 description: 用四个专家、三个 token 位置的同一张路由表，算出混合输出、负载、容量和资源用量，再对照公开模型的路由差异。
 order: 1
 code:
-  - code/advanced/moe.py
+  - examples/advanced/moe.py
+prerequisites: ["principles/gated-ffn", "math/distributions", "training/optimization"]
+optional: true
 ---
 
 import MoeRouteLab from '../../../components/labs/MoeRouteLab'
-import { MoeDispatchLab } from '../../../components/labs/AdvancedLabs'
+import MoeDispatchLab from '../../../components/labs/MoeDispatchLab'
 
-[P8](/principles/modern-decoder/#swiglu对同一位置的隐藏状态做门控变换) 的每个 token 都经过同一组 SwiGLU 权重。如果把前馈层换成许多组独立权重，又让每个 token 只调用其中少数几组，模型就能拥有较多参数而不在每个位置计算全部参数。这种结构叫混合专家（mixture of experts，MoE）。它的关键不是把训练好的普通 FFN 无损拆开，而是在模型中加入**路由**，让专家与路由器共同学习。
+[P10](/principles/gated-ffn/) 的每个 token 都经过同一组 SwiGLU 权重。如果把前馈层换成许多组独立权重，又让每个 token 只调用其中少数几组，模型就能拥有较多参数而不在每个位置计算全部参数。这种结构叫混合专家（mixture of experts，MoE）。它的关键不是把训练好的普通 FFN 无损拆开，而是在模型中加入**路由**，让专家与路由器共同学习。
 
-本章需要 P8 的 FFN、[M5 softmax](/math/distributions/) 和 [T2 梯度更新](/training/optimization/)。读完要能给定一张路由分数表，独立算出每条 token 的输出，并分别回答：参数总共存多少、每条 token 算多少、专家分布到多卡时传什么。
+本章需要 P10 的 FFN、[M5 softmax](/math/distributions/) 和 [T2 梯度更新](/training/optimization/)。读完要能给定一张路由分数表，独立算出每条 token 的输出，并分别回答：参数总共存多少、每条 token 算多少、专家分布到多卡时传什么。
 
 ## 从一条 token 开始：路由器决定调用谁
 
-设隐藏状态为 $x\in\mathbb R^d$，有 $n_e$ 个专家 $F_e:\mathbb R^d\to\mathbb R^d$。路由器可用可训练矩阵 $W_{\mathrm r}\in\mathbb R^{n_e\times d}$ 得到每个专家的 `logits`（softmax 前的分数）：$a=W_{\mathrm r}x$。从 $a$ 中取分数最高的 $k_e$ 个专家，记索引集合为 $\mathcal E(x)$。这里的 top-k 在**专家轴**上选择，和 [P9](/principles/generation/) 从词表中选候选 token 是两件事。
+设隐藏状态为 $x\in\mathbb R^D$，有 $n_e$ 个专家 $F_e:\mathbb R^D\to\mathbb R^D$。路由器可用可训练矩阵 $W_{\mathrm r}\in\mathbb R^{n_e\times D}$ 得到每个专家的 `logits`（softmax 前的分数）：$a=W_{\mathrm r}x$。从 $a$ 中取分数最高的 $k_e$ 个专家，记索引集合为 $\mathcal E(x)$。这里的 top-k 在**专家轴**上选择，和 [P11](/principles/generation/) 从词表中选候选 token 是两件事。
 
 先固定一种混合约定：只对选中的分数做 softmax。未选中的权重为零，选中者的权重之和为一，输出为
 
@@ -28,7 +30,7 @@ $$
 
 先对全部专家 softmax、选 top-k 后**再次归一化**，也得到这组 $g_e$：公共分母会约掉。不再次归一化则是另一种模型，选中权重之和通常小于一。选择规则、混合权重与是否归一化都须一起写清。
 
-本章教学例取 $d=2,n_e=4,k_e=2$。四个专家先用易手算的线性函数 $F_e(x)=(e+1)x$；真实 Decoder 通常把每个 $F_e$ 换成独立的 SwiGLU。下表把一个 batch 展平后的三行记为 token 0、1、2，并**直接给定**路由器输出的分数。表并不声称这些数来自某个已给定的 $W_{\mathrm r}$；后面的代码把它们当作可求导的分数输入。
+本章教学例取 $D=2,n_e=4,k_e=2$。四个专家先用易手算的线性函数 $F_e(x)=(e+1)x$；真实 Decoder 通常把每个 $F_e$ 换成独立的 SwiGLU。下表把一个 batch 展平后的三行记为 token 0、1、2，并**直接给定**路由器输出的分数。表并不声称这些数来自某个已给定的 $W_{\mathrm r}$；后面的代码把它们当作可求导的分数输入。
 
 | token | $x$ | 专家 0/1/2/3 的分数 | top-2 |
 | --- | --- | --- | --- |
@@ -53,7 +55,7 @@ token 1 也有分数差 1，故以相同的两项权重混合 $F_2(x)=(6,-3)$ �
 
 ## 把三个 token 位置分给专家：为何要加回原行
 
-上面的公式按 token 写；实际执行往往按**专家**收集输入。对 $(B,T,d)$ 的隐藏状态，先把有效位置展平成 $(N,d)$，选中索引与权重都是 $(N,k_e)$。本例专家 0 收到原行 0、2，专家 1 收到行 0，专家 2 收到行 1、2，专家 3 收到行 1。每个专家只对自己收到的行运行一次小 batch，随后带着原行号返回。
+上面的公式按 token 写；实际执行往往按**专家**收集输入。对 $(B,T,D)$ 的隐藏状态，先把有效位置展平成 $(N,D)$，选中索引与权重都是 $(N,k_e)$。本例专家 0 收到原行 0、2，专家 1 收到行 0，专家 2 收到行 1、2，专家 3 收到行 1。每个专家只对自己收到的行运行一次小 batch，随后带着原行号返回。
 
 ```mermaid
 flowchart LR
@@ -93,19 +95,19 @@ $$
 
 ## 分开记账：总权重、活跃计算和跨卡传输
 
-四个教学专家各有一块无偏置 $2\times2$ 矩阵，总共 **16 个**专家参数。每条 token 只调用两块，活跃专家权重是 **8 个**；若在真实可训练 router 中使用 $W_{\mathrm r}$，另加 $n_ed=8$ 个参数。本例直接提供分数，所以脚本只实例化那 16 个专家权重。16 个总权重与 8 个活跃权重不是同一种计数。
+四个教学专家各有一块无偏置 $2\times2$ 矩阵，总共 **16 个**专家参数。每条 token 只调用两块，活跃专家权重是 **8 个**；若在真实可训练 router 中使用 $W_{\mathrm r}$，另加 $n_eD=8$ 个参数。本例直接提供分数，所以脚本只实例化那 16 个专家权重。16 个总权重与 8 个活跃权重不是同一种计数。
 
-对 P8 的无偏置 SwiGLU 专家，gate、up、down 三块矩阵合计每专家 $3dd_{\mathrm{ff},e}$ 个权重。若共有 $n_e$ 个同宽路由专家，每条 token 选 $k_e$ 个，则这一层的专家部分大致为
+对 P10 的无偏置 SwiGLU 专家，gate、up、down 三块矩阵合计每专家 $3DD_{\mathrm{ff},e}$ 个权重。若共有 $n_e$ 个同宽路由专家，每条 token 选 $k_e$ 个，则这一层的专家部分大致为
 
 | 问题 | 数量，不含注意力与共享模块 |
 | --- | --- |
-| 常驻专家参数 | $3n_e d d_{\mathrm{ff},e}$ |
-| 单 token 活跃专家参数 | $3k_e d d_{\mathrm{ff},e}$ |
-| 单 token 专家线性层乘加 | 约 $2\times3k_e d d_{\mathrm{ff},e}$ FLOP |
+| 常驻专家参数 | $3n_e D D_{\mathrm{ff},e}$ |
+| 单 token 活跃专家参数 | $3k_e D D_{\mathrm{ff},e}$ |
+| 单 token 专家线性层乘加 | 约 $2\times3k_e D D_{\mathrm{ff},e}$ FLOP |
 
 一次乘加按 2 FLOP，激活函数、router、加权合并另算。总参数必须为后续 token 保留；少算专家并不自动省去权重容量。一个大 batch 也可能触及全部专家，使权重读取接近全部专家权重。与 [S1 的稠密模型账](/systems/ledger/) 比较时，应先明确替换的是 FFN，而非把整模参数直接乘 $k_e/n_e$；MoE 也没有直接减少注意力的 KV cache。
 
-若四位专家放在不同设备，token 0 的二维隐藏状态须送往专家 0、1 所在设备，两个结果再回到原 token 行。专家并行（expert parallelism，EP）传的是**被路由的 token 状态及其结果**，可能还有索引和权重；它不像 [S9 张量并行](/systems/cluster/) 那样按矩阵输入或输出维求部分和。分发可用 all-to-all，通信量与 token 数、$k_e$、$d$、数据类型和放置有关，还要计消息延迟、排序与不均衡。特别在 decode 的小 batch 中，每位专家可能只收到很少几行，省下的乘法未必抵得过等待；时间结论需要目标系统实测。
+若四位专家放在不同设备，token 0 的二维隐藏状态须送往专家 0、1 所在设备，两个结果再回到原 token 行。专家并行（expert parallelism，EP）传的是**被路由的 token 状态及其结果**，可能还有索引和权重；它不像 [S9 张量并行](/systems/cluster/) 那样按矩阵输入或输出维求部分和。分发可用 all-to-all，通信量与 token 数、$k_e$、$D$、数据类型和放置有关，还要计消息延迟、排序与不均衡。特别在 decode 的小 batch 中，每位专家可能只收到很少几行，省下的乘法未必抵得过等待；时间结论需要目标系统实测。
 
 ## 对照公开模型：相似结构有不同路由
 
@@ -123,9 +125,9 @@ $$
 
 ## 用脚本核对同一路由
 
-运行 `python code/advanced/moe.py`。脚本固定本章三条输入与分数，逐项核对三条输出、六次命中、容量与负载项、参数数、同路由的稀疏/稠密参考以及选中分数的梯度；它不测 EP 通信或 GPU 性能。
+运行 `uv run python -m examples.advanced.moe`。脚本固定本章三条输入与分数，逐项核对三条输出、六次命中、容量与负载项、参数数、同路由的稀疏/稠密参考以及选中分数的梯度；它不测 EP 通信或 GPU 性能。
 
-<CodeFile path="code/advanced/moe.py" />
+<CodeFile path="examples/advanced/moe.py" symbol={["route", "dispatch"]} />
 
 ## 常见误区
 

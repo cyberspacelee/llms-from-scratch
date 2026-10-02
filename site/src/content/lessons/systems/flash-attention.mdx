@@ -4,20 +4,21 @@ question: 不保存完整分数矩阵，怎样仍计算数学上相同的注意�
 description: 用六个键的同一组 Q/K/V，手算分块 softmax 与输出合并，再解释 GPU IO、causal mask、反向重算和 SDPA 后端边界。
 order: 3
 code:
-  - code/systems/attention_io.py
+  - examples/systems/attention_io.py
+prerequisites: ["principles/attention", "systems/accelerator"]
 ---
 
-import { OnlineSoftmaxLab } from '../../../components/labs/SystemsLabs'
+import OnlineSoftmaxLab from '../../../components/labs/OnlineSoftmaxLab'
 
-从 [P3 注意力](/principles/attention/) 到 [P10 KV cache](/principles/kv-cache/)，我们都把注意力写作“算分数、做 softmax、用权重加权 V”。这能说明模型算了什么，却没有规定 GPU 必须把每一步的结果写到哪里。[S2](/systems/accelerator/) 已说明，数据在 GPU 存储层级之间移动会占时间。本章只解决一个问题：**如果最终只要每个查询的输出，能否边读 K/V 边更新输出，避免在显存中保存整张分数和权重矩阵？**
+从 [P3 注意力](/principles/attention/) 到 [P12 KV cache](/principles/kv-cache/)，我们都把注意力写作“算分数、做 softmax、用权重加权 V”。这能说明模型算了什么，却没有规定 GPU 必须把每一步的结果写到哪里。[S2](/systems/accelerator/) 已说明，数据在 GPU 存储层级之间移动会占时间。本章只解决一个问题：**如果最终只要每个查询的输出，能否边读 K/V 边更新输出，避免在显存中保存整张分数和权重矩阵？**
 
 先修只需知道点积、稳定 softmax 和 causal mask。贯穿案例有六个键，以及绝对位置为 3、4、5 的三个查询。我们先算最后一个查询，再让另外两行检验边界。
 
 ## 同一组 Q/K/V：朴素计算会留下什么
 
-只看一个头，令 $d_h=2$、值宽 $d_v=1$。三个查询都取 $q_i=(1,0)$，键和值如下。键的首坐标特意乘 $\sqrt2$，使缩放点积恰好等于表中的整数。
+只看一个头，令 $D_h=2$、值宽 $D_v=1$。三个查询都取 $q_i=(1,0)$，键和值如下。键的首坐标特意乘 $\sqrt2$，使缩放点积恰好等于表中的整数。
 
-| 键的绝对位置 $j$ | $k_j$ | $v_j$ | $q_i^\top k_j/\sqrt{d_h}$ |
+| 键的绝对位置 $j$ | $k_j$ | $v_j$ | $q_i^\top k_j/\sqrt{D_h}$ |
 | --- | --- | ---: | ---: |
 | 0 | $(0,0)$ | 1 | 0 |
 | 1 | $(\sqrt2,0)$ | 2 | 1 |
@@ -28,14 +29,14 @@ import { OnlineSoftmaxLab } from '../../../components/labs/SystemsLabs'
 
 若查询在位置 5，六个键都可见。它的一行分数是 $s=(0,1,2,3,4,5)$。查询在位置 3 时只能读键 0–3；位置 4 时只能读键 0–4。这是 [P3 的 causal mask](/principles/attention/#causal-mask哪些键允许进入分母)，不是把未来分数改成 0。
 
-一般地，$Q\in\mathbb R^{T_q\times d_h}$、$K\in\mathbb R^{T_k\times d_h}$、$V\in\mathbb R^{T_k\times d_v}$，显式写法为
+一般地，$Q\in\mathbb R^{T_q\times D_h}$、$K\in\mathbb R^{T_k\times D_h}$、$V\in\mathbb R^{T_k\times D_v}$，显式写法为
 
 $$
-S=QK^\top/\sqrt{d_h},\qquad
+S=QK^\top/\sqrt{D_h},\qquad
 A=\operatorname{softmax}(S+M),\qquad O=AV.
 $$
 
-softmax 沿键轴逐行计算。$M_{ij}$ 对可见键为 0、不可见键为 $-\infty$。$S,A$ 各有 $T_qT_k$ 个元素，输出只有 $T_qd_v$ 个。若 $T_q=T_k=8192$，一个头的一张 bf16 分数矩阵就是 $8192^2\times2$ byte，即 **128 MiB**；32 个头仅这张矩阵就达 4 GiB，尚未计权重矩阵、梯度和其他激活。这个数说明显式物化的代价，并不表示所有使用上面公式的库都会真的保存它。
+softmax 沿键轴逐行计算。$M_{ij}$ 对可见键为 0、不可见键为 $-\infty$。$S,A$ 各有 $T_qT_k$ 个元素，输出只有 $T_qD_v$ 个。若 $T_q=T_k=8192$，一个头的一张 bf16 分数矩阵就是 $8192^2\times2$ byte，即 **128 MiB**；32 个头仅这张矩阵就达 4 GiB，尚未计权重矩阵、梯度和其他激活。这个数说明显式物化的代价，并不表示所有使用上面公式的库都会真的保存它。
 
 ## 一行状态：把看过的键压缩成什么
 
@@ -141,13 +142,13 @@ flowchart LR
 
 训练时仍要计算对 Q/K/V 的梯度。朴素实现可保存完整概率矩阵 $A$；FlashAttention 的反向利用前向保存的输出和每行 softmax 统计，**分块重算**局部概率，再累积梯度。这用额外计算换取较少的全长激活保存。若启用 dropout，还要在重算时复现相应随机掩码；本页的无 dropout CPU 参考没有实现反向。
 
-PyTorch 的 `torch.nn.functional.scaled_dot_product_attention`（SDPA）是调用接口，不是一个固定的 FlashAttention kernel。它可依输入设备、dtype、形状、mask 和库版本选择不同实现；官方 [SDPA 文档](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) 列出可用后端与约束，`sdpa_kernel()` 可在实验中限制后端。自动选择时记录实际 kernel，比较性能时固定 Q/K/V、精度、mask、dropout、预热和同步，并先核对输出与梯度误差。[G4 的完整模型实验](/gpu/measurement/#完整模型先对齐输出与梯度再观察执行路径) 说明这些测量边界。
+PyTorch 的 `torch.nn.functional.scaled_dot_product_attention`（SDPA）是调用接口，不是一个固定的 FlashAttention kernel。它可依输入设备、dtype、形状、mask 和库版本选择不同实现；官方 [SDPA 文档](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html) 列出可用后端与约束，`sdpa_kernel()` 可在实验中限制后端。自动选择时记录实际 kernel，比较性能时固定 Q/K/V、精度、mask、dropout、预热和同步，并先核对输出与梯度误差。[G4 的完整模型实验](/gpu/model-profiling/) 说明这些测量边界。
 
 ## CPU 核对：同一案例，换块大小
 
 下面脚本直接构造上表的 Q/K/V，先手算位置 5 的 $5.43293$，再将三个查询的 dense 输出与在线输出比较。块长 1、2、3、4、8 会触及完整块和不完整尾块；分数整体加 1000 检查稳定性；额外的 padding 和全遮蔽行检查 mask 边界。
 
-<CodeFile path="code/systems/attention_io.py" />
+<CodeFile path="examples/systems/attention_io.py" symbol="online_attention" />
 
 运行成功只证明这些输入上的数学一致性。NumPy 循环没有 GPU shared memory、tensor core 或并行调度，不能用它的耗时论证 FlashAttention 的加速。
 

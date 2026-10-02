@@ -4,7 +4,8 @@ question: 已知条件概率，怎样还原整体、反查来源并计算一串�
 description: 从同一张四记录表推导全概率、贝叶斯定理与概率链式法则，再把两步联合扩展为序列概率。
 order: 2
 code:
-  - code/math/probability.py
+  - examples/math/probability.py
+prerequisites: ["math/events"]
 ---
 
 import MathBayesLab from '../../../components/labs/MathBayesLab'
@@ -229,7 +230,7 @@ $$
 
 现在可以从局部条件概率恢复整体、在观测后反查来源，并保留完整历史计算序列概率。[M3 概率与统计](/math/probability/) 继续沿用四条记录，研究抽样损失的平均和波动；[M4 信息量与熵](/math/information/) 将解释怎样用对数衡量结果的不确定性。[P2 下一 token 预测](/principles/language-modeling/) 再把这里的序列条件概率变成实际训练问题。
 
-数值核对复用 `code/math/probability.py`，在仓库根目录运行 `python code/math/probability.py`。
+数值核对复用 `examples/math/probability.py`，在仓库根目录运行 `uv run python -m examples.math.probability`。
 
 ## 资料
 

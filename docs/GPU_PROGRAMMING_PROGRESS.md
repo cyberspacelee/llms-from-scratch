@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # GPU 编程实施与验收
 
 依据：[GPU 编程规划](GPU_PROGRAMMING_PLAN.md) 与 [讲义规范](CONVENTIONS.md)。日期：2026-09-27。

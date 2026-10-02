@@ -4,16 +4,17 @@ question: 一条生成请求跨两张 GPU 时，每张卡算什么、传什么�
 description: 用同一个两层 Decoder 手算列切分与行切分、通信字节、流水时序和 KV 放置，再判断副本与 prefill/decode 分离的代价。
 order: 9
 code:
-  - code/systems/parallel_layout.py
+  - examples/systems/parallel_layout.py
+prerequisites: ["systems/ledger", "gpu/memory-and-sync"]
 ---
 
-import { CollectiveLab } from '../../../components/labs/SystemsLabs'
+import CollectiveLab from '../../../components/labs/CollectiveLab'
 
 [S1 资源估算](/systems/ledger/) 已算出模型权重和 KV cache 的大小，[S2 硬件](/systems/accelerator/) 解释了计算与搬移的瓶颈。假设一张 GPU 放不下目标模型，或放得下但处理不了到达的请求，我们需要加入第二张卡。
 
 两张卡可以共同计算同一层，也可以各算不同层，还可以各存一份完整模型并分别服务请求。本章从算子和请求状态逐项计算通信与等待，再判断各布局对容量、单请求延迟和整体吞吐的影响。
 
-沿用 S1 的两层小 Decoder：隐藏维度 $d=4$、两个查询头、一个 KV 头、每头维度 $d_h=2$。下面先看它的一次线性投影，再把结论放回一个生成请求。数值矩阵只是演示切分的投影，不代表该模型的某组实际训练权重。权重、激活和 KV 均以每元素 2 字节计；带宽示例另外注明假设。
+沿用 S1 的两层小 Decoder：隐藏维度 $D=4$、两个查询头、一个 KV 头、每头维度 $D_h=2$。下面先看它的一次线性投影，再把结论放回一个生成请求。数值矩阵只是演示切分的投影，不代表该模型的某组实际训练权重。权重、激活和 KV 均以每元素 2 字节计；带宽示例另外注明假设。
 
 ## 先约定谁持有结果
 
@@ -105,9 +106,9 @@ PP 的传输量可用同一个玩具模型估计：两层各在一张卡，阶�
 
 prefill（一次处理提示）与 decode（逐步生成）也可部署在不同 worker。这样可分别为两类负载配置资源，但 prefill 结束后必须把 KV 送到 decode 侧。[DistServe 原论文](https://arxiv.org/abs/2401.09670)研究了这种拆分，[vLLM 示例](https://docs.vllm.ai/en/latest/examples/disaggregated/example_connector/)展示了状态转移接口。以 S1 的大型模型账为例，一条 8192-token 提示约有 1 GiB KV。**假设**可用的单向有效带宽为 50 GB/s，仅传 1 GiB 的理想下界约为 $1.074\,\mathrm{GB}/50\,\mathrm{GB/s}=21.5$ ms，尚未计固定延迟、队列、格式转换或接收侧写入。若原先混部只损失 5 ms，就不能仅凭“资源独立”宣称拆分更快；若能重叠传输或减少搬移量，需按新路径重算。两侧模型权重、位置约定、KV 布局与已处理长度也必须兼容。
 
-训练中的数据并行需要同步梯度，ZeRO/FSDP 还会分片优化器、梯度和参数；这些状态及同步目标与推理 KV 不同。它们的更新推导在 [T9 分布式训练](/training/distributed-training/)。专家并行把 token 发往选中专家所在 rank，通信与普通 TP 不同，在 [A1 MoE](/advanced/moe/) 建立路由规则后再讨论。
+训练中的数据并行需要同步梯度，ZeRO/FSDP 还会分片优化器、梯度和参数；这些状态及同步目标与推理 KV 不同。它们的更新推导在 [T8 分布式训练](/training/distributed-training/)。专家并行把 token 发往选中专家所在 rank，通信与普通 TP 不同，在 [A1 MoE](/advanced/moe/) 建立路由规则后再讨论。
 
-<CodeFile path="code/systems/parallel_layout.py" />
+<CodeFile path="examples/systems/parallel_layout.py" symbol="verify" />
 
 脚本核对本章两种矩阵切分、两卡通信字节、两层 KV 与流水比例。它没有建立多进程组、执行 NCCL 或测 GPU 网络，因而不能证明某种布局在目标硬件上更快。
 

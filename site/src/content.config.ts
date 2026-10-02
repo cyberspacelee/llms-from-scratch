@@ -16,6 +16,8 @@ const lessons = defineCollection({
     order: z.number().int().nonnegative(),
     /** Repository paths of the scripts that verify this lesson. */
     code: z.array(z.string()).default([]),
+    prerequisites: z.array(z.string()).default([]),
+    optional: z.boolean().default(false),
   }),
 })
 

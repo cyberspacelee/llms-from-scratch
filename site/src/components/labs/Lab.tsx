@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode, type SelectHTMLAttributes } from 'react'
 
 /** The shared frame of every lab: title, hint, body. */
 export function LabFrame({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
@@ -26,7 +26,7 @@ type RangeProps = {
   value: number
   min: number
   max: number
-  step?: number
+  step?: number | 'any'
   onChange: (value: number) => void
   format?: (value: number) => string
 }
@@ -53,26 +53,41 @@ export function Range({ label, value, min, max, step = 1, onChange, format = Str
   )
 }
 
-export function Button({ children, onClick, primary = false, label }: {
+export function Button({ children, onClick, primary = false, label, disabled = false }: {
   children: ReactNode
   onClick: () => void
   primary?: boolean
   label?: string
+  disabled?: boolean
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       aria-label={label}
-      className={
+      className={'disabled:cursor-default disabled:opacity-40 ' + (
         primary
           ? 'h-9 rounded-lg border border-accent bg-accent px-4 text-sm text-paper hover:bg-accent-strong'
           : 'h-9 rounded-lg border border-rule-strong bg-paper px-4 text-sm text-ink hover:border-accent hover:text-accent-strong'
-      }
+      )}
     >
       {children}
     </button>
   )
+}
+
+export function Select({ label, children, ...props }: SelectHTMLAttributes<HTMLSelectElement> & { label: string }) {
+  const id = useId()
+  return <label htmlFor={id} className="block text-sm">{label}<select {...props} id={id} className="mt-1 block h-9 w-full rounded-lg border border-rule-strong bg-paper px-2 text-ink">{children}</select></label>
+}
+
+export function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (value: boolean) => void }) {
+  return <label className="flex min-h-9 items-center gap-2 text-sm"><input type="checkbox" checked={checked} onChange={event => onChange(event.target.checked)} className="size-4 shrink-0 accent-accent" />{label}</label>
+}
+
+export function StepControls({ label = '执行阶段', value, labels, onChange }: { label?: string; value: number; labels: string[]; onChange: (value: number) => void }) {
+  return <div className="space-y-2"><Range label={label} value={value} min={0} max={labels.length - 1} onChange={onChange} format={step => labels[step]} /><div className="flex gap-2"><Button disabled={value === 0} onClick={() => onChange(value - 1)}>上一步</Button><Button disabled={value === labels.length - 1} onClick={() => onChange(value + 1)}>下一步</Button></div></div>
 }
 
 export function Readout({ children }: { children: ReactNode }) {

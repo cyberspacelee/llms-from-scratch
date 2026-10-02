@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import Formula from './Formula'
 import { threadNumber } from './GpuIndexModel'
@@ -14,7 +15,7 @@ export default function BlockVolumeLab() {
       <Range label="thread y" value={y} min={0} max={3} onChange={setY} />
       <Range label="z 切片" value={z} min={0} max={1} onChange={setZ} />
     </Controls>
-    <svg viewBox="0 0 320 380" className={`${pen.canvas} max-w-96`} role="img" aria-label={`8×4×2 逻辑 block，选中坐标 (${x},${y},${z})，线性线程 ${thread}`}>
+    <SvgCanvas viewBox="0 0 320 380" className={`${pen.canvas} max-w-96`} role="img" aria-label={`8×4×2 逻辑 block，选中坐标 (${x},${y},${z})，线性线程 ${thread}`}>
       <text x="12" y="19">block (8, 4, 2) · 逻辑坐标</text>
       {[0, 1].map(layer => <g key={layer}>
         <text x="286" y={155 - layer * 76} className={layer === z ? pen.textA : pen.muted}>z={layer}</text>
@@ -36,7 +37,7 @@ export default function BlockVolumeLab() {
         </g>
       })}
       <text x="12" y="377" className={pen.muted}>轴测示意；不是物理核心排列</text>
-    </svg>
+    </SvgCanvas>
     <Readout><Formula>{`t=${x}+8(${y}+4\\times${z})=${thread}`}</Formula> · warp {Math.floor(thread / 32)} · lane {thread % 32}<br />x 每加 1，t 加 1 · y 每加 1，t 加 8 · z 每加 1，t 加 32</Readout>
   </LabFrame>
 }

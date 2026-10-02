@@ -4,7 +4,8 @@ question: 怎样把 (B,T,d) 拆成多头注意力所需的轴，再无错位地�
 description: 沿用六个 NumPy 数值，追踪共享存储、dtype/device、stride 与轴身份，完成一次可核对的拆头、mask 和合并。
 order: 3
 code:
-  - code/frameworks/torch_tensors.py
+  - examples/frameworks/torch_tensors.py
+prerequisites: ["frameworks/numpy-arrays"]
 ---
 
 import TorchStrideLab from '../../../components/labs/TorchStrideLab'
@@ -144,7 +145,7 @@ assert not torch.equal(wrong, X)
 
 从 NumPy 到 Torch 后，F1 的判断仍适用：检查值、shape、轴身份和共享关系，别让其中一项代替其余项。Torch 还增加 dtype、device 与自动微分历史这几层契约；`clone` 只保证新存储，是否停止求导要另行决定。脚本把同一份六个数走完整条路径，并用非方形轴、共享/复制与 mask 断言检查常见错位：
 
-<CodeFile path="code/frameworks/torch_tensors.py" />
+<CodeFile path="examples/frameworks/torch_tensors.py" region="head_axes" />
 
 ## 常见误区
 

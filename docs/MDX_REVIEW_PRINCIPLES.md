@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 模型原理路线逐页整改记录
 
 审阅日期：2026-10-02。范围：`site/src/content/lessons/principles/` 的全部 12 页。修改前问题已汇入 [全站审计](MDX_READABILITY_AUDIT.md)。按中文技术教学场景采用接近 ASD-STE100 的短句、明确操作对象和单段单主题，不声称符合其正式英文规范。

@@ -4,7 +4,8 @@ question: 五个样本怎样组成训练批次，并在暂停后得到相同的�
 description: 沿五个样本和一个线性模型追踪批次、有效分母、梯度、优化器历史与 checkpoint 中的数据位置。
 order: 6
 code:
-  - code/frameworks/data_and_training.py
+  - examples/frameworks/data_and_training.py
+prerequisites: ["frameworks/modules-and-losses"]
 ---
 
 import BatchStreamLab from '../../../components/labs/BatchStreamLab'
@@ -204,15 +205,15 @@ g.set_state(checkpoint["order_rng"])
 
 因此 checkpoint 的含义应是一组处于同一逻辑边界的状态。最容易核对的初始设计是在一个完整 step 后保存，游标指向下一个待处理批次。多个微批组成一次更新时，可以等累计组完成再保存；若一定要在中间暂停，还需要记录已累计梯度、累计分母以及处理到哪一个微批。本章不保存中间计算图，示例始终以完整更新为边界。
 
-数据集改变后，即使 `order` 和游标的数值仍在范围内，它们也未必指向相同的内容。真实实验还需记录数据版本、切分与 tokenizer。这里固定五个张量样本，让状态错误能被隔离；[T3](/training/pretraining/) 会把输入契约纳入完整训练实验，并用恢复对照图显示漏存优化器、随机状态或游标时从哪一步偏离。
+数据集改变后，即使 `order` 和游标的数值仍在范围内，它们也未必指向相同的内容。真实实验还需记录数据版本、切分与 tokenizer。这里固定五个张量样本，让状态错误能被隔离；[T5](/training/checkpoint/) 会把输入契约纳入完整恢复实验，并用恢复对照图显示漏存优化器、随机状态或游标时从哪一步偏离。
 
-<CodeFile path="code/frameworks/data_and_training.py" />
+<CodeFile path="examples/frameworks/data_and_training.py" symbol="update" />
 
-运行 `python3 code/frameworks/data_and_training.py`，第一行应报告批次 `2/2/1`、加权损失 9 和精确 AdamW 续训通过。脚本固定 CPU float64、一个线程和随机种子，在临时目录保存并加载 checkpoint。它还核对 `drop_last` 导致零批次的边界、同一模型的第一批 SGD 梯度 $(-7,4)$ 与参数 $(0.7,-0.4)$、生成器状态及 state_dict 快照的共享关系。
+运行 `uv run python -m examples.frameworks.data_and_training`，第一行应报告批次 `2/2/1`、加权损失 9 和精确 AdamW 续训通过。脚本固定 CPU float64、一个线程和随机种子，在临时目录保存并加载 checkpoint。它还核对 `drop_last` 导致零批次的边界、同一模型的第一批 SGD 梯度 $(-7,4)$ 与参数 $(0.7,-0.4)$、生成器状态及 state_dict 快照的共享关系。
 
 续训实验在随机排列的前两批更新后保存；连续训练第三批作为参考。另建模型与优化器，装载状态，按保存的 `order` 和 `cursor=2` 取得同一第三批。脚本逐项比较第三批 loss、所有模型参数、AdamW step 与下一轮排列。反例只装载模型权重：第三批前向 loss 一样，但做完 step 后参数不同。模型没有 Dropout，且在同一 CPU 环境中运行；这没有验证多 worker 中途恢复、分布式采样或跨设备逐位复现。
 
-如果恢复后的下一次 loss 不同，先核对输入批次与模型状态；loss 相同但参数更新不同，再核对优化器状态、学习率、裁剪与累计边界。这比只观察后续 loss 曲线是否“看起来相似”更容易定位问题。真正的小语言模型恢复还涉及文本窗口、数据排列和多种随机来源，T3 提供完整实验。
+如果恢复后的下一次 loss 不同，先核对输入批次与模型状态；loss 相同但参数更新不同，再核对优化器状态、学习率、裁剪与累计边界。这比只观察后续 loss 曲线是否“看起来相似”更容易定位问题。真正的小语言模型恢复还涉及文本窗口、数据排列和多种随机来源，T5 提供完整实验。
 
 ## 常见误区
 
@@ -278,7 +279,7 @@ g.set_state(checkpoint["order_rng"])
 
 ## 原始资料与边界
 
-资料读取日期 2026-09-27；本轮验证使用 PyTorch 2.14.0+cpu。仓库依赖范围与安装方式见 README，示例使用基础 PyTorch 2.x 接口。
+资料读取日期 2026-09-27；首次核对使用 PyTorch 2.14.0+cpu，当前锁定环境的版本由脚本输出。仓库依赖范围与安装方式见 README，示例使用基础 PyTorch 2.x 接口。
 
 - [PyTorch data](https://docs.pytorch.org/docs/2.14/data.html)：Dataset、DataLoader、collate、随机性与末尾批次。
 - [Optimizer.zero_grad](https://docs.pytorch.org/docs/2.14/generated/torch.optim.Optimizer.zero_grad.html)：None 与零梯度的行为差异。

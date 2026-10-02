@@ -4,7 +4,8 @@ question: 模型分数怎样变成可训练的预测损失
 description: 从三分类分数走到 softmax、最大似然、经验交叉熵与稳定实现，再将同一思路用于二分类和回归。
 order: 5
 code:
-  - code/math/probability.py
+  - examples/math/probability.py
+prerequisites: ["math/probability", "math/information"]
 ---
 
 import MathPredictionLab from '../../../components/labs/MathPredictionLab'
@@ -259,7 +260,11 @@ $$
 
 </details>
 
-完整数值验证见 `code/math/probability.py`。下一章 [M6 向量与矩阵](/math/linear-algebra/) 将单样本类别轴与 batch 轴放进明确的矩阵形状，为线性层和参数求导准备工具。
+完整数值验证见 `examples/math/probability.py`。下一章 [M6 向量与矩阵](/math/linear-algebra/) 将单样本类别轴与 batch 轴放进明确的矩阵形状，为线性层和参数求导准备工具。
+
+## 真实代码核对
+
+<CodeFile path="examples/math/probability.py" symbol="log_softmax" />
 
 ## 原始资料
 

@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # MDX 可读性审计与整改
 
 审计日期：2026-10-02。范围：`site/src/content/lessons/` 的全部 68 个 MDX，含 7 个导读页。工作顺序：先逐页审计，汇总问题，再由多个 subagent 按路线分批修改，最后统一验收。

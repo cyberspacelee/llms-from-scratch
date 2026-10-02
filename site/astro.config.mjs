@@ -10,6 +10,8 @@ import { rehypeBaseLinks } from './src/plugins/rehype-base-links.mjs'
 import tailwindcss from '@tailwindcss/vite'
 
 const base = '/llms-from-scratch'
+// A running dev server must keep its dependency files when check/build run concurrently.
+const cacheCommand = process.argv.find(arg => ['dev', 'check', 'build'].includes(arg)) ?? 'build'
 
 export default defineConfig({
   site: 'https://cyberspacelee.github.io',
@@ -17,6 +19,7 @@ export default defineConfig({
   trailingSlash: 'always',
   integrations: [react(), mdx()],
   vite: {
+    cacheDir: `node_modules/.vite/${cacheCommand}`,
     plugins: [tailwindcss()],
   },
   markdown: {

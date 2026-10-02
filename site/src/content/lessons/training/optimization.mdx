@@ -4,11 +4,12 @@ question: 四个有效目标怎样合成一次正确的参数更新
 description: 从 T1 的有效目标出发，手算梯度累积和 AdamW 的一步更新，再判断裁剪、学习率、精度与重算各解决什么问题。
 order: 2
 code:
-  - code/training/optimization.py
+  - examples/training/optimization.py
+prerequisites: ["training/data", "frameworks/data-and-training"]
 ---
 
 import TokenWeightLab from '../../../components/labs/TokenWeightLab'
-import { AdamHistoryLab } from '../../../components/labs/TrainingTraceLabs'
+import AdamHistoryLab from '../../../components/labs/AdamHistoryLab'
 
 [T1](/training/data/) 把两篇文档整理成四个有效的下一 token 目标；跨文档的那一行不计入损失。现在假设显存只能分两次处理这四行：第一份只有 1 个有效目标，第二份有 3 个。怎样得到与一次处理四行相同的梯度，并用它更新参数？本章先完成这一步，再讨论让大型模型的这一步可运行、可恢复的条件。阅读前建议掌握 [M9 的梯度累加](/math/backprop/) 与 [M10 的 SGD 更新](/math/training/)。
 
@@ -56,7 +57,7 @@ $$
 
 再把第二份的目标数改为 2，保留两个 NLL。两种结果现在都为 2，因为两个微批有效数相同。这个变式说明：只用等长微批检查，会漏掉权重错误。配套脚本还比较梯度向量，避免只靠损失标量判断实现。
 
-这项等价要求每行损失在两种组织方式下相同。dropout 的随机结果、BatchNorm 的批内统计和浮点求和顺序可能破坏逐位一致；本例逐行独立，用 float64 在容差内核对。分布式训练还须确认设备间是求和还是平均，并处理跨设备总有效数，详见 [T9](/training/distributed-training/)。
+这项等价要求每行损失在两种组织方式下相同。dropout 的随机结果、BatchNorm 的批内统计和浮点求和顺序可能破坏逐位一致；本例逐行独立，用 float64 在容差内核对。分布式训练还须确认设备间是求和还是平均，并处理跨设备总有效数，详见 [T8](/training/distributed-training/)。
 
 ## 一步 SGD：梯度与学习率各做什么
 
@@ -101,7 +102,7 @@ $$
 
 实际 checkpoint 至少保存模型权重、优化器状态与步计数；若有学习率日程、梯度缩放器、采样器或随机状态，也要按目标恢复。`model.state_dict()` 只可重现当前前向，不能独自重现下一次更新。[T3](/training/pretraining/) 会把这些状态接进训练循环。
 
-<CodeFile path="code/training/optimization.py" />
+<CodeFile path="examples/training/optimization.py" symbol="manual_adamw" />
 
 <AdamHistoryLab client:visible />
 
@@ -121,7 +122,7 @@ $$
 
 ## 初始化与学习率：何时改变这条路径
 
-$w_0$ 为手算而固定。真实模型在第一步之前要给参数设尺度。对线性层 $z=Wx$，若输入坐标与权重独立、权重零均值且各项相关性可忽略，则单个输出的方差近似为 $d_{\mathrm{in}}\operatorname{Var}(W_{ij})\mathbb E[x_j^2]$。令权重方差约为 $1/d_{\mathrm{in}}$，可避免仅因输入维度增加就使前向尺度放大；ReLU、残差分支和归一化会改变适用假设。初始化控制信号尺度，不是猜到好参数。Xavier、He 等规则与 GPT-2 的残差写回缩放须结合具体架构选用。
+$w_0$ 为手算而固定。真实模型在第一步之前要给参数设尺度。对线性层 $z=Wx$，若输入坐标与权重独立、权重零均值且各项相关性可忽略，则单个输出的方差近似为 $D_{\mathrm{in}}\operatorname{Var}(W_{ij})\mathbb E[x_j^2]$。令权重方差约为 $1/D_{\mathrm{in}}$，可避免仅因输入维度增加就使前向尺度放大；ReLU、残差分支和归一化会改变适用假设。初始化控制信号尺度，不是猜到好参数。Xavier、He 等规则与 GPT-2 的残差写回缩放须结合具体架构选用。
 
 学习率日程使公式中的 $\eta_k$ 随进度变化。例如 warmup 可定义为 $\eta_k=\eta_{\max}k/K_w$（$1\le k\le K_w$），随后衰减。调度器在 `step()` 前还是后推进、第一步是否为零，都必须固定；恢复时也要恢复位置。若每步有效目标数变化，100 次更新不代表固定数量的 token，可同时记录累计有效目标数。短实验先用固定学习率检查更新和恢复，再受控比较日程。
 

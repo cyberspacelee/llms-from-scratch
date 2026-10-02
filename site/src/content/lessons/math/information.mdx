@@ -4,7 +4,8 @@ question: 预测多付出的负对数代价来自哪里
 description: 从同一张四条记录表计算信息量、熵和条件熵，再把预测交叉熵拆成真实不确定性与 KL 散度。
 order: 4
 code:
-  - code/math/probability.py
+  - examples/math/probability.py
+prerequisites: ["math/probability"]
 ---
 
 import MathInformationLab from '../../../components/labs/MathInformationLab'
@@ -289,7 +290,7 @@ print(f"H={h_u:.6f}, H(U|V)={h_given_v:.6f}")
 print(f"CE={ce:.6f}, KL={kl:.6f}, reverse KL={reverse_kl:.6f}")
 ```
 
-输出第一行是 `H=0.693147, H(U|V)=0.477386`，第二行是 `CE=0.836988, KL=0.143841, reverse KL=0.130812`。这些数回答的是不同问题：真实标签的不确定性、知道来源后的平均剩余不确定性、固定预测的平均代价，以及相对于真实分布多付出的部分。仓库的共享验证入口是 `python code/math/probability.py`。
+输出第一行是 `H=0.693147, H(U|V)=0.477386`，第二行是 `CE=0.836988, KL=0.143841, reverse KL=0.130812`。这些数回答的是不同问题：真实标签的不确定性、知道来源后的平均剩余不确定性、固定预测的平均代价，以及相对于真实分布多付出的部分。仓库的共享验证入口是 `uv run python -m examples.math.probability`。
 
 ## 练习与核对
 

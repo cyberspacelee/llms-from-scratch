@@ -4,7 +4,8 @@ question: 共享中间变量通向多条计算路径时，梯度怎样汇总
 description: 沿一个带共享分支的两层网络完成前向与反向手算，再核对批量归约、微批累积和自动求导边界。
 order: 9
 code:
-  - code/math/backprop.py
+  - examples/math/backprop.py
+prerequisites: ["math/matrix-calculus"]
 ---
 
 import SharedNodeLab from '../../../components/labs/SharedNodeLab'
@@ -106,35 +107,11 @@ $$
 
 ### 用同一个网络检查算例
 
-下面的代码与手算使用同一组参数、目标和归约方式。`h.retain_grad()` 仅为读出中间值收到的总梯度；反向计算本身不需要调用它。
+下面的实际脚本使用同一组参数、目标和归约方式，断言参数和输入收到的总梯度。
 
-```python
-import torch
+<CodeFile path="examples/math/backprop.py" symbol={["make_parameters", "losses", "main"]} />
 
-torch.set_default_dtype(torch.float64)
-x = torch.tensor([1., 1.], requires_grad=True)
-W1 = torch.tensor([[1., 1.], [2., -1.]], requires_grad=True)
-b1 = torch.zeros(2, requires_grad=True)
-W2 = torch.tensor([[1., -2.]], requires_grad=True)
-b2 = torch.tensor(1., requires_grad=True)
-
-z = W1 @ x + b1
-h = torch.relu(z)
-h.retain_grad()
-prediction = (W2 @ h).squeeze() + b2 + h[0]
-loss = 0.5 * (prediction - 1.) ** 2
-loss.backward()
-
-torch.testing.assert_close(loss.detach(), torch.tensor(2.))
-torch.testing.assert_close(h.grad, torch.tensor([4., -4.]))
-torch.testing.assert_close(W2.grad, torch.tensor([[4., 2.]]))
-torch.testing.assert_close(b2.grad, torch.tensor(2.))
-torch.testing.assert_close(W1.grad, torch.tensor([[4., 4.], [-4., -4.]]))
-torch.testing.assert_close(b1.grad, torch.tensor([4., -4.]))
-torch.testing.assert_close(x.grad, torch.tensor([-4., 8.]))
-```
-
-这组断言同时检查前向值、分支汇总及两个权重矩阵的方向。脚本 `code/math/backprop.py` 还用同一网络核对批量与微批变体。
+这组断言同时检查前向值、分支汇总及两个权重矩阵的方向。脚本 `examples/math/backprop.py` 还用同一网络核对批量与微批变体。
 
 ## 从逐分量到 VJP：为什么反向用转置
 
@@ -177,7 +154,7 @@ $$
 
 ## 求导边界：何时需要记录计算图
 
-本章手算描述数学依赖；PyTorch 还要决定哪些依赖被记录。参数用 `requires_grad=True` 才会沿参与的可微运算积累梯度，`.grad` 是反向结果的存储处；`.grad is None` 不等于已计算出零梯度。反向通常只自动保存需要求导的叶子张量的 `.grad`，前面用 `h.retain_grad()` 才额外读到隐藏值的梯度。
+本章手算描述数学依赖；PyTorch 还要决定哪些依赖被记录。参数用 `requires_grad=True` 才会沿参与的可微运算积累梯度，`.grad` 是反向结果的存储处；`.grad is None` 不等于已计算出零梯度。反向通常只自动保存需要求导的叶子张量的 `.grad`，若要直接查看隐藏值的 `.grad`，需对它额外调用 `retain_grad()`。
 
 `torch.no_grad()` 使上下文中的通常运算不记录反向路径，适合参数更新或无需求导的前向；它不清空已有 `.grad`，也不切换模块的训练/评估行为。`detach()` 将一个张量结果从当前求导路径中分离，前向数值可以相同，返回原参数的梯度却会改变。例如令 $a=x^2$、$x=2$，$a+a$ 的值为 $8$、对 $x$ 的梯度为 $8$；`a + a.detach()` 的值仍为 $8$，梯度只剩第一项的 $4$。`detach()` 与原张量共享存储；需要独立可修改的数据时还须复制。
 

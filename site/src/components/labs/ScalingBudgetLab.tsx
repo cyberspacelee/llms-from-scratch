@@ -1,3 +1,4 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { budgetLoss } from '../../lib/chapter-labs-model'
 import { Controls, LabFrame, Range, Readout, fmt, pen } from './Lab'
@@ -23,7 +24,7 @@ export default function ScalingBudgetLab() {
       <Range label="模型指数 α" min={0.2} max={1} step={0.1} value={alpha} onChange={setAlpha} />
       <Range label="数据指数 β" min={0.2} max={1} step={0.1} value={beta} onChange={setBeta} />
     </Controls>
-    <svg viewBox="0 0 380 295" className={`${pen.canvas} max-w-110!`} role="img" aria-label={`预算 ${budget}，当前 N ${size}，损失 ${fmt(result.loss)}`}>
+    <SvgCanvas viewBox="0 0 380 295" className={`${pen.canvas} max-w-110!`} role="img" aria-label={`预算 ${budget}，当前 N ${size}，损失 ${fmt(result.loss)}`}>
       <path d="M40 20V250H350" className={pen.axis} />
       {[0, 2, 4, 6, 8, 10].map(n => <g key={n}><line x1="40" x2="350" y1={y(n)} y2={y(n)} className={pen.grid} /><text x="32" y={y(n) + 4} textAnchor="end">{n}</text></g>)}
       {[1, 10, 100].map(n => <text key={n} x={x(n)} y="274" textAnchor="middle">{n}</text>)}
@@ -33,7 +34,7 @@ export default function ScalingBudgetLab() {
       <line x1={x(size)} x2={x(size)} y1="25" y2="250" className={pen.guide} /><circle cx={x(size)} cy={y(result.loss)} r="5" className="fill-accent" />
       <circle cx={x(optimum)} cy={y(optimumLoss.loss)} r="5" className="fill-accent2" />
       <text x="44" y="16" className={pen.muted}>损失 / 分项</text><text x="350" y="292" textAnchor="end">模型量 N</text>
-    </svg>
+    </SvgCanvas>
     <p className="mt-2 text-sm"><span className="text-accent">绿色：总损失</span> · <span className="text-info">蓝色：模型项</span> · <span className="text-accent2">橙色虚线：数据项；圆点：区间最优</span></p>
     <Readout>N = {size} · D = K/N = {fmt(result.dataSize)} · L = 0.5 + {fmt(result.modelTerm)} + {fmt(result.dataTerm)} = {fmt(result.loss)}<br />无约束 N* = {fmt(result.optimalSize)} · 区间 [1,100] 最优 N = {fmt(optimum)} · 这是假设曲线，不是实测模型结果。</Readout>
   </LabFrame>

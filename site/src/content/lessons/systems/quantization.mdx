@@ -4,10 +4,11 @@ question: 权重少用几个 bit，为什么模型不一定更快或一样准确
 description: 用一块 2×4 权重矩阵追踪整数编码、输出误差与存储账，再区分权重、激活和 KV cache 的量化成本。
 order: 7
 code:
-  - code/systems/quantization.py
+  - examples/systems/quantization.py
+prerequisites: ["systems/accelerator"]
 ---
 
-import { QuantizationLab } from '../../../components/labs/SystemsLabs'
+import QuantizationLab from '../../../components/labs/QuantizationLab'
 
 [S1 资源估算](/systems/ledger/)把权重容量写成“参数个数 × 每个参数的字节数”。若把 bf16 权重换成 4 bit 整数，**编码本身**从每个 2 字节变为半字节；但整数还需要 scale，计算时也需要能消费这种格式的 kernel。本章要沿同一块权重回答三个问题：实际存多少、输出改了多少、请求执行是否可能获益。阅读前建议掌握 [M6 矩阵乘法](/math/linear-algebra/) 和 [S2 带宽与算力](/systems/accelerator/)；任务质量的对照方法见 [T4](/training/evaluation/)。
 
@@ -110,13 +111,13 @@ $$
 
 量化后可能走不同 kernel：weight-only 常在 kernel 内读取压缩权重、恢复或转换后参与浮点运算；权重与激活共同量化才可能利用整数矩阵乘，但也要支付激活量化与零点处理。prefill 的大矩阵乘和 decode 的小批量访问可能处在不同的带宽/算力区间，较少 bit 对两者的收益不能互推。即使模型因占用更少空间容纳更多并发，单请求 TTFT 仍可能变慢。
 
-已有方法在上述取舍上作不同选择。[SmoothQuant](https://arxiv.org/abs/2211.10438) 为 W8A8 通过逐通道等价缩放转移激活异常值：若 $D$ 是可逆对角矩阵，$XW=(XD^{-1})(DW)$ 在量化前严格相等；选择 $D$ 后的量化误差仍需测量。[AWQ](https://arxiv.org/abs/2306.00978) 用激活信息寻找需要保护的权重通道，目标是低 bit 的 weight-only 路径。[QLoRA](/training/lora/) 则在量化冻结基座上训练 adapter，训练占用和推理 kernel 应另算。
+已有方法在上述取舍上作不同选择。[SmoothQuant](https://arxiv.org/abs/2211.10438) 为 W8A8 通过逐通道等价缩放转移激活异常值：若 $D$ 是可逆对角矩阵，$XW=(XD^{-1})(DW)$ 在量化前严格相等；选择 $D$ 后的量化误差仍需测量。[AWQ](https://arxiv.org/abs/2306.00978) 用激活信息寻找需要保护的权重通道，目标是低 bit 的 weight-only 路径。[QLoRA](/post-training/lora/) 则在量化冻结基座上训练 adapter，训练占用和推理 kernel 应另算。
 
 ## 核对：数值正确与真实收益分开验收
 
 脚本对固定 $W,x$ 验证三种粒度、非对称激活、INT8 舍入、截断边界与两种字节账。它在 NumPy 上恢复为浮点再做矩阵乘，只能核对**表示和输出**，不能证明某张 GPU 的 INT4/INT8 kernel 更快。
 
-<CodeFile path="code/systems/quantization.py" />
+<CodeFile path="examples/systems/quantization.py" symbol={["symmetric", "affine"]} />
 
 部署对照要固定模型、tokenizer、数据、生成策略、输入和输出长度，再沿用 [T4](/training/evaluation/) 的任务指标比较原模型与量化模型。容量分别记录磁盘文件、加载峰值、稳态权重、KV cache 和工作区；性能分别记录相同负载下的 prefill、decode、TTFT 与吞吐，并核对实际运行的 kernel 与数据格式。只有在质量约束和请求负载相同的前提下，才能说一次系统改动带来净收益。
 

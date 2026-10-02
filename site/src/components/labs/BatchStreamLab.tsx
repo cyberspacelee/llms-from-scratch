@@ -1,6 +1,7 @@
+import SvgCanvas from './SvgCanvas'
 import { useState } from 'react'
 import { batchPlan } from '../../lib/batch-plan'
-import { Controls, LabFrame, Range, Readout, pen } from './Lab'
+import { Toggle, Controls, LabFrame, Range, Readout, pen } from './Lab'
 
 export default function BatchStreamLab() {
   const [samples, setSamples] = useState(5)
@@ -11,9 +12,9 @@ export default function BatchStreamLab() {
     <Controls>
       <Range label="样本数" value={samples} min={1} max={10} onChange={setSamples} />
       <Range label="batch size" value={batchSize} min={1} max={8} onChange={setBatchSize} />
-      <label className="flex h-8 items-center gap-2 text-sm"><input type="checkbox" checked={dropLast} onChange={e => setDropLast(e.target.checked)} className="accent-accent" />drop_last</label>
+      <Toggle label="drop_last" checked={dropLast} onChange={value => setDropLast(value)} />
     </Controls>
-    <svg viewBox="0 0 360 466" className={pen.canvas} role="img" aria-label={`${plan.batches.length} 个批次，保留 ${plan.retained} 个样本，丢弃 ${plan.dropped} 个样本`}>
+    <SvgCanvas viewBox="0 0 360 466" className={pen.canvas} role="img" aria-label={`${plan.batches.length} 个批次，保留 ${plan.retained} 个样本，丢弃 ${plan.dropped} 个样本`}>
       <text x="12" y="24">数据集：样本编号与各自损失</text>
       {Array.from({ length: 10 }, (_, i) => <g key={i}>
         <rect x={12 + i * 34} y="38" width="30" height="52" rx="2" className={i >= samples ? 'fill-none stroke-rule' : i >= plan.retained ? 'fill-accent2-soft stroke-accent2' : 'fill-accent-soft stroke-accent'} />
@@ -30,7 +31,7 @@ export default function BatchStreamLab() {
         </g>
       })}
       <text x="12" y="450" className={pen.muted}>橙色：丢弃样本；空框：没有这样的批次</text>
-    </svg>
+    </SvgCanvas>
     <Readout>批次 {plan.batches.length} · 保留 {plan.retained} · 丢弃 {plan.dropped}<br />
       {plan.weighted === null ? '没有有效批次，不能计算均值或执行参数更新' : `按样本平均 ${plan.weighted.toFixed(6)} · 批均值直接平均 ${plan.unweighted!.toFixed(6)}`}
     </Readout>

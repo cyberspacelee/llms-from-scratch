@@ -2,14 +2,15 @@
 title: 缩放规律与计算预算
 question: 固定训练计算量时，应该增加参数还是增加数据
 description: 用同一组参数量、训练目标数和验证损失，拟合经验曲线，计算等 FLOP 预算中的模型与数据分配，并辨认重复数据和实测成本的边界。
-order: 7
+order: 6
 code:
-  - code/training/scaling.py
+  - examples/training/scaling.py
+prerequisites: ["training/evaluation", "systems/ledger"]
 ---
 
 import ScalingBudgetLab from '../../../components/labs/ScalingBudgetLab'
 
-固定训练预算，模型参数多一倍、训练目标少一半，或反过来，哪个验证损失更低？[T3 预训练](/training/pretraining/) 建立了可恢复的训练过程，[T4 评估](/training/evaluation/) 定义了验证 NLL 的计算方式。本章再用粗略计算量估算式 $C\approx6ND$ 和一组可复算的观测把两者接起来：先拟合损失怎样随模型参数量 $N$ 和训练目标数 $D$ 变化，再在固定 $C$ 下选择候选。用到的数学只有 [M7 导数](/math/calculus/) 和 [M6 矩阵](/math/linear-algebra/)；拟合的数值敏感性可回读 [M11](/math/spectral/)。
+固定训练预算，模型参数多一倍、训练目标少一半，或反过来，哪个验证损失更低？[T3 预训练](/training/pretraining/) 建立了可恢复的训练过程，[T4 评估](/training/evaluation/) 定义了验证 NLL 的计算方式。本章再用粗略计算量估算式 $C\approx6ND$ 和一组可复算的观测把两者接起来：先拟合损失怎样随模型参数量 $N$ 和训练目标数 $D$ 变化，再在固定 $C$ 下选择候选。用到的数学只有 [M7 导数](/math/calculus/) 和 [M6 矩阵](/math/linear-algebra/)；拟合的数值敏感性可回读 [M12](/math/low-rank/)。
 
 ## 一张观测表：预算里到底数什么
 
@@ -85,17 +86,17 @@ $$
 
 从最优点公式可得 $N_*\propto K^{\beta/(\alpha+\beta)}$、$D_*\propto K^{\alpha/(\alpha+\beta)}$。本例将 $K$ 扩为四倍，$N_*$ 乘 $4^{0.4}\approx1.741$，$D_*$ 乘 $4^{0.6}\approx2.297$。仅在 $\alpha=\beta$ 时两者都随 $\sqrt K$ 增长；系数 $A,B$ 仍决定两者的具体比例。论文中某一组最优 token/参数比，不能脱离它的数据、模型和训练条件变成常数规则。
 
-这里还有一个容易失效的前提：$D$ 只数**执行过的目标事件**，不代表独立文本量。一百个唯一目标重复十遍，计算账可记约一千次目标；但信息覆盖仍近似只有原来的文本。若一个来源有 $D_s$ 个可用目标，在总预算 $D$ 中占比例 $p_s$，期望重复次数为 $p_sD/D_s$。[T8 数据工程](/training/data-engineering/) 会用这个数检查来源混合。若目标预算使稀缺来源高度重复，小尺度拟合得到的 $BD^{-\beta}$ 未必能继续下降；应补独立数据、调整混合，或把重复程度纳入新的受控实验。
+这里还有一个容易失效的前提：$D$ 只数**执行过的目标事件**，不代表独立文本量。一百个唯一目标重复十遍，计算账可记约一千次目标；但信息覆盖仍近似只有原来的文本。若一个来源有 $D_s$ 个可用目标，在总预算 $D$ 中占比例 $p_s$，期望重复次数为 $p_sD/D_s$。[T7 数据工程](/training/data-engineering/) 会用这个数检查来源混合。若目标预算使稀缺来源高度重复，小尺度拟合得到的 $BD^{-\beta}$ 未必能继续下降；应补独立数据、调整混合，或把重复程度纳入新的受控实验。
 
-训练 FLOP 也只是一个约束口径。$6ND$ 忽略一些注意力、embedding 与非矩阵计算，长上下文尤其需要重新计账。[T3](/training/pretraining/) 用 `FlopCounterMode` 取得具体配置的运算估计。FLOP 是运算次数，FLOP/s 是吞吐速率，墙钟秒数还取决于设备、内存、通信和利用率；等 FLOP 的候选未必等耗时，更不能从 CPU pilot 推断 GPU 成本。若部署推理占主要成本，较小模型多训练可能更划算，但那要另写总成本目标函数并测量。
+训练 FLOP 也只是一个约束口径。$6ND$ 忽略一些注意力、embedding 与非矩阵计算，长上下文尤其需要重新计账。[T5](/training/checkpoint/) 的四ID探针用 `FlopCounterMode` 取得具体配置的运算估计。FLOP 是运算次数，FLOP/s 是吞吐速率，墙钟秒数还取决于设备、内存、通信和利用率；等 FLOP 的候选未必等耗时，更不能从 CPU pilot 推断 GPU 成本。若部署推理占主要成本，较小模型多训练可能更划算，但那要另写总成本目标函数并测量。
 
 ## 脚本核对：理想曲线与真实 pilot 分开
 
-<CodeFile path="code/training/scaling.py" />
+<CodeFile path="examples/training/scaling.py" symbol="optimal_allocation" />
 
-运行 `python code/training/scaling.py` 会从上述未舍入的十六点恢复系数，核对 $(10,50)$ 留出点、$K=100$ 的最优与离散候选，并拒绝只有一个 $N$ 的不可辨识设计。这验证算术和实现，**不验证语言模型存在这条规律**。
+运行 `uv run python -m examples.training.scaling` 会从上述未舍入的十六点恢复系数，核对 $(10,50)$ 留出点、$K=100$ 的最优与离散候选，并拒绝只有一个 $N$ 的不可辨识设计。这验证算术和实现，**不验证语言模型存在这条规律**。
 
-可另运行 `python code/training/scaling.py --measure --output scaling-pilot.json`。它调用 [P11 完整 Transformer](/principles/complete-transformer/) 的模型和 T3 的短篇自编语料，用宽度 16、24、32 的配置，分别在第 8、16、32 步记录验证 NLL、参数数、实际累计目标数和 `approximate_flop`。这个字段只是 $6ND$ 估算，不是硬件计数或运行秒数。
+可另运行 `uv run python -m examples.training.scaling --measure --output scaling-pilot.json`。它调用 [P13 完整 Transformer](/principles/complete-transformer/) 的模型和 T3 的短篇自编语料，用宽度 16、24、32 的配置，分别在第 8、16、32 步记录验证 NLL、参数数、实际累计目标数和 `approximate_flop`。这个字段只是 $6ND$ 估算，不是硬件计数或运行秒数。
 
 九条 pilot 记录来自三个训练轨迹；同一宽度的三个 checkpoint 共享初始化和训练历史，不能视为三次独立实验。语料会重复、seed 只有一个、点数与预算范围都很小，脚本不拿它们拟合大型模型规律。下一轮若要用于决策，应扩大独立文档，预先固定 tokenizer 与评估协议，为不同 $N,D$ 设置接近相同计算量的候选，重复训练 seed，并检查留出配置上的预测残差。比较“都训练 32 步”不能代替等预算比较，因为参数数与每步目标数可能不同。
 
@@ -129,7 +130,7 @@ $D=100/N$，故两方案为 $(8,12.5)$ 和 $(32,3.125)$。代入 $0.5+4N^{-0.6}+
 
 </details>
 
-下一章 [T8 数据工程](/training/data-engineering/) 会追查预算中的目标来自哪些原始文档，以及去重、过滤和混合怎样改变可行的数据量。
+下一章 [T7 数据工程](/training/data-engineering/) 会追查预算中的目标来自哪些原始文档，以及去重、过滤和混合怎样改变可行的数据量。
 
 ## 原始资料
 

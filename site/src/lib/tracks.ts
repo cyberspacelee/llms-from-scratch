@@ -1,4 +1,4 @@
-export type TrackId = 'math' | 'frameworks' | 'principles' | 'training' | 'gpu' | 'systems' | 'advanced'
+export type TrackId = 'math' | 'frameworks' | 'principles' | 'training' | 'post-training' | 'gpu' | 'systems' | 'advanced'
 
 export type Track = {
   id: TrackId
@@ -28,7 +28,11 @@ export const tracks: Track[] = [
   },
   {
     id: 'training', letter: 'T', label: '训练与评估',
-    summary: '完成文本训练、磁盘恢复与适配，再研究缩放规律、数据工程与分布式训练。',
+    summary: '从数据构造完成文本训练、评估与精确恢复，再研究预算、数据工程与分布式更新。',
+  },
+  {
+    id: 'post-training', letter: 'H', label: '后训练与适配',
+    summary: '沿回复监督学习 SFT、LoRA 与蒸馏，再比较偏好优化和可验证奖励的策略更新。',
   },
   {
     id: 'gpu', letter: 'G', label: 'GPU 编程',
@@ -42,7 +46,7 @@ export const tracks: Track[] = [
   },
   {
     id: 'advanced', letter: 'A', label: '进阶模型',
-    summary: '沿不同设计轴理解稀疏专家、压缩状态、偏好与推理训练，以及多模态输入。',
+    summary: '按计算、缓存、递归状态和模态输入选择结构分支，再进入压缩与记忆机制实验。',
   },
 ]
 

@@ -4,10 +4,11 @@ question: 怎样用请求事件判断服务改动是否更快、更稳定
 description: 沿同一组到达、排队、流式输出和取消事件，计算延迟分布、吞吐与 SLO goodput，再设计可复现的容量实验。
 order: 10
 code:
-  - code/systems/serving_metrics.py
+  - examples/systems/serving_metrics.py
+prerequisites: ["systems/engine-execution"]
 ---
 
-import { ServiceTimelineLab } from '../../../components/labs/SystemsLabs'
+import ServiceTimelineLab from '../../../components/labs/ServiceTimelineLab'
 
 [S9](/systems/cluster/) 讨论了多卡布局，[S4](/systems/engine-runtime/) 讨论了调度。现在设想一次优化使 decode kernel 单步时间减少，却让长 prompt 在队列里等待更久。只看 kernel 毫秒数，无法回答用户是否更快收到答案。本章的任务是从请求事件出发，算出用户看见的延迟和系统在约定质量下能承载的负载。
 
@@ -114,7 +115,7 @@ vLLM 的指标与 benchmark 对单 token 请求采用不同约定：
 
 脚本保存上表四条请求，校验时间顺序与终态，复算延迟、两种 TPOT 聚合、分位数、吞吐和 goodput。它只核对统计定义，不模拟调度器、网络或 GPU。
 
-<CodeFile path="code/systems/serving_metrics.py" />
+<CodeFile path="examples/systems/serving_metrics.py" symbol="measure" />
 
 ## 练习与核对
 

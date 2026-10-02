@@ -1,14 +1,41 @@
 ---
 import { getLessons, url } from '../../lib/lessons'
 import { tracks } from '../../lib/tracks'
-import CourseMapLab from '../labs/CourseMapLab'
-import ChapterList from './ChapterList.astro'
+import { learningPaths } from '../../lib/curriculum'
 interface Props { track?: string }
 const { track } = Astro.props
-const nodes = (await getLessons()).filter(lesson => !lesson.isIntro).map(lesson => ({
+const lessons = await getLessons()
+const nodes = lessons.filter(lesson => !lesson.isIntro).map(lesson => ({
   track: lesson.track.id, code: lesson.code, title: lesson.title, question: lesson.question,
-  href: url(lesson.path), order: lesson.entry.data.order,
+  href: url(lesson.path), path: lesson.path, order: lesson.entry.data.order,
+  optional: lesson.entry.data.optional, prerequisites: lesson.entry.data.prerequisites,
 }))
+const selected = track ? nodes.filter(node => node.track === track).sort((a,b) => a.order-b.order) : []
+const routeIds: Record<string, string> = { principles: 'first-model', training: 'text-training', 'post-training': 'adaptation', systems: 'serving', gpu: 'kernel' }
+const routeId = routeIds[track ?? '']
+const route = learningPaths.find(item => item.id === routeId)
+const main = route ? route.steps.flatMap(path => nodes.filter(node => node.path === path && node.track === track)) : selected.filter(node => !node.optional)
+const first = main.slice(0, 6)
+const remaining = [
+  { title: '路线后续', nodes: main.slice(6) },
+  { title: '其他目标与选读', nodes: selected.filter(node => !main.includes(node)) },
+]
+const prerequisiteTitle = (path: string) => {
+  const lesson = lessons.find(item => item.path === path.replace(/^\/+|\/+$/g, ''))
+  return lesson ? `${lesson.code} · ${lesson.title}` : path
+}
+const routeNode = (path: string) => nodes.find(node => node.path === path)
 ---
-<CourseMapLab nodes={nodes} tracks={tracks.map(({ id, label }) => ({ id, label }))} initialTrack={track ?? 'math'} locked={Boolean(track)} client:visible />
-{track && <details class="not-prose my-4"><summary class="cursor-pointer text-sm font-semibold">各章的问题与入口</summary><ChapterList track={track} /></details>}
+<nav aria-label={track ? `${tracks.find(item => item.id === track)?.label}阅读路线` : '选择学习路线'} class="not-prose my-6 rounded-lg border border-rule bg-raised p-4">
+  <p class="m-0 text-sm font-semibold">{track ? '建议阅读入口' : '按目标选择路线'}</p>
+  {route && <p class="mt-1 mb-0 text-sm text-muted">{route.description}</p>}
+  {!track ? <ul class="mt-3 list-none divide-y divide-rule p-0">{learningPaths.map(item => <li class="py-3">
+    <a href={url(item.steps[0])} class="font-semibold text-accent">{item.title}</a>
+    <p class="m-0 text-sm text-muted">{item.description}</p>
+    <p class="mt-1 mb-0 text-xs text-muted">从 <a href={url(item.steps[0])} class="underline underline-offset-2">{routeNode(item.steps[0])?.title ?? item.steps[0]}</a> 走到 <a href={url(item.steps[item.steps.length-1])} class="underline underline-offset-2">{routeNode(item.steps[item.steps.length-1])?.title ?? item.steps[item.steps.length-1]}</a></p>
+    <details class="mt-2"><summary class="text-sm font-semibold">查看路线 · {item.steps.length} 步</summary><ol class="mt-2 list-decimal space-y-2 pl-5 text-sm">{item.steps.map(path => <li><a href={url(path)} class="text-accent">{routeNode(path) ? `${routeNode(path)?.code} · ${routeNode(path)?.title}` : path}</a></li>)}</ol></details>
+  </li>)}</ul> : <>
+    <ol class="mt-3 list-none divide-y divide-rule p-0">{first.map(node => <li class="py-2"><a href={node.href} class="text-sm font-semibold text-accent">{node.code} · {node.title}</a><p class="m-0 text-sm text-muted">{node.question}</p>{Boolean(node.prerequisites?.length) && <p class="m-0 text-xs text-muted">先修：{node.prerequisites?.map((path, index) => <Fragment>{index > 0 && '、'}<a href={url(path)} class="underline underline-offset-2">{prerequisiteTitle(path)}</a></Fragment>)}</p>}</li>)}</ol>
+    {remaining.filter(group => group.nodes.length > 0).map(group => <details class="mt-3 border-t border-rule pt-3"><summary class="text-sm font-semibold">{group.title} · {group.nodes.length} 篇</summary><ul class="mt-3 list-none space-y-3 p-0">{group.nodes.map(node => <li><a href={node.href} class="text-sm font-semibold text-accent">{node.code} · {node.title}</a>{node.optional && <span class="ml-2 text-xs text-muted">选读</span>}<p class="m-0 text-sm text-muted">{node.question}</p></li>)}</ul></details>)}
+  </>}
+</nav>

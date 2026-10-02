@@ -146,9 +146,8 @@
     content: counter(section, decimal-leading-zero);
   }
 
-  .math-lesson h2 { @apply mt-12 border-t border-rule pt-6; }
-  .math-lesson h3 { @apply text-accent-strong; }
-  .math-lesson > p { @apply leading-8; }
+  .prose-lesson h2 { @apply mt-12 border-t border-rule pt-6; }
+  .prose-lesson > p { @apply leading-8; }
 
   .prose-lesson blockquote {
     @apply rounded-r-lg bg-accent-soft px-4 py-3 font-normal not-italic;
@@ -193,9 +192,20 @@
 
   /* Mermaid sources render in the browser into this frame. */
   .prose-lesson .mermaid {
-    @apply my-6 overflow-x-auto rounded-lg border border-rule bg-raised p-4 text-center whitespace-pre text-transparent;
+    @apply my-8 overflow-x-auto rounded-lg border border-rule bg-raised p-4 text-center whitespace-pre text-transparent;
   }
   .prose-lesson .mermaid[data-rendered] { @apply whitespace-normal text-ink; }
   .prose-lesson .mermaid[data-failed] { @apply text-left font-mono text-code whitespace-pre-wrap text-accent2; }
   .prose-lesson .mermaid svg { @apply mx-auto h-auto max-w-none; }
 }
+
+/* The same viewport is used by static figures and interactive diagrams. */
+.diagram-viewport {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-gutter: stable;
+  overscroll-behavior-inline: contain;
+}
+.diagram-viewport > svg { display: block; }

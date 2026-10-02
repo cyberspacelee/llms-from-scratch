@@ -2,15 +2,16 @@
 title: 递归式线性注意力与混合层
 question: 矩阵递归状态与全注意力，怎样在一个模型中共同工作
 description: 用同一组三步数据推导线性状态、delta 纠错和门控遗忘，再手算混合模型的输出与缓存。
-order: 7
+order: 5
 code:
-  - code/advanced/hybrid_attention.py
+  - examples/advanced/hybrid_attention.py
+prerequisites: ["advanced/state-space", "principles/attention"]
+optional: true
 ---
 
 import DeltaStateLab from '../../../components/labs/DeltaStateLab'
-import { HybridBoundaryLab } from '../../../components/labs/AdvancedLabs'
 
-[A6](/advanced/state-space/) 用固定状态处理序列，[P3](/principles/attention/) 让新查询重新读取历史位置。能否把这两种算子放进同一个模型？本章将逐步算出一层递归、一层全注意力的输出，并分别列出 decode（逐步生成）必须保留的状态。只需先会矩阵外积、softmax 和因果注意力。
+[A4](/advanced/state-space/) 用固定状态处理序列，[P3](/principles/attention/) 让新查询重新读取历史位置。能否把这两种算子放进同一个模型？本章将逐步算出一层递归、一层全注意力的输出，并分别列出 decode（逐步生成）必须保留的状态。只需先会矩阵外积、softmax 和因果注意力。
 
 全章使用三个位置。第一层的键、值和查询都是二维列向量；状态 $S_t\in\mathbb R^{2\times2}$ 的行对应值坐标，列对应键坐标，初态 $S_{-1}=0$。第一层输出 $z_t$ 随后进入第二层。下面的数值是教学设定，不是公开模型的权重。
 
@@ -67,7 +68,7 @@ $$
 
 ## 第二层：按位置重新分配权重
 
-现在把 $z_0=(2,1)$、$z_1=(0,2)$、$z_2=(0.5,0.5)$ 送入第二层。为便于手算，用一个标量键和查询：$K(z)$ 取第一坐标，$Q(z)=\ln(16)$ 乘第一坐标，$V(z)=z$。这是固定线性投影。键维度为 1，通常的 $1/\sqrt{d_k}$ 在这里就是 1；真实模型还有残差、归一化和输出投影。
+现在把 $z_0=(2,1)$、$z_1=(0,2)$、$z_2=(0.5,0.5)$ 送入第二层。为便于手算，用一个标量键和查询：$K(z)$ 取第一坐标，$Q(z)=\ln(16)$ 乘第一坐标，$V(z)=z$。这是固定线性投影。键维度为 1，通常的 $1/\sqrt{D_k}$ 在这里就是 1；真实模型还有残差、归一化和输出投影。
 
 位置 2 的查询是 $q'_2=0.5\ln(16)=\ln4$，历史键为 $(2,0,0.5)$，指数权重为 $(16,1,2)$。因果 softmax 给出
 
@@ -96,9 +97,9 @@ flowchart LR
 
 本例单样本递归层保留 $2\times2=4$ 个矩阵元素；全注意力层每位置保留 1 个键、2 个值，三位置共 $3(1+2)=9$ 个元素。若同用 float64，纯状态分别为 32 和 72 字节。额外 token 只让第二层增加 3 个缓存元素。这里未计权重、临时输出和框架对象。
 
-一般地，$n_s$ 个递归状态头、每头 $d_v\times d_k$ 的矩阵合计 $n_sd_vd_k$ 个元素；短卷积还需历史状态。一个全注意力层若有 $n_{\mathrm{kv}}$ 个 KV 头和长度 $T$，缓存为 $Tn_{\mathrm{kv}}(d_k+d_v)$ 个元素。混合模型必须**逐层相加**；只要保留全注意力层，历史状态就随 $T$ 增长。
+一般地，$n_s$ 个递归状态头、每头 $D_v\times D_k$ 的矩阵合计 $n_sD_vD_k$ 个元素；短卷积还需历史状态。一个全注意力层若有 $H_{\mathrm{kv}}$ 个 KV 头和长度 $T$，缓存为 $TH_{\mathrm{kv}}(D_k+D_v)$ 个元素。混合模型必须**逐层相加**；只要保留全注意力层，历史状态就随 $T$ 增长。
 
-固定维度下，递归层顺序 decode 每步约需 $O(d_kd_v)$ 工作，$T$ 步约为 $O(Td_kd_v)$；这里的“线性”只指序列长度。标准全注意力的单个新查询仍读可见历史，整段工作通常随 $T^2$ 增长。输入投影、短卷积和 FFN 也各有成本。训练或 prefill（一次处理已知提示）还需临时激活与块计算，不能用 decode 的四元素状态估计训练内存。给定每步输入投影，递推对旧状态是仿射的；[A6](/advanced/state-space/) 的组合思想解释跨块传状态，高效训练仍依赖秩一结构和硬件 kernel。
+固定维度下，递归层顺序 decode 每步约需 $O(D_kD_v)$ 工作，$T$ 步约为 $O(TD_kD_v)$；这里的“线性”只指序列长度。标准全注意力的单个新查询仍读可见历史，整段工作通常随 $T^2$ 增长。输入投影、短卷积和 FFN 也各有成本。训练或 prefill（一次处理已知提示）还需临时激活与块计算，不能用 decode 的四元素状态估计训练内存。给定每步输入投影，递推对旧状态是仿射的；[A4](/advanced/state-space/) 的组合思想解释跨块传状态，高效训练仍依赖秩一结构和硬件 kernel。
 
 ## 对照 Gated DeltaNet 与 Qwen3.5
 
@@ -110,30 +111,13 @@ flowchart LR
 
 服务协议也要按状态类型处理：KV cache 可按有效长度裁去尾部，递归矩阵却已吸收后来 token，不能靠裁一行恢复旧状态。[S8](/systems/speculative-decoding/) 的投机拒绝需要旧矩阵快照或重算已接受前缀；前缀缓存也要保存对应的递归终态和全注意力 KV。
 
-## 选读：混合缓存为何需要共同安全边界
-
-前面的两层模型同时保存递归终态和完整 KV。若前缀缓存声称复用了前 b 个 token，下一步必须同时拿到完整 KV 的 [0,b) 和恰好处理到 b 的递归终态；只有 KV 命中不够。递归状态已经吸收未来输入，不能通过缩短有效长度恢复到 b，必须保存相应快照或重算。
-
-[SGLang Unified Radix Cache](https://www.sglang.io/blog/unified-radix-cache) 将 FULL、滑动窗口 SWA 与递归组件的复用条件放在同一前缀结构上评估。下面借用这种“逐组件投票”的组织方式，但采用独立的教学布局：共有八项完整 KV，SWA 窗口大小为 3、目前仅保留 token 下标 2–5，递归快照只存在于已处理边界 0、4、8。边界 b 表示已处理 [0,b)，不是 token b 本身。
-
-<HybridBoundaryLab client:visible />
-
-候选 b=4 时，FULL 具备 [0,4)，SWA 需要 [1,4) 却缺 token 1，递归快照虽存在仍不能共同通过。b=8 时 SWA 缺 6、7，也失败；b=5 时 SWA 完整，却没有边界 5 的递归快照。只启用 FULL/SWA 时，5 可以通过。各候选独立核对，不能直接把某个组件最长命中的长度当成模型的安全边界。真实系统还需核对层状态、短卷积、位置规则、分配所有权和正在使用的引用。
-
-这一节加入第三种组件解释跨层一致性，不修改前文两层模型，也不把 [S5 的 nano-vLLM 完整块哈希链](/systems/paged-cache/)画成 radix tree。它没有复现参考文章的分配器、驱逐或性能曲线。
-
-<details>
-<summary>保留 FULL 与递归组件、停用 SWA。边界 4 与 5 哪个可以复用？若只保留 FULL 与 SWA，边界 6 呢？</summary>
-
-FULL 与递归在边界 4 都有状态，所以 4 可复用；边界 5 缺递归快照，即使完整 KV 命中也不可复用。FULL 与 SWA 在边界 6 分别具备完整 [0,6) 和窗口 [3,6)，所以 6 可复用。结论取决于启用组件和各自状态，不能只比较前缀 token 的最长匹配。
-
-</details>
+混合层的递归终态与KV必须对应同一逻辑前缀；实际复用、快照与回滚见 [混合缓存](/systems/hybrid-cache/)。
 
 ## 用代码核对三步
 
-运行 python code/advanced/hybrid_attention.py。脚本逐步检查上表三个矩阵，将“先衰减再改写”与展开的仿射式独立对照，再核对第二层全部因果 softmax 输出。它不加载 Qwen3.5 权重。
+运行 uv run python -m examples.advanced.hybrid_attention。脚本逐步检查上表三个矩阵，将“先衰减再改写”与展开的仿射式独立对照，再核对第二层全部因果 softmax 输出。它不加载 Qwen3.5 权重。
 
-<CodeFile path="code/advanced/hybrid_attention.py" />
+<CodeFile path="examples/advanced/hybrid_attention.py" symbol="delta_step" />
 
 ## 常见误区
 
@@ -155,7 +139,7 @@ FULL 与递归在边界 4 都有状态，所以 4 可复用；边界 5 缺递归
 
 </details>
 
-[A8](/advanced/sparse-attention/) 会继续保留逐位置状态，但只让每个查询读取选中的部分历史，并计算选择本身的成本。
+[A6](/advanced/sparse-attention/) 会继续保留逐位置状态，但只让每个查询读取选中的部分历史，并计算选择本身的成本。
 
 ## 原始资料
 

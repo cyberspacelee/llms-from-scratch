@@ -1,3 +1,5 @@
+> 重构前的规划或审查记录。当前结构与验证结果见 [实施记录](MDX_REBUILD_STATUS.md)，教学约定见 [当前课程设计](CHAPTER_BLUEPRINTS.md)。
+
 # 课程实施与验收
 
 实施依据：[课程计划](CURRICULUM_PLAN.md)、[逐章设计卡](CHAPTER_BLUEPRINTS.md)。研究与实施日期：2026-09-27。
