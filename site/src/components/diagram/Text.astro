@@ -1,0 +1,29 @@
+---
+/** Free text inside a diagram. Put the words in `label` (may contain "\n") or the slot. */
+import { lines, size as sizes, text as tones, type Size, type TextTone } from './tones'
+
+interface Props {
+  x: number
+  y: number
+  label?: string
+  anchor?: 'start' | 'middle' | 'end'
+  size?: Size
+  tone?: TextTone
+  mono?: boolean
+  bold?: boolean
+  /** Rotate around (x, y), in degrees; -90 for a vertical axis title. */
+  rotate?: number
+}
+const { x, y, label, anchor = 'middle', size = 'md', tone = 'ink', mono = false, bold = false, rotate } = Astro.props
+const fontSize = sizes[size]
+const transform = rotate ? `rotate(${rotate} ${x} ${y})` : undefined
+---
+{label ? (
+  <g transform={transform}>
+    {lines(label, y, fontSize).map((line) => (
+      <text x={x} y={line.y} text-anchor={anchor} dominant-baseline="central" font-size={fontSize} font-weight={bold ? 600 : undefined} class:list={[tones[tone], mono && 'font-mono']}>{line.value}</text>
+    ))}
+  </g>
+) : (
+  <text x={x} y={y} transform={transform} text-anchor={anchor} dominant-baseline="central" font-size={fontSize} font-weight={bold ? 600 : undefined} class:list={[tones[tone], mono && 'font-mono']}><slot /></text>
+)}

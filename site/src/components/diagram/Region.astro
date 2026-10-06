@@ -1,0 +1,20 @@
+---
+/** A dashed or tinted container that groups primitives, titled at its top-left: "GPU 0", "SM", "Encoder". */
+import { shape, size as sizes, type Tone } from './tones'
+
+interface Props {
+  x: number
+  y: number
+  w: number
+  h: number
+  title?: string
+  tone?: Tone
+}
+const { x, y, w, h, title, tone = 'ghost' } = Astro.props
+const colors = shape[tone]
+---
+<g>
+  <rect x={x} y={y} width={w} height={h} rx={10} class:list={[colors.box, tone !== 'ghost' && '[fill-opacity:0.45]', 'stroke-[1.25]']} />
+  {title && <text x={x + 12} y={y + 18} font-size={sizes.sm} font-weight="600" class={tone === 'strong' ? 'fill-accent' : 'fill-muted'}>{title}</text>}
+  <slot />
+</g>

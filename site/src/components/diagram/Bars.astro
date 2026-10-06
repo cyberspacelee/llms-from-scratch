@@ -1,0 +1,55 @@
+---
+/**
+ * A numbered horizontal bar chart; each bar may be stacked from segments.
+ *
+ *   <Bars label="7B 模型训练显存" unit="GB"
+ *         items={[{ label: 'FP32 + Adam', segments: [{ value: 28, label: '权重' }, { value: 56, label: '优化器' }] }]} />
+ */
+import FigureShell from '../FigureShell.astro'
+import { shape, size as sizes, type Tone } from './tones'
+
+type Segment = { value: number; label?: string; tone?: Tone }
+interface Props {
+  label: string
+  items: { label: string; value?: number; tone?: Tone; segments?: Segment[]; note?: string }[]
+  unit?: string
+  max?: number
+  width?: number
+  /** Show the total at the end of each bar. */
+  totals?: boolean
+}
+const { label, items, unit = '', width = 720, totals = true } = Astro.props
+const tones: Tone[] = ['accent', 'info', 'accent2', 'muted', 'neutral']
+const rows = items.map((item) => ({ ...item, segments: item.segments ?? [{ value: item.value ?? 0, tone: item.tone }] }))
+const total = (row: (typeof rows)[number]) => row.segments.reduce((sum, s) => sum + s.value, 0)
+const max = Astro.props.max ?? Math.max(...rows.map(total))
+const left = Math.max(80, Math.max(...items.map((item) => item.label.length)) * 13 + 20)
+const right = totals ? 90 : 16, barH = 26, gap = 14
+const segmentLabels = [...new Map(rows.flatMap((row) => row.segments.map((s, i) => [s.label, s.tone ?? tones[i % tones.length]] as const)).filter(([l]) => l)).entries()]
+const legendH = segmentLabels.length > 1 ? 30 : 0
+const height = legendH + rows.length * (barH + gap) + 6
+const sx = (v: number) => (v / max) * (width - left - right)
+const fmt = (v: number) => String(Number(v.toPrecision(4)))
+---
+<FigureShell label={label}>
+  <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} font-size={sizes.sm} class="mx-auto block h-auto w-full font-sans" style={`min-width:${Math.round(width * 0.7)}px`}>
+    {segmentLabels.length > 1 && segmentLabels.map(([text, tone], index) => <g>
+      <rect x={left + index * 120} y={8} width={12} height={12} rx="3" class:list={[shape[tone].box, 'stroke-[1.25]']} />
+      <text x={left + index * 120 + 18} y={14} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{text}</text>
+    </g>)}
+    {rows.map((row, r) => {
+      const y = legendH + r * (barH + gap) + 4
+      let cursor = left
+      return <g>
+        <text x={left - 10} y={y + barH / 2} text-anchor="end" dominant-baseline="central" font-size={sizes.sm} class="fill-ink">{row.label}</text>
+        {row.segments.map((s, i) => {
+          const x = cursor, w = sx(s.value)
+          cursor += w
+          return <rect x={x} y={y} width={Math.max(0, w)} height={barH} class:list={[shape[s.tone ?? tones[i % tones.length]].box, 'stroke-[1.25]']} />
+        })}
+        {totals && <text x={cursor + 8} y={y + barH / 2} dominant-baseline="central" font-size={sizes.sm} class="fill-ink font-mono">{fmt(total(row))}{unit && ` ${unit}`}{row.note && <tspan class="fill-muted"> {row.note}</tspan>}</text>}
+      </g>
+    })}
+  </svg>
+  {Astro.slots.has('caption') && <Fragment slot="caption"><slot name="caption" /></Fragment>}
+</FigureShell>

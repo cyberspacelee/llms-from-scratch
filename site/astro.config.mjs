@@ -4,7 +4,8 @@ import react from '@astrojs/react'
 import { unified } from '@astrojs/markdown-remark'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { rehypeMermaidBlocks } from './src/plugins/rehype-mermaid.mjs'
+import { transformerMetaHighlight, transformerNotationDiff, transformerNotationFocus, transformerNotationHighlight } from '@shikijs/transformers'
+import { transformerBookMeta } from './src/plugins/shiki-meta.mjs'
 import { rehypeTableScroll } from './src/plugins/rehype-table-scroll.mjs'
 import { rehypeBaseLinks } from './src/plugins/rehype-base-links.mjs'
 import tailwindcss from '@tailwindcss/vite'
@@ -25,16 +26,21 @@ export default defineConfig({
   markdown: {
     syntaxHighlight: {
       type: 'shiki',
-      excludeLangs: ['mermaid'],
     },
     shikiConfig: {
       themes: { light: 'github-light', dark: 'github-dark' },
       defaultColor: false,
+      transformers: [
+        transformerMetaHighlight(),
+        transformerNotationHighlight({ matchAlgorithm: 'v3' }),
+        transformerNotationDiff({ matchAlgorithm: 'v3' }),
+        transformerNotationFocus({ matchAlgorithm: 'v3' }),
+        transformerBookMeta(),
+      ],
     },
     processor: unified({
       remarkPlugins: [remarkMath],
       rehypePlugins: [
-        rehypeMermaidBlocks,
         rehypeTableScroll,
         [rehypeBaseLinks, { base }],
         [rehypeKatex, { throwOnError: true, strict: 'error' }],

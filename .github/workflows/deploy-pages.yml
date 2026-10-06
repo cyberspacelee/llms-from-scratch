@@ -36,13 +36,10 @@ jobs:
         run: uv sync --frozen --group dev
 
       - name: Lint Python
-        run: uv run ruff check src examples tests scripts
+        run: uv run ruff check src tests
 
-      - name: Verify model and independent references
-        run: uv run python -m unittest discover -s tests -v
-
-      - name: Run all CPU curriculum experiments
-        run: uv run python -m examples.verify
+      - name: Run tests
+        run: uv run pytest
 
   build:
     runs-on: ubuntu-24.04
@@ -54,12 +51,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-
-      - name: Setup uv for cross-language cases
-        uses: astral-sh/setup-uv@v6
-
-      - name: Install locked Python environment
-        run: uv sync --frozen --group dev
 
       - name: Enable pnpm
         run: corepack enable pnpm

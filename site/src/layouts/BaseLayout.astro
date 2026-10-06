@@ -1,18 +1,15 @@
 ---
 import '../styles/global.css'
-import { tracks } from '../lib/tracks'
-import { repoUrl, url } from '../lib/lessons'
+import { repoUrl, url } from '../lib/book'
 
 interface Props {
   title: string
   description: string
-  /** Track highlighted in the header. */
-  trackId?: string
   /** Show the reading-progress bar and the drawer toggle for the sidebar. */
   reading?: boolean
 }
 
-const { title, description, trackId, reading = false } = Astro.props
+const { title, description, reading = false } = Astro.props
 const pageTitle = title === 'LLMs From Scratch' ? title : `${title} · LLMs From Scratch`
 ---
 <!doctype html>
@@ -66,15 +63,7 @@ const pageTitle = title === 'LLMs From Scratch' ? title : `${title} · LLMs From
           </svg>
           LLMs From Scratch
         </a>
-        <nav aria-label="学习路线" class="hidden gap-1 xl:flex">
-          {tracks.map((track) => (
-            <a
-              href={url(track.id)}
-              aria-current={track.id === trackId ? 'page' : undefined}
-              class="rounded-full px-3 py-1 text-sm whitespace-nowrap text-muted no-underline hover:bg-sunken hover:text-ink aria-[current=page]:bg-accent-soft aria-[current=page]:font-semibold aria-[current=page]:text-accent-strong"
-            >{track.label}</a>
-          ))}
-        </nav>
+        <a href={url()} class="hidden rounded-full px-3 py-1 text-sm text-muted no-underline hover:bg-sunken hover:text-ink sm:block">目录</a>
         <div class="ml-auto flex items-center gap-1">
           <a
             href={repoUrl}
@@ -116,7 +105,7 @@ const pageTitle = title === 'LLMs From Scratch' ? title : `${title} · LLMs From
 
     <footer class="border-t border-rule text-xs text-muted">
       <div class="mx-auto flex max-w-page flex-wrap justify-between gap-3 px-4 py-6 sm:px-6">
-        <p class="m-0">LLMs From Scratch · 用推导、图解与可运行代码理解大语言模型</p>
+        <p class="m-0">LLMs From Scratch · 从数学原理到训练与推理系统，用推导与可运行代码理解大语言模型</p>
         <p class="m-0"><a href={repoUrl} class="text-muted">源码与验证脚本</a></p>
       </div>
     </footer>

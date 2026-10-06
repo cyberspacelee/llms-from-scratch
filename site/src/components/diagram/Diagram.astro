@@ -1,0 +1,40 @@
+---
+/**
+ * A numbered figure drawn with the diagram primitives (Box, Arrow, Text, Matrix, Region, Legend).
+ * Coordinates are SVG user units; draw at width ≈ 720 so 1 unit ≈ 1 px of the text column.
+ *
+ *   <Diagram width={720} height={240} label="三层计算图">
+ *     <Box x={20} y={90} w={120} h={56} label="x" />
+ *     <Arrow from={[140, 118]} to={[220, 118]} label="W" />
+ *     <Fragment slot="caption">读图说明……</Fragment>
+ *   </Diagram>
+ */
+import FigureShell from '../FigureShell.astro'
+import { size } from './tones'
+
+interface Props {
+  width: number
+  height: number
+  /** What the drawing shows, for screen readers. */
+  label: string
+  /** Narrowest rendering before the figure scrolls sideways; defaults to 70% of the drawn width. */
+  minWidth?: number
+  /** Cap the rendered width, for small drawings that should not stretch to the full column. */
+  maxWidth?: number
+}
+const { width, height, label, minWidth = Math.round(width * 0.7), maxWidth } = Astro.props
+const style = [`min-width:${Math.min(minWidth, width)}px`, maxWidth ? `max-width:${maxWidth}px` : ''].filter(Boolean).join(';')
+---
+<FigureShell label={label}>
+  <svg
+    viewBox={`0 0 ${width} ${height}`}
+    role="img"
+    aria-label={label}
+    font-size={size.md}
+    class="mx-auto block h-auto w-full font-sans"
+    style={style}
+  >
+    <slot />
+  </svg>
+  {Astro.slots.has('caption') && <Fragment slot="caption"><slot name="caption" /></Fragment>}
+</FigureShell>

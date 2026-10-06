@@ -1,0 +1,84 @@
+---
+/**
+ * A straight or bent arrow through `from → via… → to`, with an optional label.
+ * The head is drawn as a polygon, so no <marker> ids are needed.
+ */
+import { line as lineTones, size as sizes, text as textTones, type TextTone, type Tone } from './tones'
+
+type Point = [number, number]
+interface Props {
+  from: Point
+  to: Point
+  via?: Point[]
+  tone?: Tone
+  dashed?: boolean
+  head?: 'end' | 'both' | 'none'
+  label?: string
+  /** Which side of the longest segment the label sits on. */
+  labelSide?: 'above' | 'below' | 'left' | 'right'
+  labelTone?: TextTone
+  /** Draw a smooth curve through the points instead of straight segments. */
+  curve?: boolean
+  width?: number
+}
+const { from, to, via = [], tone = 'muted', dashed = false, head = 'end', label, labelSide = 'above', labelTone = 'muted', curve = false, width = 1.6 } = Astro.props
+const points: Point[] = [from, ...via, to]
+const colors = lineTones[tone]
+const size = 7
+
+function arrowhead(tip: Point, before: Point) {
+  const angle = Math.atan2(tip[1] - before[1], tip[0] - before[0])
+  const corner = (turn: number): Point => [tip[0] - size * 1.4 * Math.cos(angle + turn), tip[1] - size * 1.4 * Math.sin(angle + turn)]
+  const [a, b] = [corner(0.42), corner(-0.42)]
+  return `${tip[0]},${tip[1]} ${a[0]},${a[1]} ${b[0]},${b[1]}`
+}
+// Stop the line short of the tip so the stroke does not poke through the head.
+function shorten(tip: Point, before: Point): Point {
+  const length = Math.hypot(tip[0] - before[0], tip[1] - before[1]) || 1
+  const cut = Math.min(size, length / 2)
+  return [tip[0] - ((tip[0] - before[0]) / length) * cut, tip[1] - ((tip[1] - before[1]) / length) * cut]
+}
+const drawn = [...points]
+if (head === 'end' || head === 'both') drawn[drawn.length - 1] = shorten(points.at(-1)!, points.at(-2)!)
+if (head === 'both') drawn[0] = shorten(points[0], points[1])
+
+let d = `M${drawn[0][0]},${drawn[0][1]}`
+if (curve && drawn.length > 2) {
+  for (let index = 1; index < drawn.length; index += 1) {
+    const [p0, p1] = [drawn[index - 1], drawn[index]]
+    const mx = (p0[0] + p1[0]) / 2
+    d += ` C${mx},${p0[1]} ${mx},${p1[1]} ${p1[0]},${p1[1]}`
+  }
+} else if (curve) {
+  const [p0, p1] = drawn
+  const mx = (p0[0] + p1[0]) / 2
+  d += ` C${mx},${p0[1]} ${mx},${p1[1]} ${p1[0]},${p1[1]}`
+} else {
+  for (const point of drawn.slice(1)) d += ` L${point[0]},${point[1]}`
+}
+
+// Label on the longest segment.
+let best = 0
+for (let index = 1; index < points.length; index += 1) {
+  const length = Math.hypot(points[index][0] - points[index - 1][0], points[index][1] - points[index - 1][1])
+  const current = Math.hypot(points[best + 1][0] - points[best][0], points[best + 1][1] - points[best][1])
+  if (length > current) best = index - 1
+}
+const [p, q] = [points[best], points[best + 1]]
+const mid: Point = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]
+const offset = 9
+const place = {
+  above: { x: mid[0], y: mid[1] - offset, anchor: 'middle', baseline: 'auto' },
+  below: { x: mid[0], y: mid[1] + offset, anchor: 'middle', baseline: 'hanging' },
+  left: { x: mid[0] - offset, y: mid[1], anchor: 'end', baseline: 'central' },
+  right: { x: mid[0] + offset, y: mid[1], anchor: 'start', baseline: 'central' },
+}[labelSide]
+---
+<g>
+  <path d={d} fill="none" stroke-width={width} stroke-linecap="round" stroke-linejoin="round" class:list={[colors.stroke, dashed && '[stroke-dasharray:5_4]']} />
+  {(head === 'end' || head === 'both') && <polygon points={arrowhead(points.at(-1)!, points.at(-2)!)} class={colors.fill} />}
+  {head === 'both' && <polygon points={arrowhead(points[0], points[1])} class={colors.fill} />}
+  {label && (
+    <text x={place.x} y={place.y} text-anchor={place.anchor} dominant-baseline={place.baseline} font-size={sizes.sm} paint-order="stroke" stroke-width="4" stroke-linejoin="round" class:list={[textTones[labelTone], 'stroke-raised']}>{label}</text>
+  )}
+</g>

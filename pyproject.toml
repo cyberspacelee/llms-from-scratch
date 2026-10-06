@@ -1,13 +1,10 @@
 [project]
 name = "llms-from-scratch"
 version = "0.1.0"
-description = "Runnable primitives and experiments for the Chinese LLM curriculum"
+description = "Reference implementations for the LLMs From Scratch book"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["numpy>=2,<3", "torch>=2.6,<3"]
-
-[project.scripts]
-llms-from-scratch = "llms_from_scratch.experiments:main"
 
 [project.optional-dependencies]
 plots = ["matplotlib>=3.9"]
@@ -18,7 +15,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/llms_from_scratch", "examples"]
+packages = ["src/llms_from_scratch"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
@@ -29,7 +26,7 @@ url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [dependency-groups]
-dev = ["ruff>=0.16.10"]
+dev = ["ruff>=0.16.10", "pytest>=8"]
 
 [tool.ruff]
 target-version = "py311"
@@ -39,4 +36,8 @@ line-length = 100
 select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["B007", "B905"]
+"tests/**/*.py" = ["B007", "B905"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

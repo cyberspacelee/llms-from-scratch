@@ -1,0 +1,21 @@
+---
+/** A row of colour keys. */
+import { shape, size as sizes, type Tone } from './tones'
+
+interface Props {
+  x: number
+  y: number
+  items: { label: string; tone: Tone }[]
+  /** Horizontal space per item. */
+  gap?: number
+}
+const { x, y, items, gap = 120 } = Astro.props
+---
+<g>
+  {items.map((item, index) => (
+    <g>
+      <rect x={x + index * gap} y={y - 6} width={12} height={12} rx={3} class:list={[shape[item.tone].box, 'stroke-[1.25]']} />
+      <text x={x + index * gap + 18} y={y} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{item.label}</text>
+    </g>
+  ))}
+</g>

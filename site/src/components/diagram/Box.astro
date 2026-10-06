@@ -1,0 +1,39 @@
+---
+/** A labelled rectangle: a tensor, a layer, a process, a memory. `label` may contain "\n". */
+import { lines, shape, size as sizes, type Size, type Tone } from './tones'
+
+interface Props {
+  x: number
+  y: number
+  w: number
+  h: number
+  label?: string
+  /** Smaller second line under the label, e.g. a shape "(B, T, C)". */
+  sub?: string
+  tone?: Tone
+  size?: Size
+  mono?: boolean
+  rx?: number
+  /** Draw the label at the top-left instead of the centre (for containers). */
+  title?: boolean
+}
+const { x, y, w, h, label, sub, tone = 'neutral', size = 'md', mono = false, rx = 6, title = false } = Astro.props
+const colors = shape[tone]
+const fontSize = sizes[size]
+const subSize = Math.max(sizes.xs, fontSize - 2.5)
+const centre = y + h / 2 - (sub ? subSize * 0.65 : 0)
+const labelLines = lines(label, centre, fontSize)
+const subY = (labelLines.at(-1)?.y ?? centre) + fontSize * 0.6 + subSize * 0.85
+---
+<g>
+  <rect x={x} y={y} width={w} height={h} rx={rx} class:list={[colors.box, 'stroke-[1.5]']} />
+  {title ? (
+    label && <text x={x + 10} y={y + fontSize + 6} font-size={fontSize} font-weight="600" class={colors.text}>{label}</text>
+  ) : (
+    labelLines.map((line) => (
+      <text x={x + w / 2} y={line.y} text-anchor="middle" dominant-baseline="central" font-size={fontSize} font-weight="600" class:list={[colors.text, mono && 'font-mono']}>{line.value}</text>
+    ))
+  )}
+  {sub && !title && <text x={x + w / 2} y={subY} text-anchor="middle" dominant-baseline="central" font-size={subSize} class:list={[colors.sub, 'font-mono']}>{sub}</text>}
+  <slot />
+</g>

@@ -1,17 +1,22 @@
 ---
-/** An aside: `note` for route hints and definitions, `warn` for boundaries and pitfalls. */
+/**
+ * An aside in four tones:
+ *   note — background or a reminder; tip — practical advice;
+ *   warn — a pitfall or a boundary; deep — optional depth that the main line does not need.
+ */
 interface Props {
-  tone?: 'note' | 'warn'
+  tone?: 'note' | 'tip' | 'warn' | 'deep'
   title?: string
 }
 const { tone = 'note', title } = Astro.props
+const style = {
+  note: { frame: 'border-info bg-info-soft', tag: 'text-info', name: '说明' },
+  tip: { frame: 'border-accent bg-accent-soft', tag: 'text-accent-strong', name: '提示' },
+  warn: { frame: 'border-accent2 bg-accent2-soft', tag: 'text-accent2', name: '注意' },
+  deep: { frame: 'border-rule-strong bg-sunken', tag: 'text-muted', name: '深入' },
+}[tone]
 ---
-<aside
-  class:list={[
-    'my-6 rounded-r-lg border-l-[3px] px-4 py-3 [&>p]:my-2 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0',
-    tone === 'warn' ? 'border-accent2 bg-accent2-soft' : 'border-accent bg-accent-soft',
-  ]}
->
-  {title && <p class="mb-1! font-semibold">{title}</p>}
+<aside class:list={['my-6 rounded-r-lg border-l-[3px] px-4 py-3 [&>p]:my-2 [&>*:first-child]:mt-0 [&>*:last-child]:mb-0 [&_.katex-display]:my-3', style.frame]}>
+  <p class="mb-1! text-sm font-semibold"><span class:list={['mr-2', style.tag]}>{style.name}</span>{title}</p>
   <slot />
 </aside>

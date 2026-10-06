@@ -1,0 +1,55 @@
+---
+/**
+ * A numbered timeline with one lane per worker: GPU streams, pipeline stages, scheduler steps.
+ *
+ *   <Lanes label="GPipe 的气泡" lanes={['GPU 0', 'GPU 1']} unit="时间步"
+ *          items={[{ lane: 0, start: 0, end: 1, label: 'F1' }, { lane: 1, start: 1, end: 2, label: 'F1', tone: 'info' }]} />
+ */
+import FigureShell from '../FigureShell.astro'
+import { shape, size as sizes, type Tone } from './tones'
+
+interface Props {
+  label: string
+  lanes: string[]
+  items: { lane: number; start: number; end: number; label?: string; tone?: Tone }[]
+  /** Axis title, e.g. "时间 (ms)". */
+  unit?: string
+  /** Total span; defaults to the last item's end. */
+  span?: number
+  /** Tick every `tick` units; 0 hides ticks. */
+  tick?: number
+  width?: number
+  laneHeight?: number
+}
+const { label, lanes, items, unit, tick = 1, width = 720, laneHeight = 34 } = Astro.props
+const span = Astro.props.span ?? Math.max(...items.map((item) => item.end))
+const left = Math.max(64, Math.max(...lanes.map((lane) => lane.length)) * 13 + 20)
+const right = 24, top = 10
+const height = top + lanes.length * (laneHeight + 8) + (unit || tick ? 40 : 10)
+const sx = (v: number) => left + (v / span) * (width - left - right)
+const ly = (lane: number) => top + lane * (laneHeight + 8)
+const tickValues = tick ? Array.from({ length: Math.floor(span / tick) + 1 }, (_, i) => i * tick) : []
+const axisY = ly(lanes.length) + 2
+---
+<FigureShell label={label}>
+  <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} font-size={sizes.sm} class="mx-auto block h-auto w-full font-sans" style={`min-width:${Math.round(width * 0.7)}px`}>
+    {lanes.map((lane, index) => <g>
+      <rect x={left} y={ly(index)} width={width - left - right} height={laneHeight} rx="4" class="fill-sunken" />
+      <text x={left - 10} y={ly(index) + laneHeight / 2} text-anchor="end" dominant-baseline="central" font-size={sizes.sm} class="fill-ink">{lane}</text>
+    </g>)}
+    {items.map((item) => {
+      const tone = shape[item.tone ?? 'accent']
+      const w = sx(item.end) - sx(item.start)
+      return <g>
+        <rect x={sx(item.start) + 1} y={ly(item.lane) + 3} width={Math.max(1, w - 2)} height={laneHeight - 6} rx="3" class:list={[tone.box, 'stroke-[1.25]']} />
+        {item.label && w > item.label.length * 6 && <text x={sx(item.start) + w / 2} y={ly(item.lane) + laneHeight / 2} text-anchor="middle" dominant-baseline="central" font-size={sizes.xs} class:list={[tone.text, 'font-mono']}>{item.label}</text>}
+      </g>
+    })}
+    {tickValues.map((v) => <g>
+      <line x1={sx(v)} x2={sx(v)} y1={axisY} y2={axisY + 5} class="stroke-rule-strong" />
+      <text x={sx(v)} y={axisY + 16} text-anchor="middle" font-size={sizes.xs} class="fill-muted font-mono">{v}</text>
+    </g>)}
+    {unit && <text x={(left + width - right) / 2} y={height - 6} text-anchor="middle" font-size={sizes.sm} class="fill-muted">{unit}</text>}
+  </svg>
+  {Astro.slots.has('caption') && <Fragment slot="caption"><slot name="caption" /></Fragment>}
+</FigureShell>

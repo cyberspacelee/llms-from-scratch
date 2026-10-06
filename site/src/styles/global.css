@@ -33,9 +33,10 @@
   --text-2xl--line-height: 1.2;
 
   --spacing-header: 3.5rem;
-  --spacing-sidebar: 15rem;
+  --spacing-sidebar: 16rem;
+  --spacing-toc: 13rem;
   --container-content: 46rem;
-  --container-page: 76rem;
+  --container-page: 90rem;
 }
 
 /* Semantic colors switch with the theme, so markup never needs dark: variants for them. */
@@ -116,8 +117,8 @@
   button:not(:disabled), summary { @apply cursor-pointer; }
 }
 
-/* Lesson prose: the typography plugin, fed by the site tokens. */
-@utility prose-lesson {
+/* Book prose: the typography plugin, fed by the site tokens. */
+@utility prose-book {
   --tw-prose-body: var(--color-ink);
   --tw-prose-headings: var(--color-ink);
   --tw-prose-lead: var(--color-muted);
@@ -134,69 +135,103 @@
   --tw-prose-pre-bg: var(--color-code-bg);
   --tw-prose-th-borders: var(--color-rule-strong);
   --tw-prose-td-borders: var(--color-rule);
-  counter-reset: section figure;
+  --chapter: "";
 }
 
 /* The typography plugin emits `prose` as a utility, so its overrides must sit in the utilities layer too. */
 @layer utilities {
-  /* Sections are numbered by the page, not typed into the Markdown. */
-  .prose-lesson h2 { counter-increment: section; }
-  .prose-lesson h2::before {
-    @apply mb-2 block font-mono text-xs font-semibold tracking-wide text-accent;
-    content: counter(section, decimal-leading-zero);
+  .prose-book { @apply text-base; }
+  .prose-book > p { @apply leading-8; }
+  .prose-book :is(h2, h3, h4) { @apply scroll-mt-[calc(var(--spacing-header)+1rem)] font-semibold text-balance; }
+  .prose-book h2 { @apply mt-16 mb-5 border-t border-rule pt-8 text-xl; counter-increment: section; counter-reset: subsection; }
+  .prose-book h3 { @apply mt-10 mb-3 text-lg; counter-increment: subsection; }
+  .prose-book h4 { @apply mt-8 mb-2 text-base; }
+  .prose-book a { @apply font-normal decoration-1 underline-offset-[0.2em] hover:decoration-2; }
+  .prose-book li { @apply my-1.5; }
+  .prose-book hr { @apply my-12; }
+  .prose-book img { @apply my-0; }
+
+  /* Sections are numbered by the page (3.1, 3.1.2), never typed into the Markdown. */
+  .prose-numbered h2::before {
+    @apply mr-3 font-mono text-accent;
+    content: var(--chapter) "." counter(section);
+  }
+  .prose-numbered h3::before {
+    @apply mr-2 font-mono text-base text-muted;
+    content: var(--chapter) "." counter(section) "." counter(subsection);
   }
 
-  .prose-lesson h2 { @apply mt-12 border-t border-rule pt-6; }
-  .prose-lesson > p { @apply leading-8; }
+  /* Hover anchors added by the page script. */
+  .prose-book .heading-anchor { @apply ml-2 text-muted no-underline opacity-0 hover:text-accent focus-visible:opacity-100; }
+  .prose-book :is(h2, h3):hover .heading-anchor { @apply opacity-100; }
 
-  .prose-lesson blockquote {
-    @apply rounded-r-lg bg-accent-soft px-4 py-3 font-normal not-italic;
+  .prose-book blockquote {
+    @apply rounded-r-lg border-l-[3px] bg-sunken px-4 py-3 font-normal not-italic;
   }
-  .prose-lesson blockquote p::before,
-  .prose-lesson blockquote p::after { content: none; }
-  .prose-lesson blockquote > :first-child { @apply mt-0; }
-  .prose-lesson blockquote > :last-child { @apply mb-0; }
+  .prose-book blockquote p::before,
+  .prose-book blockquote p::after { content: none; }
+  .prose-book blockquote > :first-child { @apply mt-0; }
+  .prose-book blockquote > :last-child { @apply mb-0; }
 
-  .prose-lesson :not(pre) > code {
-    @apply rounded-sm bg-sunken px-[0.35em] py-[0.1em] font-medium wrap-anywhere;
+  .prose-book :not(pre) > code {
+    @apply rounded-sm bg-sunken px-[0.35em] py-[0.1em] text-[0.875em] font-medium wrap-anywhere;
   }
-  .prose-lesson :not(pre) > code::before,
-  .prose-lesson :not(pre) > code::after { content: none; }
+  .prose-book :not(pre) > code::before,
+  .prose-book :not(pre) > code::after { content: none; }
 
-  /* Shiki writes both themes as variables; pick one per theme. */
-  .prose-lesson pre {
-    @apply relative my-6 overflow-x-auto rounded-lg border border-rule px-5 py-4 text-code;
+  /* Code blocks. Shiki writes both themes as variables; pick one per theme. */
+  .prose-book pre {
+    @apply relative my-6 overflow-x-auto rounded-lg border border-rule bg-code-bg py-4 text-code;
     tab-size: 4;
   }
+  .prose-book pre > code { @apply grid min-w-max; }
+  .prose-book pre .line { @apply block px-5; min-height: 1lh; }
+  .prose-book pre .line.highlighted { @apply bg-accent-soft shadow-[inset_3px_0_0_var(--color-accent)]; }
+  .prose-book pre .line.diff.add { @apply bg-accent-soft before:absolute before:left-1.5 before:text-accent before:content-['+']; }
+  .prose-book pre .line.diff.remove { @apply bg-accent2-soft opacity-80 before:absolute before:left-1.5 before:text-accent2 before:content-['−']; }
+  .prose-book pre.has-focused .line:not(.focused) { @apply opacity-45 blur-[0.3px] transition-[opacity,filter]; }
+  .prose-book pre.has-focused:hover .line:not(.focused) { @apply opacity-100 blur-none; }
+  .prose-book pre[data-line-numbers] > code { counter-reset: line; }
+  .prose-book pre[data-line-numbers] .line { @apply pl-14; counter-increment: line; }
+  .prose-book pre[data-line-numbers] .line::before {
+    @apply absolute left-0 w-10 text-right text-muted select-none;
+    content: counter(line);
+  }
+  .prose-book .code-titled { @apply my-6 overflow-hidden rounded-lg border border-rule bg-code-bg; }
+  .prose-book .code-titled > .code-title {
+    @apply flex items-center gap-2 border-b border-rule px-4 py-2 font-mono text-xs text-muted;
+  }
+  .prose-book .code-titled > pre { @apply my-0 rounded-none border-0; }
   .astro-code, .astro-code span { color: var(--shiki-light); }
   [data-theme="dark"] .astro-code, [data-theme="dark"] .astro-code span { color: var(--shiki-dark); }
 
   /* Break between KaTeX atoms; indivisible matrices still scroll when wide. */
-  .prose-lesson .katex { font-size: 1.05em; }
-  :where(.prose-lesson) .katex-display { @apply my-6 overflow-x-auto overflow-y-hidden py-1; }
-  .prose-lesson .katex-display > .katex { @apply whitespace-normal; }
-  .prose-lesson :is(td, th) .katex { @apply whitespace-nowrap; }
+  .prose-book .katex { font-size: 1.05em; }
+  :where(.prose-book) .katex-display { @apply my-6 overflow-x-auto overflow-y-hidden py-1; }
+  .prose-book .katex-display > .katex { @apply whitespace-normal; }
+  .prose-book :is(td, th) .katex { @apply whitespace-nowrap; }
 
-  .prose-lesson table { @apply my-0 text-sm; }
-  .prose-lesson th { @apply whitespace-nowrap; }
+  .prose-book table { @apply my-0 text-sm; }
+  .prose-book th { @apply whitespace-nowrap; }
+  .prose-book thead th { @apply bg-sunken px-3 py-2; }
+  .prose-book tbody td { @apply px-3 py-2; }
 
   /* Exercises and optional detail use native <details>. */
-  .prose-lesson details { @apply my-3 rounded-lg border border-rule bg-raised wrap-anywhere; }
-  .prose-lesson summary { @apply flex gap-2 px-4 py-3 font-semibold; list-style: none; }
-  .prose-lesson summary::-webkit-details-marker { display: none; }
-  .prose-lesson summary::before { @apply flex-none font-mono font-semibold text-accent; content: "+"; }
-  .prose-lesson details[open] > summary { @apply border-b border-rule; }
-  .prose-lesson details[open] > summary::before { content: "−"; }
-  .prose-lesson details > :not(summary) { @apply mx-4; }
-  .prose-lesson details > :last-child { @apply mb-4; }
+  .prose-book details { @apply my-3 rounded-lg border border-rule bg-raised wrap-anywhere; }
+  .prose-book summary { @apply flex gap-2 px-4 py-3 font-semibold; list-style: none; }
+  .prose-book summary::-webkit-details-marker { display: none; }
+  .prose-book summary::before { @apply flex-none font-mono font-semibold text-accent; content: "+"; }
+  .prose-book details[open] > summary { @apply border-b border-rule; }
+  .prose-book details[open] > summary::before { content: "−"; }
+  .prose-book details > :not(summary) { @apply mx-4; }
+  .prose-book details > :last-child { @apply mb-4; }
 
-  /* Mermaid sources render in the browser into this frame. */
-  .prose-lesson .mermaid {
-    @apply my-8 overflow-x-auto rounded-lg border border-rule bg-raised p-4 text-center whitespace-pre text-transparent;
+  /* Figures and diagrams: 图 3-2 inside chapter 3; 图 2 on a part introduction. */
+  .figure-number::before {
+    @apply mr-2 font-semibold text-ink;
+    content: "图 " counter(figure);
   }
-  .prose-lesson .mermaid[data-rendered] { @apply whitespace-normal text-ink; }
-  .prose-lesson .mermaid[data-failed] { @apply text-left font-mono text-code whitespace-pre-wrap text-accent2; }
-  .prose-lesson .mermaid svg { @apply mx-auto h-auto max-w-none; }
+  .prose-numbered .figure-number::before { content: "图 " var(--chapter) "-" counter(figure); }
 }
 
 /* The same viewport is used by static figures and interactive diagrams. */

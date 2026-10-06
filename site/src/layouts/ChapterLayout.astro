@@ -1,0 +1,131 @@
+---
+import BaseLayout from './BaseLayout.astro'
+import BookNav from '../components/BookNav.astro'
+import { chapterLabel, getBook, readingMinutes, repoUrl, url, type Chapter } from '../lib/book'
+
+interface Props {
+  chapter: Chapter
+  headings: { depth: number; slug: string; text: string }[]
+}
+
+const { chapter, headings } = Astro.props
+const book = await getBook()
+const index = book.indexOf(chapter)
+const previous = book[index - 1]
+const next = book[index + 1]
+const minutes = readingMinutes(chapter.entry.body ?? '')
+const numbered = !chapter.isIntro
+
+// Number sections the same way the page does: 3.1, 3.2 … for chapters; plain for part introductions.
+let section = 0
+const toc = headings
+  .filter((heading) => heading.depth === 2 || heading.depth === 3)
+  .map((heading) => {
+    if (heading.depth === 2) section += 1
+    return {
+      ...heading,
+      number: heading.depth === 2 && numbered ? `${chapter.number}.${section}` : '',
+    }
+  })
+const short = (item: Chapter) => (item.isIntro ? item.part.numeral : `第 ${item.number} 章`)
+---
+<BaseLayout title={chapter.title} description={chapter.description} reading>
+  <div class="mx-auto max-w-page px-4 sm:px-6 lg:grid lg:grid-cols-[var(--spacing-sidebar)_minmax(0,1fr)] lg:gap-10 xl:grid-cols-[var(--spacing-sidebar)_minmax(0,1fr)_var(--spacing-toc)]">
+    <div data-nav-scrim class="fixed inset-x-0 top-header bottom-0 z-20 hidden bg-ink/30 lg:hidden"></div>
+    <aside
+      id="sidebar"
+      aria-label="全书目录"
+      class="invisible fixed top-header bottom-0 left-0 z-30 w-[min(20rem,88vw)] -translate-x-full overflow-y-auto overscroll-contain border-r border-rule bg-paper px-3 py-5 transition-[transform,visibility] duration-200 motion-reduce:transition-none data-open:visible data-open:translate-x-0 lg:visible lg:sticky lg:top-header lg:z-auto lg:max-h-[calc(100dvh-var(--spacing-header))] lg:w-auto lg:translate-x-0 lg:self-start lg:border-r-0 lg:bg-transparent lg:px-0 lg:py-8"
+    >
+      <BookNav current={chapter} />
+    </aside>
+
+    <main id="content" class="min-w-0 pt-6 pb-16 lg:pt-10">
+      <div class="mx-auto max-w-content">
+        <header class="mb-10">
+          <p class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs font-semibold text-muted">
+            <a href={url(chapter.part.id)} class="text-muted no-underline hover:text-accent">{chapter.part.numeral} · {chapter.part.label}</a>
+            {!chapter.isIntro && <><span aria-hidden="true">/</span><span class="text-accent">{chapterLabel(chapter)}</span></>}
+          </p>
+          <h1 class="text-2xl font-semibold tracking-tight text-balance">{chapter.title}</h1>
+          <p class="mt-4 mb-0 text-lg text-muted text-pretty">{chapter.description}</p>
+          <ul class="mt-5 mb-0 flex list-none flex-wrap gap-x-5 gap-y-1 border-b border-rule p-0 pb-5 text-xs text-muted">
+            <li>阅读约 <strong class="font-semibold text-ink">{minutes}</strong> 分钟</li>
+            {chapter.entry.data.code.map((path) => (
+              <li class="min-w-0">代码 <a href={`${repoUrl}/blob/master/${path}`} class="font-mono wrap-anywhere">{path}</a></li>
+            ))}
+          </ul>
+          {chapter.entry.data.draft && (
+            <p class="mt-5 mb-0 rounded-lg border border-accent2 bg-accent2-soft px-4 py-3 text-sm">本章仍在撰写中，内容会持续补全。</p>
+          )}
+        </header>
+
+        {toc.length > 0 && (
+          <details class="group mb-10 rounded-lg border border-rule bg-raised xl:hidden">
+            <summary class="flex items-center justify-between px-4 py-3 text-sm font-semibold [&::-webkit-details-marker]:hidden">
+              本章目录
+              <span aria-hidden="true" class="font-mono text-accent group-open:hidden">+</span>
+              <span aria-hidden="true" class="hidden font-mono text-accent group-open:inline">−</span>
+            </summary>
+            <ol class="m-0 list-none border-t border-rule px-4 py-3 text-sm">
+              {toc.map((item) => (
+                <li class:list={[item.depth === 3 && 'pl-8']}>
+                  <a href={`#${item.slug}`} class="flex gap-2 py-1 text-muted no-underline hover:text-ink">
+                    {item.number && <span class="w-7 flex-none font-mono text-xs leading-6 text-accent">{item.number}</span>}
+                    <span>{item.text}</span>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </details>
+        )}
+
+        <article
+          class:list={['prose prose-book max-w-none [counter-reset:section_figure]', numbered && 'prose-numbered']}
+          style={numbered ? `--chapter: "${chapter.number}"` : undefined}
+        >
+          <slot />
+        </article>
+
+        <nav aria-label="上一章与下一章" class="mt-20 grid gap-4 border-t border-rule pt-8 sm:grid-cols-2">
+          {previous && (
+            <a href={url(previous.path)} rel="prev" class="block rounded-lg border border-rule p-4 text-ink no-underline hover:border-accent">
+              <small class="block text-xs text-muted">← 上一章 · {short(previous)}</small>
+              <strong class="mt-1 block text-sm font-semibold">{previous.title}</strong>
+            </a>
+          )}
+          {next && (
+            <a href={url(next.path)} rel="next" class="block rounded-lg border border-rule p-4 text-ink no-underline hover:border-accent sm:col-start-2 sm:text-right">
+              <small class="block text-xs text-muted">下一章 · {short(next)} →</small>
+              <strong class="mt-1 block text-sm font-semibold">{next.title}</strong>
+            </a>
+          )}
+        </nav>
+      </div>
+    </main>
+
+    {toc.length > 0 && (
+      <nav aria-label="本章目录" class="hidden xl:sticky xl:top-header xl:block xl:max-h-[calc(100dvh-var(--spacing-header))] xl:self-start xl:overflow-y-auto xl:py-10">
+        <p class="mb-3 text-xs font-semibold text-muted">本章目录</p>
+        <ol class="m-0 list-none border-l border-rule p-0 text-xs">
+          {toc.map((item) => (
+            <li>
+              <a
+                href={`#${item.slug}`}
+                data-section-link
+                class:list={[
+                  '-ml-px flex gap-2 border-l-2 border-transparent py-1 pr-2 text-muted no-underline hover:text-ink aria-[current=true]:border-accent aria-[current=true]:text-ink',
+                  item.depth === 3 ? 'pl-7' : 'pl-3 font-medium',
+                ]}
+              >
+                {item.number && <span class="flex-none font-mono text-accent">{item.number}</span>}
+                <span>{item.text}</span>
+              </a>
+            </li>
+          ))}
+        </ol>
+        <a href="#content" class="mt-4 block pl-3 text-xs text-muted no-underline hover:text-accent">回到顶部 ↑</a>
+      </nav>
+    )}
+  </div>
+</BaseLayout>

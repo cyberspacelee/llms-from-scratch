@@ -119,80 +119,12 @@ document.querySelectorAll<HTMLPreElement>('pre.astro-code').forEach((pre) => {
   pre.append(button)
 })
 
-// Mermaid diagrams: render from source, redraw in the new colors when the theme changes.
-const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid')]
-for (const diagram of diagrams) diagram.dataset.source = diagram.textContent ?? ''
-
-async function renderDiagrams() {
-  if (!diagrams.length) return
-  const { default: mermaid } = await import('mermaid')
-  const style = getComputedStyle(root)
-  // Mermaid only parses hex/rgb, and the tokens are oklch: resolve each through a 1×1 canvas.
-  const context = document.createElement('canvas').getContext('2d', { willReadFrequently: true })
-  const color = (name: string) => {
-    const value = style.getPropertyValue(name).trim()
-    if (!context) return value
-    context.clearRect(0, 0, 1, 1)
-    context.fillStyle = value
-    context.fillRect(0, 0, 1, 1)
-    const [r, g, b] = context.getImageData(0, 0, 1, 1).data
-    return `#${[r, g, b].map((channel) => channel.toString(16).padStart(2, '0')).join('')}`
-  }
-  mermaid.initialize({
-    startOnLoad: false,
-    securityLevel: 'strict',
-    theme: 'base',
-    fontFamily: style.fontFamily,
-    themeVariables: {
-      darkMode: root.dataset.theme === 'dark',
-      background: color('--raised'),
-      primaryColor: color('--accent-soft'),
-      primaryTextColor: color('--ink'),
-      primaryBorderColor: color('--accent'),
-      secondaryColor: color('--info-soft'),
-      tertiaryColor: color('--sunken'),
-      lineColor: color('--muted'),
-      textColor: color('--ink'),
-      noteBkgColor: color('--accent2-soft'),
-      noteTextColor: color('--ink'),
-      noteBorderColor: color('--accent2'),
-      actorBkg: color('--accent-soft'),
-      actorBorder: color('--accent'),
-      actorTextColor: color('--ink'),
-      signalColor: color('--muted'),
-      signalTextColor: color('--ink'),
-      labelBoxBkgColor: color('--sunken'),
-      labelBoxBorderColor: color('--rule-strong'),
-      loopTextColor: color('--ink'),
-      fontSize: '15px',
-    },
-    // Natural size keeps labels readable; wide diagrams scroll inside their frame.
-    flowchart: { htmlLabels: true, useMaxWidth: false },
-    sequence: { useMaxWidth: false },
-    state: { useMaxWidth: false },
-  })
-  for (const [index, diagram] of diagrams.entries()) {
-    try {
-      const { svg } = await mermaid.render(`mermaid-${index}-${Date.now()}`, diagram.dataset.source ?? '')
-      diagram.innerHTML = svg
-      diagram.dataset.rendered = ''
-      delete diagram.dataset.failed
-    } catch (error) {
-      diagram.textContent = `图无法绘制：${error instanceof Error ? error.message : String(error)}`
-      diagram.dataset.failed = ''
-    }
-  }
-}
-
-if (diagrams.length) {
-  const observer = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) {
-      observer.disconnect()
-      renderDiagrams()
-    }
-  }, { rootMargin: '400px' })
-  diagrams.forEach((diagram) => observer.observe(diagram))
-  document.addEventListener('themechange', () => {
-    if (diagrams.some((diagram) => 'rendered' in diagram.dataset)) renderDiagrams()
-  })
-}
+// Hover anchors on chapter headings.
+document.querySelectorAll<HTMLElement>('.prose-book :is(h2, h3)[id]').forEach((heading) => {
+  const anchor = document.createElement('a')
+  anchor.href = `#${heading.id}`
+  anchor.className = 'heading-anchor'
+  anchor.textContent = '#'
+  anchor.setAttribute('aria-label', `链接到“${heading.textContent?.trim() ?? ''}”`)
+  heading.append(anchor)
+})

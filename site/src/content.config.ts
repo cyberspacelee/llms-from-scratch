@@ -2,23 +2,23 @@ import { defineCollection } from 'astro:content'
 import { glob } from 'astro/loaders'
 import { z } from 'astro/zod'
 
-// A lesson's track is its folder; `index.mdx` is the track's introduction.
-const lessons = defineCollection({
+// A chapter's part is its folder; `index.mdx` (order 0) is the part's introduction.
+const book = defineCollection({
   loader: glob({
     pattern: '*/*.mdx',
-    base: './src/content/lessons',
+    base: './src/content/book',
     generateId: ({ entry }) => entry.replace(/\.mdx$/, ''),
   }),
   schema: z.object({
     title: z.string(),
-    question: z.string(),
+    /** One or two sentences: the page lead and meta description. */
     description: z.string(),
     order: z.number().int().nonnegative(),
-    /** Repository paths of the scripts that verify this lesson. */
+    /** Repository paths of the code this chapter builds or runs. */
     code: z.array(z.string()).default([]),
-    prerequisites: z.array(z.string()).default([]),
-    optional: z.boolean().default(false),
+    /** Draft chapters render a notice and stay out of the reading-time count. */
+    draft: z.boolean().default(false),
   }),
 })
 
-export const collections = { lessons }
+export const collections = { book }

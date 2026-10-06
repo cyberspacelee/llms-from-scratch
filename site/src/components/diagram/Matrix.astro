@@ -1,0 +1,66 @@
+---
+/**
+ * A grid of cells: a matrix, a tensor slice, a memory row, an attention map.
+ * `highlight` colours whole rows, columns or single cells; later entries win.
+ *
+ *   <Matrix x={40} y={40} rows={4} cols={4} values={scores}
+ *           highlight={[{ rows: [2], tone: 'accent' }, { cells: [[2, 3]], tone: 'accent2' }]}
+ *           rowLabels={['我', '爱', '机', '器']} title="注意力分数" />
+ */
+import { shape, size as sizes, type Tone } from './tones'
+
+type Highlight = { tone: Tone; rows?: number[]; cols?: number[]; cells?: [number, number][]; upper?: boolean; lower?: boolean }
+interface Props {
+  x: number
+  y: number
+  rows: number
+  cols: number
+  /** Cell edge length, or [width, height]. */
+  cell?: number | [number, number]
+  values?: (string | number)[][]
+  highlight?: Highlight[]
+  /** Base tone for every cell. */
+  tone?: Tone
+  rowLabels?: string[]
+  colLabels?: string[]
+  title?: string
+  /** Gap between cells; 0 draws a dense grid. */
+  gap?: number
+  mono?: boolean
+  /** Digits after the decimal point for numeric values. */
+  digits?: number
+}
+const { x, y, rows, cols, cell = 28, values, highlight = [], tone = 'neutral', rowLabels, colLabels, title, gap = 2, mono = true, digits = 2 } = Astro.props
+const [cw, ch] = Array.isArray(cell) ? cell : [cell, cell]
+const longest = Math.max(1, ...(values ?? []).flat().map((value) => (typeof value === 'number' && !Number.isInteger(value) ? value.toFixed(digits) : String(value)).length))
+const fontSize = Math.min(sizes.md, ch * 0.5, (cw - 4) / (longest * 0.62))
+
+function toneAt(r: number, c: number): Tone {
+  let result = tone
+  for (const item of highlight) {
+    if (item.rows?.includes(r) || item.cols?.includes(c) || item.cells?.some(([hr, hc]) => hr === r && hc === c)
+      || (item.upper && c > r) || (item.lower && c <= r)) result = item.tone
+  }
+  return result
+}
+const format = (value: string | number | undefined) =>
+  value === undefined ? '' : typeof value === 'number' ? (Number.isInteger(value) ? String(value) : value.toFixed(digits)) : value
+const cells = Array.from({ length: rows }, (_, r) => Array.from({ length: cols }, (_, c) => ({ r, c, tone: toneAt(r, c) })))
+---
+<g>
+  {title && <text x={x + (cols * (cw + gap) - gap) / 2} y={y - (colLabels ? 26 : 10)} text-anchor="middle" font-size={sizes.sm} font-weight="600" class="fill-ink">{title}</text>}
+  {colLabels?.map((label, c) => (
+    <text x={x + c * (cw + gap) + cw / 2} y={y - 9} text-anchor="middle" font-size={sizes.xs} class="fill-muted font-mono">{label}</text>
+  ))}
+  {rowLabels?.map((label, r) => (
+    <text x={x - 8} y={y + r * (ch + gap) + ch / 2} text-anchor="end" dominant-baseline="central" font-size={sizes.xs} class="fill-muted font-mono">{label}</text>
+  ))}
+  {cells.flat().map(({ r, c, tone: cellTone }) => (
+    <g>
+      <rect x={x + c * (cw + gap)} y={y + r * (ch + gap)} width={cw} height={ch} rx={gap ? 3 : 0} class:list={[shape[cellTone].box, 'stroke-1']} />
+      {values?.[r]?.[c] !== undefined && (
+        <text x={x + c * (cw + gap) + cw / 2} y={y + r * (ch + gap) + ch / 2} text-anchor="middle" dominant-baseline="central" font-size={fontSize} class:list={[shape[cellTone].text, mono && 'font-mono']}>{format(values[r][c])}</text>
+      )}
+    </g>
+  ))}
+</g>

@@ -4,9 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "NODE_ENV=development astro dev --mode development",
-    "build": "node --experimental-strip-types scripts/check-reference-traces.mjs && astro build && node scripts/check-links.mjs",
+    "build": "astro build && node scripts/check-links.mjs",
     "preview": "astro preview",
-    "check": "astro check && node --experimental-strip-types scripts/check-gpu-models.mjs && node --experimental-strip-types scripts/check-gpu-indexing.mjs && node --experimental-strip-types scripts/check-transpose-model.mjs && node --experimental-strip-types scripts/check-kernel-lifecycle.mjs && node --experimental-strip-types scripts/check-numpy-contracts.mjs && node --experimental-strip-types scripts/check-framework-tensor-model.mjs && node --experimental-strip-types scripts/check-masked-loss.mjs && node --experimental-strip-types scripts/check-batch-plan.mjs && node --experimental-strip-types scripts/check-multihead-model.mjs && node --experimental-strip-types scripts/check-head-pattern.mjs && node --experimental-strip-types scripts/check-sampling-model.mjs && node --experimental-strip-types scripts/check-math-labs.mjs && node --experimental-strip-types scripts/check-interactive-models.mjs && node --experimental-strip-types scripts/check-reference-traces.mjs"
+    "check": "astro check"
   },
   "dependencies": {
     "@astrojs/markdown-remark": "^7.3.1",
@@ -14,7 +14,6 @@
     "@astrojs/react": "^6.0.6",
     "astro": "^7.3.3",
     "katex": "^0.16.47",
-    "mermaid": "^12.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "rehype-katex": "^7.0.1",
@@ -23,6 +22,7 @@
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
+    "@shikijs/transformers": "^4.5.0",
     "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.3",

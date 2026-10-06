@@ -1,22 +1,20 @@
 ---
-/** The chapters of a track, generated from the content collection. */
-import { getTrackLessons, url } from '../../lib/lessons'
+/** The chapters of a part, generated from the content collection. */
+import { getPartChapters, url } from '../../lib/book'
 
 interface Props {
-  track: string
-  /** Leave out the track introduction. */
-  chaptersOnly?: boolean
+  part: string
 }
-const { track, chaptersOnly = true } = Astro.props
-const lessons = (await getTrackLessons(track)).filter((lesson) => !chaptersOnly || !lesson.isIntro)
+const { part } = Astro.props
+const chapters = (await getPartChapters(part)).filter((chapter) => !chapter.isIntro)
 ---
-<ol class="not-prose my-6 list-none border-t border-rule p-0">
-  {lessons.map((lesson) => (
+<ol class="not-prose my-8 list-none border-t border-rule p-0">
+  {chapters.map((chapter) => (
     <li>
-      <a href={url(lesson.path)} class="group grid grid-cols-[3rem_minmax(0,1fr)] gap-x-3 border-b border-rule py-3 text-ink no-underline">
-        <span class="pt-0.5 font-mono text-xs font-medium text-muted">{lesson.isIntro ? '导读' : lesson.code}</span>
-        <span class="font-semibold group-hover:text-accent">{lesson.title}</span>
-        <span class="col-start-2 text-sm text-muted">{lesson.question}</span>
+      <a href={url(chapter.path)} class="group grid grid-cols-[4.5rem_minmax(0,1fr)] gap-x-3 border-b border-rule py-4 text-ink no-underline">
+        <span class="pt-0.5 font-mono text-xs font-medium text-accent">第 {chapter.number} 章</span>
+        <span class="font-semibold group-hover:text-accent">{chapter.title}</span>
+        <span class="col-start-2 mt-1 text-sm text-muted">{chapter.description}</span>
       </a>
     </li>
   ))}

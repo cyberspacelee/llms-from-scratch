@@ -1,91 +1,92 @@
 ---
 import BaseLayout from '../layouts/BaseLayout.astro'
-import { getLessons, repoUrl, url } from '../lib/lessons'
-import { tracks } from '../lib/tracks'
-import CourseMap from '../components/mdx/CourseMap.astro'
+import { getBook, repoUrl, url } from '../lib/book'
+import { parts } from '../lib/parts'
 
-const lessons = await getLessons()
-const byTrack = (id: string) => lessons.filter((lesson) => lesson.track.id === id)
-const chapters = lessons.filter((lesson) => !lesson.isIntro)
-const scripts = [...new Set(lessons.flatMap((lesson) => lesson.entry.data.code))]
+const book = await getBook()
+const chapters = book.filter((chapter) => !chapter.isIntro)
+const first = chapters[0]
 ---
-<BaseLayout title="LLMs From Scratch" description="用数学推导、图解、交互实验与可运行的 PyTorch 验证，理解大语言模型从训练原理到推理系统的每一步。">
-  <main id="content" class="mx-auto max-w-page px-4 pb-20 sm:px-6">
-    <section class="grid gap-10 border-b border-rule py-14 sm:py-20 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-end">
+<BaseLayout title="LLMs From Scratch" description="一本从数学原理、PyTorch 实现到预训练、对齐、GPU 编程与推理系统的大语言模型中文技术书。">
+  <main id="content" class="mx-auto max-w-page px-4 pb-24 sm:px-6">
+    <section class="grid gap-10 border-b border-rule py-16 sm:py-24 lg:grid-cols-[minmax(0,1fr)_22rem] lg:items-end">
       <div>
-        <p class="mb-4 text-sm font-semibold text-accent">中文讲义 · 推导 · 图解 · 可运行验证</p>
-        <h1 class="max-w-[16em] text-2xl font-semibold tracking-tight">从一行点积推到一台推理引擎，每一步都能手算、能运行。</h1>
-        <p class="mt-5 mb-0 max-w-content text-lg text-muted">
-          从数学与 NumPy / PyTorch API 搭起完整 Decoder，完成小语言模型训练与评估，再沿推理引擎理解调度、分页缓存和集群，最后比较不同进阶模型的设计。
+        <p class="mb-5 font-mono text-xs font-semibold tracking-widest text-accent">LLMS FROM SCRATCH</p>
+        <h1 class="max-w-[18em] text-2xl font-semibold tracking-tight text-balance">从链式法则到推理引擎：<br class="hidden sm:block" />亲手构建大语言模型</h1>
+        <p class="mt-6 mb-0 max-w-content text-lg text-muted text-pretty">
+          一本层层递进的中文技术书。先用数学和 PyTorch 打好地基，再从零实现 Transformer，沿 2017—2026 年的架构演进走到 DeepSeek-V4；随后讲清预训练、分布式训练与对齐，最后深入 GPU 编程与 vLLM 式推理系统。每个公式都有推导，每个机制都有可运行的代码。
         </p>
-        <div class="mt-8 flex flex-wrap gap-3">
-          <a href={url('math')} class="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-paper no-underline hover:bg-accent-strong hover:text-paper">从数学基础开始</a>
-          <a href={url('principles')} class="rounded-lg border border-rule-strong px-5 py-2.5 text-sm font-semibold text-ink no-underline hover:border-accent hover:text-accent-strong">直接读模型原理</a>
+        <div class="mt-9 flex flex-wrap gap-3">
+          {first && <a href={url(first.path)} class="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-paper no-underline hover:bg-accent-strong hover:text-paper">从第 1 章开始</a>}
+          <a href="#toc" class="rounded-lg border border-rule-strong px-5 py-2.5 text-sm font-semibold text-ink no-underline hover:border-accent hover:text-accent-strong">浏览目录</a>
         </div>
       </div>
       <dl class="m-0 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-rule bg-rule lg:grid-cols-1">
         {[
-          [String(chapters.length), '章正文'],
-          [String(scripts.length), '个验证脚本'],
-          [String(tracks.length), '个主题分区'],
+          [String(parts.length), '个部分'],
+          [String(chapters.length), '章'],
+          ['PyTorch · CUDA · Triton', '代码'],
         ].map(([value, label]) => (
-          <div class="flex flex-col-reverse bg-raised px-4 py-3">
+          <div class="flex flex-col-reverse bg-raised px-5 py-4">
             <dt class="text-xs text-muted">{label}</dt>
-            <dd class="m-0 font-mono text-xl font-semibold text-accent">{value}</dd>
+            <dd class="m-0 font-mono text-lg font-semibold text-accent">{value}</dd>
           </div>
         ))}
       </dl>
     </section>
 
-    <section aria-labelledby="tracks-heading" class="py-14">
-      <h2 id="tracks-heading" class="mb-8 text-xl font-semibold">数学、数组与模型的完整路线</h2>
-      <div class="grid gap-6 lg:grid-cols-3">
-        {tracks.map((track) => {
-          const items = byTrack(track.id)
+    <section class="grid gap-8 border-b border-rule py-14 lg:grid-cols-3">
+      {[
+        ['原理', '数学推导先于结论：链式法则、反向传播、注意力、缩放定律、PPO/GRPO 的目标函数都从定义出发推出，并用小例子手算核对。'],
+        ['实现', '每章的机制都落到 PyTorch 代码：自动微分引擎、BPE、GPT、AdamW 与 Muon、FSDP、LoRA、GRPO、FlashAttention、分页 KV Cache 与推理引擎。'],
+        ['系统', '把模型放到真实硬件上：算 FLOPs 与显存，理解 GPU 的内存层次，写 CUDA 与 Triton kernel，再看 vLLM 怎样调度与批处理。'],
+      ].map(([title, text]) => (
+        <div>
+          <h2 class="mb-2 text-lg font-semibold">{title}</h2>
+          <p class="m-0 text-muted">{text}</p>
+        </div>
+      ))}
+    </section>
+
+    <section id="toc" aria-labelledby="toc-heading" class="scroll-mt-[calc(var(--spacing-header)+1rem)] py-14">
+      <h2 id="toc-heading" class="mb-10 text-xl font-semibold">目录</h2>
+      <ol class="m-0 grid list-none gap-x-12 gap-y-12 p-0 lg:grid-cols-2">
+        {parts.map((part) => {
+          const items = book.filter((chapter) => chapter.part === part && !chapter.isIntro)
           return (
-            <section class="flex flex-col rounded-lg border border-rule bg-raised">
-              <header class="border-b border-rule p-5">
-                <p class="mb-2 font-mono text-xs font-semibold text-accent">{track.letter} · {items.length - 1} 章 + 导读</p>
-                <h3 class="text-lg font-semibold"><a href={url(track.id)} class="text-ink no-underline hover:text-accent">{track.label}</a></h3>
-                <p class="mt-2 mb-0 text-sm text-muted">{track.summary}</p>
-              </header>
-              <ol class="m-0 flex-1 list-none p-2">
-                {items.map((lesson) => (
+            <li>
+              <a href={url(part.id)} class="group block no-underline">
+                <p class="mb-1 font-mono text-xs font-semibold text-accent">{part.numeral}</p>
+                <h3 class="m-0 text-lg font-semibold text-ink group-hover:text-accent">{part.label}</h3>
+              </a>
+              <p class="mt-2 mb-4 text-sm text-muted">{part.summary}</p>
+              <ol class="m-0 list-none border-t border-rule p-0">
+                {items.map((chapter) => (
                   <li>
-                    <a href={url(lesson.path)} class="group grid grid-cols-[2.5rem_minmax(0,1fr)] gap-x-2 rounded-lg px-3 py-2 text-ink no-underline hover:bg-sunken">
-                      <span class="pt-px font-mono text-xs text-muted">{lesson.isIntro ? '导读' : lesson.code}</span>
-                      <span class="text-sm font-semibold group-hover:text-accent">{lesson.title}</span>
-                      <span class="col-start-2 text-xs text-muted">{lesson.question}</span>
+                    <a href={url(chapter.path)} class="group grid grid-cols-[2.5rem_minmax(0,1fr)] border-b border-rule py-2 text-sm text-ink no-underline">
+                      <span class="font-mono text-xs leading-6 text-muted">{chapter.number}</span>
+                      <span class="group-hover:text-accent">{chapter.title}{chapter.entry.data.draft && <span class="ml-2 text-xs text-muted">撰写中</span>}</span>
                     </a>
                   </li>
                 ))}
               </ol>
-            </section>
+            </li>
           )
         })}
-      </div>
+      </ol>
     </section>
 
-    <section aria-labelledby="routes-heading" class="border-t border-rule py-14">
-      <h2 id="routes-heading" class="mb-2 text-xl font-semibold">从哪里开始</h2>
-      <p class="mt-0 mb-8 text-muted">路线按依赖排好；已经熟悉前面的内容，可以沿下面的捷径直接进入。</p>
-      <CourseMap />
-
-    </section>
-
-    <section aria-labelledby="verify-heading" class="grid gap-8 border-t border-rule py-14 lg:grid-cols-2">
+    <section aria-labelledby="run-heading" class="grid gap-8 border-t border-rule py-14 lg:grid-cols-2">
       <div>
-        <h2 id="verify-heading" class="mb-2 text-xl font-semibold">公式都有程序核对</h2>
+        <h2 id="run-heading" class="mb-2 text-xl font-semibold">代码与运行</h2>
         <p class="mt-0 text-muted">
-          主线推导配有 CPU 数值核对，GPU 实测另外标明硬件要求。脚本检查：梯度与自动微分一致、RoPE 只依赖相对位置、分块解码与整段注意力相等。正文从统一 Python 包与章节实验中摘录实际函数；同一个模型实现用于组装、训练、生成和机制对照。
+          书中代码位于仓库的 <code class="font-mono text-code">src/llms_from_scratch/</code>，按部分组织并配有测试。默认环境只需 CPU；GPU 章节的 CUDA 与 Triton 示例需要 NVIDIA GPU，并在无硬件时自动跳过。
         </p>
         <p class="mb-0 text-sm"><a href={repoUrl}>在 GitHub 查看全部源码</a></p>
       </div>
-      <pre class="m-0 overflow-x-auto rounded-lg border border-rule bg-code-bg px-5 py-4 font-mono text-code"><code>uv sync --locked
-uv run python -m examples.principles.complete_transformer
-uv run python -m examples.training.text_pretraining --steps 80
-uv run llms-from-scratch chapters
-uv run llms-from-scratch check</code></pre>
+      <pre class="m-0 overflow-x-auto rounded-lg border border-rule bg-code-bg px-5 py-4 font-mono text-code"><code>uv sync --locked --group dev
+uv run pytest
+uv run python -m llms_from_scratch.transformer.train --help</code></pre>
     </section>
   </main>
 </BaseLayout>

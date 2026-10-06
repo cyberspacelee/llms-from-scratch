@@ -1,17 +1,17 @@
 ---
 import { render } from 'astro:content'
-import LessonLayout from '../layouts/LessonLayout.astro'
-import { getLessons, type Lesson } from '../lib/lessons'
+import ChapterLayout from '../layouts/ChapterLayout.astro'
+import { getBook, type Chapter } from '../lib/book'
 import { mdxComponents } from '../lib/mdx-components'
 
 export async function getStaticPaths() {
-  const lessons = await getLessons()
-  return lessons.map((lesson) => ({ params: { path: lesson.path }, props: { lesson } }))
+  const book = await getBook()
+  return book.map((chapter) => ({ params: { path: chapter.path }, props: { chapter } }))
 }
 
-const { lesson } = Astro.props as { lesson: Lesson }
-const { Content, headings } = await render(lesson.entry)
+const { chapter } = Astro.props as { chapter: Chapter }
+const { Content, headings } = await render(chapter.entry)
 ---
-<LessonLayout lesson={lesson} headings={headings}>
+<ChapterLayout chapter={chapter} headings={headings}>
   <Content components={mdxComponents} />
-</LessonLayout>
+</ChapterLayout>

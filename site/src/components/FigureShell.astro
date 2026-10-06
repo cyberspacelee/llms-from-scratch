@@ -15,9 +15,11 @@ const { label, padded = false } = Astro.props
   >
     <slot />
   </div>
-  <figcaption class="mt-3 text-sm text-muted before:mr-2 before:font-semibold before:text-ink before:content-['图_'_counter(figure)]">
-    <slot name="caption" />
-  </figcaption>
+  {Astro.slots.has('caption') && (
+    <figcaption class="figure-number mt-3 text-sm text-muted text-pretty">
+      <slot name="caption" />
+    </figcaption>
+  )}
 </figure>
 
 <script>

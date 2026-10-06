@@ -2,7 +2,7 @@
 import { Code } from 'astro:components'
 import { execFileSync } from 'node:child_process'
 import extractor from './extract-source.py?raw'
-import { repoUrl } from '../../lib/lessons'
+import { repoUrl } from '../../lib/book'
 
 interface Props {
   path: string
@@ -13,7 +13,7 @@ interface Props {
   run?: string
 }
 const { path, symbol, region, run } = Astro.props
-const files = import.meta.glob<string>(['../../../../examples/**/*.py', '../../../../examples/**/*.cu', '../../../../src/**/*.py'], { query: '?raw', import: 'default', eager: true })
+const files = import.meta.glob<string>(['../../../../src/**/*.{py,cu,cuh}', '../../../../tests/**/*.py'], { query: '?raw', import: 'default', eager: true })
 const source = files[`../../../../${path}`]
 if (source === undefined) throw new Error(`Code file not found: ${path}`)
 if (symbol && region) throw new Error(`CodeFile accepts symbol or region, not both: ${path}`)
@@ -25,7 +25,7 @@ if (symbol || region) {
   }))
 }
 const themes = { light: 'github-light', dark: 'github-dark' } as const
-const lang = path.endsWith('.cu') ? 'cpp' : 'python'
+const lang = /\.cuh?$/.test(path) ? 'cpp' : 'python'
 ---
 <div class="source-file not-prose my-6 overflow-hidden rounded-lg border border-rule bg-code-bg">
   <div class="flex flex-wrap items-center justify-between gap-2 border-b border-rule px-4 py-2 text-xs text-muted">
@@ -33,13 +33,13 @@ const lang = path.endsWith('.cu') ? 'cpp' : 'python'
     <a href={`${repoUrl}/blob/master/${path}`} class="text-muted hover:text-accent">查看源码</a>
   </div>
   {run && <p class="m-0 border-b border-rule px-4 py-3 text-sm">运行：<code class="font-mono wrap-anywhere">{run}</code></p>}
-  {excerpts.map(excerpt => <div class="prose prose-lesson max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!" data-source-start={excerpt.start} data-source-end={excerpt.end}>
+  {excerpts.map(excerpt => <div class="prose prose-book max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!" data-source-start={excerpt.start} data-source-end={excerpt.end}>
     <p class="m-0 px-4 py-2 text-xs text-muted">源码第 {excerpt.start}–{excerpt.end} 行</p>
     <Code code={excerpt.code} lang={lang} themes={themes} defaultColor={false} />
   </div>)}
   <details class="m-0! rounded-none! border-0! bg-transparent!">
     <summary class="px-4 py-3 text-sm font-semibold">完整源码 · {source.trimEnd().split('\n').length} 行</summary>
-    <div class="prose prose-lesson m-0! max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
+    <div class="prose prose-book m-0! max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!">
       <Code code={source.trimEnd()} lang={lang} themes={themes} defaultColor={false} />
     </div>
   </details>
