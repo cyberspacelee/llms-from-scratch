@@ -3,6 +3,7 @@ import mdx from '@astrojs/mdx'
 import react from '@astrojs/react'
 import { unified } from '@astrojs/markdown-remark'
 import remarkMath from 'remark-math'
+import remarkCjkFriendly from 'remark-cjk-friendly'
 import rehypeKatex from 'rehype-katex'
 import { transformerMetaHighlight, transformerNotationDiff, transformerNotationFocus, transformerNotationHighlight } from '@shikijs/transformers'
 import { transformerBookMeta } from './src/plugins/shiki-meta.mjs'
@@ -39,7 +40,7 @@ export default defineConfig({
       ],
     },
     processor: unified({
-      remarkPlugins: [remarkMath],
+      remarkPlugins: [remarkCjkFriendly, remarkMath],
       rehypePlugins: [
         rehypeTableScroll,
         [rehypeBaseLinks, { base }],
