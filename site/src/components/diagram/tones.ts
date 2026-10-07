@@ -37,7 +37,7 @@ export const text: Record<TextTone, string> = {
 }
 
 /** Font sizes in SVG user units. Diagrams are drawn at ~1 unit = 1 CSS px (width ≈ 720). */
-export const size = { xs: 11, sm: 12.5, md: 14, lg: 16 } as const
+export const size = { xs: 12, sm: 13, md: 14, lg: 16 } as const
 export type Size = keyof typeof size
 
 /** Split a label on "\n" into lines, centred around `y`. */

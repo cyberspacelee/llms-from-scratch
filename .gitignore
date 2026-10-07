@@ -46,3 +46,4 @@ site/dist/
 
 # Local teaching-model checkpoints and experiment reports
 /runs/
+.claude/

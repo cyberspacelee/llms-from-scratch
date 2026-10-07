@@ -27,6 +27,9 @@ const left = Math.max(80, Math.max(...items.map((item) => item.label.length)) * 
 const right = totals ? 90 : 16, barH = 26, gap = 14
 const segmentLabels = [...new Map(rows.flatMap((row) => row.segments.map((s, i) => [s.label, s.tone ?? tones[i % tones.length]] as const)).filter(([l]) => l)).entries()]
 const legendH = segmentLabels.length > 1 ? 30 : 0
+const labelWidth = (label: string) => [...label].reduce((sum, ch) => sum + (/[\u2E80-\uFFFF]/.test(ch) ? 13 : 7.8), 0)
+const legendX: number[] = []
+segmentLabels.reduce((cursor, [text]) => { legendX.push(cursor); return cursor + 18 + labelWidth(text ?? '') + 24 }, left)
 const height = legendH + rows.length * (barH + gap) + 6
 const sx = (v: number) => (v / max) * (width - left - right)
 const fmt = (v: number) => String(Number(v.toPrecision(4)))
@@ -34,8 +37,8 @@ const fmt = (v: number) => String(Number(v.toPrecision(4)))
 <FigureShell label={label}>
   <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} font-size={sizes.sm} class="mx-auto block h-auto w-full font-sans" style={`min-width:${Math.round(width * 0.7)}px`}>
     {segmentLabels.length > 1 && segmentLabels.map(([text, tone], index) => <g>
-      <rect x={left + index * 120} y={8} width={12} height={12} rx="3" class:list={[shape[tone].box, 'stroke-[1.25]']} />
-      <text x={left + index * 120 + 18} y={14} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{text}</text>
+      <rect x={legendX[index]} y={8} width={12} height={12} rx="3" class:list={[shape[tone].box, 'stroke-[1.25]']} />
+      <text x={legendX[index] + 18} y={14} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{text}</text>
     </g>)}
     {rows.map((row, r) => {
       const y = legendH + r * (barH + gap) + 4
