@@ -2,7 +2,302 @@
 title: PyTorch autograd 的工作方式
 description: 计算图如何在前向时建立、在反向时释放；叶子张量、grad 累加、no_grad 与 detach，自定义 autograd.Function。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/autograd_functions.py
+  - tests/pytorch/test_autograd_functions.py
 ---
 
-本章正在撰写。
+在[从零实现自动微分](/math/autodiff/)中，我们写过一个反向模式自动微分引擎：每次运算都把输入和局部导数记在一条“磁带”上，`backward` 时按拓扑逆序回放，用链式法则把梯度一路乘回去。PyTorch 的 autograd 做的是同一件事，只是把记录对象从标量换成了张量，把局部导数换成了向量-雅可比积（VJP），并且用 C++ 实现。原理我们已经掌握，本章关心的是**工程上的行为**：图在什么时候建立、什么时候释放；为什么梯度会累加；`no_grad`、`inference_mode`、`detach` 各自关掉了什么；以及怎样写一个自己的可微算子。
+
+最后一节把注意力转向显存。反向传播需要前向时的中间结果，这些“为反向保存的张量”——激活——往往比参数本身占用更多显存。学会测量它，是[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)和后面激活重计算的基础。
+
+## 计算图在前向时建立
+
+### grad_fn 链
+
+PyTorch 的计算图是 **动态的**（define-by-run）：没有单独的“建图”阶段，每执行一次可微运算，就当场创建一个反向节点并挂到输出张量的 `grad_fn` 上。看一个小例子：
+
+```python
+x = torch.tensor([1.0, 2.0])                       # 数据，不需要梯度
+w = torch.tensor([3.0, -1.0], requires_grad=True)  # 参数
+b = torch.tensor(0.5, requires_grad=True)
+z = x * w + b
+loss = (z ** 2).sum()
+
+loss.grad_fn                    # <SumBackward0>
+loss.grad_fn.next_functions     # ((<PowBackward0>, 0),)
+z.grad_fn.next_functions        # ((<MulBackward0>, 0), (<AccumulateGrad>, 0))
+```
+
+每个反向节点（`SumBackward0`、`PowBackward0`……）知道两件事：怎样把输出梯度变成输入梯度（这一步的 VJP），以及输入来自哪些上游节点（`next_functions`）。图的终点是 `AccumulateGrad` 节点，它把流到叶子张量的梯度加进 `.grad`。`x` 不需要梯度，所以 `MulBackward0` 指向它的那条边是 `None`。
+
+<Diagram width={720} height={270} label="z = x·w + b，loss = Σz² 的前向与反向图">
+  <Box x={20} y={30} w={110} h={50} label="x" sub="数据" tone="muted" />
+  <Box x={20} y={110} w={110} h={50} label="w" sub="叶子·参数" tone="info" />
+  <Box x={20} y={190} w={110} h={50} label="b" sub="叶子·参数" tone="info" />
+  <Box x={190} y={70} w={130} h={50} label="MulBackward0" sub="只保存 x" size="sm" tone="accent" />
+  <Box x={370} y={110} w={130} h={50} label="AddBackward0" sub="不保存" size="sm" tone="accent" />
+  <Box x={550} y={50} w={150} h={50} label="PowBackward0" sub="保存 z、指数 2" size="sm" tone="accent" />
+  <Box x={550} y={170} w={150} h={50} label="SumBackward0" sub="保存形状" size="sm" tone="strong" />
+  <Arrow from={[130, 55]} to={[190, 88]} />
+  <Arrow from={[130, 135]} to={[190, 102]} />
+  <Arrow from={[320, 95]} to={[370, 125]} />
+  <Arrow from={[130, 215]} via={[[350, 215], [350, 145]]} to={[370, 145]} />
+  <Arrow from={[500, 125]} via={[[525, 125], [525, 75]]} to={[550, 75]} />
+  <Arrow from={[625, 100]} to={[625, 170]} />
+  <Fragment slot="caption">实线箭头是前向的数据流；每个蓝绿色框是前向时顺手创建的反向节点，括号中是它为反向保存的东西。backward 从右下的 SumBackward0 出发，沿箭头逆向走回 w 与 b 的 AccumulateGrad。</Fragment>
+</Diagram>
+
+手算一遍反向。$z = (3.5,\ -1.5)$，$\text{loss} = 12.25 + 2.25 = 14.5$。从输出往回走：
+
+$$
+\frac{\partial\,\text{loss}}{\partial z} = 2z = (7,\ -3),\qquad
+\frac{\partial\,\text{loss}}{\partial w} = 2z \odot x = (7,\ -6),\qquad
+\frac{\partial\,\text{loss}}{\partial b} = \sum_i 2z_i = 4 .
+$$
+
+`loss.backward()` 后 `w.grad` 为 `[7., -6.]`，`b.grad` 为 `4.`，与手算一致。注意 $b$ 是标量，却被广播加到了两个分量上；反向时广播的“逆运算”是求和，`AddBackward0` 自动把形状为 $(2,)$ 的梯度归约回 $()$。这正是[反向传播：从标量到矩阵](/math/backprop/)中“广播的梯度是求和”的结论。
+
+### 为什么是动态图
+
+动态图的好处是图的结构可以依赖数据：`if`、`for`、递归、提前退出都只是普通 Python，执行到哪条分支，图里就记录哪条分支。调试也简单——任何一行都可以打断点、打印张量。代价是每一步都要在 Python 里分配节点，对小算子很多的模型有可观的开销；第八部分讲的 `torch.compile` 会把一段 Python 捕获成静态图再整体优化，以消除这部分开销。
+
+## 叶子张量、requires_grad 与 .grad
+
+### 谁是叶子
+
+**叶子张量**（leaf tensor）是图的起点：由用户直接创建，而不是由可微运算产生的张量。`requires_grad=True` 的叶子（典型地是模型参数 `nn.Parameter`）在反向后获得 `.grad`；中间张量 `z` 不是叶子，它的梯度在反向过程中算出、用完即丢，`.grad` 保持 `None`。如果确实想看中间张量的梯度（调试梯度爆炸时常用），在 backward 之前调用 `z.retain_grad()`。
+
+`requires_grad` 沿运算传播：只要有一个输入需要梯度，输出就需要梯度并带有 `grad_fn`。所以只需要在参数上设 `requires_grad=True`，数据张量保持默认的 `False`，整个前向就会被记录，而对输入数据不会做多余的梯度计算。
+
+### 梯度是累加的
+
+`backward` 不是“把 `.grad` 设为梯度”，而是“把梯度**加到** `.grad` 上”。
+
+```python
+w = torch.tensor(2.0, requires_grad=True)
+(w * 3).backward()
+(w * 3).backward()
+w.grad      # tensor(6.)：两次各贡献 3
+```
+
+这个设计有充分的理由：一个参数可能在图中被使用多次（权重共享、RNN 的时间步），各条路径的梯度本来就该相加，多元链式法则就是这么写的；它也使**梯度累加**成为可能——把一个大批次拆成几个微批次，依次 backward，梯度自然在 `.grad` 中求和，下一章的训练循环会用到这一点。代价是你必须在每个优化步之前显式清零：`optimizer.zero_grad()`。忘记清零是最常见的训练 bug 之一，症状是损失先降后发散，因为每一步的“梯度”其实是历史梯度之和。
+
+<Callout tone="note" title="zero_grad(set_to_none=True)">
+PyTorch 2.0 起 `zero_grad` 默认把 `.grad` 设为 `None` 而不是填零。这样既省一次写内存的 kernel，又让下一次 backward 直接“赋值”而非“累加”到一个全零张量上。副作用是：在 `backward` 之前读 `p.grad` 会得到 `None`，自己写的梯度处理代码需要判空。
+</Callout>
+
+## 反向之后，图被释放
+
+### 保存的张量与释放
+
+回到图中的 `PowBackward0`：计算 $\partial z^2/\partial z = 2z$ 需要 $z$ 的值，所以前向时它把 $z$ 存了下来；`MulBackward0` 为了算 $\partial(xw)/\partial w = x$ 保存了 $x$；由于 $x$ 不需要梯度，它不必保存 $w$（`grad_fn._saved_other` 为 `None`）。这些**为反向保存的张量**（saved tensors）在 backward 用完后立即释放——反向传播最需要显存的时候正是前向刚结束、所有激活都还在的时候，越早释放越好。所以第二次调用 `loss.backward()` 会报错：
+
+```text
+RuntimeError: Trying to backward through the graph a second time (or directly access saved
+tensors after they have already been freed). ... Specify retain_graph=True if you need to
+backward through the graph a second time ...
+```
+
+确实需要多次反向时（例如对同一个前向分别求两个损失的梯度），在除最后一次外的 backward 中传 `retain_graph=True`。更常见的做法是先把两个损失相加再反向一次。
+
+### 原地修改与版本计数
+
+保存的张量必须在反向时保持前向时的值。如果在前向之后、反向之前原地修改了它，梯度就会算错。PyTorch 给每个张量维护一个**版本计数器**，每次原地修改加一；反向时检查保存的版本，发现不一致就报错：
+
+```python
+a = torch.randn(3, requires_grad=True)
+s = a.sigmoid()   # SigmoidBackward 保存了输出 s，因为 σ' = σ(1 − σ)
+s.mul_(2)         # 原地修改了 s
+s.sum().backward()
+# RuntimeError: one of the variables needed for gradient computation has been modified by
+# an inplace operation: [torch.FloatTensor [3]], which is output 0 of Sigmoid, is at version 1;
+# expected version 0 instead.
+```
+
+改成非原地的 `s = s * 2` 就没有问题。另一条相关规则是：对需要梯度的叶子张量做原地运算会直接报错（`a leaf Variable that requires grad is being used in an in-place operation`），因为那会破坏图的起点。优化器更新参数时要在 `torch.no_grad()` 中进行，正是为了绕开这条规则。
+
+## 关掉梯度记录：no_grad、inference_mode 与 detach
+
+有三种工具能让一段计算不进入图，作用范围和代价各不相同：
+
+| 工具 | 作用 | 结果张量 | 典型用途 |
+| --- | --- | --- | --- |
+| `torch.no_grad()` | 上下文内的运算不记录、不保存激活 | `requires_grad=False`，可在之后参与求导 | 验证、参数更新、初始化 |
+| `torch.inference_mode()` | 同上，并跳过版本计数与视图追踪 | “推理张量”，之后**不能**被保存进计算图 | 纯推理、生成 |
+| `t.detach()` | 返回与 `t` 共享内存、但脱离图的新张量 | `requires_grad=False` | 截断梯度（目标网络、停止梯度） |
+
+`no_grad` 与 `inference_mode` 的差别在于后者更激进：它连版本计数器都不维护，因此略快，但它产生的张量不能再被用于需要梯度的计算，否则报错 `Inference tensors cannot be saved for backward`。训练循环中的验证步骤用 `no_grad` 更稳妥；生成文本这种从头到尾不会求导的代码适合 `inference_mode`。
+
+`detach` 不复制数据，它和原张量共享 storage（测试中用 `untyped_storage().data_ptr()` 验证过）。因此对 detach 的结果做原地修改会改到原张量，而且可能触发上面的版本检查。需要独立副本时用 `t.detach().clone()`。`detach` 的数学含义是**停止梯度**：在 $f(\operatorname{sg}(x))$ 中，$x$ 对 $f$ 的影响在前向中存在，在反向中被当作常数。第七部分的 PPO、DPO 会频繁使用它来固定参考策略的输出。
+
+测试 `test_no_grad_saves_nothing` 用下一节的测量工具验证了 `no_grad` 下没有任何张量被保存，这就是验证时显存远低于训练时的原因。
+
+## 自定义 autograd.Function
+
+### 何时需要
+
+PyTorch 内置算子的反向都已写好，组合它们就能得到正确的梯度。需要自己写 `torch.autograd.Function` 的情形主要有三类：
+
+1. **更省显存或更快的反向**：组合算子会把每个中间结果都保存下来，手写反向可以只保存最少的东西，其余在反向时重新计算。
+2. **数学上没有有用导数的运算**：例如取整、采样。它们的导数几乎处处为零，需要人为指定一个“替代梯度”。
+3. **调用外部 kernel**：用 Triton 或 CUDA 写的融合算子，需要告诉 autograd 它的反向是什么（第八部分会这样包装 FlashAttention）。
+
+### 例子：手写 SiLU
+
+SiLU（也叫 Swish）是 $\operatorname{SiLU}(x) = x\,\sigma(x)$，其中 $\sigma(x) = 1/(1+e^{-x})$。它是全书 GPT 中 SwiGLU 前馈层的激活函数。求导用乘积法则，并利用 $\sigma'(x) = \sigma(x)(1-\sigma(x))$：
+
+$$
+\frac{d}{dx}\,x\,\sigma(x) = \sigma(x) + x\,\sigma(x)\bigl(1-\sigma(x)\bigr) = \sigma(x)\bigl(1 + x(1-\sigma(x))\bigr).
+$$
+
+如果直接写 `x * torch.sigmoid(x)`，autograd 会记录两个节点：`SigmoidBackward` 保存输出 $\sigma(x)$，`MulBackward` 保存两个乘数 $x$ 与 $\sigma(x)$——去重后要保存两个与输入同样大小的张量。手写版本只保存 $x$，反向时花一次 sigmoid 重新算出 $\sigma(x)$：
+
+<CodeFile path="src/llms_from_scratch/pytorch/autograd_functions.py" region="silu" />
+
+`forward` 与 `backward` 都是静态方法，第一个参数 `ctx` 是两者之间传递信息的上下文对象：`ctx.save_for_backward` 保存张量（autograd 会为它们做版本检查），其他非张量信息可以直接挂在 `ctx` 上。`backward` 接收输出的梯度，返回每个输入的梯度，个数与 `forward` 的输入一一对应（不需要梯度的输入返回 `None`）。使用时调用 `SiLUFunction.apply(x)`，而不是直接调用 `forward`。
+
+### 用 gradcheck 验证
+
+手写反向最容易出错的是符号和漏项。`torch.autograd.gradcheck` 用中心差分
+
+$$
+\frac{\partial f}{\partial x_i} \approx \frac{f(x + \varepsilon e_i) - f(x - \varepsilon e_i)}{2\varepsilon}
+$$
+
+逐个分量估计雅可比矩阵，再与解析反向得到的雅可比比较。中心差分的截断误差是 $O(\varepsilon^2)$，但 $\varepsilon$ 太小时舍入误差 $O(u/\varepsilon)$（$u$ 为单位舍入）又会放大——[浮点数与数值稳定性](/math/numerics/)分析过这个权衡。float32 的 $u\approx 6\times 10^{-8}$，找不到让两种误差都足够小的 $\varepsilon$，因此 **gradcheck 必须用 float64 输入**，此时默认 $\varepsilon = 10^{-6}$ 能达到约 $10^{-10}$ 的精度。
+
+```python
+x = torch.randn(16, dtype=torch.float64, requires_grad=True)
+torch.autograd.gradcheck(silu, (x,))   # True
+```
+
+测试 `test_silu_matches_torch_and_gradcheck` 同时对比了前向值、gradcheck 和 `F.silu` 的梯度；`test_custom_silu_saves_less_than_composite` 则验证手写版本只保存 4096 字节（1024 个 float32），组合写法保存 8192 字节。
+
+### 直通估计器
+
+量化感知训练要在前向中把权重取整到一个网格上，模拟低比特推理的误差。但 $\operatorname{round}$ 的导数几乎处处为 0，梯度一经过它就消失，网络无法学习。**直通估计器**（straight-through estimator，STE）的做法是：前向照常取整，反向假装取整是恒等函数，梯度原样通过。
+
+<CodeFile path="src/llms_from_scratch/pytorch/autograd_functions.py" region="ste" />
+
+STE 给出的不是真实梯度，而是一个有偏但有用的替代：它告诉参数“如果你连续地变化，输出大致会怎样变化”。同样的思路也出现在 VQ-VAE 的码本查找中，常见的一行写法是 `x + (q(x) - x).detach()`——前向值等于 $q(x)$，反向时 `detach` 的部分没有梯度，只剩 $x$ 的恒等梯度。
+
+## 梯度钩子
+
+有时我们不想改变算子，只想在梯度流过某处时“看一眼”或“改一下”。PyTorch 提供了几层钩子：
+
+- **张量钩子** `t.register_hook(fn)`：反向计算出 `t` 的梯度后调用 `fn(grad)`；返回值若不为 `None` 就替换梯度继续向上游传播。
+- **参数累加后钩子** `p.register_post_accumulate_grad_hook(fn)`：在梯度累加进 `p.grad` 之后调用。分布式数据并行（DDP）在这里启动梯度的 all-reduce，让通信与其余层的反向重叠；“在反向中执行优化器”（optimizer-in-backward）也用它在每个参数的梯度就绪后立刻更新并释放梯度。
+- **模块钩子** `module.register_forward_hook` / `register_full_backward_hook`：在模块的前向或反向前后调用，常用于记录激活统计、调试。
+
+下面的钩子把流过某个张量的梯度逐分量截断到 $[-2, 2]$：
+
+<CodeFile path="src/llms_from_scratch/pytorch/autograd_functions.py" region="hooks" />
+
+在测试中，`h = x * 1.0` 的上游梯度是 $(1, 5, -7)$，经钩子变成 $(1, 2, -2)$ 后再传给 `x`。注意这与下一章的**梯度裁剪**不同：裁剪按所有参数梯度拼成的向量的整体范数等比例缩小，不改变方向；逐分量截断会改变方向，一般只在调试或特定算法中使用。
+
+## 激活保存与显存
+
+### 测量为反向保存了什么
+
+`torch.autograd.graph.saved_tensors_hooks(pack, unpack)` 让我们在每个张量被保存时拦截它。`pack` 的返回值会代替张量本身存进图里，`unpack` 在反向读取时把它还原。用它来测量激活大小只需记录每个被保存张量的 storage，并按指针去重（同一个张量常被多个节点保存）：
+
+<CodeFile path="src/llms_from_scratch/pytorch/autograd_functions.py" region="saved" />
+
+`exclude` 用来排除模型参数——线性层会把权重也“保存”进图，但参数无论如何都常驻显存，不属于激活。这个钩子机制本身也是两种显存优化技术的入口：在 `pack` 中把张量搬到 CPU、在 `unpack` 中搬回来，就是**激活卸载**（activation offloading）；在 `pack` 中什么也不存、在 `unpack` 中重新跑一遍前向，就是**激活重计算**（activation checkpointing）的一种实现。
+
+### 显存随时间的变化
+
+对一个 $L$ 层网络，前向每经过一层，就多保存一层的激活；反向从最后一层开始，每算完一层的梯度就释放这一层的激活。显存因此呈现一个“山峰”：前向结束、反向开始的那一刻达到峰值。
+
+<Plot label="训练一步中激活显存随时间的变化（示意，L = 4）" x={[0, 8]} y={[0, 4.5]} xLabel="时间（每格完成一层的前向或反向）" yLabel="已保存的激活（层数）" xTicks={[0, 1, 2, 3, 4, 5, 6, 7, 8]} yTicks={[0, 1, 2, 3, 4]} series={[
+  { points: [[0, 0], [1, 1], [2, 2], [3, 3], [4, 4], [5, 3], [6, 2], [7, 1], [8, 0]], label: '保存全部激活' },
+  { points: [[0, 0], [1, 0.25], [2, 0.5], [3, 0.75], [4, 1], [4.5, 1.75], [5, 1.5], [5.5, 1.5], [6, 1.25], [6.5, 1.25], [7, 1], [7.5, 1], [8, 0]], label: '只保存每层输入（重计算）', tone: 'accent2', dashed: true },
+]}>
+  <Fragment slot="caption">实线：标准反向传播，第 4 步（前向结束）时所有层的激活同时存在，峰值正比于层数 L。虚线：只保存每层的输入（约为整层激活的 1/4），反向到某一层时先重跑该层前向恢复其内部激活，峰值大幅降低，代价是多做约一次前向计算。图中数字为示意。</Fragment>
+</Plot>
+
+这幅图说明了一个重要事实：**激活显存与批大小、序列长度、层数都成正比**，而参数显存与它们无关。对于长序列、大批次的训练，激活往往是显存的主要部分。资源核算一章会给出 Transformer 的激活公式，并用 `saved_tensor_bytes` 在全书的 GPT 上实测。
+
+<Callout tone="deep" title="torch.utils.checkpoint">
+PyTorch 内置的 `torch.utils.checkpoint.checkpoint(fn, *args, use_reentrant=False)` 实现了上图虚线的策略：前向时在 `no_grad` 下运行 `fn`、只保存输入；反向到达这里时重新以记录模式运行一次 `fn`，再对它做反向。重跑前向时它会恢复 RNG 状态，保证 dropout 的掩码与第一次一致。第六部分讨论大模型训练的显存规划时会量化这笔“用计算换显存”的交易。
+</Callout>
+
+## 小结
+
+- autograd 在前向时动态建图：每个可微运算创建一个反向节点（`grad_fn`），节点保存计算 VJP 所需的张量；`backward` 沿 `next_functions` 逆序执行。
+- 只有 `requires_grad=True` 的叶子张量会得到 `.grad`，而且是**累加**的；每步之前要 `zero_grad()`。中间张量需要 `retain_grad()` 才保留梯度。
+- 反向结束后保存的张量立即释放；原地修改被保存的张量会被版本计数器发现并报错。
+- `no_grad` 不记录图，`inference_mode` 更进一步但结果不能再参与求导，`detach` 返回共享内存、停止梯度的视图。
+- 自定义 `autograd.Function` 可以减少保存的激活或提供替代梯度（STE）；务必用 float64 的 `gradcheck` 验证。
+- 激活显存随批大小、序列长度和层数线性增长，`saved_tensors_hooks` 可以测量它，也是卸载与重计算的入口。
+
+下一章用 `nn.Module` 把参数组织成模型，并从零写出 `Linear` 与 `Embedding`。
+
+## 练习
+
+1. 对 $y = \tanh(xW^\top)$，`TanhBackward` 保存的是输入还是输出？为什么这个选择比保存输入更好？用 `saved_tensor_bytes` 和 `grad_fn._saved_result` 验证你的判断。
+
+<details>
+<summary>答案</summary>
+
+保存输出。因为 $\tanh'(u) = 1 - \tanh^2(u)$ 可以只用输出表示，反向时不必重新计算 $\tanh$；而输出本身就是下一层的输入，很可能已经被下一个节点保存，按 storage 去重后不额外占显存。sigmoid（$\sigma' = \sigma(1-\sigma)$）与 exp 同理。`y.grad_fn._saved_result` 与 `y` 共享 storage 即可验证。
+
+</details>
+
+2. 下面的代码试图在一个训练循环里同时更新两个模型，损失却越来越大。指出原因：每一步执行 `loss_a.backward(); loss_b.backward(); opt.step()`，其中 `loss_a` 与 `loss_b` 共享编码器，而 `opt` 管理全部参数，且循环中没有 `zero_grad`。
+
+<details>
+<summary>答案</summary>
+
+两个问题叠加。第一，没有 `zero_grad`，`.grad` 中是从第一步开始所有梯度的累加和，更新量随步数线性增长，最终发散。第二，若两个损失共享编码器的中间激活，第一次 backward 后图已释放，第二次 backward 会报错，除非第一次传 `retain_graph=True`；更好的写法是 `(loss_a + loss_b).backward()`，一次反向得到两者梯度之和，与分别反向的结果相同。
+
+</details>
+
+3. 用 `torch.autograd.Function` 写一个“梯度反转层”：前向恒等，反向把梯度乘以 $-\lambda$。它在域适应（DANN）中用于让特征提取器“对抗”域分类器。说明为什么 `backward` 需要为 $\lambda$ 返回 `None`。
+
+<details>
+<summary>答案</summary>
+
+```python
+class GradReverse(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, lam):
+        ctx.lam = lam
+        return x.view_as(x)
+    @staticmethod
+    def backward(ctx, g):
+        return -ctx.lam * g, None
+```
+
+`backward` 必须为 `forward` 的每个输入返回一个梯度；$\lambda$ 是 Python 浮点数，不需要梯度，因此返回 `None`。前向用 `view_as` 而非直接返回 `x`，是为了让输出成为一个新的张量对象，autograd 才能为它挂上本节点。
+
+</details>
+
+4. 为什么 gradcheck 用 float32 会失败？设 $f(x) = x^2$ 在 $x=1$ 处用中心差分估计导数，分别取 $\varepsilon = 10^{-3}$ 与 $10^{-6}$，估计 float32 下的误差量级。
+
+<details>
+<summary>答案</summary>
+
+对 $x^2$，中心差分没有截断误差（三阶导为 0），误差全部来自舍入：分子 $f(1+\varepsilon) - f(1-\varepsilon)$ 的两项各有约 $u \approx 6\times10^{-8}$ 的相对误差，绝对误差约 $10^{-7}$，除以 $2\varepsilon$ 后误差约为 $10^{-7}/(2\varepsilon)$。$\varepsilon = 10^{-3}$ 时约 $5\times10^{-5}$，$\varepsilon = 10^{-6}$ 时约 $0.05$——与 gradcheck 默认的容差（约 $10^{-5}$ 量级）相比都太大或勉强。float64 下 $u\approx 10^{-16}$，$\varepsilon = 10^{-6}$ 时误差约 $10^{-10}$，可以放心比较。
+
+</details>
+
+5. 在 `no_grad` 下运行模型的前向，峰值显存比训练时的前向低多少？用本章的 `saved_tensor_bytes` 在一个 4 层 MLP 上测量并解释。
+
+<details>
+<summary>答案</summary>
+
+`no_grad` 下 `saved_tensor_bytes` 返回 0：没有任何张量为反向保存，每层的输出在被下一层用完后就可以释放，峰值显存约为参数加上相邻两层的激活。训练时的前向则要保留所有层的激活直到反向，峰值多出约 $L$ 层激活之和。测试 `test_no_grad_saves_nothing` 给出了单层的验证。
+
+</details>
+
+## 参考文献
+
+- PyTorch 文档：[Autograd mechanics](https://pytorch.org/docs/stable/notes/autograd.html)，包括保存的张量、原地运算与版本计数、`inference_mode`。
+- PyTorch 文档：[Extending torch.autograd](https://pytorch.org/docs/stable/notes/extending.html) 与 [`torch.autograd.gradcheck`](https://pytorch.org/docs/stable/generated/torch.autograd.gradcheck.gradcheck.html)。
+- PyTorch 教程：[Hooks for saved tensors](https://pytorch.org/tutorials/intermediate/autograd_saved_tensors_hooks_tutorial.html)。
+- A. Paszke et al., [PyTorch: An Imperative Style, High-Performance Deep Learning Library](https://arxiv.org/abs/1912.01703)，NeurIPS 2019。
+- Y. Bengio, N. Léonard, A. Courville, [Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation](https://arxiv.org/abs/1308.3432)，2013（直通估计器）。
+- P. Ramachandran, B. Zoph, Q. V. Le, [Searching for Activation Functions](https://arxiv.org/abs/1710.05941)，2017（Swish/SiLU）。
+- T. Chen et al., [Training Deep Nets with Sublinear Memory Cost](https://arxiv.org/abs/1604.06174)，2016（激活重计算）。
