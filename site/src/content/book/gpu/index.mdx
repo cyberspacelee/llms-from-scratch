@@ -2,9 +2,56 @@
 title: GPU 与 CUDA 编程
 description: 理解深度学习为什么跑在 GPU 上、跑得快慢由什么决定，并亲手写出从向量加法到 FlashAttention 的 kernel。
 order: 0
-draft: true
 ---
 
-理解深度学习为什么跑在 GPU 上、跑得快慢由什么决定，并亲手写出从向量加法到 FlashAttention 的 kernel。
+到这里，读者已经能从零写出一个 GPT，知道训练它要花多少 FLOPs、占多少显存，也见过 MFU（模型 FLOPs 利用率）这个让人清醒的数字：一张标称 989 TFLOPS（BF16 稠密）的 H100，跑真实的训练任务时只能兑现其中的一部分，公开报告的大模型训练 MFU 多在 40% 上下（例如 Llama 3 405B 的训练报告给出 38%–43%）。前面各部分把 GPU 当成一个“很快的矩阵乘法机器”，这一部分要打开这个黑箱，回答三个问题：
+
+1. **为什么是 GPU？** 深度学习的计算是海量、规则、彼此独立的乘加。GPU 用几万个简单的线程和一套为吞吐量设计的内存层次来吃下这种负载，代价是单个线程很慢、编程模型很特别。
+2. **快慢由什么决定？** 绝大多数时候，瓶颈不是算力，而是把数据搬到算力旁边的速度。理解算术强度、合并访存、共享内存与 roofline，就能在写代码之前估算一个算子“最多能多快”。
+3. **怎样写出快的 kernel？** 我们会依次写出向量加法、矩阵转置、归约与 softmax、分块 GEMM，再用 Triton 以更高的抽象重写它们，最后实现 FlashAttention-2——这是本书前面所有注意力代码在 GPU 上真正运行的样子。
+
+## 知识脉络
+
+<Diagram width={720} height={330} label="第八部分各章的依赖关系">
+  <Region x={10} y={10} w={700} h={96} title="硬件与编程模型" />
+  <Box x={40} y={42} w={190} h={50} label="GPU 硬件" sub="SM · warp · 内存层次" tone="info" />
+  <Box x={270} y={42} w={190} h={50} label="CUDA 编程模型" sub="grid · block · thread" tone="info" />
+  <Box x={500} y={42} w={190} h={50} label="性能分析" sub="roofline · profiler" tone="info" />
+  <Region x={10} y={120} w={700} h={96} title="手写 CUDA kernel：从带宽受限到计算受限" />
+  <Box x={40} y={152} w={190} h={50} label="访存优化" sub="合并 · 共享内存 · bank" tone="accent" />
+  <Box x={270} y={152} w={190} h={50} label="归约与 softmax" sub="shuffle · 在线 softmax" tone="accent" />
+  <Box x={500} y={152} w={190} h={50} label="GEMM" sub="分块 · Tensor Core" tone="accent" />
+  <Region x={10} y={230} w={700} h={90} title="更高的抽象与综合应用" />
+  <Box x={40} y={258} w={190} h={50} label="Triton" sub="以块为单位编程" />
+  <Box x={270} y={258} w={190} h={50} label="算子融合" sub="torch.compile" />
+  <Box x={500} y={258} w={190} h={50} label="FlashAttention" sub="分块 + 在线 softmax" tone="strong" />
+  <Arrow from={[230, 67]} to={[270, 67]} />
+  <Arrow from={[460, 67]} to={[500, 67]} />
+  <Arrow from={[230, 177]} to={[270, 177]} />
+  <Arrow from={[460, 177]} to={[500, 177]} />
+  <Arrow from={[365, 92]} to={[135, 152]} />
+  <Arrow from={[595, 202]} to={[135, 258]} />
+  <Arrow from={[230, 283]} to={[270, 283]} />
+  <Arrow from={[460, 283]} to={[500, 283]} />
+  <Arrow from={[365, 202]} via={[[480, 230]]} to={[560, 258]} tone="accent" dashed />
+  <Fragment slot="caption">上层是理解性能所需的硬件模型与工具；中层按“带宽受限 → 计算受限”的顺序手写 CUDA kernel；下层用 Triton 与编译器把同样的思想自动化，并在 FlashAttention 中汇合——虚线表示在线 softmax 直接成为 FlashAttention 的核心。</Fragment>
+</Diagram>
+
+前两章建立硬件与编程模型：[GPU 硬件：SM、warp 与内存层次](/gpu/gpu-architecture/)解释吞吐导向的设计和“内存墙”，[CUDA 编程模型：第一个 kernel](/gpu/cuda-basics/)教会读者写、编译、调用一个 kernel。接下来三章是手写 CUDA 的主体：[访存优化：合并访问与共享内存](/gpu/memory-optimization/)处理纯搬运的算子；[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)处理需要线程协作的算子，并推导出在线 softmax；[矩阵乘法优化：从朴素到 Tensor Core](/gpu/gemm/)把一个计算受限的算子一步步推向峰值。之后的[Triton 编程](/gpu/triton/)与[算子融合与 torch.compile](/gpu/kernel-fusion/)把同样的分块思想交给编译器；[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)把分块、在线 softmax、融合与重计算组合起来；[性能分析：Roofline 与 Profiler](/gpu/profiling/)给出贯穿全部分的度量方法。
+
+## 与前后部分的关系
+
+本部分以[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)为起点：那里我们数清楚了一次前向与反向需要多少 FLOPs；这里要解释为什么这些 FLOPs 不能以峰值速度完成。[注意力机制](/transformer/attention/)中的 softmax 与矩阵乘法，在这里会被拆成 kernel 级别的循环；[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)讨论的数值格式，在这里对应 Tensor Core 的不同峰值。之后的[推理系统](/inference/)会大量使用本部分的结论：decode 阶段为什么受带宽限制，CUDA Graph 为什么能消除启动开销，PagedAttention 的 kernel 怎样在不连续的显存上做注意力。
+
+## 阅读与动手建议
+
+本书的写作环境没有 GPU，因此每一个 CUDA/Triton kernel 都配有一个 **CPU 模拟器**：它按 block、warp、thread 的顺序执行同样的算法，并统计访存事务、bank conflict、全局读取量等指标。读者可以先在任意机器上运行模拟器与测试理解算法，再在有 GPU 的机器上编译真实 kernel：
+
+```sh
+uv run pytest tests/gpu            # 模拟器与参考实现；无 GPU 时 kernel 测试自动跳过
+uv pip install triton              # 有 GPU 时：安装 Triton，运行 Triton 测试
+```
+
+正文中的硬件参数取自 NVIDIA 白皮书与数据手册，性能数字取自论文与公开博客并注明出处；凡是“估算”，都给出推导过程。建议按顺序阅读前五章，它们之间是严格递进的；Triton、融合与 FlashAttention 三章依赖前五章的概念；性能分析一章可以在任何时候插入阅读，它定义的 roofline 是贯穿本部分的语言。
 
 <ChapterList part="gpu" />

@@ -2,7 +2,231 @@
 title: 访存优化：合并访问与共享内存
 description: 全局内存的合并访问，共享内存分块与 bank conflict，以矩阵转置为例从朴素版本优化到接近带宽上限。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/gpu/kernels/transpose.cu
+  - src/llms_from_scratch/gpu/simulator.py
+  - tests/gpu/test_simulator.py
 ---
 
-本章正在撰写。
+向量加法每个元素读 8 字节、写 4 字节、做 1 次加法，算术强度约 0.08 FLOP/byte，比 H100 的脊点低三个数量级。对这类 **带宽受限**（memory-bound）的 kernel，计算几乎是免费的，速度完全取决于“每秒从 HBM 搬多少有用的字节”。上一章的向量加法恰好是最理想的访问模式；但只要访问模式稍有不同，同样的数据量就可能要多花好几倍的时间。
+
+本章用矩阵转置作为例子。转置不做任何计算，它的理想时间就是“读一遍、写一遍”：一个 $N\times N$ 的 `float32` 矩阵需要搬运 $2\cdot 4N^2$ 字节。朴素实现离这个理想很远，原因在于 **合并访问**（coalescing）；用共享内存分块修复它之后，又会遇到 **bank conflict**；最后用一个字节的 padding 解决。每一步，我们都用 CPU 模拟器数出内存事务与 bank 串行次数，让“快”与“慢”变成可以核对的数字。
+
+## 全局内存事务与合并访问
+
+### 扇区：DRAM 的最小搬运单位
+
+HBM 不按单个字节或单个 `float` 响应请求。从 L2 到 SM 之间的数据以 **32 字节扇区**（sector）为单位传输，4 个扇区组成一条 128 字节的缓存行。一个 warp 执行一条读指令时，32 个线程各给出一个地址，硬件（加载/存储单元）把这些地址归并成尽量少的扇区请求。
+
+于是，一次 warp 访存的成本可以用“涉及多少个不同的扇区”来度量：
+
+<KeyEq label="访存效率">
+
+$$
+\text{efficiency} = \frac{\text{bytes requested by the warp}}{32 \times \text{number of sectors}}
+$$
+
+</KeyEq>
+
+几种典型模式（每个线程读一个 4 字节的 `float`，warp 共请求 128 字节）：
+
+| 模式 | 线程 $k$ 的地址 | 扇区数 | 效率 |
+| --- | --- | --- | --- |
+| 连续、对齐 | $4k$ | 4 | 100% |
+| 连续、错位一个元素 | $4(k+1)$ | 5 | 80% |
+| 步长 2 | $8k$ | 8 | 50% |
+| 步长 32（例如按列读行主序矩阵） | $128k$ | 32 | 12.5% |
+| 全部读同一地址（广播） | $0$ | 1 | — |
+
+<Diagram width={660} height={220} label="连续访问与跨步访问涉及的扇区">
+  <Text x={20} y={30} label="步长 1：32 个线程 → 4 个扇区" anchor="start" bold size="sm" />
+  <Matrix x={20} y={44} rows={1} cols={32} cell={[18, 24]} gap={1} tone="accent" />
+  <Box x={20} y={74} w={151} h={24} label="扇区 0" size="sm" tone="info" />
+  <Box x={172} y={74} w={151} h={24} label="扇区 1" size="sm" tone="info" />
+  <Box x={324} y={74} w={151} h={24} label="扇区 2" size="sm" tone="info" />
+  <Box x={476} y={74} w={151} h={24} label="扇区 3" size="sm" tone="info" />
+  <Text x={20} y={126} label="步长 2：同样 32 个线程 → 8 个扇区，一半字节被浪费" anchor="start" bold size="sm" />
+  <Matrix x={20} y={140} rows={1} cols={32} cell={[18, 24]} gap={1} tone="muted" highlight={[{ cols: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30], tone: 'accent' }]} />
+  <Box x={20} y={170} w={151} h={24} label="扇区 0" size="sm" tone="info" />
+  <Box x={172} y={170} w={151} h={24} label="扇区 1" size="sm" tone="info" />
+  <Box x={324} y={170} w={151} h={24} label="扇区 2" size="sm" tone="info" />
+  <Box x={476} y={170} w={151} h={24} label="扇区 3" size="sm" tone="info" />
+  <Text x={640} y={196} label="… 共 8 个" anchor="end" size="sm" tone="muted" />
+  <Fragment slot="caption">每个格子是一个 4 字节的 float，深色是被某个线程请求的元素。步长 1 时 32 个请求恰好填满 4 个扇区；步长 2 时请求分散在两倍的地址范围上，图中只画出前 4 个扇区（覆盖前 16 个线程），整个 warp 需要 8 个，每个扇区只有一半字节有用。</Fragment>
+</Diagram>
+
+模拟器把这条规则写成两行代码：对地址整除 32 后去重计数。
+
+<CodeFile path="src/llms_from_scratch/gpu/simulator.py" symbol="sectors_per_request" />
+
+测试 `test_coalescing_patterns` 逐一核对了上表的扇区数。
+
+### 线程到数据的映射决定合并
+
+合并与否不取决于“读了哪些数据”，而取决于 **同一个 warp 的 32 个线程在同一条指令里读了哪些地址**。回忆上一章：warp 由 `threadIdx.x` 连续的线程组成。对行主序矩阵 `A[row * cols + col]`，若 `col` 由 `threadIdx.x` 决定，warp 读一行中连续的 32 个元素，完全合并；若 `row` 由 `threadIdx.x` 决定，warp 读一列中的 32 个元素，地址间隔 `cols × 4` 字节，每个线程都要一个独立的扇区——带宽利用率只有 1/8。
+
+这条规则也适用于写。写入不合并同样浪费带宽，而且部分写入的扇区可能需要先读后写（read-modify-write），代价更高。
+
+## 朴素转置：读合并，写不合并
+
+### kernel
+
+转置 $B = A^\top$ 中，元素 $A[y, x]$ 被写到 $B[x, y]$。最直接的写法让每个线程处理一个（这里是 4 个）元素：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/transpose.cu" region="naive" />
+
+block 的形状是 `(32, 8)`，每个线程沿 `y` 方向处理 4 个元素，覆盖一个 $32\times 32$ 的 tile。`x` 由 `threadIdx.x` 决定，因此读 `in[(y + j) * cols + x]` 是一行中的连续元素，完全合并。但写 `out[x * rows + (y + j)]` 时，相邻线程的 `x` 相差 1，地址相差 `rows × 4` 字节——每个线程写一个独立的扇区。
+
+### 用模拟器数事务
+
+`transpose_naive_sim` 按 warp 执行同样的读写，并把每次 warp 访存的地址交给 `MemStats` 计数。对一个 $64\times 96$ 的矩阵：
+
+```python
+import numpy as np
+from llms_from_scratch.gpu.simulator import MemStats, transpose_naive_sim
+
+x = np.arange(64 * 96, dtype=np.float32).reshape(64, 96)
+stats = MemStats()
+transpose_naive_sim(x, stats)
+stats.sectors_per_load, stats.sectors_per_store     # (4.0, 32.0)
+```
+
+每次读 4 个扇区，每次写 32 个扇区：写入搬运了 8 倍于必要的字节。按扇区总数估算，朴素转置的 HBM 流量是理想值的 $(4 + 32)/(4+4) = 4.5$ 倍。实际 GPU 上 L2 会吸收一部分写入的浪费（同一扇区的其他字节随后被别的 warp 写入时可能在 L2 中合并），所以实测的减速通常没有这么夸张，但趋势是一样的。
+
+## 共享内存分块
+
+### 思路：在片上完成“转”这一步
+
+问题的根源是：读和写不能同时按行连续。解决办法是 **借道共享内存**：
+
+1. 一个 block 按行合并地读入一个 $32\times 32$ 的 tile，写入共享内存 `tile[ty][tx]`；
+2. `__syncthreads()`，确保整个 tile 都写好了；
+3. 再按行合并地写出到输出的转置位置，数据从共享内存 **按列** 取：`tile[tx][ty]`。
+
+全局内存的读和写因此都是合并的；“非连续访问”被移到了共享内存上，而共享内存没有扇区的概念，任意地址的访问都可以在一个周期内完成——只要不发生 bank conflict。
+
+<Diagram width={720} height={260} label="借道共享内存的转置">
+  <Matrix x={30} y={60} rows={4} cols={4} cell={34} values={[["a", "b", "c", "d"], ["e", "f", "g", "h"], ["i", "j", "k", "l"], ["m", "n", "o", "p"]]} highlight={[{ rows: [0], tone: 'accent' }]} title="输入 tile（HBM）" />
+  <Matrix x={290} y={60} rows={4} cols={4} cell={34} values={[["a", "b", "c", "d"], ["e", "f", "g", "h"], ["i", "j", "k", "l"], ["m", "n", "o", "p"]]} tone="info" highlight={[{ cols: [0], tone: 'accent2' }]} title="共享内存 tile" />
+  <Matrix x={550} y={60} rows={4} cols={4} cell={34} values={[["a", "e", "i", "m"], ["b", "f", "j", "n"], ["c", "g", "k", "o"], ["d", "h", "l", "p"]]} highlight={[{ rows: [0], tone: 'accent2' }]} title="输出 tile（HBM）" />
+  <Arrow from={[176, 128]} to={[284, 128]} label="按行读（合并）" />
+  <Arrow from={[436, 128]} to={[544, 128]} label="按列取、按行写" />
+  <Text x={360} y={226} label="__syncthreads()：整个 tile 写入共享内存后，才能开始按列读取" size="sm" tone="muted" />
+  <Fragment slot="caption">以 4×4 示意 32×32 的 tile。第一阶段一个 warp 读输入的一行（深色）并原样存入共享内存；第二阶段一个 warp 从共享内存取一列（橙色），作为输出的一行连续写出。两次全局访存都是连续的。</Fragment>
+</Diagram>
+
+### kernel
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/transpose.cu" region="shared" />
+
+第二阶段交换了 `blockIdx.x` 与 `blockIdx.y` 的角色：输入的第 $(b_y, b_x)$ 个 tile 转置后位于输出的第 $(b_x, b_y)$ 个 tile。两个 `__syncthreads()` 中的第一个必不可少：没有它，某个 warp 可能在别的 warp 尚未写入时就去读共享内存，读到旧值。这种错误不会每次都出现，属于最难调试的一类竞争条件；`compute-sanitizer --tool racecheck` 可以检测它。
+
+模拟器 `transpose_shared_sim` 执行同样的两个阶段，并同时统计共享内存的访问：
+
+<CodeFile path="src/llms_from_scratch/gpu/simulator.py" region="transpose_sim" />
+
+运行它，全局内存的读写都变成了每次 4 个扇区。但共享内存出现了新的问题。
+
+## bank conflict 与 padding
+
+### 共享内存的 32 个 bank
+
+共享内存被划分为 32 个 **bank**，连续的 4 字节字依次落在 bank 0、1、……、31、0、1、……上：
+
+$$
+\text{bank}(\text{addr}) = \left\lfloor \frac{\text{addr}}{4} \right\rfloor \bmod 32 .
+$$
+
+每个 bank 每个周期只能服务一个 4 字节字。一个 warp 的 32 个访问如果落在 32 个不同的 bank 上，一个周期完成；如果有 $k$ 个 **不同的字** 落在同一个 bank，这些访问必须串行，耗时变为 $k$ 倍——称为 $k$ 路 bank conflict。多个线程读 **同一个字** 不算冲突，硬件会广播。
+
+<CodeFile path="src/llms_from_scratch/gpu/simulator.py" symbol="bank_conflict_degree" />
+
+### 按列读 tile 的 32 路冲突
+
+`float tile[32][32]` 中，元素 `tile[r][c]` 的字地址是 $32r + c$，bank 是 $(32r+c) \bmod 32 = c$。第二阶段一个 warp 读 `tile[tx][ty]`：32 个线程的 `tx` 从 0 到 31，`ty` 相同，所以全部落在 bank `ty`——32 路冲突，原本一个周期的访问变成 32 个周期。
+
+解决方法出奇地简单：把 tile 声明为 `tile[32][33]`。多出的一列不存数据，只是让每一行在 bank 上错开一位：
+
+$$
+\text{bank}(\texttt{tile}[r][c]) = (33r + c) \bmod 32 = (r + c) \bmod 32 .
+$$
+
+固定 $c$、让 $r$ 取 0 到 31，得到 32 个不同的 bank，冲突消失。按行访问时 $(r+c) \bmod 32$ 对 $c$ 也互不相同，第一阶段同样无冲突。
+
+<Diagram width={660} height={250} label="tile[32][32] 与 tile[32][33] 的 bank 编号">
+  <Matrix x={60} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5]]} rowLabels={['r=0', 'r=1', 'r=2', 'r=3', 'r=4', 'r=5']} colLabels={['c=0', 'c=1', 'c=2', 'c=3', 'c=4', 'c=5']} highlight={[{ cols: [0], tone: 'accent2' }]} title="tile[32][32]：bank = c" />
+  <Matrix x={390} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9], [5, 6, 7, 8, 9, 10]]} rowLabels={['r=0', 'r=1', 'r=2', 'r=3', 'r=4', 'r=5']} colLabels={['c=0', 'c=1', 'c=2', 'c=3', 'c=4', 'c=5']} highlight={[{ cols: [0], tone: 'accent' }]} title="tile[32][33]：bank = (r + c) mod 32" />
+  <Text x={180} y={230} label="一列全在 bank 0：32 路冲突" size="sm" tone="accent2" />
+  <Text x={510} y={230} label="一列分散到 32 个 bank：无冲突" size="sm" tone="accent" />
+  <Fragment slot="caption">只画出左上角 6×6。每个格子里的数字是该元素所在的 bank。按列读取（高亮列）时，未 padding 的 tile 每个元素都在同一个 bank；每行多出一个元素后，同一列的元素沿对角线分布到不同的 bank。</Fragment>
+</Diagram>
+
+模拟器的统计印证了这一点。我们用“每次共享内存请求的平均串行次数”度量：
+
+| 版本 | 全局读：扇区/请求 | 全局写：扇区/请求 | 共享内存：串行次数/请求 |
+| --- | --- | --- | --- |
+| 朴素 | 4 | 32 | — |
+| 共享内存 `tile[32][32]` | 4 | 4 | 16.5（写 1，读 32） |
+| 共享内存 `tile[32][33]` | 4 | 4 | 1 |
+
+这三个数字都在 `test_transpose_variants_and_traffic` 中被断言。在真实 GPU 上，最后一个版本的带宽接近同等数据量的纯拷贝 kernel；Mark Harris 在 NVIDIA 技术博客 “An Efficient Matrix Transpose in CUDA C/C++” 中给出了这三个版本与拷贝 kernel 的实测对比，读者可以在自己的 GPU 上用 `cuda_ext.load("transpose")` 复现（`variant` 取 0、1、2）。
+
+<Callout tone="note" title="bank 宽度与 64 位访问">
+从 Kepler 起，bank 宽度可以配置；在当前架构上，一个 warp 读 64 位（`double` 或 `float2`）时，硬件会把请求拆成两个半 warp 处理，规则相应变化；读 128 位（`float4`）时拆成四个四分之一 warp。分析向量化访存的 bank conflict 时，要以“每个周期实际服务的那组线程”为单位计算。
+</Callout>
+
+## 更多访存技巧
+
+### 向量化加载
+
+一次读 16 字节的 `float4` 比四次读 4 字节的 `float` 更好：指令数减为四分之一，每个线程的在途字节翻四倍（回忆利特尔定律），一个 warp 一次请求 512 字节，正好 16 个扇区。代价是地址必须 16 字节对齐、元素数是 4 的倍数（或单独处理尾部）。PyTorch 的逐元素 kernel 普遍使用这种向量化，矩阵乘法一章的 `gemm_vectorized` 也会用到。
+
+### 只读数据与 `__restrict__`
+
+给指针参数加上 `const ... __restrict__`，告诉编译器这些指针互不别名、数据在 kernel 内只读，编译器就可以把加载调度得更积极，并使用只读数据路径（`ld.global.nc`）。`vector_add.cu` 中的 kernel 就这样声明了参数。
+
+### 异步拷贝：从 `cp.async` 到 TMA
+
+在 Ampere 之前，从全局内存到共享内存的拷贝要经过寄存器：线程先 `load` 到寄存器，再 `store` 到共享内存，这期间线程被占住。Ampere 引入 `cp.async`，可以直接从全局内存异步拷贝到共享内存，线程发出指令后就能继续做别的事——这让“计算当前 tile、同时预取下一个 tile”的软件流水线成为可能。Hopper 更进一步，加入 **TMA**（Tensor Memory Accelerator）：一个线程描述一整块多维 tile（基址、形状、步长），由专门的硬件单元完成地址计算与搬运，并通过异步屏障（mbarrier）通知完成。TMA 在矩阵乘法与 FlashAttention-3 中扮演核心角色，我们会在后面两章再遇到它。
+
+## 小结
+
+- 全局内存以 32 字节扇区为单位传输；一个 warp 的访存成本是它涉及的扇区数，相邻线程访问相邻地址才能合并。
+- 合并与否由“warp 内线程到地址的映射”决定；让 `threadIdx.x` 对应行主序数组的最内维。
+- 朴素转置读合并、写不合并，写入搬运了 8 倍的扇区；借道共享内存可以让全局读写都合并。
+- 共享内存有 32 个 4 字节宽的 bank，同一 bank 的不同字串行访问；`tile[32][33]` 的 padding 把列访问分散到 32 个 bank。
+- 向量化加载、`__restrict__`、`cp.async`/TMA 是进一步提高带宽利用率的工具。
+
+转置只需要“搬”，线程之间唯一的协作是共享一个 tile。下一章[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)处理需要大量线程 **合作算出一个值** 的计算。
+
+## 练习
+
+1. 一个 warp 读 `float` 数组，线程 $k$ 的地址是 $4\cdot(3k)$（步长 3）。需要多少个扇区？效率是多少？用 `sectors_per_request` 验证。
+2. 对 `double tile[32][32]`（8 字节元素），按列读取一个元素/线程时会有几路 bank conflict？应当怎样 padding？（提示：按“每个 4 字节字一个 bank”计算，64 位访问由两个半 warp 先后执行。）
+3. 朴素转置中，如果改为“读不合并、写合并”（让 `threadIdx.x` 对应输出的列），扇区统计会怎样变化？在真实 GPU 上哪一种可能更快？为什么？
+4. 解释为什么 `transpose_shared` 中第二个循环之前必须有 `__syncthreads()`，而在第二个循环之后不需要。
+5. 在 H100 上转置一个 $16384\times 16384$ 的 `float32` 矩阵，按 3.35 TB/s 估算理想时间。若朴素版本的 HBM 流量是理想值的 4.5 倍，估算它的时间下界。
+
+<details>
+<summary>答案</summary>
+
+1. 地址范围 $[0, 4\cdot 93]$，即 $0$ 到 $372$ 字节，跨 $\lfloor 372/32\rfloor + 1 = 12$ 个扇区；有用字节 128，效率 $128/(12\cdot 32)\approx 33\%$。`sectors_per_request(np.arange(32) * 12)` 返回 12。
+
+2. 每个 `double` 占两个字：`tile[r][c]` 的字地址为 $64r + 2c$，bank 为 $2c \bmod 32$ 与 $2c+1$。一个半 warp（16 个线程）按列读，16 个元素的 bank 都相同，16 路冲突。padding 一个 `double`（行长 33 个 `double` = 66 个字）后 bank 为 $(66r + 2c) \bmod 32 = (2r + 2c) \bmod 32$，16 个 $r$ 给出 16 个不同的偶数 bank（各占两个字，正好覆盖 32 个 bank），无冲突。
+
+3. 读变成 32 扇区/请求、写变成 4 扇区/请求，总扇区数不变。实际 GPU 上“写合并”通常更好：不合并的读只是多搬一些字节（且可能在 L1/L2 中被后续 warp 命中），不合并的部分写可能触发额外的读-改-写，并占用写回通路。具体差异需要实测。
+
+4. 第二个循环读的是别的线程在第一个循环中写入的共享内存位置，必须等所有线程都写完。第二个循环之后 kernel 就结束了，没有再写共享内存，不存在“后面的写覆盖别人尚未读的数据”的风险；若 kernel 在循环中处理多个 tile，则每轮结束也需要一次同步。
+
+5. 数据量 $16384^2\times 4 = 1.07$ GB，读写共 2.15 GB，理想时间 $2.15/3350 \approx 0.64$ ms。朴素版本约 $4.5\times 0.64 \approx 2.9$ ms（只计 HBM 流量的下界，忽略 L2 吸收）。
+
+</details>
+
+## 参考文献
+
+- NVIDIA. [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)：Coalesced Access to Global Memory、Shared Memory and Memory Banks。
+- NVIDIA. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：Device Memory Accesses、Shared Memory、Asynchronous Data Copies、Tensor Memory Accelerator。
+- M. Harris. [An Efficient Matrix Transpose in CUDA C/C++](https://developer.nvidia.com/blog/efficient-matrix-transpose-cuda-cc/), NVIDIA Technical Blog, 2013.
+- M. Harris. [How to Access Global Memory Efficiently in CUDA C/C++ Kernels](https://developer.nvidia.com/blog/how-access-global-memory-efficiently-cuda-c-kernels/), NVIDIA Technical Blog, 2013.
+- J. Luitjens. [CUDA Pro Tip: Increase Performance with Vectorized Memory Access](https://developer.nvidia.com/blog/cuda-pro-tip-increase-performance-with-vectorized-memory-access/), NVIDIA Technical Blog, 2013.
+- NVIDIA. [NVIDIA H100 Tensor Core GPU Architecture](https://resources.nvidia.com/en-us-tensor-core/gtc22-whitepaper-hopper)（TMA、异步执行）。

@@ -2,7 +2,252 @@
 title: 归约、softmax 与 warp 原语
 description: 并行归约的树形结构，warp shuffle，block 级与网格级归约，并实现一个在线 softmax kernel。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/gpu/kernels/reduce_softmax.cu
+  - src/llms_from_scratch/gpu/reduction.py
+  - src/llms_from_scratch/gpu/online_softmax.py
+  - tests/gpu/test_reduction.py
+  - tests/gpu/test_online_softmax.py
 ---
 
-本章正在撰写。
+向量加法与转置有一个共同点：每个输出元素只依赖固定的少数输入，线程之间几乎不需要交流。深度学习里另一大类算子却需要“很多输入合成一个输出”：求和、求最大值、求范数，以及建立在它们之上的 softmax、LayerNorm、RMSNorm、交叉熵。这类计算叫 **归约**（reduction）。
+
+串行求和是一条长度为 $n$ 的依赖链，无法直接并行。本章先把它改写成深度为 $\log_2 n$ 的树，再在 GPU 的三个层次上实现这棵树：warp 内用 shuffle 指令在寄存器之间交换数据，block 内借助共享内存，block 之间用两次 kernel 启动。然后转向 softmax：它需要两次归约（最大值与指数和），朴素实现要把输入读三遍。我们会推导 **在线 softmax**（online softmax）——一种在一次扫描中同时维护最大值与指数和的方法，并证明它的部分结果可以按任意顺序合并。这个合并公式是下一阶段的钥匙：FlashAttention 正是把它用在了注意力的分块计算上。
+
+## 从串行链到归约树
+
+### 结合律让并行成为可能
+
+串行求和 `s = 0; for x in xs: s += x` 的每一步都依赖上一步的结果，深度为 $n$。但加法满足结合律，$(a+b)+(c+d) = ((a+b)+c)+d$，所以可以先两两相加，再把结果两两相加，如此往复：
+
+<Diagram width={720} height={240} label="8 个元素的树形归约">
+  <Matrix x={80} y={20} rows={1} cols={8} cell={[60, 34]} gap={10} values={[["3", "1", "4", "1", "5", "9", "2", "6"]]} tone="neutral" />
+  <Matrix x={80} y={84} rows={1} cols={4} cell={[60, 34]} gap={10} values={[["8", "10", "6", "7"]]} tone="info" />
+  <Matrix x={80} y={148} rows={1} cols={2} cell={[60, 34]} gap={10} values={[["14", "17"]]} tone="accent" />
+  <Matrix x={80} y={204} rows={1} cols={1} cell={[60, 30]} gap={10} values={[["31"]]} tone="strong" />
+  <Text x={20} y={37} label="smem" anchor="start" size="sm" tone="muted" mono />
+  <Text x={20} y={101} label="s=4" anchor="start" size="sm" tone="muted" mono />
+  <Text x={20} y={165} label="s=2" anchor="start" size="sm" tone="muted" mono />
+  <Text x={20} y={219} label="s=1" anchor="start" size="sm" tone="muted" mono />
+  <Text x={440} y={101} label="线程 t < 4：smem[t] += smem[t + 4]" anchor="start" size="sm" mono />
+  <Text x={440} y={165} label="线程 t < 2：smem[t] += smem[t + 2]" anchor="start" size="sm" mono />
+  <Text x={440} y={219} label="线程 0：smem[0] += smem[1]" anchor="start" size="sm" mono />
+  <Fragment slot="caption">“顺序寻址”的树形归约：每一步步长 s 减半，前 s 个线程把后半段加到前半段上。第一步 3+5=8、1+9=10、4+2=6、1+6=7。8 个数经过 log₂8 = 3 步得到 31；每一步之后需要一次 __syncthreads()。</Fragment>
+</Diagram>
+
+树的深度是 $\lceil\log_2 n\rceil$，总加法次数仍是 $n-1$，没有多做功。$n$ 个线程配合时，第一步有一半线程工作，之后每步减半——这是归约固有的“并行度衰减”，也是为什么后面要在每个线程里先串行累加许多元素，只在最后一段使用树。
+
+### 浮点数不满足结合律
+
+浮点加法只是 **近似** 满足结合律：$(a+b)+c$ 与 $a+(b+c)$ 的舍入误差不同。两个后果：
+
+1. **结果依赖归约顺序**。改变块大小、网格大小或使用原子加法（`atomicAdd` 的执行顺序不确定），会让结果在最后几位上变化。这是 GPU 训练“不可逐位复现”的主要来源之一，PyTorch 的 `torch.use_deterministic_algorithms(True)` 会禁用这类算法或换用确定性实现。
+2. **树形顺序通常更准确**。串行累加 $n$ 个数，最坏情况下舍入误差界随 $n$ 线性增长；两两求和（pairwise summation）的误差界只随 $\log n$ 增长。测试 `test_tree_order_is_more_accurate_than_sequential` 用 $2^{16}$ 个 `float32` 的 0.1 验证：串行和的误差比树形和大十倍以上。[浮点数与数值稳定性](/math/numerics/)对舍入误差有更系统的讨论。
+
+### 共享内存上的树
+
+block 内归约最直接的写法是把每个线程的值写进共享内存，然后按上图的方式逐步折半：
+
+<CodeFile path="src/llms_from_scratch/gpu/reduction.py" region="tree_reduce" />
+
+这里用的是“顺序寻址”：第 $s$ 步由线程 $0\ldots s-1$ 工作，读 `smem[t]` 与 `smem[t + s]`。Mark Harris 的经典报告 “Optimizing Parallel Reduction in CUDA” 比较了几种写法：更朴素的“交错寻址”（线程 $t$ 在 `t % (2s) == 0` 时工作）会让同一个 warp 内一半线程闲置、发生分支发散，并且访问步长为 $2s$ 造成 bank conflict；顺序寻址让工作的线程总是连续的前 $s$ 个，既无发散（直到 $s<32$）也无冲突。
+
+## warp shuffle：在寄存器之间交换数据
+
+### `__shfl_down_sync`
+
+当 $s$ 降到 32 以下时，只剩一个 warp 在工作，而同一个 warp 的线程本来就同步执行。为此再写共享内存、调用 `__syncthreads()` 是浪费。从 Kepler 起，CUDA 提供 **warp shuffle** 指令，让 warp 内的线程直接读取彼此的寄存器：
+
+```cpp
+T __shfl_down_sync(unsigned mask, T var, unsigned delta);
+```
+
+lane $i$ 得到 lane $i+\delta$ 的 `var`；若 $i+\delta \ge 32$，得到自己的值。`mask` 指明哪些 lane 参与（全部参与时为 `0xffffffff`）。同族的还有 `__shfl_up_sync`、`__shfl_xor_sync`（与 lane $i \oplus \delta$ 交换，常用于蝶形归约，结束时每个 lane 都持有总和）和 `__shfl_sync`（从任意 lane 读）。
+
+<Diagram width={660} height={240} label="8 个 lane 的 shuffle 归约">
+  <Matrix x={120} y={30} rows={1} cols={8} cell={[54, 32]} gap={6} values={[["3", "1", "4", "1", "5", "9", "2", "6"]]} colLabels={['0', '1', '2', '3', '4', '5', '6', '7']} />
+  <Matrix x={120} y={96} rows={1} cols={8} cell={[54, 32]} gap={6} values={[["8", "10", "6", "7", "", "", "", ""]]} tone="info" highlight={[{ cols: [4, 5, 6, 7], tone: 'muted' }]} />
+  <Matrix x={120} y={150} rows={1} cols={8} cell={[54, 32]} gap={6} values={[["14", "17", "", "", "", "", "", ""]]} tone="accent" highlight={[{ cols: [2, 3, 4, 5, 6, 7], tone: 'muted' }]} />
+  <Matrix x={120} y={204} rows={1} cols={8} cell={[54, 30]} gap={6} values={[["31", "", "", "", "", "", "", ""]]} tone="strong" highlight={[{ cols: [1, 2, 3, 4, 5, 6, 7], tone: 'muted' }]} />
+  <Text x={20} y={46} label="lane" anchor="start" size="sm" tone="muted" />
+  <Text x={20} y={112} label="δ = 4" anchor="start" size="sm" mono />
+  <Text x={20} y={166} label="δ = 2" anchor="start" size="sm" mono />
+  <Text x={20} y={219} label="δ = 1" anchor="start" size="sm" mono />
+  <Fragment slot="caption">以 8 个 lane 示意（真实 warp 为 32 个 lane、5 轮：δ = 16, 8, 4, 2, 1）。每轮 lane i 加上 lane i+δ 的值；灰色 lane 也在执行加法，但其结果不再被使用。最后 lane 0 持有总和，整个过程不经过共享内存，也不需要 __syncthreads()。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/reduce_softmax.cu" region="warp_reduce" />
+
+模拟器用 NumPy 数组表示一个 warp 的 32 个寄存器，`shfl_down` 按上述语义做一次“错位读取”：
+
+<CodeFile path="src/llms_from_scratch/gpu/reduction.py" region="warp_shuffle" />
+
+### block 级与网格级归约
+
+`block_reduce_sum` 组合了两层：每个 warp 先用 shuffle 归约，lane 0 把 warp 的部分和写入共享内存的 `warp_sums[warp]`；同步之后，第 0 个 warp 读出这至多 32 个部分和，再做一次 shuffle 归约。整个 block 只需要一次 `__syncthreads()`。
+
+对整个数组求和，还需要跨 block 合并，而 block 之间不能同步。常见的两种做法：
+
+- **两阶段归约**：第一个 kernel 让每个 block 写出一个部分和，第二个 kernel 用一个 block 归约这些部分和。kernel 之间的边界就是全局同步点。
+- **原子操作**：每个 block 用 `atomicAdd` 把部分和加到同一个全局变量上。只需一个 kernel，但结果的舍入顺序不确定。
+
+`sum_kernel` 采用两阶段，并用网格跨步循环让每个线程先串行累加许多元素——这样 block 数可以固定（这里是 1024 个），树形部分只占很小一部分工作：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/reduce_softmax.cu" region="grid_sum" />
+
+对应的模拟器：
+
+<CodeFile path="src/llms_from_scratch/gpu/reduction.py" region="block_reduce" />
+
+### 归约是带宽受限的
+
+求和每读一个 `float`（4 字节）做一次加法，算术强度 0.25 FLOP/byte，与向量加法同一量级。所以归约 kernel 的目标同样是 **跑满带宽**：每个元素只读一次、读取合并、并有足够的在途请求。上面的设计满足这些条件——第一阶段的网格跨步循环中，每一轮同一 warp 读连续地址；第二阶段只处理 1024 个数，可以忽略。
+
+## softmax：两次归约与三次遍历
+
+### 数值稳定的 softmax
+
+对一行 $x\in\mathbb R^n$，softmax 定义为 $y_i = e^{x_i}/\sum_j e^{x_j}$。直接计算会在 $x_i$ 较大时溢出（`float32` 中 $e^{89}$ 已经是无穷大），标准做法是先减去最大值：
+
+$$
+m = \max_j x_j,\qquad \ell = \sum_j e^{x_j - m},\qquad y_i = \frac{e^{x_i - m}}{\ell}.
+$$
+
+减去 $m$ 不改变结果（分子分母同乘 $e^{-m}$），却保证每个指数的自变量 $\le 0$，且至少有一项等于 1，所以 $\ell \ge 1$ 不会下溢为 0。实现它需要三次遍历：
+
+<CodeFile path="src/llms_from_scratch/gpu/online_softmax.py" region="three_pass" />
+
+每一遍都要从 HBM 读一次整行（行太长、放不进片上存储时）。对带宽受限的 softmax 来说，读三次输入、写一次输出共 4 次访存，而理论下限是 2 次（读一次、写一次）。
+
+### 在线 softmax：一遍得到 m 与 ℓ
+
+能否在一次扫描中同时求出 $m$ 与 $\ell$？难点在于：处理前 $j$ 个元素时，还不知道最终的最大值。Milakov 与 Gimelshein（2018）给出的解法是：**维护相对当前最大值的和，最大值变化时把旧的和重新缩放**。
+
+记前 $j$ 个元素的最大值为 $m_j$，相对它的指数和为 $\ell_j = \sum_{k\le j} e^{x_k - m_j}$。读入 $x_{j+1}$ 后：
+
+$$
+m_{j+1} = \max(m_j, x_{j+1}).
+$$
+
+旧的和中每一项是 $e^{x_k - m_j}$，换成以 $m_{j+1}$ 为基准需要乘以 $e^{m_j - m_{j+1}}$：
+
+$$
+e^{x_k - m_{j+1}} = e^{x_k - m_j}\cdot e^{m_j - m_{j+1}}.
+$$
+
+于是
+
+<KeyEq label="在线 softmax 递推">
+
+$$
+\ell_{j+1} = \ell_j\, e^{m_j - m_{j+1}} + e^{x_{j+1} - m_{j+1}},\qquad m_0 = -\infty,\ \ell_0 = 0 .
+$$
+
+</KeyEq>
+
+由归纳法，扫描结束时 $m_n = \max_j x_j$、$\ell_n = \sum_j e^{x_j - m_n}$，正是三遍算法的前两遍结果。缩放因子 $e^{m_j - m_{j+1}} \le 1$，不会溢出。
+
+**手算一个例子**：$x = (1, 3, 2)$。
+
+| 步骤 | $x_j$ | $m_j$ | $\ell_j$ |
+| --- | --- | --- | --- |
+| 1 | 1 | 1 | $0\cdot e^{-\infty} + e^{0} = 1$ |
+| 2 | 3 | 3 | $1\cdot e^{1-3} + e^{0} = 1 + e^{-2} \approx 1.1353$ |
+| 3 | 2 | 3 | $1.1353\cdot e^{0} + e^{2-3} \approx 1.5032$ |
+
+直接计算：$e^{-2} + e^{0} + e^{-1} \approx 0.1353 + 1 + 0.3679 = 1.5032$，一致。
+
+<CodeFile path="src/llms_from_scratch/gpu/online_softmax.py" symbol="online_max_sum" />
+
+代码中多了一个分支：当到目前为止所有元素都是 $-\infty$（例如因果掩码遮住了整段）时，$m_{j+1} = -\infty$，$e^{m_j - m_{j+1}}$ 会变成 $e^{-\infty - (-\infty)} = \text{NaN}$，所以直接跳过。这个边界情况在注意力的掩码中真实存在。
+
+### 合并两段状态
+
+在线递推仍是串行的。要在 GPU 上并行，需要能把两段 **各自独立** 算出的状态合并。设两段的状态为 $(m_a, \ell_a)$ 与 $(m_b, \ell_b)$，合并后的最大值是 $m = \max(m_a, m_b)$，两段的和各自按上面的方法换到新基准再相加：
+
+<KeyEq label="状态合并">
+
+$$
+(m_a,\ell_a)\oplus(m_b,\ell_b) = \Bigl(m,\ \ell_a e^{m_a - m} + \ell_b e^{m_b - m}\Bigr),\qquad m = \max(m_a, m_b).
+$$
+
+</KeyEq>
+
+在线递推正是“状态 $\oplus$ 单元素状态 $(x_{j+1}, 1)$”的特例。$\oplus$ 满足 **交换律**（显然对称）与 **结合律**：三段合并时，无论先合并哪两段，最大值都是 $\max(m_a,m_b,m_c)$，和都是 $\sum_{s\in\{a,b,c\}}\ell_s e^{m_s - m}$。因此可以按任意的树形顺序合并——这正是归约所需的全部性质。换句话说，**softmax 的分母是一个以 $(m,\ell)$ 为状态、以 $\oplus$ 为运算的归约**，前面为求和设计的 warp shuffle、block 归约都可以原样复用。
+
+<CodeFile path="src/llms_from_scratch/gpu/online_softmax.py" symbol="merge_states" />
+
+测试 `test_merge_matches_whole_and_is_associative` 把一行分成三段，按两种括号方式合并，都与整行一次扫描的结果一致。
+
+## 行 softmax kernel
+
+### 一个 block 处理一行
+
+把这些组合起来，得到一个 softmax kernel：每个 block 负责矩阵的一行；block 内每个线程以 `blockDim.x` 为步长扫描这一行，维护自己的 $(m,\ell)$；然后用 warp shuffle 与共享内存把 256 个线程的状态合并成整行的状态；最后每个线程再扫一遍，写出 $e^{x_i - m}/\ell$。
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/reduce_softmax.cu" region="softmax" />
+
+几个实现细节：
+
+- 状态是一对浮点数，shuffle 要分别交换 `m` 与 `l` 两个寄存器，再在本 lane 内调用 `merge`。
+- `__expf` 是硬件快速指数（精度略低于 `expf`，配合 `--use_fast_math` 使用），在 softmax 中这点精度损失通常可以接受。
+- 合并结果写入共享内存的 `total`，第二次 `__syncthreads()` 之后所有线程都能读到它。
+
+CPU 模拟器以同样的顺序执行：线程 $t$ 处理 `row[t::block_dim]`，再按 shuffle 的配对方式两两合并：
+
+<CodeFile path="src/llms_from_scratch/gpu/online_softmax.py" region="row_softmax_sim" />
+
+### 访存次数的比较
+
+对长度为 $n$ 的一行（每元素 4 字节）：
+
+| 算法 | 读 | 写 | HBM 字节 |
+| --- | --- | --- | --- |
+| 三次遍历 | 3 | 1 | $16n$ |
+| 在线 softmax（两次遍历） | 2 | 1 | $12n$ |
+| 整行放在寄存器/共享内存中 | 1 | 1 | $8n$ |
+
+第三行是 Triton 官方教程中“融合 softmax”的做法：当一行能完全放进一个 block 的寄存器时，读一次之后在片上完成所有计算，只写一次。在线 softmax 的价值在 **行太长放不下** 的场景，以及更重要的——**输出不需要被显式写出、而是马上要乘以另一个矩阵** 的场景。注意力中的 softmax 恰好如此：$P = \text{softmax}(S)$ 只是为了计算 $PV$。[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)会把 $\oplus$ 推广到连同输出向量 $O$ 一起合并，从而一次也不把 $T\times T$ 的 $P$ 写回 HBM。
+
+## 小结
+
+- 归约利用结合律把深度 $n$ 的串行链改写成深度 $\log n$ 的树；浮点数只近似满足结合律，归约顺序影响结果的最后几位，树形顺序通常更准确。
+- GPU 上的归约分三层：warp 内用 `__shfl_down_sync` 交换寄存器，block 内经共享内存汇总各 warp 的结果，block 之间用两阶段 kernel 或原子操作。
+- 归约是带宽受限的；先让每个线程串行累加许多元素，再用树合并少量部分和。
+- 在线 softmax 用一次扫描维护 $(m,\ell)$：最大值变化时把旧的和乘以 $e^{m_{\text{old}}-m_{\text{new}}}$。
+- 两段状态的合并 $\oplus$ 满足交换律与结合律，因此 softmax 的分母本身就是一个可并行的归约。
+
+softmax 与归约受带宽限制；下一章[矩阵乘法优化：从朴素到 Tensor Core](/gpu/gemm/)转向本书最重要的计算受限算子，看看怎样让 GPU 的算力真正发挥出来。
+
+## 练习
+
+1. 用 256 个线程的 block 做顺序寻址的树形归约，一共需要几次 `__syncthreads()`？如果改成“先 warp shuffle、再归约 8 个 warp 的部分和”，需要几次？
+2. 证明 $\oplus$ 满足结合律：写出 $((m_a,\ell_a)\oplus(m_b,\ell_b))\oplus(m_c,\ell_c)$ 的展开式，并说明它与另一种括号方式相等。
+3. 对 $x = (2, -1, 5, 0)$，分别按“逐元素在线递推”和“先合并 (2,−1)、(5,0) 两段再合并”计算 $(m,\ell)$，验证结果一致。
+4. 如果用 `__shfl_xor_sync` 代替 `__shfl_down_sync`（每轮与 lane $i\oplus\delta$ 交换并相加），5 轮之后各 lane 持有什么？这对 softmax kernel 有什么好处？
+5. LayerNorm 需要一行的均值与方差。仿照在线 softmax，设计一个单遍扫描的状态与合并公式（提示：Welford 算法，状态为计数、均值与 $M_2=\sum(x-\bar x)^2$）。
+
+<details>
+<summary>答案</summary>
+
+1. 写入共享内存后一次，之后 8 步折半（$s = 128,\dots,1$）每步一次，共 9 次（最后一步之后若只有线程 0 读结果可省去）。warp shuffle 版本：warp 内归约不需要同步，lane 0 写共享内存后同步一次，之后第 0 个 warp 再用 shuffle 归约，共 1 次。
+
+2. 令 $m = \max(m_a,m_b,m_c)$，$m_{ab}=\max(m_a,m_b)$。左边先得到 $(m_{ab},\ \ell_a e^{m_a-m_{ab}}+\ell_b e^{m_b-m_{ab}})$，再与 $c$ 合并：最大值 $\max(m_{ab},m_c)=m$，和为 $(\ell_a e^{m_a-m_{ab}}+\ell_b e^{m_b-m_{ab}})e^{m_{ab}-m}+\ell_c e^{m_c-m} = \ell_a e^{m_a-m}+\ell_b e^{m_b-m}+\ell_c e^{m_c-m}$。右边同理得到相同的对称表达式。
+
+3. 逐元素：$(2,1)\to(2, 1+e^{-3})\to(5,(1+e^{-3})e^{-3}+1)\to(5,\ \ell+e^{-5})$，即 $\ell = e^{-3}+e^{-6}+1+e^{-5}\approx 1.0590$。分段：$(2,1+e^{-3})$ 与 $(5,1+e^{-5})$ 合并：$m=5$，$\ell=(1+e^{-3})e^{-3}+(1+e^{-5}) $，相同。
+
+4. 蝶形归约结束后 **所有 lane** 都持有完整的结果（总和或合并后的状态）。softmax kernel 中就不需要再通过共享内存把 lane 0 的结果广播给其他线程（对单 warp 处理一行的情形尤其方便）。
+
+5. 状态 $(n, \bar x, M_2)$。合并两段 $(n_a,\bar x_a,M_{2,a})$ 与 $(n_b,\bar x_b,M_{2,b})$：$n=n_a+n_b$，$\delta=\bar x_b-\bar x_a$，$\bar x=\bar x_a+\delta\, n_b/n$，$M_2=M_{2,a}+M_{2,b}+\delta^2 n_a n_b/n$；方差为 $M_2/n$。该合并同样满足结合律，可以用 warp shuffle 实现（Chan 等人的并行方差算法）。
+
+</details>
+
+## 参考文献
+
+- M. Harris. [Optimizing Parallel Reduction in CUDA](https://developer.download.nvidia.com/assets/cuda/files/reduction.pdf), NVIDIA, 2007.
+- J. Luitjens. [Faster Parallel Reductions on Kepler](https://developer.nvidia.com/blog/faster-parallel-reductions-kepler/), NVIDIA Technical Blog, 2014.
+- NVIDIA. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：Warp Shuffle Functions、Atomic Functions。
+- M. Milakov, N. Gimelshein. [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867), 2018.
+- N. Higham. Accuracy and Stability of Numerical Algorithms, 2nd ed., SIAM, 2002（第 4 章：求和的误差分析）。
+- T. Chan, G. Golub, R. LeVeque. [Algorithms for Computing the Sample Variance](https://doi.org/10.1080/00031305.1983.10483115), The American Statistician, 1983.
+- Triton. [Fused Softmax tutorial](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html).
