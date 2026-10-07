@@ -2,9 +2,54 @@
 title: 现代架构：2017—2026
 description: 从 2017 年的原始 Transformer 到 2026 年的 DeepSeek-V4，看清每一次结构改动解决了什么问题，并用代码实现其中的关键机制。
 order: 0
-draft: true
 ---
 
-从 2017 年的原始 Transformer 到 2026 年的 DeepSeek-V4，看清每一次结构改动解决了什么问题，并用代码实现其中的关键机制。
+第三部分结束时，我们手里有一个能训练、能生成的 GPT：Pre-Norm 的 RMSNorm、RoPE 位置编码、分组查询注意力（GQA）、SwiGLU 前馈网络和 KV Cache。它不是 2017 年论文里的那个 Transformer，而是 2023 年 LLaMA 之后几乎所有开源模型共享的“默认配置”。这一部分要回答的是：这个默认配置是怎样一步步形成的？当模型从几十亿参数走到上万亿参数、上下文从 2K 走到 100 万 token 时，它又在哪些地方被推到了极限，人们换上了什么新部件？
+
+把 2017—2026 年的结构变化放在一起看，会发现它们几乎都在回应同一组压力。**第一是推理时的 KV Cache。** 解码一个 token 的成本主要不是乘法，而是把整段历史的 K/V 从显存读出来；上下文越长、并发越高，这部分越是瓶颈。MQA、GQA、MLA，以及后来的稀疏注意力、压缩注意力和线性注意力，都是在用不同的方式缩小或绕开这块缓存。**第二是参数量与计算量的解耦。** 稠密模型的每个参数都参与每个 token 的计算，想要更多“知识容量”就得付出成比例的 FLOPs；混合专家（MoE）让总参数与激活参数分离，DeepSeek 的 Engram 又把一部分容量交给查表式的记忆。**第三是深度与规模下的训练稳定性。** Pre-Norm、RMSNorm、QK-Norm、logit soft-capping、mHC 的流形约束，都在让很深、很宽的网络能平稳地训练下去。
+
+## 本部分的脉络
+
+<Diagram width={700} height={330} label="第四部分各章之间的关系：从共识设计出发，分为缓存与注意力、容量与计算、残差与训练信号、模态四条线">
+  <Box x={240} y={14} w={220} h={50} label="架构演进总览" sub="共识设计与超参数" tone="strong" />
+  <Region x={10} y={90} w={340} h={230} title="注意力与 KV Cache" />
+  <Box x={30} y={124} w={140} h={48} label="MQA / GQA / MLA" size="sm" tone="accent" />
+  <Box x={190} y={124} w={140} h={48} label="长上下文" sub="YaRN · 滑窗 · sink" tone="accent" />
+  <Box x={30} y={200} w={140} h={48} label="稀疏注意力" sub="NSA · DSA · CSA" tone="accent" />
+  <Box x={190} y={200} w={140} h={48} label="线性注意力" sub="SSM · DeltaNet" tone="accent" />
+  <Text x={180} y={290} label="目标：缩小或绕开每 token 的 KV 读取量" size="sm" tone="muted" />
+  <Region x={360} y={90} w={340} h={230} title="容量、残差与训练信号" />
+  <Box x={380} y={124} w={140} h={48} label="混合专家 MoE" sub="总参数 ≠ 激活参数" tone="info" />
+  <Box x={540} y={124} w={140} h={48} label="残差流扩展" sub="HC · mHC · Engram" tone="info" />
+  <Box x={380} y={200} w={140} h={48} label="多 token 预测" sub="更密的训练信号" tone="info" />
+  <Box x={540} y={200} w={140} h={48} label="多模态" sub="图像变成 token" tone="info" />
+  <Text x={530} y={290} label="目标：更多容量、更稳的训练、更多输入" size="sm" tone="muted" />
+  <Arrow from={[290, 64]} to={[180, 90]} />
+  <Arrow from={[410, 64]} to={[530, 90]} />
+  <Arrow from={[170, 148]} to={[190, 148]} />
+  <Arrow from={[100, 172]} to={[100, 200]} />
+  <Arrow from={[260, 172]} to={[260, 200]} />
+  <Fragment slot="caption">从上往下读：第一章总结 2017—2026 的共识设计；左边四章都在处理注意力与 KV Cache 的成本，右边四章处理参数容量、残差结构、训练目标与输入模态。DeepSeek-V4 同时用到了左右两侧的大部分部件。</Fragment>
+</Diagram>
+
+[架构演进总览：从 Transformer 到 DeepSeek-V4](/architecture/evolution/) 是全部分的地图：它沿时间线比较 GPT、LLaMA、Mistral、Qwen、DeepSeek、Kimi、gpt-oss 等模型的结构与超参数，并用一段可测试的参数核算代码把表里的数字“算出来”。随后四章沿着 KV Cache 这条线展开：[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/) 从缓存公式出发推导三种共享 K/V 的方式，重点是 MLA 的矩阵吸收与解耦 RoPE；[长上下文：位置外推与滑动窗口](/architecture/long-context/) 讲 RoPE 的频率视角、PI/NTK/YaRN 与滑动窗口；[稀疏注意力：从 NSA、DSA 到压缩注意力](/architecture/sparse-attention/) 让每个查询只读一部分历史；[线性注意力、状态空间模型与混合架构](/architecture/linear-attention/) 把注意力改写成固定大小状态的递推。
+
+右侧四章各自独立。[混合专家 MoE](/architecture/moe/) 从路由与负载均衡讲到 DeepSeekMoE 的细粒度专家与无辅助损失偏置；[残差流的扩展：Hyper-Connections 与 mHC](/architecture/residual-streams/) 讨论 2025—2026 年对“残差连接”这个最古老部件的改造；[多 token 预测](/architecture/multi-token-prediction/) 是训练目标层面的改动，同时为推理提供草稿；[多模态：视觉语言模型](/architecture/multimodal/) 说明图像怎样变成语言模型能读的 token。
+
+## 与前后部分的关系
+
+本部分默认你已经读完[从零实现 Transformer](/transformer/)，尤其是[位置编码：从正弦到 RoPE](/transformer/positional-encoding/)、[Transformer 块：归一化、残差与前馈网络](/transformer/transformer-block/) 和[文本生成：解码策略与 KV Cache](/transformer/generation/)。代码直接 import 第三部分的 `transformer/model.py`：GQA 就是它的 `CausalSelfAttention`，MoE 的专家就是它的 `SwiGLU`，MTP 模块就是它的 `Block`。
+
+这里只讲“结构是什么、为什么这样设计、数学上为什么成立”。怎样把这些结构训练好属于[预训练](/pretraining/)：Muon 优化器、QK-Norm 与 z-loss 等稳定性技巧、FP8 训练、缩放定律。MoE 的专家并行与 all-to-all 通信在[专家并行与 all-to-all](/distributed/expert-parallel/) 中展开。FlashAttention 等高效 kernel 在[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)。MLA 的吸收计算、稀疏注意力与 MTP 草稿在服务系统中如何落地，见[推理系统](/inference/)，尤其是[投机解码](/inference/speculative-decoding/)与[分布式推理：并行、PD 分离与大规模 MoE 服务](/inference/distributed-inference/)。
+
+## 阅读与动手建议
+
+先读总览，再按兴趣挑章；左侧四章最好按顺序读，因为后一章会用到前一章的缓存公式与 RoPE 频率。每章的核心实现都在 `src/llms_from_scratch/architecture/` 下，体量刻意保持在一两百行以内，测试在 `tests/architecture/`。读每一章时，建议先运行对应测试，再改动一个参数观察哪条断言失败——例如把 MLA 的吸收路径里的缩放因子换成 $1/\sqrt{d_c}$，或者把 YaRN 的斜坡上界 $\beta$ 改小。
+
+```sh
+uv run pytest tests/architecture -q
+```
+
+关于数字的约定：书中涉及具体模型的超参数都来自论文或官方 `config.json`，每章末尾列出出处；需要推导的数字（缓存字节数、参数量）都给出了算式，并尽量用测试复核。2025—2026 年的部分模型（DeepSeek-V4、Qwen3-Next、Kimi Linear）发布时间短，后续若有修订，以官方报告为准。
 
 <ChapterList part="architecture" />

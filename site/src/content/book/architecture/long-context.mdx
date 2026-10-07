@@ -2,7 +2,250 @@
 title: 长上下文：位置外推与滑动窗口
 description: 位置插值、NTK 缩放与 YaRN，滑动窗口与注意力汇聚点（attention sink），以及长上下文训练的数据与课程。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/architecture/rope_scaling.py
+  - src/llms_from_scratch/architecture/window_cache.py
+  - tests/architecture/test_rope_scaling.py
+  - tests/architecture/test_window_cache.py
 ---
 
-本章正在撰写。
+预训练几乎都在较短的序列上进行：LLaMA 3 主体阶段用 8K，DeepSeek-V3 用 4K，因为注意力的计算量随长度平方增长，长序列的训练样本也更稀少。可是使用时，人们希望模型读完整个代码仓库、一本书或者一段几十万 token 的智能体轨迹。2023 年以来，开源模型的上下文从 2K 一路走到 128K，DeepSeek-V4 与 Qwen3-Next 已经支持 100 万 token 级别。这中间要解决两类问题。
+
+第一类是**位置**：模型在训练中只见过 0 到 4095 的位置，第 10 万个位置的编码对它是陌生的。[位置编码：从正弦到 RoPE](/transformer/positional-encoding/) 中的 RoPE 把位置变成旋转角，本章从“每对维度的频率与波长”这个视角出发，解释为什么直接外推会失败，以及位置插值（PI）、NTK-aware 缩放和 YaRN 怎样只改几行频率公式、再配合少量继续训练就把上下文扩大 16 到 32 倍。第二类是**成本**：即使位置问题解决了，全注意力的 KV Cache 与计算量仍随长度增长。本章介绍最简单的一种限制——滑动窗口注意力，以及与之相伴的注意力汇聚点（attention sink）现象；更激进的稀疏与线性方案留给后面两章。最后讨论长上下文能力在训练流程中是怎样分阶段获得的。
+
+## RoPE 的频率与波长
+
+回顾 RoPE：把头维 $d$ 的向量分成 $d/2$ 对，第 $k$ 对（$k=0,\dots,d/2-1$）在位置 $m$ 处旋转角度 $m\theta_k$，其中
+
+<KeyEq label="RoPE 的频率与波长">
+
+$$
+\theta_k = b^{-2k/d},\qquad \lambda_k = \frac{2\pi}{\theta_k} = 2\pi\, b^{2k/d}.
+$$
+
+</KeyEq>
+
+$b$ 是底数（base，原始 RoPE 取 10000）。$\theta_k$ 是第 $k$ 对维度每前进一个 token 转过的弧度，$\lambda_k$ 是转满一圈需要的 token 数，即这对维度的**波长**。$k=0$ 的波长是 $2\pi\approx6.3$，每个 token 转约 57°，它分辨的是相邻几个 token 之间的细微位置差；$k=d/2-1$ 的波长接近 $2\pi b\approx62832$，在几千个 token 的范围内只转了一个小角度，它编码的是粗粒度的“远近”。RoPE 的所有频率构成一个几何级数，像一组从秒针到时针的指针。
+
+<Plot label="RoPE 各维度对的波长（d = 128）" x={[0, 63]} y={[1, 1000000]} logY xLabel="维度对编号 k" yLabel="波长 λ_k（token）" series={[
+  { fn: (k) => 2 * Math.PI * Math.pow(10000, (2 * k) / 128), label: 'b = 10000' },
+  { fn: (k) => 2 * Math.PI * Math.pow(500000, (2 * k) / 128), label: 'b = 500000', tone: 'info' },
+  { fn: () => 4096, label: '训练长度 4096', tone: 'accent2', dashed: true },
+]}>
+  <Fragment slot="caption">纵轴为对数。虚线以下的维度对在 4096 个 token 内转了不止一圈，训练时已经见过所有可能的角度；虚线以上的维度对在训练长度内连一圈都没转完，推理时超过 4096 的位置会产生它们从未见过的角度。增大底数（LLaMA 3 用 500000）让整条曲线上移，更多维度落在“没转满一圈”的区域。</Fragment>
+</Plot>
+
+这张图解释了**为什么直接外推会失败**。对波长小于训练长度的维度对，超出训练长度的位置只是“又转了几圈”，旋转角取模 $2\pi$ 后都在训练中出现过，外推是安全的。对波长大于训练长度的维度对，训练中见过的角度只覆盖 $[0, L\theta_k)$ 这一段弧，位置一旦超过 $L$，角度就落到了从未见过的区间，查询与键的点积可能取到训练中从未出现的值。Chen 等（2023）在 PI 论文中给出了一个更强的论证：在训练长度内，注意力分数作为相对距离的函数被一个较小的界约束；超出训练长度后，这个界会迅速增大到数千，注意力分布随之崩溃。直接在 2K 上训练的 LLaMA 外推到 4K 以上，困惑度会急剧上升。
+
+## 位置插值：把长序列压回训练范围
+
+位置插值（Position Interpolation，PI）的想法很朴素：既然模型只见过 $[0,L)$ 的位置，那就把目标长度 $L' = sL$ 内的位置线性压缩回去，用 $m/s$ 代替 $m$。由于 $m\theta_k$ 只以乘积形式出现，这等价于把所有频率除以 $s$：
+
+$$
+\theta_k^{\text{PI}} = \frac{\theta_k}{s}.
+$$
+
+这样位置 $sL-1$ 的旋转角等于原来位置 $L-1/s$ 的角，所有角度都落在训练见过的范围内（只是变成了更密的“分数位置”）。PI 论文用这种方法把 LLaMA 7B—65B 的上下文从 2048 扩展到 32768，只需约 1000 步继续训练。测试 `test_pi_maps_long_positions_into_trained_range` 验证了“新位置 4000 的角度 = 原位置 1000 的角度”（$s=4$）。
+
+PI 的缺点在于它**一视同仁地压缩了所有频率**。高频维度原本就不存在外推问题，压缩后相邻 token 的角度差从 $\theta_0$ 变成 $\theta_0/s$。当 $s=16$ 时，原来相距 1 个 token 的两个位置现在只差 $1/16$ 个“训练时的 token”，模型很难再分辨局部的词序。这体现为扩展后短文本上的性能下降，以及需要更多继续训练来重新学习局部位置。
+
+## NTK-aware 缩放：高频外推，低频插值
+
+更好的做法是区别对待不同频率：高频维度保持不变（外推），低频维度做插值。2023 年社区提出的 **NTK-aware** 缩放用一种巧妙的方式实现这一点：不改位置，而是改底数。设新底数 $b' = b\cdot\kappa$，要求它满足两个端点条件：最高频 $k=0$ 不变（自动满足，因为 $b'^0=1$），最低频 $k=d/2-1$ 恰好被插值 $s$ 倍：
+
+$$
+b'^{-(d-2)/d} = \frac{b^{-(d-2)/d}}{s}
+\;\Longrightarrow\;
+b' = b\cdot s^{\frac{d}{d-2}} .
+$$
+
+中间的频率则按几何级数平滑过渡：$\theta_k'/\theta_k = (b'/b)^{-2k/d} = s^{-2k/(d-2)}$，从 1 单调降到 $1/s$。“NTK”这个名字来自神经正切核理论的一个结论：网络难以从低维输入中学习高频函数，因此插值时应尽量保留高频成分。NTK-aware 缩放即使**不做任何微调**也能把上下文扩展数倍，困惑度明显好于 PI。Code Llama 把底数直接改为 $10^6$ 并在 16K 序列上继续训练，LLaMA 3 预训练时就用 500000，都是“增大底数”这一思路的变体（后者常被称为 ABF，adjusted base frequency）。
+
+<CodeFile path="src/llms_from_scratch/architecture/rope_scaling.py" region="pi_ntk" />
+
+测试 `test_ntk_keeps_highest_and_interpolates_lowest` 验证两个端点条件，以及插值比例随 $k$ 单调增大。
+
+## YaRN：按波长分段，再修正温度
+
+NTK-aware 缩放仍有一个问题：它的插值比例对每个 $k$ 都不是 1，即使波长只有几十个 token 的维度也被轻微压缩了。Peng 等（2023）的 **YaRN** 把“哪些维度需要插值”说得更精确：看第 $k$ 对维度在原训练长度 $L$ 内转了多少圈，
+
+$$
+r_k = \frac{L}{\lambda_k}.
+$$
+
+$r_k$ 很大（转了很多圈）说明这对维度在训练中已见过所有角度，应完全保留；$r_k$ 小于 1（一圈都没转完）说明它需要完全插值；中间用一个线性斜坡过渡。这就是 **NTK-by-parts** 插值：
+
+<KeyEq label="YaRN 的分段频率">
+
+$$
+\gamma(r) = \begin{cases} 0, & r < \alpha \\ \dfrac{r-\alpha}{\beta-\alpha}, & \alpha \le r \le \beta \\ 1, & r > \beta \end{cases}
+\qquad
+\theta_k^{\text{YaRN}} = \big(1-\gamma(r_k)\big)\frac{\theta_k}{s} + \gamma(r_k)\,\theta_k .
+$$
+
+</KeyEq>
+
+论文对 LLaMA 系列推荐 $\alpha=1$、$\beta=32$：转不满 1 圈的维度完全插值，转了超过 32 圈的维度完全不动。
+
+YaRN 的第二个组成部分是**注意力温度**。插值让位置编码变得更“密”，同时更长的上下文也意味着 softmax 在更多的键上分配概率，注意力分布的熵会上升、变得更平。YaRN 在 softmax 之前把 logits 乘以 $1/t$，并通过实验拟合出
+
+$$
+\sqrt{1/t} = 0.1\ln s + 1 .
+$$
+
+实现时不需要改注意力 kernel：把 $q$ 和 $k$ 各乘以 $\sqrt{1/t}$ 即可（RoPE 的旋转不改变向量长度，这个缩放可以并入旋转因子）。$s=32$ 时 $\sqrt{1/t}\approx1.35$，logits 放大约 1.81 倍，让注意力重新变得更“尖”。YaRN 论文报告，它达到同样效果所需的继续训练 token 数约为此前方法的 1/10、训练步数约为 1/2.5。
+
+<CodeFile path="src/llms_from_scratch/architecture/rope_scaling.py" region="yarn" />
+
+<Plot label="三种方法对每个频率的缩放比例 θ'_k / θ_k（d = 128，s = 16，L = 4096）" x={[0, 63]} y={[0.04, 1.2]} logY xLabel="维度对编号 k（左高频，右低频）" yLabel="θ' / θ" series={[
+  { fn: () => 1 / 16, label: 'PI', tone: 'accent2' },
+  { fn: (k) => Math.pow(16, (-2 * k) / 126), label: 'NTK-aware', tone: 'info' },
+  { fn: (k) => { const r = 4096 / (2 * Math.PI * Math.pow(10000, (2 * k) / 128)); const g = Math.min(1, Math.max(0, (r - 1) / 31)); return (1 - g) / 16 + g; }, label: 'YaRN', tone: 'accent' },
+]}>
+  <Fragment slot="caption">比例为 1 表示该维度不变（外推），为 $1/16$ 表示完全插值。PI 对所有维度一视同仁；NTK-aware 从 1 平滑地降到 $1/16$，但几乎每个维度都被改了一点；YaRN 让在 4096 内转了 32 圈以上的高频维度（左段）保持原样，让转不满一圈的低频维度（右段）完全插值，中间线性过渡。</Fragment>
+</Plot>
+
+`test_yarn_piecewise` 在 $d=128$、$s=16$、$L=4096$ 的设置下检查三段：高频维度与原频率相同，低频维度等于 PI 的结果，中间维度夹在两者之间。`rotary_factors` 把任意一组逆频率转换成与第三部分 `rope_frequencies` 相同格式的复数因子，因此这些缩放方法可以直接替换进 `GPT` 的 `freqs` 缓冲区。
+
+YaRN 已成为开源模型的标准做法。DeepSeek-V3 在 4K 预训练之后，用 YaRN（$s=40$、$\alpha=1$、$\beta=32$）分两个阶段各训练 1000 步，把上下文扩到 32K 再到 128K。Qwen3 原生支持 32K，推理时用 YaRN 因子 4 扩到 128K；gpt-oss 与 Kimi K2 的 `config.json` 中都写着因子为 32 的 YaRN。LLaMA 3.1 采用了一种思路相同的分段缩放（配置中的 `rope_type: llama3`，因子 8）。
+
+<Callout tone="warn" title="推理时的 YaRN 是静态的">
+大多数推理框架实现的是“静态” YaRN：无论输入多长，都使用同一个缩放因子。这意味着即使输入只有几千 token，也在用为 128K 准备的频率，短文本上可能有轻微损失。Qwen3 的文档因此建议只在确实需要长上下文时才开启 YaRN。另一种“动态”做法根据当前长度选择 $s$，但它会让同一个 token 在不同长度下的 KV Cache 不一致，与前缀缓存冲突。
+</Callout>
+
+## 滑动窗口注意力：让缓存不随长度增长
+
+位置外推解决了“看不懂远处的位置”，但全注意力的 KV Cache 仍与长度成正比。最直接的限制是**滑动窗口注意力**（sliding window attention，SWA）：位置 $t$ 只看最近的 $W$ 个位置 $(t-W, t]$。Mistral 7B（2023）对所有层使用 $W=4096$。
+
+只看 $W$ 个位置并不等于只有 $W$ 的感受野。第 1 层的位置 $t$ 汇聚了 $(t-W,t]$ 的信息；第 2 层的位置 $t$ 读取第 1 层 $(t-W,t]$ 处的表示，而它们各自又汇聚了再往前 $W$ 个位置——信息每过一层向后传播 $W$ 个位置，$L$ 层后理论感受野约为 $L\cdot W$。Mistral 7B 的 32 层 × 4096 约等于 131K。当然，信息经过多层逐次接力会衰减，这个“理论感受野”远不如全注意力可靠。
+
+窗口注意力的推理实现非常简洁：KV Cache 只需 $W$ 个槽位，第 $t$ 个 token 写入槽位 $t \bmod W$，覆盖恰好滑出窗口的那个旧位置。这就是 Mistral 的**环形缓冲区缓存**（rolling buffer cache）。由于 RoPE 在写入缓存前已经作用于键，缓存里的顺序无关紧要：softmax 对键的排列是不变的。
+
+<CodeFile path="src/llms_from_scratch/architecture/window_cache.py" region="ring" />
+
+<Diagram width={660} height={320} label="滑动窗口加注意力汇聚点的掩码，以及对应的环形缓存槽位">
+  <Matrix x={50} y={50} rows={10} cols={10} cell={20} rowLabels={['0','1','2','3','4','5','6','7','8','9']} colLabels={['0','1','2','3','4','5','6','7','8','9']} tone="muted" highlight={[
+    { cells: Array.from({ length: 10 }, (_, i) => Array.from({ length: 10 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && j > i - 4), tone: 'accent' },
+    { cells: Array.from({ length: 10 }, (_, i) => [i, 0]), tone: 'accent2' },
+  ]} />
+  <Text x={158} y={16} label="键位置 j" size="sm" tone="muted" />
+  <Text x={18} y={158} label="查询 i" size="sm" tone="muted" rotate={-90} />
+  <Legend x={20} y={300} items={[{ label: '窗口内（W = 4）', tone: 'accent' }, { label: '汇聚点（n_sink = 1）', tone: 'accent2' }, { label: '不可见', tone: 'muted' }]} gap={150} />
+  <Text x={480} y={60} label="生成位置 9 时的缓存槽位" size="sm" bold />
+  <Box x={330} y={90} w={52} h={44} label="0" sub="sink" tone="accent2" mono />
+  <Box x={400} y={90} w={52} h={44} label="9" sub="槽 0" tone="accent" mono />
+  <Box x={458} y={90} w={52} h={44} label="6" sub="槽 1" tone="accent" mono />
+  <Box x={516} y={90} w={52} h={44} label="7" sub="槽 2" tone="accent" mono />
+  <Box x={574} y={90} w={52} h={44} label="8" sub="槽 3" tone="accent" mono />
+  <Text x={480} y={160} label="位置 t 写入环形槽 (t − 1) mod 4" size="sm" tone="muted" />
+  <Text x={480} y={184} label="位置 9 覆盖了位置 5" size="sm" tone="muted" />
+  <Text x={480} y={230} label="缓存始终 1 + 4 = 5 个槽位，" size="sm" />
+  <Text x={480} y={252} label="与已生成长度无关" size="sm" />
+  <Fragment slot="caption">左：第 $i$ 行是位置 $i$ 的查询能看到的键。深色对角带是宽度 4 的滑动窗口，第 0 列是永久保留的汇聚点。右：生成到位置 9 时的缓存内容。汇聚点占固定槽位，其余位置轮流写入 4 个环形槽位，位置 9 覆盖了刚滑出窗口的位置 5。</Fragment>
+</Diagram>
+
+测试 `test_ring_cache_decode_matches_masked_attention` 逐个 token 写入环形缓存、用当前查询读取，结果与对整段序列施加窗口掩码的注意力完全一致，而缓存始终只有 $W+n_{\text{sink}}$ 个槽位。
+
+纯粹的窗口注意力在需要精确回忆远处内容的任务上表现较差，所以后来的模型大多**交替**使用局部与全局层：Gemma 2 让窗口 4096 的局部层与全局层 1:1 交替；Gemma 3 改为 5 个窗口 1024 的局部层配 1 个全局层，KV Cache 主要由少数全局层决定；gpt-oss 让窗口仅 128 的局部层与全注意力层交替。设全局层占比为 $\rho$、窗口为 $W$，长度 $T$ 时的缓存约为全注意力的 $\rho + (1-\rho)W/T$。Gemma 3 在 128K 上下文时 $\rho=1/6$、$W/T\approx0.008$，缓存约为全注意力的 17%。这种“局部 + 全局”的混合思路与[线性注意力、状态空间模型与混合架构](/architecture/linear-attention/)中的线性/全注意力混合一脉相承。
+
+## 注意力汇聚点
+
+Xiao 等（2023）在研究流式推理时发现了一个奇怪的现象：如果用窗口缓存，一旦最开头的几个 token 被挤出缓存，模型的困惑度会立刻爆炸——即使那几个 token 只是一个换行符或 `<s>`，在语义上毫不重要。把注意力权重画出来会发现，在大多数层和头中，**相当大比例的注意力都落在第一个 token 上**。他们称之为注意力汇聚点（attention sink）。
+
+原因在于 softmax 的约束：一行注意力权重之和必须为 1。当一个头在当前位置“没什么需要看的”时，它仍得把概率分到某处。训练中，序列开头的 token 对所有后续位置都可见，模型便学会把它当作一个“垃圾桶”，把多余的注意力倒进去，并让它的值向量接近零，从而不影响输出。一旦这个垃圾桶被移出缓存，多余的概率被迫分配到有意义的 token 上，表示就被破坏了。
+
+**StreamingLLM** 的修复因此极其简单：永久保留最开始的 4 个 token 作为汇聚点，再加上最近的窗口，即可在不做任何训练的情况下稳定处理数百万 token 的流式输入（当然，窗口外的内容仍会被遗忘）。我们的 `SinkRingCache` 用 `n_sink` 个固定槽位实现了这一点。StreamingLLM 原文还在缓存内部重新分配位置编号（按缓存中的顺序而非原文位置施加 RoPE），以避免窗口外推，这一细节我们的简化版没有实现。
+
+既然模型需要一个“可以不看任何东西”的出口，更干净的办法是在结构中直接提供它。gpt-oss 为每个头学习一个汇聚 logit $z'_h$，加在 softmax 的分母上：
+
+$$
+a_{t,s} = \frac{\exp(z_{t,s})}{\sum_{u\le t}\exp(z_{t,u}) + \exp(z'_h)} ,
+$$
+
+于是一行权重之和可以小于 1。DeepSeek-V4 的注意力也采用了同样形式的可学习汇聚 logit。Qwen 团队的门控注意力（gated attention）从另一个角度解决问题：在注意力输出上乘一个依赖输入的 sigmoid 门，头可以直接把输出“关掉”，实验中注意力汇聚现象基本消失，长上下文外推也更好，Qwen3-Next 采用了这一设计。
+
+## 长上下文的数据与训练
+
+位置缩放与窗口结构只是“让模型有能力”读长文本，真正的长上下文能力要靠训练获得。目前的主流做法是**渐进式扩展**：先在短序列上完成大部分预训练，最后用相对很少的计算逐级拉长序列。
+
+- LLaMA 3.1 在 8K 上完成主体预训练后，分六个阶段把上下文逐步增加到 128K，长上下文阶段共使用约 8000 亿 token；每一阶段都要求短文本评测不退化、“大海捞针”测试满分后才进入下一阶段。
+- DeepSeek-V3 预训练长度为 4K，随后用 YaRN 进行两阶段扩展（32K、128K），每阶段 1000 步。
+- DeepSeek-V4 的序列长度按 4K → 16K → 64K → 1M 逐级增长，这是它支持百万 token 上下文的训练基础。
+- Qwen3 在预训练的最后一个阶段用长文本数据把 RoPE 底数从 10000 提高到 1000000（ABF），并在推理时配合 YaRN 与双块注意力（DCA）进一步外推。
+
+数据方面有几个要点。长文档本身是稀缺的：网页的中位数长度只有一千多 token，长上下文阶段需要对书籍、论文、代码仓库（按依赖关系拼接整个仓库）、长对话等来源**上采样**，同时保留足够的短文本以免短任务退化。**打包**多个短文档成一条长序列时，若不加文档边界掩码，模型会学着在毫不相关的文档之间建立注意力，这对长上下文训练是有害的，因此长序列阶段通常使用文档内因果掩码（intra-document masking）。评估方面，“大海捞针”（needle in a haystack）只测试检索单个事实，已经过于简单；RULER 等基准加入了多针检索、变量追踪、聚合等任务，更能区分“窗口很长”与“真正会用长窗口”。
+
+最后，长序列训练的系统代价同样不可忽视：128K 序列的注意力激活放不进单卡，需要把序列维切到多张卡上（上下文并行 / 序列并行），见[张量并行与序列并行](/distributed/tensor-parallel/)；FlashAttention 让注意力的显存从 $O(T^2)$ 降到 $O(T)$，见[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)。
+
+## 小结
+
+- RoPE 第 $k$ 对维度的波长 $\lambda_k = 2\pi b^{2k/d}$。波长超过训练长度的低频维度在外推时会遇到没见过的角度，这是直接外推失败的原因。
+- PI 把所有频率除以 $s$，简单但损害了高频维度的局部分辨率；NTK-aware 改底数 $b'=bs^{d/(d-2)}$，高频不变、最低频恰好插值 $s$ 倍。
+- YaRN 按维度在训练长度内转的圈数 $r_k$ 分段：多于 $\beta$ 圈不动，少于 $\alpha$ 圈完全插值，中间线性过渡；再用 $\sqrt{1/t}=0.1\ln s+1$ 修正注意力温度。
+- 滑动窗口注意力配环形缓存，让 KV Cache 大小与长度无关；多层叠加的感受野约为 $L\cdot W$。现代模型多用局部层与全局层交替。
+- 注意力汇聚点源自 softmax 必须归一化：模型把多余注意力倒给开头的 token。保留少量 sink token、学习一个分母中的汇聚 logit，或给注意力输出加门控，都能处理这一现象。
+- 长上下文能力靠短序列预训练加渐进式扩展获得，需要上采样长文档、文档内掩码与更难的评估基准。
+
+## 练习
+
+1. $d=128$、$b=10000$、训练长度 $L=4096$。有多少对维度的波长超过训练长度？若 $b=500000$ 呢？
+
+<details>
+<summary>答案</summary>
+
+条件 $2\pi b^{2k/d} > 4096$，即 $2k/d > \log_b(4096/2\pi)$。$4096/2\pi\approx651.9$。$b=10000$ 时 $\log_{10000}651.9 = \lg651.9/4\approx0.7035$，$k > 0.7035\times64\approx45.0$，所以 $k=46,\dots,63$ 共 18 对。$b=500000$ 时 $\log_{500000}651.9 = \ln651.9/\ln500000\approx6.48/13.12\approx0.494$，$k>31.6$，即 $k=32,\dots,63$ 共 32 对，一半的维度对在训练长度内都转不满一圈。更大的底数让更多维度专注于长程位置，也意味着更多维度在扩展时需要插值。
+
+</details>
+
+2. 推导：在 NTK-aware 缩放下，第 $k$ 对维度的插值比例 $\theta'_k/\theta_k$ 是多少？验证 $k=0$ 与 $k=d/2-1$ 时的值。
+
+<details>
+<summary>答案</summary>
+
+$\theta'_k/\theta_k = (b'/b)^{-2k/d} = \big(s^{d/(d-2)}\big)^{-2k/d} = s^{-2k/(d-2)}$。$k=0$ 时为 $s^0=1$；$k=d/2-1$ 时指数为 $-(d-2)/(d-2)=-1$，比例为 $1/s$。两端条件都满足，中间按 $k$ 的指数平滑过渡。
+
+</details>
+
+3. 一个 32 层模型，每层都是窗口 $W=4096$ 的滑动窗口注意力，$h_{kv}=8$、$d_h=128$、BF16。生成到第 100 万个 token 时，每条请求的 KV Cache 是多少？与全注意力相比呢？
+
+<details>
+<summary>答案</summary>
+
+窗口注意力只缓存 4096 个位置：$2\times4096\times32\times8\times128\times2 = 536{,}870{,}912$ 字节，即 512 MiB，与生成长度无关。全注意力需要缓存 $10^6$ 个位置，约为 $10^6/4096\approx244$ 倍，约 122 GiB。代价是：超过约 $32\times4096\approx131$K 的内容在理论上已无法影响当前 token，实际上远早于此就会遗忘。
+
+</details>
+
+4. 若在 YaRN 中忘记做温度修正（$t=1$），而扩展倍数 $s=32$，注意力分布会发生什么变化？为什么修正可以放到 $q$ 和 $k$ 上而不必改 kernel？
+
+<details>
+<summary>答案</summary>
+
+插值后更多的位置挤在相近的角度上，同时上下文更长、参与 softmax 的键更多，注意力分布会变得比训练时更平（熵更高），模型难以把注意力集中到关键 token 上，长文本困惑度变差。温度修正把 logits 乘以 $1/t = (0.1\ln32+1)^2\approx1.81$，让分布变尖。由于 $q^\top k$ 是双线性的，把 $q$ 与 $k$ 各乘 $\sqrt{1/t}$ 等价于 logits 乘 $1/t$；RoPE 是正交旋转，不改变长度，这个标量可以直接并入旋转因子（复数因子乘以 $\sqrt{1/t}$），无需改动注意力 kernel。
+
+</details>
+
+5. 有人认为“注意力汇聚点说明第一个 token 有特殊语义”。设计一个实验否定或支持这个说法。
+
+<details>
+<summary>答案</summary>
+
+StreamingLLM 的做法是：把序列开头的 4 个 token 换成没有语义的换行符，再在窗口缓存中保留它们。若这样仍能恢复困惑度，就说明起作用的是“位置在最前、对所有后续 token 都可见”，而不是语义。他们的实验正是如此：用 `\n` 作为汇聚点同样有效。另一个支持性实验是在预训练时加入一个专门的可学习汇聚 token，模型只需这一个 token 就能稳定，说明汇聚是 softmax 归一化带来的结构需求。
+
+</details>
+
+## 参考文献
+
+- Su et al. [RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864). 2021.
+- Chen et al. [Extending Context Window of Large Language Models via Positional Interpolation](https://arxiv.org/abs/2306.15595). 2023.
+- bloc97. [NTK-Aware Scaled RoPE](https://www.reddit.com/r/LocalLLaMA/comments/14lz7j5/ntkaware_scaled_rope_allows_llama_models_to_have/). 2023.
+- Peng et al. [YaRN: Efficient Context Window Extension of Large Language Models](https://arxiv.org/abs/2309.00071). 2023.
+- Rozière et al. [Code Llama](https://arxiv.org/abs/2308.12950). 2023；Xiong et al. [Effective Long-Context Scaling of Foundation Models](https://arxiv.org/abs/2309.16039). 2023（ABF）.
+- Jiang et al. [Mistral 7B](https://arxiv.org/abs/2310.06825). 2023（滑动窗口与环形缓存）.
+- Gemma Team. [Gemma 2](https://arxiv.org/abs/2408.00118). 2024；[Gemma 3 Technical Report](https://arxiv.org/abs/2503.19786). 2025.
+- Xiao et al. [Efficient Streaming Language Models with Attention Sinks](https://arxiv.org/abs/2309.17453). 2023.
+- Qiu et al. [Gated Attention for Large Language Models: Non-linearity, Sparsity, and Attention-Sink-Free](https://arxiv.org/abs/2505.06708). 2025.
+- OpenAI. [gpt-oss-120b & gpt-oss-20b Model Card](https://arxiv.org/abs/2508.10925). 2025.
+- Llama Team. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783). 2024（§3.4.2 长上下文预训练）.
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024（§4.3 长上下文扩展）；[DeepSeek-V4](https://arxiv.org/abs/2606.19348). 2026.
+- Qwen Team. [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388). 2025.
+- Hsieh et al. [RULER: What's the Real Context Size of Your Long-Context Language Models?](https://arxiv.org/abs/2404.06654) 2024.

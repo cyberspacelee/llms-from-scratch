@@ -2,7 +2,274 @@
 title: 线性注意力、状态空间模型与混合架构
 description: 把注意力改写成递推：线性注意力、Mamba、DeltaNet 与门控 DeltaNet，以及 Qwen3-Next、Kimi Linear 式的混合层设计。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/architecture/linear_attention.py
+  - tests/architecture/test_linear_attention.py
 ---
 
-本章正在撰写。
+前两章的方法都在“少读一些历史”，但历史本身仍以 KV Cache 的形式完整保存（或者按固定比例压缩），推理状态随上下文长度线性增长。循环神经网络（RNN）走的是另一个极端：无论读了多少 token，状态都是一个固定大小的向量，每步的计算与显存都是常数。RNN 的问题是训练无法在序列维上并行，而且固定大小的状态很难记住远处的精确信息。
+
+本章要说明的是，这两个极端之间存在一个连续的谱系。只要把 softmax 换成一个可以分解的相似度函数，注意力就能被**严格地**改写成一个以矩阵为状态的 RNN：训练时用类似注意力的并行形式，推理时用递推形式，二者数学上等价。在这个框架下，2020 年的线性注意力、RetNet 与 GLA 的衰减门、Mamba 与 Mamba-2 的选择性状态空间、DeltaNet 与门控 DeltaNet 的增量规则，都只是“状态怎样更新”的不同选择。最后我们讨论为什么 2025 年的模型（Qwen3-Next、Kimi Linear）普遍采用 3:1 的线性/全注意力混合，而不是纯线性结构。
+
+## 从 softmax 到核函数
+
+把因果注意力对单个查询的输出写成加权平均的形式：
+
+$$
+o_t = \frac{\sum_{s\le t}\operatorname{sim}(q_t,k_s)\,v_s}{\sum_{s\le t}\operatorname{sim}(q_t,k_s)},\qquad \operatorname{sim}(q,k)=\exp\!\big(q^\top k/\sqrt{d}\big).
+$$
+
+softmax 注意力的相似度是指数函数，它无法分解成“只依赖 $q$ 的部分”乘以“只依赖 $k$ 的部分”。Katharopoulos 等（2020）的想法是用一个特征映射 $\phi$ 把相似度换成内积：$\operatorname{sim}(q,k)=\phi(q)^\top\phi(k)$，他们取 $\phi(x)=\mathrm{elu}(x)+1$ 以保证非负。于是分子变成
+
+$$
+\sum_{s\le t}\big(\phi(q_t)^\top\phi(k_s)\big)v_s
+= \sum_{s\le t} v_s\,\phi(k_s)^\top\phi(q_t)
+= \underbrace{\Big(\sum_{s\le t} v_s\,\phi(k_s)^\top\Big)}_{S_t}\phi(q_t).
+$$
+
+第一个等号只是交换了标量与向量的位置，第二个等号是矩阵乘法的结合律：$\phi(q_t)$ 与 $s$ 无关，可以提到求和号外面。$S_t\in\mathbb R^{d_v\times d_k}$ 是所有历史 $v_s\phi(k_s)^\top$ 的累加。分母同理为 $z_t^\top\phi(q_t)$，其中 $z_t=\sum_{s\le t}\phi(k_s)$。下文为了记号简洁，把 $\phi(q),\phi(k)$ 直接记作 $q,k$。
+
+### 两种等价形式
+
+由此得到线性注意力的**递推形式**：
+
+<KeyEq label="线性注意力的递推形式">
+
+$$
+S_t = S_{t-1} + v_t k_t^\top,\qquad o_t = S_t\, q_t .
+$$
+
+</KeyEq>
+
+这正是一个 RNN：状态 $S_t$ 是一个 $d_v\times d_k$ 的矩阵，每步做一次秩 1 更新（“写入”）和一次矩阵—向量乘法（“读取”），计算与显存都与 $t$ 无关。从关联记忆的角度看，$v_tk_t^\top$ 把“键 $k_t$ 对应值 $v_t$”写进记忆，$S_tq_t=\sum_s v_s(k_s^\top q_t)$ 按查询与每个键的相似度把值读出来。
+
+把所有位置的输出叠在一起，又得到与注意力形状相同的**并行形式**：
+
+$$
+O = \big((QK^\top)\odot M\big)V ,
+$$
+
+$M$ 是下三角的因果掩码（含对角线为 1）。与 softmax 注意力相比，唯一的区别是没有逐行的 softmax，所以 $QK^\top$ 的每个元素就是最终的权重。并行形式的计算量是 $O(T^2d)$，递推形式是 $O(Td^2)$。训练时序列长、要求并行，用前者（或下面的分块形式）；推理时逐 token 生成，用后者。
+
+<CodeFile path="src/llms_from_scratch/architecture/linear_attention.py" region="parallel_recurrent" />
+
+测试 `test_parallel_equals_recurrent_normalized` 用 $\phi=\mathrm{elu}+1$ 与原始论文的分母归一化，断言两种形式的输出在浮点误差内一致。
+
+### 分块形式：训练时的折中
+
+并行形式需要 $T\times T$ 的矩阵，递推形式需要 $T$ 步串行。实际的训练 kernel 采用**分块**（chunkwise）形式：把序列切成长度为 $C$ 的块，块内用并行形式（$C\times C$ 的小矩阵，适合 Tensor Core），块间只传递一个 $d_v\times d_k$ 的状态。对块 $[c, c+C)$ 内的位置 $t$，
+
+$$
+o_t = \underbrace{S_{c-1}\,q_t}_{\text{inter-chunk}} + \underbrace{\sum_{c\le s\le t}(k_s^\top q_t)\,v_s}_{\text{intra-chunk}},\qquad
+S_{c+C-1} = S_{c-1} + \sum_{s=c}^{c+C-1} v_s k_s^\top .
+$$
+
+前一项读取之前所有块累积的状态，后一项是块内的小型因果注意力。总计算量为 $O(TCd + Td^2)$，串行步数只有 $T/C$。`linear_attention_chunked` 实现了带衰减的版本（衰减的处理见下一节），测试 `test_chunked_equals_recurrent` 对块大小 1、4、5、13 都检查了与递推形式的一致性——块大小不整除序列长度时也成立。FlashLinearAttention 等库中的 kernel 就是这个算法的高效实现。
+
+## 遗忘：衰减与门控
+
+朴素的线性注意力有一个明显缺陷：$S_t$ 只加不减，所有历史以相同的权重永远留在状态里。状态的容量是有限的（$d_v\times d_k$ 个数），不断写入只会让读出的内容越来越混杂。早期的线性注意力在语言建模上明显落后于 softmax 注意力，这是主要原因之一。
+
+解决办法是在写入之前先让旧状态衰减：
+
+<KeyEq label="门控线性注意力">
+
+$$
+S_t = \alpha_t\, S_{t-1} + v_t k_t^\top,\qquad \alpha_t\in(0,1].
+$$
+
+</KeyEq>
+
+RetNet（2023）取一个与输入无关的常数 $\alpha_t=\gamma$（每个头一个），GLA（门控线性注意力，2023）、Mamba-2 等让 $\alpha_t$ 由当前输入计算——模型可以在遇到新段落时“清空”记忆，在需要保持时让 $\alpha_t\approx1$。展开递推可以得到对应的并行形式：$s$ 时刻写入的内容到 $t$ 时刻被乘了 $\prod_{r=s+1}^t\alpha_r$，所以
+
+$$
+O = \big((QK^\top)\odot D\big)V,\qquad D_{ts} = \begin{cases}\prod_{r=s+1}^{t}\alpha_r, & s\le t\\ 0, & s>t.\end{cases}
+$$
+
+$D$ 取代了 0/1 的因果掩码，变成一个“随距离衰减”的掩码。实现时用累积对数 $b_t=\sum_{r\le t}\ln\alpha_r$ 计算 $D_{ts}=\exp(b_t-b_s)$，避免连乘下溢；这也是分块形式中块间状态与块内位置的衰减系数的来源。测试 `test_parallel_equals_recurrent_with_decay` 验证带衰减的两种形式等价。
+
+## 状态空间模型：Mamba 的视角
+
+状态空间模型（state space model，SSM）来自控制理论，描述一个连续时间系统 $h'(t)=Ah(t)+Bx(t)$、$y(t)=Ch(t)$。以步长 $\Delta$ 离散化后，得到递推 $h_t=\bar Ah_{t-1}+\bar Bx_t$、$y_t=Ch_t$，其中 $\bar A=\exp(\Delta A)$。S4（2021）等早期 SSM 的 $A,B,C,\Delta$ 不随输入变化（线性时不变），整个系统等价于一个很长的卷积，可以用 FFT 并行训练；但时不变也意味着它无法根据内容决定“记住什么”。
+
+Mamba（Gu & Dao 2023）的关键改动是**选择性**：让 $\Delta_t$、$B_t$、$C_t$ 都由当前输入计算。$\Delta_t$ 大时，$\exp(\Delta_tA)$ 小（$A$ 为负），旧状态被快速遗忘、当前输入被大量写入；$\Delta_t$ 小时则相反。这样一来卷积形式不再成立，Mamba 用一个硬件感知的并行扫描（parallel scan）kernel 来训练。
+
+Mamba-2（Dao & Gu 2024）把 $A$ 限制为一个标量乘单位阵，并指出此时 SSM 与门控线性注意力是**同一个东西**，称为状态空间对偶（state space duality，SSD）。对单个头，令状态 $h_t\in\mathbb R^{P\times N}$（$P$ 个输入通道、状态维 $N$），
+
+$$
+h_t = \underbrace{e^{\Delta_t a}}_{\alpha_t}\,h_{t-1} + \underbrace{(\Delta_t x_t)}_{v_t}\,\underbrace{B_t^\top}_{k_t^\top},\qquad y_t = h_t\,\underbrace{C_t}_{q_t}.
+$$
+
+逐项对照即可看出：$C_t$ 就是查询，$B_t$ 就是键，$\Delta_tx_t$ 就是值，$e^{\Delta_ta}$ 就是衰减门。
+
+<CodeFile path="src/llms_from_scratch/architecture/linear_attention.py" region="ssm" />
+
+测试 `test_mamba2_is_gated_linear_attention` 按这个对应关系把 Mamba-2 的扫描与门控线性注意力的递推逐元素比较，二者完全一致。这个等价性的意义在于：SSM 社区的扫描算法与线性注意力社区的分块算法可以互相借用，Mamba-2 正是用分块矩阵乘法实现了比 Mamba 快数倍的训练。
+
+## DeltaNet：从累加到覆盖
+
+即使有了遗忘门，线性注意力的写入方式仍然是**累加**。从关联记忆的角度看问题更清楚：用状态检索键 $k_j$ 对应的值，
+
+$$
+S_t k_j = \sum_{s\le t} v_s\,(k_s^\top k_j) = v_j\,\|k_j\|^2 + \sum_{s\ne j} v_s\,(k_s^\top k_j).
+$$
+
+只有当所有键两两正交时，检索才是精确的；而 $d_k$ 维空间中最多只有 $d_k$ 个正交向量，写入的 token 一多，第二项的“串扰”就不可避免。更糟的是，如果同一个键先后写入两个不同的值，状态里存的是二者之和，而不是最新的那个。
+
+DeltaNet（Schlag 等 2021；Yang 等 2024 给出了可并行的训练算法）把写入改成**先读后改**：先用当前状态预测 $k_t$ 对应的值 $S_{t-1}k_t$，再把预测误差写回去：
+
+<KeyEq label="增量规则（delta rule）">
+
+$$
+S_t = S_{t-1} + \beta_t\big(v_t - S_{t-1}k_t\big)k_t^\top = S_{t-1}\big(I - \beta_t k_tk_t^\top\big) + \beta_t v_tk_t^\top .
+$$
+
+</KeyEq>
+
+$\beta_t\in[0,1]$ 是写入强度，$k_t$ 经过 L2 归一化。这个更新恰好是对在线回归损失 $\frac12\|Sk_t-v_t\|^2$ 关于 $S$ 做一步学习率为 $\beta_t$ 的梯度下降：梯度是 $(Sk_t-v_t)k_t^\top$。当 $\beta_t=1$、$\|k_t\|=1$ 时，更新后 $S_tk_t=v_t$ 精确成立——旧值被完全覆盖。
+
+用一个三步的例子对比两种写入。键取单位向量：第 1 步写入 $(e_0, v=(1,0))$，第 2 步写入 $(e_1, v=(0,1))$，第 3 步再次写入 $(e_0, v=(5,5))$，然后用 $e_0$ 查询。线性注意力返回 $(1,0)+(5,5)=(6,5)$，两次写入叠加在一起；DeltaNet 第 3 步先读出旧值 $(1,0)$，误差为 $(4,5)$，写回后状态对 $e_0$ 的值变成 $(5,5)$，旧值被覆盖。这就是测试 `test_delta_rule_overwrites_instead_of_accumulating`。
+
+<Diagram width={700} height={230} label="线性注意力与 DeltaNet 的状态更新对比">
+  <Box x={20} y={90} w={100} h={50} label="Sₜ₋₁" sub="d_v × d_k" tone="info" />
+  <Region x={150} y={10} w={250} h={100} title="线性注意力：累加" />
+  <Box x={170} y={45} w={210} h={44} label="Sₜ₋₁ + vₜ kₜᵀ" tone="accent2" />
+  <Region x={150} y={120} w={250} h={100} title="门控 DeltaNet：衰减 + 纠错" />
+  <Box x={160} y={152} w={110} h={50} label="预测" sub="S k_t" tone="neutral" />
+  <Box x={280} y={152} w={110} h={50} label="写回误差" sub="β (v_t − S k_t)" tone="accent" />
+  <Box x={450} y={90} w={100} h={50} label="Sₜ" sub="d_v × d_k" tone="info" />
+  <Box x={590} y={90} w={90} h={50} label="oₜ = Sₜ qₜ" size="sm" tone="strong" />
+  <Arrow from={[120, 115]} via={[[140, 115], [140, 67]]} to={[170, 67]} />
+  <Arrow from={[120, 115]} via={[[140, 115], [140, 177]]} to={[160, 177]} />
+  <Arrow from={[270, 177]} to={[280, 177]} />
+  <Arrow from={[380, 67]} via={[[425, 67], [425, 105]]} to={[450, 105]} tone="accent2" />
+  <Arrow from={[390, 177]} via={[[425, 177], [425, 125]]} to={[450, 125]} tone="accent" />
+  <Arrow from={[550, 115]} to={[590, 115]} />
+  <Fragment slot="caption">状态是一个固定大小的矩阵，每步一次写入、一次读出。线性注意力直接把 $v_tk_t^\top$ 加进去；门控 DeltaNet 先把旧状态乘以遗忘门 $\alpha_t$，再用旧状态预测 $k_t$ 对应的值，只把预测误差写回，同一个键再次出现时新值会覆盖旧值。</Fragment>
+</Diagram>
+
+**门控 DeltaNet**（Gated DeltaNet，Yang 等 2025）把衰减门与增量规则结合：
+
+$$
+S_t = \alpha_t\,S_{t-1}\big(I-\beta_tk_tk_t^\top\big) + \beta_t v_tk_t^\top .
+$$
+
+$\alpha_t$ 负责快速清空不再需要的记忆，$\beta_t$ 负责精确地改写特定的键。两种机制互补：只有门控时无法精确改写，只有增量规则时无法整体遗忘。
+
+<CodeFile path="src/llms_from_scratch/architecture/linear_attention.py" region="delta" />
+
+测试 `test_gated_delta_with_unit_gate_equals_delta` 检查两个边界：$\alpha_t\equiv1$ 时退化为 DeltaNet；$\alpha_t\equiv0$ 时状态只剩当前一步的写入。我们这里只实现了递推形式；增量规则的并行训练需要把一串 $(I-\beta kk^\top)$ 的乘积写成 WY 表示（一种 Householder 乘积的紧凑形式），再在分块内用矩阵乘法计算，这是 DeltaNet 训练 kernel 的核心难点，超出了本章范围。
+
+Kimi Linear（2025）的 **KDA**（Kimi Delta Attention）进一步把标量门 $\alpha_t$ 换成逐通道的对角门 $\operatorname{diag}(\alpha_t)$，让状态的不同维度以不同速度遗忘，并为这种“对角加低秩”的转移矩阵设计了专门的分块算法。
+
+## 混合架构
+
+线性注意力的状态大小固定，这既是优点也是根本局限。一个 $128\times128$ 的状态最多只能精确存储约 128 对正交的键值，而一段 100K token 的上下文中可能有上千个需要精确回忆的事实（变量名、数字、引用）。在“大海捞针”、多跳检索、上下文内复制等任务上，纯线性模型明显落后于全注意力。另一方面，全注意力的 KV Cache 随长度线性增长，计算随长度平方增长。
+
+2024—2025 年的答案是**层级混合**：大部分层用线性注意力（或 SSM），少数层保留全注意力。全注意力层负责精确检索，线性层负责廉价地建模局部与中程依赖。代表性的配置如下：
+
+- Jamba（AI21，2024）：Mamba 与注意力层 7:1 混合，并加入 MoE。
+- MiniMax-01（2025）：闪电注意力（一种线性注意力）与 softmax 注意力 7:1 混合，456B 总参数、45.9B 激活。值得一提的是，其后续的 MiniMax-M2（2025）又回到了全注意力，团队公开解释了线性/混合注意力在复杂推理与工程生态上的困难。
+- Qwen3-Next-80B-A3B（2025）：48 层，按“3 层门控 DeltaNet + 1 层门控注意力”重复 12 次。门控注意力 16 个查询头、2 个 KV 头、头维 256；门控 DeltaNet 层有 32 个值头、16 个查询/键头，头维 128。
+- Kimi Linear（2025）：KDA 与 MLA 按 3:1 混合，48B 总参数、3B 激活；报告 KV Cache 最多减少 75%，在 1M 上下文时解码吞吐最高提升约 6 倍。
+
+<Diagram width={700} height={170} label="Qwen3-Next 的 3:1 混合层排布">
+  <Box x={20} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={100} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={180} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={260} y={50} w={70} h={60} label="GA" sub="+ MoE" tone="accent" />
+  <Box x={350} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={430} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={510} y={50} w={70} h={60} label="GDN" sub="+ MoE" tone="info" />
+  <Box x={590} y={50} w={70} h={60} label="GA" sub="+ MoE" tone="accent" />
+  <Text x={680} y={80} label="…" />
+  <Region x={10} y={30} w={330} h={92} title="" />
+  <Text x={175} y={140} label="一个重复单元，共 12 个 = 48 层" size="sm" tone="muted" />
+  <Legend x={290} y={150} items={[{ label: '门控 DeltaNet：固定大小状态', tone: 'info' }, { label: '门控注意力：KV Cache', tone: 'accent' }]} gap={210} />
+  <Fragment slot="caption">每 4 层中只有 1 层是全注意力（GA），其 KV Cache 随长度增长；另外 3 层是门控 DeltaNet（GDN），每层只保存一个固定大小的状态。全注意力层负责精确检索，线性层以常数成本处理大部分的序列建模。</Fragment>
+</Diagram>
+
+用 Qwen3-Next 的公开配置可以算出混合带来的缓存收益。12 个门控注意力层，每层每 token 缓存 $2\times2\times256=1024$ 个数，BF16 下全模型每 token $12\times1024\times2=24$ KiB。36 个门控 DeltaNet 层的状态是 $36\times32\times128\times128\times2$ 字节，约 37.7 MB，与长度无关。若 48 层全部是同样的注意力层，每 token 需要 96 KiB。
+
+<Plot label="推理状态大小随上下文长度的变化（Qwen3-Next 尺寸，BF16，单条请求）" x={[0, 256]} y={[0, 26]} xLabel="上下文长度（千 token）" yLabel="显存（GB）" series={[
+  { fn: (t) => (48 * 1024 * 2 * t * 1024) / 1e9, label: '48 层全注意力', tone: 'accent2' },
+  { fn: (t) => (12 * 1024 * 2 * t * 1024 + 36 * 32 * 128 * 128 * 2) / 1e9, label: '3:1 混合', tone: 'accent' },
+  { fn: () => (36 * 32 * 128 * 128 * 2) / 1e9, label: '线性层状态（常数）', tone: 'info', dashed: true },
+]}>
+  <Fragment slot="caption">全注意力的缓存随长度线性增长，256K 时约 25.8 GB；3:1 混合只有四分之一的层有 KV Cache，256K 时约 6.5 GB，其中线性层的状态只占约 38 MB（虚线），在长上下文下可以忽略。代价是线性层在精确检索上较弱，需要由全注意力层弥补。</Fragment>
+</Plot>
+
+计算上也是同样的结构：线性层每 token 的计算与长度无关，只有全注意力层的计算随长度增长，因此长上下文 prefill 的注意力 FLOPs 也降为约四分之一。混合比例本身是一个经验选择：Qwen3-Next 与 Kimi Linear 的消融都指向 3:1 附近；比例再高（如 7:1）在检索类任务上开始掉点。Qwen3-Next 的注意力层还带有输出门（gated attention，见[长上下文：位置外推与滑动窗口](/architecture/long-context/)中关于注意力汇聚点的讨论），Kimi Linear 的 MLA 层则不使用位置编码（NoPE），把位置信息完全交给 KDA 层。
+
+最后要说明线性注意力的工程代价：推理时，线性层的状态不能像 KV Cache 那样按 token 分页、共享前缀（状态是整个前缀的“摘要”，不能截断复用到中间位置），这让前缀缓存与投机解码的回退都更复杂；训练 kernel 也远不如 FlashAttention 成熟。这些是 MiniMax-M2 回到全注意力时提到的现实考量，也是混合架构仍在演进中的原因。
+
+## 小结
+
+- 把 softmax 换成可分解的相似度 $\phi(q)^\top\phi(k)$，注意力就可以严格地改写成以矩阵为状态的 RNN：$S_t=S_{t-1}+v_tk_t^\top$，$o_t=S_tq_t$。
+- 线性注意力有三种等价形式：并行 $O(T^2d)$、递推 $O(Td^2)$、分块 $O(TCd+Td^2)$；训练用分块，推理用递推。
+- 衰减门 $S_t=\alpha_tS_{t-1}+v_tk_t^\top$ 让状态可以遗忘，对应的并行形式用衰减矩阵 $D_{ts}=\prod_{r=s+1}^t\alpha_r$ 代替因果掩码。
+- Mamba-2 的选择性 SSM 与门控线性注意力等价：$C_t$ 是查询、$B_t$ 是键、$\Delta_tx_t$ 是值、$e^{\Delta_ta}$ 是门。
+- DeltaNet 用增量规则 $S_t=S_{t-1}+\beta_t(v_t-S_{t-1}k_t)k_t^\top$ 覆盖而不是累加，相当于在线回归的一步梯度下降；门控 DeltaNet 再加衰减门，KDA 把门细化到每个通道。
+- 固定大小的状态难以精确检索，所以主流做法是 3:1 左右的线性/全注意力混合（Qwen3-Next、Kimi Linear），以四分之一左右的 KV Cache 获得接近全注意力的质量。
+
+## 练习
+
+1. 证明：对于带衰减门的线性注意力，递推形式 $S_t=\alpha_tS_{t-1}+v_tk_t^\top$、$o_t=S_tq_t$ 与并行形式 $O=((QK^\top)\odot D)V$ 等价。
+
+<details>
+<summary>答案</summary>
+
+由 $S_0=0$ 归纳展开：$S_t=\sum_{s\le t}\big(\prod_{r=s+1}^t\alpha_r\big)v_sk_s^\top$。于是 $o_t=S_tq_t=\sum_{s\le t}D_{ts}\,v_s(k_s^\top q_t)=\sum_{s}\big[(QK^\top)\odot D\big]_{ts}v_s$，因为 $(QK^\top)_{ts}=q_t^\top k_s$，且 $s>t$ 时 $D_{ts}=0$。右式正是并行形式第 $t$ 行。
+
+</details>
+
+2. 一个线性注意力层有 32 个头，$d_k=d_v=128$，BF16。它的推理状态有多大？同样头数与头维的 MHA 层在多长的上下文时 KV Cache 与之相等？
+
+<details>
+<summary>答案</summary>
+
+状态 $32\times128\times128\times2=1{,}048{,}576$ 字节，即 1 MiB。MHA 每 token 缓存 $2\times32\times128\times2=16$ KiB，所以在 64 个 token 时二者相等。超过几十个 token 之后，线性注意力的状态就远小于 KV Cache；但这 1 MiB 必须容纳整段上下文的全部信息，这正是它检索能力受限的根源。
+
+</details>
+
+3. 在增量规则中，若 $\|k_t\|\ne1$ 而 $\beta_t=1$，更新后 $S_tk_t$ 等于什么？为什么实现中要对 $k_t$ 做 L2 归一化？
+
+<details>
+<summary>答案</summary>
+
+$S_tk_t=S_{t-1}k_t-\beta_t(S_{t-1}k_t)\|k_t\|^2+\beta_tv_t\|k_t\|^2$。$\beta_t=1$ 时为 $S_{t-1}k_t(1-\|k_t\|^2)+v_t\|k_t\|^2$，只有 $\|k_t\|=1$ 时才等于 $v_t$。更严重的是，矩阵 $I-\beta_tk_tk_t^\top$ 在 $k_t$ 方向上的特征值为 $1-\beta_t\|k_t\|^2$，当 $\beta_t\|k_t\|^2>2$ 时其绝对值大于 1，状态会在多步后数值爆炸。归一化把这个特征值限制在 $[0,1]$，保证递推稳定。
+
+</details>
+
+4. 为什么纯线性注意力的模型很难完成“上下文内复制”任务（给出一段随机字符串，要求原样复述）？混合架构怎样缓解？
+
+<details>
+<summary>答案</summary>
+
+复制长度为 $n$ 的随机串需要在状态中精确存储约 $n\log V$ 比特的信息，并能按位置检索。固定大小的状态（例如每层 1 MiB）在 $n$ 增大后必然发生串扰，无法精确存下全部内容；即使容量足够，按位置检索也要求键之间近似正交。全注意力保留了每个 token 的 KV，可以按需精确检索任意位置。混合架构中，少数全注意力层承担检索，线性层处理其余建模，理论与实验（如 Jelassi 等 2024 关于复制任务的分析）都表明少量注意力层就足以恢复复制与检索能力。
+
+</details>
+
+5. Mamba-2 中若 $\Delta_t\to0$，状态更新会怎样？若 $\Delta_t\to\infty$（$a<0$）呢？用门控线性注意力的语言解释。
+
+<details>
+<summary>答案</summary>
+
+$\Delta_t\to0$ 时 $\alpha_t=e^{\Delta_ta}\to1$，值 $v_t=\Delta_tx_t\to0$：状态保持不变，当前输入几乎不被写入，相当于“跳过这个 token”。$\Delta_t\to\infty$ 时 $\alpha_t\to0$，旧状态被清空，而当前输入以很大的权重写入：相当于“忘掉过去，只记住现在”。选择性正是指模型能根据内容在这两种行为之间切换。
+
+</details>
+
+## 参考文献
+
+- Katharopoulos et al. [Transformers are RNNs: Fast Autoregressive Transformers with Linear Attention](https://arxiv.org/abs/2006.16236). 2020.
+- Sun et al. [Retentive Network](https://arxiv.org/abs/2307.08621). 2023；Yang et al. [Gated Linear Attention Transformers with Hardware-Efficient Training](https://arxiv.org/abs/2312.06635). 2023.
+- Gu et al. [Efficiently Modeling Long Sequences with Structured State Spaces](https://arxiv.org/abs/2111.00396)（S4）. 2021.
+- Gu & Dao. [Mamba: Linear-Time Sequence Modeling with Selective State Spaces](https://arxiv.org/abs/2312.00752). 2023；Dao & Gu. [Transformers are SSMs](https://arxiv.org/abs/2405.21060)（Mamba-2）. 2024.
+- Schlag et al. [Linear Transformers Are Secretly Fast Weight Programmers](https://arxiv.org/abs/2102.11174). 2021；Yang et al. [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484). 2024.
+- Yang, Kautz & Hatamizadeh. [Gated Delta Networks: Improving Mamba2 with Delta Rule](https://arxiv.org/abs/2412.06464). 2024.
+- Kimi Team. [Kimi Linear: An Expressive, Efficient Attention Architecture](https://arxiv.org/abs/2510.26692). 2025.
+- Qwen Team. [Qwen3-Next-80B-A3B 模型卡](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct). 2025.
+- Lieber et al. [Jamba: A Hybrid Transformer-Mamba Language Model](https://arxiv.org/abs/2403.19887). 2024.
+- MiniMax. [MiniMax-01: Scaling Foundation Models with Lightning Attention](https://arxiv.org/abs/2501.08313). 2025.
+- MiniMax. [Why Did MiniMax M2 End Up as a Full Attention Model?](https://huggingface.co/blog/MiniMax-AI/why-did-m2-end-up-as-a-full-attention-model). 2025.
+- Jelassi et al. [Repeat After Me: Transformers are Better than State Space Models at Copying](https://arxiv.org/abs/2402.01032). 2024.

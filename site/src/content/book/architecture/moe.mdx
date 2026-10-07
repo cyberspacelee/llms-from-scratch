@@ -2,7 +2,279 @@
 title: 混合专家 MoE
 description: 稀疏激活的路由、负载均衡损失、细粒度专家与共享专家（DeepSeekMoE），无辅助损失的负载均衡，以及 MoE 的训练与推理代价。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/architecture/moe.py
+  - tests/architecture/test_moe.py
 ---
 
-本章正在撰写。
+在[架构演进总览：从 Transformer 到 DeepSeek-V4](/architecture/evolution/) 的参数核算中，前馈网络占了一个稠密层约三分之二的参数。稠密模型有一个简单而严格的约束：每个参数都参与每个 token 的计算，前向 FLOPs 约为 $2N$（$N$ 为参数量）。想要更大的容量，就必须按比例付出更多的计算。混合专家（Mixture of Experts，MoE）打破了这个约束：把一个 FFN 换成 $E$ 个并列的 FFN（称为专家），每个 token 只由一个路由器挑选其中 $k$ 个来计算。总参数随 $E$ 增长，每 token 的计算只随 $k$ 增长。
+
+这个想法并不新。Shazeer 等（2017）在 LSTM 之间插入了上千个专家的稀疏门控层；GShard（2020）把 top-2 MoE 放进 Transformer，训练了 600B 参数的翻译模型；Switch Transformer（2021）把 $k$ 降到 1，展示了万亿参数级别的预训练加速。真正让 MoE 成为开源大模型主流的是 2024 年之后：Mixtral 8x7B、DeepSeekMoE 与 DeepSeek-V2/V3、Qwen3、Kimi K2、gpt-oss、LLaMA 4，旗舰模型几乎全是 MoE。本章从一个最小的 MoE 层开始，依次讨论路由函数、负载均衡损失的推导、容量因子与 token 丢弃、DeepSeekMoE 的细粒度专家与共享专家，以及 DeepSeek-V3 的无辅助损失负载均衡。专家分布在多张 GPU 上时的通信问题留给[专家并行与 all-to-all](/distributed/expert-parallel/)。
+
+## 稀疏 MoE 层
+
+### 路由与组合
+
+设 token 的隐藏状态为 $x\in\mathbb R^d$，有 $E$ 个专家 $\mathrm{FFN}_1,\dots,\mathrm{FFN}_E$，每个都是一个普通的 SwiGLU。路由器（router，也叫 gate）是一个 $E\times d$ 的矩阵，第 $i$ 行 $e_i$ 可以看作专家 $i$ 的“质心”。路由器为每个专家打分，选出分数最高的 $k$ 个，再把它们的输出按权重相加：
+
+<KeyEq label="Top-k MoE 层">
+
+$$
+s_i = \sigma\!\left(e_i^\top x\right),\qquad
+\mathcal T = \operatorname{TopK}(\{s_i\}, k),\qquad
+y = \sum_{i\in\mathcal T} g_i\,\mathrm{FFN}_i(x),\quad g_i = \frac{s_i}{\sum_{j\in\mathcal T}s_j}.
+$$
+
+</KeyEq>
+
+打分函数 $\sigma$ 有两种主流选择。**softmax**（GShard、Switch、Mixtral、Qwen3）让所有专家的分数构成一个概率分布；Mixtral 先选 top-$k$ 的 logits，再只在这 $k$ 个上做 softmax，这与“对全体做 softmax 再在被选中者之间重新归一化”是同一回事。**sigmoid**（DeepSeek-V3）让每个专家的分数独立地落在 $(0,1)$，再在选中的 $k$ 个之间归一化。在专家数很大（256 个）时，softmax 会让单个专家的分数被大量专家稀释，sigmoid 的独立打分更便于调节，也与下文的偏置调节配合得更好。DeepSeek-V4 又把打分函数换成 $\sqrt{\mathrm{softplus}(\cdot)}$。路由器梯度只经过被选中专家的 $g_i$ 回传，top-$k$ 的选择本身是离散、不可导的。
+
+<Diagram width={700} height={300} label="一个 top-2、8 专家的 MoE 层处理一个 token 的数据流">
+  <Box x={20} y={120} w={80} h={50} label="x" sub="(d)" />
+  <Box x={140} y={120} w={110} h={50} label="路由器" sub="E × d" tone="accent" />
+  <Box x={290} y={20} w={110} h={30} label="FFN₁" size="sm" tone="muted" />
+  <Box x={290} y={55} w={110} h={30} label="FFN₂  g = 0.62" size="sm" tone="accent" />
+  <Box x={290} y={90} w={110} h={30} label="FFN₃" size="sm" tone="muted" />
+  <Box x={290} y={125} w={110} h={30} label="FFN₄" size="sm" tone="muted" />
+  <Box x={290} y={160} w={110} h={30} label="FFN₅" size="sm" tone="muted" />
+  <Box x={290} y={195} w={110} h={30} label="FFN₆  g = 0.38" size="sm" tone="accent" />
+  <Box x={290} y={230} w={110} h={30} label="FFN₇" size="sm" tone="muted" />
+  <Box x={290} y={265} w={110} h={30} label="FFN₈" size="sm" tone="muted" />
+  <Box x={460} y={120} w={100} h={50} label="加权求和" tone="info" />
+  <Box x={600} y={120} w={80} h={50} label="y" sub="(d)" tone="strong" />
+  <Arrow from={[100, 145]} to={[140, 145]} />
+  <Arrow from={[250, 145]} via={[[270, 145], [270, 70]]} to={[290, 70]} tone="accent" />
+  <Arrow from={[250, 145]} via={[[270, 145], [270, 210]]} to={[290, 210]} tone="accent" />
+  <Arrow from={[400, 70]} via={[[430, 70], [430, 135]]} to={[460, 135]} tone="accent" />
+  <Arrow from={[400, 210]} via={[[430, 210], [430, 155]]} to={[460, 155]} tone="accent" />
+  <Arrow from={[560, 145]} to={[600, 145]} />
+  <Fragment slot="caption">路由器给 8 个专家打分，只有分数最高的两个（FFN₂、FFN₆）真正计算，其余 6 个专家的参数虽然在显存中，却不参与这个 token 的计算。输出是两个专家输出按重新归一化的门控权重 0.62 与 0.38 相加。</Fragment>
+</Diagram>
+
+### 实现：分发与合并
+
+最直接的实现是对每个 token 循环，这是我们的参考实现 `moe_reference`。真实实现必须按专家而不是按 token 组织计算：把所有被分给专家 $e$ 的 token 收集起来，作为一个小批量交给专家 $e$ 做一次矩阵乘法，再把结果按门控权重加回原位置。这对应两个操作：**分发**（dispatch，按专家收集 token）与**合并**（combine，按 token 汇总专家输出）。
+
+<CodeFile path="src/llms_from_scratch/architecture/moe.py" region="router" />
+
+路由器中有一个 `bias` 缓冲区，它只参与 top-$k$ 的选择，不参与门控权重的计算，用途见本章最后一节。
+
+<CodeFile path="src/llms_from_scratch/architecture/moe.py" region="forward" />
+
+`torch.where((r.indices == e) & r.kept)` 返回所有选了专家 $e$ 的 (token, 槽位) 对，`index_add_` 把加权后的专家输出累加回各自的 token。测试 `test_dispatch_matches_token_loop` 对 softmax 与 sigmoid 两种打分、有无共享专家四种组合，断言按专家分发的结果与逐 token 循环一致；`test_routing_picks_topk_and_gates_sum_to_one` 检查选出的专家确实是分数最高的 $k$ 个、门控权重之和为 1。
+
+在 GPU 上，“对每个专家循环”会启动 $E$ 次小矩阵乘法，效率很低。生产实现会先按专家编号对 token 排序，再用分组 GEMM（grouped GEMM）一次计算所有专家，MegaBlocks 等库把它写成块稀疏矩阵乘法；专家分布在多卡上时，分发与合并变成两次 all-to-all 通信。
+
+### 参数、计算与算术强度
+
+设单个专家的 SwiGLU 参数为 $3dd_e$。一个 MoE 层的总参数与每 token 激活参数分别是
+
+$$
+P_{\text{total}} = (E + E_s)\cdot 3dd_e + dE,\qquad
+P_{\text{active}} = (k + E_s)\cdot 3dd_e + dE ,
+$$
+
+$E_s$ 是共享专家数（下文介绍），$dE$ 是路由器。每 token 的前向 FLOPs 约为 $2P_{\text{active}}$，所以 MoE 用 $P_{\text{active}}$ 的计算换来了 $P_{\text{total}}$ 的容量。以 DeepSeek-V3 为例，每层 257 个专家共 11.3B 参数，而每 token 只用 9 个专家约 0.40B。
+
+这笔交易有三个隐藏成本。**显存**：所有专家都必须常驻显存（或至少在可快速访问的位置），671B 参数的模型即使只激活 37B，部署时也要放下 671B。**算术强度**：一批 $N$ 个 token 中，每个专家平均只分到 $Nk/E$ 个 token。DeepSeek-V3 的 $k/E = 8/256$，即每个专家只处理批中 1/32 的 token。解码时批本来就小，每个专家的矩阵乘法退化为极瘦的 GEMV，读一遍专家权重只做很少的计算，因此 MoE 推理需要非常大的批，常常要把专家分散到几十上百张卡上来聚合足够的 token，见[分布式推理：并行、PD 分离与大规模 MoE 服务](/inference/distributed-inference/)。**通信**：专家并行的 all-to-all 在训练中可能占据相当比例的时间，DeepSeek-V3 为此设计了节点受限路由与 DualPipe 的计算—通信重叠。
+
+## 负载均衡：为什么专家会“塌缩”
+
+不加约束地训练路由器，往往会出现**路由塌缩**：少数几个专家被分到了绝大部分 token，其余专家几乎得不到训练。这是一个正反馈过程：某个专家早期偶然得到较多 token，就训练得更好，路由器更倾向于选它，它又得到更多 token。塌缩既浪费了参数容量，在专家并行时还会让少数 GPU 过载、其余空闲，整体吞吐被最慢的那张卡拖住。
+
+### Switch 辅助损失的推导
+
+我们想要一个可导的损失，在负载均匀时最小。设一批有 $N$ 个 token、$E$ 个专家。定义两个量：
+
+$$
+f_i = \frac{1}{Nk}\sum_{t=1}^N \mathbb 1[i\in\mathcal T_t],\qquad
+P_i = \frac{1}{N}\sum_{t=1}^N p_{t,i},
+$$
+
+$f_i$ 是分给专家 $i$ 的分配占比（离散，不可导），$P_i$ 是路由器给专家 $i$ 的平均概率（可导）。Switch Transformer 的辅助损失是
+
+<KeyEq label="负载均衡辅助损失">
+
+$$
+\mathcal L_{\text{bal}} = \alpha\, E \sum_{i=1}^{E} f_i\,P_i .
+$$
+
+</KeyEq>
+
+为什么是这个形式？最直接的想法是最小化 $\sum_i f_i^2$（它在均匀时最小），但 $f_i$ 不可导。乘积 $f_iP_i$ 用 $P_i$ 提供梯度、用 $f_i$ 提供“权重”：
+
+$$
+\frac{\partial \mathcal L_{\text{bal}}}{\partial P_i} = \alpha E f_i .
+$$
+
+负载越高的专家（$f_i$ 越大），它的平均概率 $P_i$ 受到的下压力越大；路由器因此学会少选过载专家。均衡时 $f_i = P_i = 1/E$，$\sum_i f_iP_i = E\cdot\frac{1}{E^2} = \frac1E$，乘以 $E$ 后损失恰好为 $\alpha$。系数 $E$ 让这个最小值不随专家数变化，方便跨配置复用 $\alpha$（Switch 取 $\alpha=10^{-2}$）。完全塌缩到一个专家时，$f_1=P_1=1$，损失为 $\alpha E$。测试 `test_load_balance_loss_extremes` 正是检查这两个极端（取 $\alpha=1$）。
+
+手算一个例子：$E=4$，一批的分配占比 $f=(0.5, 0.25, 0.25, 0)$，平均概率 $P=(0.4, 0.3, 0.2, 0.1)$，则 $\sum_i f_iP_i = 0.2+0.075+0.05+0 = 0.325$，乘以 $E=4$ 得 1.3，高于均衡时的 1。梯度把 $P_1$ 往下压得最狠（系数 0.5×4=2），$P_4$ 不受压（$f_4=0$）。
+
+<CodeFile path="src/llms_from_scratch/architecture/moe.py" region="balance" />
+
+辅助损失的统计范围是一个重要细节。在**全局批**上统计只要求整体均衡，允许单条序列集中于少数专家（这对专业领域的文本是合理的）；在**每条序列**上统计更严格，可能损害专家的专门化。DeepSeek-V2 在此之上增加了设备级与通信级的均衡损失，直接约束每张 GPU 的负载。ST-MoE（2022）还提出了 **router z-loss** $\frac1N\sum_t(\log\sum_i e^{u_{t,i}})^2$，惩罚过大的路由 logits，避免 softmax 在低精度下溢出，代码中的 `router_z_loss` 即此式。
+
+### 容量因子与 token 丢弃
+
+即使有辅助损失，每一步的负载也不会完全均匀。早期的 MoE 实现（GShard、Switch）在 TPU 上需要静态形状，于是给每个专家设定一个**容量**：
+
+$$
+C = \left\lceil \text{cf}\cdot\frac{N k}{E}\right\rceil ,
+$$
+
+容量因子 $\text{cf}$ 通常取 1.0 到 1.25。分给某个专家的 token 超过 $C$ 时，多出的 token 被**丢弃**：它们不经过这个专家，只靠残差连接把输入原样传到下一层。
+
+<Diagram width={660} height={250} label="6 个 token、4 个专家、top-1 路由、容量 2 时的分配与丢弃">
+  <Matrix x={130} y={40} rows={6} cols={4} cell={[64, 28]} rowLabels={['token 0','token 1','token 2','token 3','token 4','token 5']} colLabels={['专家 0','专家 1','专家 2','专家 3']} tone="muted" values={[['1','','',''],['','1','',''],['2','','',''],['×','','',''],['','','1',''],['','2','','']]} highlight={[{ cells: [[0,0],[1,1],[2,0],[4,2],[5,1]], tone: 'accent' }, { cells: [[3,0]], tone: 'accent2' }]} />
+  <Text x={470} y={70} label="容量 C = ⌈1.0 × 6 × 1 / 4⌉ = 2" size="sm" anchor="start" />
+  <Text x={470} y={100} label="数字：该专家收到的第几个" size="sm" anchor="start" tone="muted" />
+  <Text x={470} y={130} label="token 3 是专家 0 的第 3 个，" size="sm" anchor="start" tone="accent2" />
+  <Text x={470} y={152} label="超出容量被丢弃，" size="sm" anchor="start" tone="accent2" />
+  <Text x={470} y={174} label="只走残差连接" size="sm" anchor="start" tone="accent2" />
+  <Text x={470} y={210} label="专家 3 空闲" size="sm" anchor="start" tone="muted" />
+  <Fragment slot="caption">每行一个 token，深色格表示它被路由到的专家，格中数字是按 token 顺序“先到先得”的排位。专家 0 收到 3 个 token 而容量只有 2，第 3 个（token 3）被丢弃；同时专家 3 一个 token 都没有收到。负载不均同时造成了丢弃与浪费。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/architecture/moe.py" region="capacity" />
+
+`capacity_mask` 用一次 `cumsum` 求出每个分配在其专家中的排位，这是 GShard 实现中的经典技巧。测试 `test_dropped_tokens_pass_through_zero_from_routed_experts` 验证被丢弃的 token 从路由专家得到的输出为零。丢弃 token 相当于给训练加了噪声，也让推理结果依赖于同批其他请求，因此后来的系统倾向于**无丢弃**（dropless）：MegaBlocks 用块稀疏计算处理任意的不均衡负载，DeepSeek-V3 在训练和推理中都不丢弃 token，依靠良好的负载均衡与冗余专家部署来控制最坏情况。
+
+## 细粒度专家与共享专家：DeepSeekMoE
+
+GShard 与 Mixtral 的专家都很“大”：每个专家就是一个完整宽度的 FFN，top-2 激活。Dai 等（2024）的 DeepSeekMoE 指出这种设计有两个问题。**知识混杂**：专家数少，每个专家不得不覆盖多种类型的知识，难以专门化。**知识冗余**：每个专家都需要学习一些通用的知识（比如常见的语法结构），这部分在多个专家中被重复学习。
+
+DeepSeekMoE 的第一个改动是**细粒度专家切分**：把每个专家的隐藏宽度缩小为 $1/m$，专家数扩大 $m$ 倍，激活数也扩大 $m$ 倍。参数量与计算量都不变，但可选的专家组合数暴增。以 16 个专家选 2 个为例，组合数为 $\binom{16}{2}=120$；切分 $m=4$ 后变为 64 选 8，组合数 $\binom{64}{8}\approx4.4\times10^9$。更多的组合让每个 token 能更精确地拼出它需要的知识。
+
+第二个改动是**共享专家隔离**：拿出 $E_s$ 个专家让每个 token 都经过，专门学习通用知识，路由专家从而可以专注于差异化的知识。共享专家的输出直接加到结果上，不经路由器，可以看作 MoE 层中内嵌的一个小稠密 FFN。
+
+<Diagram width={700} height={240} label="传统 MoE、细粒度专家、细粒度加共享专家三种设计的对比">
+  <Region x={10} y={10} w={210} h={220} title="传统：8 选 2" />
+  <Box x={30} y={50} w={80} h={36} label="E1" tone="accent" />
+  <Box x={120} y={50} w={80} h={36} label="E2" tone="muted" />
+  <Box x={30} y={96} w={80} h={36} label="E3" tone="muted" />
+  <Box x={120} y={96} w={80} h={36} label="E4" tone="accent" />
+  <Box x={30} y={142} w={80} h={36} label="…" tone="muted" />
+  <Box x={120} y={142} w={80} h={36} label="E8" tone="muted" />
+  <Text x={115} y={208} label="组合数 C(8, 2) = 28" size="sm" />
+  <Region x={240} y={10} w={210} h={220} title="细粒度：32 选 8" />
+  <Text x={345} y={208} label="组合数 C(32, 8) ≈ 1.1 × 10⁷" size="sm" />
+  <Region x={470} y={10} w={220} h={220} title="+ 共享专家：31 选 7 + 1" />
+  <Box x={490} y={46} w={180} h={30} label="共享专家（总是激活）" size="sm" tone="info" />
+  <Text x={580} y={208} label="通用知识集中到共享专家" size="sm" />
+  <Matrix x={260} y={50} rows={4} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: [[0,1],[0,6],[1,3],[2,0],[2,5],[3,2],[3,4],[3,7]], tone: 'accent' }]} />
+  <Matrix x={490} y={90} rows={4} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: [[0,2],[1,0],[1,5],[2,3],[2,7],[3,1],[3,6]], tone: 'accent' }, { cells: [[3,7]], tone: 'ghost' }]} />
+  <Fragment slot="caption">三者的总参数与激活参数相同。中间把每个专家切成 4 份（宽度 1/4），激活数从 2 变成 8，可选组合数从 28 增加到约一千万；右边再把其中一份变成所有 token 都经过的共享专家（右下角虚线格），其余 31 个路由专家选 7 个。</Fragment>
+</Diagram>
+
+DeepSeekMoE 16B 用 2 个共享专家加 64 个路由专家选 6 个；DeepSeek-V3 用 1 个共享专家加 256 个路由专家选 8 个，专家宽度 2048，只有模型宽度 7168 的 0.29 倍。这种“很多、很窄的专家 + 少量共享专家”的设计被 Kimi K2（384 选 8 + 1）、Qwen3-Next（512 选 10 + 1）、DeepSeek-V4（384 选 6 + 1）继承。并非所有人都采用共享专家：Qwen3 的 MoE 模型取消了共享专家（128 选 8），gpt-oss 也没有，这是一个仍有争议的选择。
+
+## 无辅助损失的负载均衡
+
+辅助损失有一个根本矛盾：它的梯度与语言模型的梯度混在一起。$\alpha$ 太小，均衡效果不够；$\alpha$ 太大，均衡损失会干扰主任务，损害模型质量。Wang 等（2024）提出的无辅助损失负载均衡（auxiliary-loss-free load balancing）被 DeepSeek-V3 采用，它根本不通过梯度来均衡负载。
+
+做法是给每个专家一个偏置 $b_i$，**只在选择专家时**加到分数上：
+
+$$
+\mathcal T_t = \operatorname{TopK}\big(\{s_{t,i} + b_i\}, k\big),\qquad
+g_{t,i} = \frac{s_{t,i}}{\sum_{j\in\mathcal T_t}s_{t,j}}\ \ (i\in\mathcal T_t).
+$$
+
+门控权重仍然用原始分数 $s_{t,i}$ 计算，偏置不影响专家输出的加权方式。偏置也不通过反向传播学习，而是在每个训练步结束时按负载做一次简单的符号更新：
+
+<KeyEq label="偏置更新">
+
+$$
+b_i \leftarrow b_i + \gamma\cdot\operatorname{sign}\!\big(\bar c - c_i\big),
+$$
+
+</KeyEq>
+
+$c_i$ 是本步分给专家 $i$ 的 token 数，$\bar c$ 是平均数。过载的专家偏置减小，下一步更难被选中；欠载的专家偏置增大。DeepSeek-V3 在前 14.3T token 取 $\gamma=0.001$，最后 500B token 取 0。作为保险，它仍保留了一个系数极小（$\alpha=10^{-4}$）的序列级均衡损失，只为防止单条序列内的极端不均衡。
+
+<CodeFile path="src/llms_from_scratch/architecture/moe.py" symbol="update_bias" />
+
+测试 `test_bias_changes_selection_but_not_gate_values` 验证偏置的两面性：把专家 5 的偏置设得很大后，每个 token 都会选上专家 5，但门控权重依然是原始 sigmoid 分数在选中集合内的归一化。`test_bias_update_balances_load` 构造了一个系统性偏爱专家 0 的路由器，反复更新偏置后，最大负载与平均负载之比降到初始值的一半以下。
+
+为什么这比辅助损失好？偏置更新是一个控制器，而不是优化目标的一部分：它不在模型参数上产生梯度，语言模型的优化完全不受干扰。DeepSeek-V3 报告中的消融显示，在相同的均衡水平下，无辅助损失策略的验证损失更低，而且专家表现出更明显的领域专门化。
+
+DeepSeek-V4 在此基础上做了几处调整：打分函数改为 $\sqrt{\mathrm{softplus}(\cdot)}$；把最开始几层的稠密 FFN 换成**哈希路由**的 MoE（按输入 token 的编号用固定的哈希函数决定专家，不需要学习路由器）；去掉了 V3 中“每个 token 最多发往 4 个节点”的限制，转而重新设计并行策略来维持训练效率。
+
+## MoE 的训练与推理代价
+
+把本章的讨论汇总成工程上的权衡：
+
+- **训练**：同样的 FLOPs 预算下，MoE 的损失明显低于稠密模型，这是它被广泛采用的根本原因。代价是路由带来的不稳定性（需要 z-loss、负载均衡、较低的路由器学习率或 FP32 路由计算）以及专家并行的通信。
+- **推理显存**：总参数决定显存。DeepSeek-V3 在 FP8 下仍需约 700 GB 存放权重，单机 8 卡 H100（640 GB）放不下，需要多机部署。
+- **推理速度**：激活参数决定每 token 的计算与（大批量下的）权重读取量。小批量时每个 token 选不同的专家，读取的权重总量可能接近总参数，此时 MoE 的速度优势会缩水；大批量下各专家都能聚到足够的 token，优势才完全体现。
+- **微调**：MoE 在小数据上微调更容易过拟合，路由也可能在微调中漂移，常见做法是冻结路由器或只微调部分专家。
+
+## 小结
+
+- MoE 层用路由器为每个 token 选 $k$ 个专家，输出为门控加权和；总参数 $\propto E$，每 token 计算 $\propto k$。
+- 路由打分可用 softmax 或 sigmoid（再在选中者内归一化）；选择是离散的，梯度只经门控权重回传。
+- 负载均衡辅助损失 $\alpha E\sum_i f_iP_i$ 用可导的 $P_i$ 承载梯度、用离散的 $f_i$ 加权，均衡时取最小值 $\alpha$。
+- 容量因子限制每个专家处理的 token 数，超出者被丢弃、只走残差；现代系统倾向于无丢弃。
+- DeepSeekMoE 的细粒度切分在不变的参数与计算下大幅增加专家组合数，共享专家吸收通用知识。
+- DeepSeek-V3 的无辅助损失均衡只在选择时给分数加偏置，并按负载做符号更新，不干扰主任务的梯度。
+
+## 练习
+
+1. 一个 MoE 层有 $E=64$ 个专家、top-$k=2$，一批 $N=4096$ 个 token，容量因子 1.25。每个专家的容量是多少？若负载完全均匀，有多少比例的容量被浪费？
+
+<details>
+<summary>答案</summary>
+
+$C=\lceil1.25\times4096\times2/64\rceil=160$。均匀时每个专家收到 $4096\times2/64=128$ 个 token，浪费 $(160-128)/160=20\%$ 的容量（静态形状下这些槽位仍要计算或填充）。容量因子越大，丢弃越少，但浪费越多。
+
+</details>
+
+2. 证明：当 $f$ 固定为均匀分布 $f_i=1/E$ 时，辅助损失 $E\sum_if_iP_i$ 对任意 $P$ 都等于 1。这说明了什么？
+
+<details>
+<summary>答案</summary>
+
+$E\sum_i\frac1EP_i=\sum_iP_i=1$。说明只要实际分配是均匀的，损失就不再对路由概率施加任何压力，路由器可以自由地学习“对哪些 token 更有信心”；损失只在分配不均时起作用。反过来，即使 $P$ 均匀，只要 $f$ 不均，损失也是 $E\sum_if_i\frac1E=1$——它不会因 $P$ 均匀而“误以为均衡”，但此时梯度 $\partial/\partial P_i=Ef_i$ 依然把过载专家的概率往下压。
+
+</details>
+
+3. 把 16 个专家、top-2 的 MoE 做 $m=4$ 的细粒度切分，再拿出 1 个细粒度专家作共享专家。写出切分后的路由专家数、每 token 激活的路由专家数，以及每个专家的隐藏宽度（原专家宽度为 $d_e$）。
+
+<details>
+<summary>答案</summary>
+
+细粒度后共 64 个宽度为 $d_e/4$ 的专家，激活 8 个。其中 1 个作为共享专家，剩下 63 个路由专家，每 token 选 7 个，再加 1 个共享专家，激活参数仍为 $8\times3d\frac{d_e}{4}=2\times3dd_e$，与原设计相同。这正是 DeepSeekMoE 论文中的构造方式。
+
+</details>
+
+4. 在无辅助损失均衡中，如果把偏置也加到门控权重的计算里（$g_i\propto s_i+b_i$），会出现什么问题？
+
+<details>
+<summary>答案</summary>
+
+偏置是为了均衡负载而调节的，与 token 本身无关。如果它进入门控权重，专家输出的加权方式就会随负载状态漂移：某专家因欠载而偏置变大时，它对所有选中它的 token 的贡献都被放大，这改变了模型的函数，而且这种改变不受语言模型损失的约束。只让偏置影响“选谁”而不影响“乘多少”，模型的输出只依赖原始分数，偏置仅起调度作用。测试 `test_bias_changes_selection_but_not_gate_values` 检查的就是这一点。
+
+</details>
+
+5. 估算：DeepSeek-V3 推理时，若一个解码批有 256 个 token，每个专家平均处理多少个 token？若单个专家的权重读取时间远大于其计算时间，批大小应该怎样变化才能提高效率？
+
+<details>
+<summary>答案</summary>
+
+每 token 选 8 个路由专家，共 $256\times8=2048$ 个分配，平均每个路由专家 $2048/256=8$ 个 token。每读一次专家权重（$3\times7168\times2048$ 个参数）只做 8 个 token 的计算，算术强度约为每参数 8 次乘加，远低于 GPU 的计算/带宽比（数百）。需要把批增大到每个专家处理数百个 token，即数万个 token 的批；单机放不下，这就是 DeepSeek 在推理时把专家分散到数十个节点、用大规模专家并行聚合批的原因。
+
+</details>
+
+## 参考文献
+
+- Shazeer et al. [Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer](https://arxiv.org/abs/1701.06538). 2017.
+- Lepikhin et al. [GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding](https://arxiv.org/abs/2006.16668). 2020.
+- Fedus et al. [Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity](https://arxiv.org/abs/2101.03961). 2021.
+- Zoph et al. [ST-MoE: Designing Stable and Transferable Sparse Expert Models](https://arxiv.org/abs/2202.08906). 2022（router z-loss）.
+- Gale et al. [MegaBlocks: Efficient Sparse Training with Mixture-of-Experts](https://arxiv.org/abs/2211.15841). 2022.
+- Jiang et al. [Mixtral of Experts](https://arxiv.org/abs/2401.04088). 2024.
+- Dai et al. [DeepSeekMoE: Towards Ultimate Expert Specialization in Mixture-of-Experts Language Models](https://arxiv.org/abs/2401.06066). 2024.
+- Wang et al. [Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts](https://arxiv.org/abs/2408.15664). 2024.
+- DeepSeek-AI. [DeepSeek-V2](https://arxiv.org/abs/2405.04434). 2024（设备级均衡损失）；[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024（§2.1.2 DeepSeekMoE 与无辅助损失均衡）；[DeepSeek-V4](https://arxiv.org/abs/2606.19348). 2026（哈希路由与 $\sqrt{\mathrm{softplus}}$ 打分）.
+- Qwen Team. [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388). 2025.
+- Stanford CS336. [Lecture 4: Mixture of Experts](https://cs336.stanford.edu/spring2025/). 2025.
