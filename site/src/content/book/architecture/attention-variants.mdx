@@ -2,7 +2,331 @@
 title: 注意力变体：MQA、GQA 与 MLA
 description: KV Cache 成为瓶颈后的三种答案：共享 K/V 头、分组共享，以及 DeepSeek 的低秩潜在注意力与解耦 RoPE。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/architecture/gqa.py
+  - src/llms_from_scratch/architecture/mla.py
+  - tests/architecture/test_gqa.py
+  - tests/architecture/test_mla.py
 ---
 
-本章正在撰写。
+在[文本生成：解码策略与 KV Cache](/transformer/generation/) 中，我们用 KV Cache 避免了重复计算历史 token 的键和值：每生成一个 token，只算它自己的 $q,k,v$，再与缓存里的全部历史做注意力。这把每步的计算从 $O(T^2)$ 降到了 $O(T)$，却引入了一个新问题——**缓存本身**。每一步解码都要把整个缓存从显存读一遍，而每个缓存元素只和一个查询做一次乘加。缓存越大，解码越慢，能同时服务的请求越少。
+
+本章沿着“缩小 KV Cache”这条线看三种注意力变体。多查询注意力（Multi-Query Attention，MQA）让所有查询头共享一组 K/V；分组查询注意力（Grouped-Query Attention，GQA）在 MHA 与 MQA 之间折中，是今天的默认选择，第三部分的模型已经实现了它；多头潜在注意力（Multi-head Latent Attention，MLA）是 DeepSeek-V2 提出的方案，它不减少头数，而是把所有头的 K/V 联合压缩成一个低维潜向量，再用“矩阵吸收”在不还原 K/V 的情况下完成注意力。MLA 的推导是本章的重点，其中最微妙的一步是它为什么必须把 RoPE 拆出去单独处理。
+
+## KV Cache 的账本
+
+先把缓存大小写清楚。设批大小 $B$、已缓存长度 $T$、层数 $L$、KV 头数 $h_{kv}$、头维 $d_h$，每个元素占 $b$ 字节。每层每个 token 要存一个键和一个值，各 $h_{kv}d_h$ 个数：
+
+<KeyEq label="KV Cache 大小">
+
+$$
+M_{\text{KV}} = 2 \cdot B \cdot T \cdot L \cdot h_{kv} \cdot d_h \cdot b .
+$$
+
+</KeyEq>
+
+以 LLaMA-2-70B 为例：$L=80$、$d_h=128$、BF16（$b=2$）。如果它用标准多头注意力（$h_{kv}=64$），一条 4096 token 的请求需要 $2\times4096\times80\times64\times128\times2 \approx 10.7$ GB 缓存，比单卡上的一份模型分片还大；实际的 $h_{kv}=8$ 把它降到 1.34 GB。这个数还会随批大小线性增长：32 条并发请求就是 43 GB。
+
+<CodeFile path="src/llms_from_scratch/architecture/gqa.py" symbol="kv_cache_bytes" />
+
+缓存大小直接决定解码速度，原因是解码阶段的**算术强度**极低。生成一个 token 时，每个查询头对每个缓存的键做一次 $d_h$ 维点积（$2d_h$ FLOPs），读入这个键需要 $d_h\cdot b$ 字节，算术强度约 $2/b = 1$ FLOP/字节（BF16）。而 H100 的计算与带宽之比约为 $989\text{ TFLOPS} / 3.35\text{ TB/s}\approx 295$ FLOP/字节，解码时 GPU 的算力几乎全部闲置，时间都花在搬运缓存上。所以：**缩小缓存 = 少搬数据 = 更快的解码与更大的批**。如果多个查询头共享同一份 K/V，读入的每个字节就能被复用多次，算术强度随之成倍提高。这正是 MQA 与 GQA 的出发点。[推理的成本模型：prefill 与 decode](/inference/inference-cost/) 会把这个分析做得更完整。
+
+## MQA 与 GQA：让查询头共享 K/V
+
+### 从 MHA 到 MQA
+
+标准多头注意力（MHA）中，每个头 $i$ 有自己的 $W_Q^{(i)}, W_K^{(i)}, W_V^{(i)}$。Shazeer（2019）的 MQA 只保留一组 $W_K, W_V$，所有 $h$ 个查询头都对同一组键和值做注意力：
+
+$$
+\mathrm{head}_i = \mathrm{softmax}\!\left(\frac{Q^{(i)} K^\top}{\sqrt{d_h}} + M\right) V,\qquad i = 1,\dots,h .
+$$
+
+缓存因此缩小 $h$ 倍。代价有两个。一是质量：K/V 的表达能力被压到一个头，实验中困惑度会略微上升，大模型上还观察到训练不稳定。二是**张量并行**：张量并行按头切分注意力（见[张量并行与序列并行](/distributed/tensor-parallel/)），8 卡切 64 个查询头时每卡 8 个头，但 MQA 只有 1 个 KV 头，只能在每张卡上复制一份，缓存的节省在多卡部署时打了折扣。PaLM（2022）与 Falcon 采用了 MQA。
+
+### GQA：分组共享
+
+Ainslie 等（2023）的 GQA 把 $h$ 个查询头分成 $h_{kv}$ 组，每组 $g = h/h_{kv}$ 个查询头共享一个 KV 头。第 $i$ 个查询头使用第 $\lfloor i/g\rfloor$ 个 KV 头。$h_{kv}=h$ 时就是 MHA，$h_{kv}=1$ 时就是 MQA。取 $h_{kv}=8$ 恰好让 8 卡张量并行时每卡分到一个 KV 头，既不复制也不浪费，这也是 8 成为最常见取值的工程原因。
+
+<Diagram width={720} height={250} label="MHA、GQA、MQA 中查询头与 K/V 头的对应关系">
+  <Region x={10} y={10} w={226} h={230} title="MHA：h_kv = h = 8" />
+  <Region x={247} y={10} w={226} h={230} title="GQA：h_kv = 2" />
+  <Region x={484} y={10} w={226} h={230} title="MQA：h_kv = 1" />
+  <Text x={20} y={58} label="Q" anchor="start" size="sm" tone="muted" />
+  <Box x={36} y={44} w={20} h={28} tone="accent" />
+  <Box x={60} y={44} w={20} h={28} tone="accent" />
+  <Box x={84} y={44} w={20} h={28} tone="accent" />
+  <Box x={108} y={44} w={20} h={28} tone="accent" />
+  <Box x={132} y={44} w={20} h={28} tone="accent" />
+  <Box x={156} y={44} w={20} h={28} tone="accent" />
+  <Box x={180} y={44} w={20} h={28} tone="accent" />
+  <Box x={204} y={44} w={20} h={28} tone="accent" />
+  <Text x={20} y={164} label="KV" anchor="start" size="sm" tone="muted" />
+  <Box x={36} y={150} w={20} h={28} tone="info" />
+  <Box x={60} y={150} w={20} h={28} tone="info" />
+  <Box x={84} y={150} w={20} h={28} tone="info" />
+  <Box x={108} y={150} w={20} h={28} tone="info" />
+  <Box x={132} y={150} w={20} h={28} tone="info" />
+  <Box x={156} y={150} w={20} h={28} tone="info" />
+  <Box x={180} y={150} w={20} h={28} tone="info" />
+  <Box x={204} y={150} w={20} h={28} tone="info" />
+  <Arrow from={[46, 150]} to={[46, 72]} head="none" />
+  <Arrow from={[70, 150]} to={[70, 72]} head="none" />
+  <Arrow from={[94, 150]} to={[94, 72]} head="none" />
+  <Arrow from={[118, 150]} to={[118, 72]} head="none" />
+  <Arrow from={[142, 150]} to={[142, 72]} head="none" />
+  <Arrow from={[166, 150]} to={[166, 72]} head="none" />
+  <Arrow from={[190, 150]} to={[190, 72]} head="none" />
+  <Arrow from={[214, 150]} to={[214, 72]} head="none" />
+  <Text x={123} y={210} label="缓存 8 份 K/V" size="sm" />
+  <Box x={273} y={44} w={20} h={28} tone="accent" />
+  <Box x={297} y={44} w={20} h={28} tone="accent" />
+  <Box x={321} y={44} w={20} h={28} tone="accent" />
+  <Box x={345} y={44} w={20} h={28} tone="accent" />
+  <Box x={369} y={44} w={20} h={28} tone="accent" />
+  <Box x={393} y={44} w={20} h={28} tone="accent" />
+  <Box x={417} y={44} w={20} h={28} tone="accent" />
+  <Box x={441} y={44} w={20} h={28} tone="accent" />
+  <Box x={307} y={150} w={24} h={28} tone="info" />
+  <Box x={403} y={150} w={24} h={28} tone="info" />
+  <Arrow from={[319, 150]} to={[283, 72]} head="none" />
+  <Arrow from={[319, 150]} to={[307, 72]} head="none" />
+  <Arrow from={[319, 150]} to={[331, 72]} head="none" />
+  <Arrow from={[319, 150]} to={[355, 72]} head="none" />
+  <Arrow from={[415, 150]} to={[379, 72]} head="none" />
+  <Arrow from={[415, 150]} to={[403, 72]} head="none" />
+  <Arrow from={[415, 150]} to={[427, 72]} head="none" />
+  <Arrow from={[415, 150]} to={[451, 72]} head="none" />
+  <Text x={360} y={210} label="缓存 2 份，每份服务 4 个头" size="sm" />
+  <Box x={510} y={44} w={20} h={28} tone="accent" />
+  <Box x={534} y={44} w={20} h={28} tone="accent" />
+  <Box x={558} y={44} w={20} h={28} tone="accent" />
+  <Box x={582} y={44} w={20} h={28} tone="accent" />
+  <Box x={606} y={44} w={20} h={28} tone="accent" />
+  <Box x={630} y={44} w={20} h={28} tone="accent" />
+  <Box x={654} y={44} w={20} h={28} tone="accent" />
+  <Box x={678} y={44} w={20} h={28} tone="accent" />
+  <Box x={592} y={150} w={24} h={28} tone="info" />
+  <Arrow from={[604, 150]} to={[520, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[544, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[568, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[592, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[616, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[640, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[664, 72]} head="none" />
+  <Arrow from={[604, 150]} to={[688, 72]} head="none" />
+  <Text x={597} y={210} label="缓存 1 份" size="sm" />
+  <Fragment slot="caption">上排是 8 个查询头，下排是缓存中的 K/V 头，连线表示“哪个查询头读哪份 K/V”。GQA 的每份 K/V 被同组的 4 个查询头复用，解码时读入一次、计算四次，缓存与读取量都降为 MHA 的 1/4。</Fragment>
+</Diagram>
+
+### 实现与验证
+
+第三部分的 `CausalSelfAttention` 已经支持 GQA：`n_kv_heads` 个 KV 头先用 `repeat_interleave` 复制到 `n_heads` 份，再交给 PyTorch 的 `scaled_dot_product_attention`。为了验证它，我们写一个逐头循环的参考实现，直接按定义“第 $i$ 个查询头读第 $\lfloor i/g\rfloor$ 个 KV 头”：
+
+<CodeFile path="src/llms_from_scratch/architecture/gqa.py" region="reference" />
+
+测试 `test_gqa_with_full_kv_heads_is_mha` 断言 `n_kv_heads == n_heads` 时，模型的注意力与逐头 MHA 参考实现在 $10^{-5}$ 内一致；`test_mqa_and_gqa_match_reference` 对 $h_{kv}=1$ 与 $h_{kv}=2$ 做同样的检查。
+
+`repeat_interleave` 在显存里真的复制了 K/V，这对训练无妨，却违背了 GQA 在解码时“只读一次”的初衷。高效 kernel 的做法是把查询头整理成 $[B, h_{kv}, g, T, d_h]$，让同组的 $g$ 个头与同一个 KV 头做批量矩阵乘法：
+
+<CodeFile path="src/llms_from_scratch/architecture/gqa.py" region="grouped" />
+
+这里 `k.unsqueeze(2)` 在组维上广播而不复制，`test_grouped_attention_without_copy` 验证它与“先复制再 SDPA”的结果一致（含 $T\ne S$、带缓存的情形）。FlashAttention 等 kernel 原生支持 GQA，原理相同。
+
+### 从 MHA 检查点得到 GQA
+
+GQA 论文还给出了一个实用的转换方法：把一个已训练好的 MHA 模型的每组 $g$ 个 K/V 投影矩阵取平均，作为该组的共享投影，再用原预训练计算量的约 5% 继续训练（uptraining）。平均池化优于“只保留组内第一个头”或随机初始化，因为它保留了组内所有头的信息。
+
+<CodeFile path="src/llms_from_scratch/architecture/gqa.py" region="uptrain" />
+
+转换本身不是无损的：只有当组内各头的 K/V 投影恰好相同时，平均才不改变输出。测试 `test_mean_pool_is_exact_when_group_heads_agree` 构造了这种特殊情形；一般情况下，转换后的误差要靠继续训练来消化。
+
+## MLA：把 K/V 压进一个低维潜向量
+
+GQA 的思路是“少存几个头”。DeepSeek-V2（2024）提出了另一个方向：**每个头都保留自己的 K/V，但它们都由同一个低维向量生成**，缓存只存这个低维向量。这就是多头潜在注意力（MLA）。
+
+### 低秩联合压缩
+
+设第 $t$ 个 token 进入注意力层的隐藏状态为 $h_t\in\mathbb R^{d}$。MLA 先用一个下投影把它压成潜向量，再用每个头各自的上投影还原出键和值：
+
+<KeyEq label="MLA 的 KV 压缩">
+
+$$
+c_t^{KV} = W^{DKV} h_t \in \mathbb R^{d_c},\qquad
+k_{t,i}^{C} = W^{UK}_i\, c_t^{KV},\qquad
+v_{t,i} = W^{UV}_i\, c_t^{KV},
+$$
+
+</KeyEq>
+
+其中 $W^{UK}_i, W^{UV}_i\in\mathbb R^{d_h\times d_c}$ 是第 $i$ 个头的上投影，上标 $C$ 表示“内容”（content）部分。DeepSeek-V3 取 $d=7168$、$h=128$、$d_h=128$、$d_c=512$。如果按 MHA 缓存，每层每 token 要存 $2hd_h=32768$ 个数；MLA 只存 $c_t^{KV}$ 的 512 个数（加上后面要讲的 64 维位置键）。查询也做了类似的低秩压缩（$d_c'=1536$），但那只是为了减少训练时的激活显存，与缓存无关。
+
+这和“把 MHA 的 K/V 做低秩近似”不同。MLA 从训练开始就是这种参数化：$W^{UK}_iW^{DKV}$ 天然是秩不超过 $d_c$ 的矩阵，模型在这个约束下学习，而不是事后压缩。从[特征分解、SVD 与低秩近似](/math/linear-algebra-advanced/)的角度看，128 个头的键矩阵堆起来是 $16384\times7168$，MLA 规定它的秩至多 512。
+
+### 矩阵吸收：不还原 K/V 也能算注意力
+
+只缓存 $c^{KV}$ 还不够：如果每一步解码都要把所有历史的 $c_s^{KV}$ 上投影成 128 个头的键和值，计算量和显存流量都会回到 MHA 的水平。MLA 的关键在于这一步可以被**吸收**掉。看第 $i$ 个头在位置 $t$ 对位置 $s$ 的内容分数：
+
+$$
+(q_{t,i}^{C})^\top k_{s,i}^{C}
+= (q_{t,i}^{C})^\top W^{UK}_i\, c_s^{KV}
+= \big((W^{UK}_i)^\top q_{t,i}^{C}\big)^\top c_s^{KV}.
+$$
+
+这只是矩阵乘法的结合律：先把 $W^{UK}_i$ 作用到**当前**查询上，得到一个 $d_c$ 维的“潜空间查询” $\tilde q_{t,i} = (W^{UK}_i)^\top q_{t,i}^{C}$，然后直接与缓存中的 $c_s^{KV}$ 做点积。对每个新 token，这个变换只做一次，而不是对每个历史位置各做一次。值的一侧同理，注意力权重 $a_{t,s,i}$ 是标量，可以与线性变换交换次序：
+
+$$
+o_{t,i} = \sum_{s\le t} a_{t,s,i}\, W^{UV}_i c_s^{KV}
+= W^{UV}_i \underbrace{\sum_{s\le t} a_{t,s,i}\, c_s^{KV}}_{z_{t,i}\in\mathbb R^{d_c}} .
+$$
+
+先在潜空间里按注意力权重求和，最后才上投影。若再往后看一步，输出投影 $W^O$ 紧接在 $W^{UV}_i$ 之后，二者还可以预先合并成一个矩阵。
+
+吸收之后，解码时的注意力变成了这样一件事：**128 个查询头，每个头一个 $d_c$ 维的查询，与所有头共享的 $d_c$ 维缓存条目做注意力，值也是同一组条目。** 这在形式上是一个头维为 512 的 MQA。它同时兼得两件好事：缓存比 MQA 的 $2d_h=256$ 只大一倍多，而每个头的“有效键”仍然是不同的（由各自的 $W^{UK}_i$ 决定），表达能力接近 MHA；并且 128 个查询头共享同一份缓存，解码的算术强度提高了两个数量级。
+
+### 为什么 RoPE 要解耦
+
+上面的推导有一个前提：$q^\top W^{UK}_i c_s$ 中间没有任何依赖于位置的东西。RoPE 恰好破坏了这一点。RoPE 把位置 $t$ 的查询与位置 $s$ 的键分别乘以旋转矩阵 $R_t$、$R_s$，分数变为
+
+$$
+(R_t q_{t,i})^\top (R_s W^{UK}_i c_s) = q_{t,i}^\top R_t^\top R_s\, W^{UK}_i\, c_s = q_{t,i}^\top R_{s-t}\, W^{UK}_i\, c_s .
+$$
+
+$R_{s-t}$ 夹在查询和 $W^{UK}_i$ 之间，且随历史位置 $s$ 变化。要吸收，就得为每个 $s$ 各算一个 $(R_{s-t}W^{UK}_i)^\top q$，吸收的收益荡然无存。也不能把 $R_{s-t}$ 挪到 $W^{UK}_i$ 右边，因为一般矩阵与旋转不可交换（测试 `test_rope_on_upprojected_keys_would_break_absorption` 给出了一个反例）。另一种思路是把 RoPE 加在 $c_s$ 上，但 RoPE 需要作用在“头维的成对坐标”上才有相对位置性质，作用在 512 维的共享潜向量上，经 $W^{UK}_i$ 变换后这一性质就丢失了。
+
+DeepSeek-V2 的解决办法是**解耦 RoPE**（decoupled RoPE）：把位置信息放到一个独立的小分支里。每个头的查询与键都由两部分拼接而成，内容部分不加 RoPE、可以吸收，位置部分加 RoPE、不参与吸收：
+
+$$
+q_{t,i} = \big[\,q_{t,i}^{C};\ \mathrm{RoPE}(W^{QR}_i c_t^{Q})\,\big],\qquad
+k_{s,i} = \big[\,W^{UK}_i c_s^{KV};\ \mathrm{RoPE}(W^{KR} h_s)\,\big].
+$$
+
+位置键 $k_s^R = \mathrm{RoPE}(W^{KR}h_s)\in\mathbb R^{d_R}$ **所有头共享**（DeepSeek-V3 中 $d_R=64$），所以它也只需缓存一份。分数是两部分之和，缩放因子按拼接后的维度 $d_h+d_R$ 计算：
+
+<KeyEq label="MLA 的注意力分数">
+
+$$
+s_{t,s,i} = \frac{\tilde q_{t,i}^\top c_s^{KV} + (q_{t,i}^{R})^\top k_s^{R}}{\sqrt{d_h + d_R}} .
+$$
+
+</KeyEq>
+
+于是每层每 token 的缓存是 $d_c + d_R = 512 + 64 = 576$ 个数。DeepSeek-V2 的论文把它表述为 $\frac{9}{2}d_h$，相当于只有 2.25 组的 GQA，但质量报告为优于 MHA。
+
+<Diagram width={700} height={270} label="MLA 的数据流：哪些量进入缓存，哪些在计算时由吸收消去">
+  <Box x={20} y={110} w={90} h={50} label="h_t" sub="(d)" />
+  <Region x={140} y={20} w={190} h={230} title="" tone="info" />
+  <Box x={150} y={40} w={170} h={50} label="c_KV = W_DKV h" sub="(d_c = 512)" tone="info" />
+  <Box x={150} y={180} w={170} h={50} label="k_R = RoPE(W_KR h)" sub="(d_R = 64)" tone="info" />
+  <Text x={235} y={140} label="缓存：576 个数" size="sm" tone="info" bold />
+  <Box x={390} y={20} w={150} h={40} label="K_C = W_UK c" sub="每头 128 维" tone="ghost" />
+  <Box x={390} y={70} w={150} h={40} label="V = W_UV c" sub="每头 128 维" tone="ghost" />
+  <Box x={390} y={150} w={150} h={50} label="q̃ = W_UKᵀ q_C" sub="查询搬进潜空间" tone="accent" />
+  <Box x={580} y={110} w={120} h={60} label="注意力" sub="q̃·c + q_R·k_R" tone="strong" />
+  <Arrow from={[110, 125]} to={[150, 65]} />
+  <Arrow from={[110, 145]} to={[150, 205]} />
+  <Arrow from={[320, 60]} to={[390, 40]} dashed />
+  <Arrow from={[320, 70]} to={[390, 90]} dashed />
+  <Arrow from={[320, 65]} via={[[560, 65], [560, 125]]} to={[580, 125]} tone="info" />
+  <Arrow from={[320, 205]} via={[[560, 205], [560, 155]]} to={[580, 155]} tone="info" />
+  <Arrow from={[540, 175]} to={[580, 145]} tone="accent" />
+  <Fragment slot="caption">左侧两个蓝框是每个 token 写入缓存的全部内容：512 维潜向量与 64 维共享位置键。虚线框是显式路径才会还原的每头 K/V；吸收路径把 $W^{UK}$ 移到查询一侧、把 $W^{UV}$ 推迟到加权求和之后，解码时只读两个蓝框。</Fragment>
+</Diagram>
+
+### 实现：两条等价路径
+
+`MultiHeadLatentAttention` 按 DeepSeek-V3 的结构实现：查询走低秩压缩 $W^{DQ}\to\mathrm{RMSNorm}\to W^{UQ}$（同时输出内容与 RoPE 两部分），键值走 $W^{DKV}\to\mathrm{RMSNorm}$ 得到 $c^{KV}$，位置键由 $W^{KR}$ 单独产生。RoPE 复用第三部分的 `rope_frequencies` 与 `apply_rope`。显式路径把潜向量上投影成每个头的 K/V，再做标准注意力：
+
+<CodeFile path="src/llms_from_scratch/architecture/mla.py" region="naive" />
+
+吸收路径完全按上一节的两个等式写：查询乘 $W^{UK}_i$ 进入潜空间，与缓存直接点积；加上位置项；在潜空间里加权求和；最后乘 $W^{UV}_i$。注意 `einsum` 中权重视图的形状：`wk_up.weight` 是 $[h\cdot d_h, d_c]$，按头拆成 $[h, d_h, d_c]$，正好是每个 $W^{UK}_i$。
+
+<CodeFile path="src/llms_from_scratch/architecture/mla.py" region="absorbed" />
+
+`tests/architecture/test_mla.py` 做两项检查。第一项对整段序列比较两条路径，误差在 $10^{-5}$ 内。第二项模拟真实的推理：先用显式路径 prefill 前 6 个 token、把 $c^{KV}$ 与 $k^R$ 写入 `MLACache`，再用吸收路径逐个解码后 4 个 token，拼起来与一次性的全序列前向一致。这说明缓存里的 576 个数确实包含了继续生成所需的全部信息。
+
+<Callout tone="warn" title="吸收不是处处更快">
+吸收后，每个查询头对每个历史位置的点积维度从 $d_h+d_R=192$ 变成 $d_c+d_R=576$，FLOPs 反而增加了 3 倍。解码时这无所谓，因为瓶颈是读缓存而不是计算；但 prefill 与训练是计算受限的，此时先把 $c^{KV}$ 上投影成每头 K/V、用标准的 FlashAttention 计算更省。实际系统在 prefill 用显式路径、在 decode 用吸收路径，这正是 `forward(absorb=...)` 这个开关的含义。缩放因子必须保持 $1/\sqrt{d_h+d_R}$：吸收只是换了乘法顺序，不能因为点积维度变成 576 就改用 $1/\sqrt{576}$。
+</Callout>
+
+## 三种方案的缓存对比
+
+把 DeepSeek-V3 的尺寸（$h=128$、$d_h=128$、61 层）代入四种设计，比较每层每 token 需要缓存的元素数：
+
+<Bars label="同一尺寸下每层每 token 的 KV Cache（BF16）" unit="KiB" items={[
+  { label: 'MHA（128 个 KV 头）', value: 64, tone: 'muted' },
+  { label: 'GQA（8 个 KV 头）', value: 4, tone: 'info' },
+  { label: 'MLA（512 + 64）', value: 1.125, tone: 'accent' },
+  { label: 'MQA（1 个 KV 头）', value: 0.5, tone: 'info' },
+]}>
+  <Fragment slot="caption">元素数分别为 $2hd_h=32768$、$2h_{kv}d_h=2048$、$d_c+d_R=576$、$2d_h=256$，每个元素 2 字节。MLA 的缓存介于 GQA-8 与 MQA 之间（约为 2.25 组 GQA），但每个查询头仍有自己的有效键和值。乘以 61 层，DeepSeek-V3 每 token 约 68.6 KiB。</Fragment>
+</Bars>
+
+用[架构演进总览：从 Transformer 到 DeepSeek-V4](/architecture/evolution/) 中的 `kv_cache_bytes_per_token` 可以算出几个模型的每 token 缓存（BF16）：LLaMA-2-7B（MHA）512 KiB，LLaMA-3-8B（GQA-8）128 KiB，DeepSeek-V3（MLA）68.6 KiB。DeepSeek-V3 的参数量是 LLaMA-3-8B 的 80 多倍，每 token 的缓存却只有它的一半。
+
+MLA 之后的发展值得一提。Kimi K2 沿用了 MLA，但把头数从 128 减到 64，以降低长上下文推理时注意力的计算量。DeepSeek-V3.2 的稀疏注意力直接建立在吸收后的“MQA 模式”上：每个潜向量条目被所有查询头共享，所以稀疏选择只需对每个查询选一次条目。DeepSeek-V4 更进一步，放弃了 $W^{UK}/W^{UV}$ 的上投影，让每个压缩条目同时充当所有头的键和值（共享 KV 的 MQA，头维 512），这在[稀疏注意力：从 NSA、DSA 到压缩注意力](/architecture/sparse-attention/)中展开。
+
+## 小结
+
+- 解码阶段每个缓存元素只被使用约一次，算术强度极低，速度由读缓存的字节数决定；缩小 KV Cache 就是加速解码与扩大批。
+- KV Cache 大小 $2BTLh_{kv}d_hb$；MQA 取 $h_{kv}=1$，GQA 取介于 1 与 $h$ 之间（常见 8，恰好匹配 8 卡张量并行），$h_{kv}=h$ 时退化为 MHA。
+- 已训练的 MHA 可以按组平均 K/V 投影转为 GQA，再用约 5% 的预训练计算量继续训练。
+- MLA 把所有头的 K/V 由一个 $d_c$ 维潜向量生成，借助结合律把 $W^{UK}$ 吸收进查询、把 $W^{UV}$ 推迟到加权求和之后，解码时只读潜向量。
+- RoPE 的位置相关旋转会夹在查询与 $W^{UK}$ 之间，破坏吸收；MLA 用共享的小维度位置键（解耦 RoPE）单独承载位置，缓存为 $d_c+d_R$。
+
+## 练习
+
+1. 某模型 $L=48$、$h=40$、$d_h=128$，用 GQA-8，FP8 缓存（$b=1$）。在 80 GB 显卡上，模型权重占 40 GB，剩余显存全部用作 KV Cache，最多能同时容纳多少个 token？如果改用 MHA 呢？
+
+<details>
+<summary>答案</summary>
+
+每 token 缓存 $2\times48\times8\times128\times1=98{,}304$ 字节，即 96 KiB。40 GB（按 $40\times10^9$ 字节）可容纳约 $40\times10^9/98304\approx406{,}900$ 个 token，例如 100 条 4K 长度的请求。MHA 时 $h_{kv}=40$，每 token 480 KiB，只能容纳约 $81{,}400$ 个 token，并发数降为 1/5。
+
+</details>
+
+2. MLA 的吸收路径中，若把 $W^{UV}_i$ 与输出投影 $W^O$ 的第 $i$ 个列块预先相乘，得到的矩阵形状是什么？解码时这一步的计算量与先乘 $W^{UV}_i$ 再乘 $W^O$ 相比如何？
+
+<details>
+<summary>答案</summary>
+
+$W^O$ 把拼接的 $h d_h$ 维输出映射到 $d$ 维，其第 $i$ 个列块 $W^O_i$ 形状为 $d\times d_h$；$W^{UV}_i$ 形状为 $d_h\times d_c$；乘积 $W^O_iW^{UV}_i$ 为 $d\times d_c$。合并后每个头每 token 的计算是 $d\cdot d_c$ 次乘加（DeepSeek-V3 中 $7168\times512$），分开算是 $d_h d_c + d\, d_h = 128\times512+7168\times128$。后者更少，所以合并只在 $d_c < d_h$ 一类特殊尺寸下才划算；实际实现通常不合并 $W^{UV}$ 与 $W^O$，而是只吸收 $W^{UK}$。这也说明“吸收”是可选的计算顺序，要按 FLOPs 和访存权衡。
+
+</details>
+
+3. 为什么 MLA 的位置键 $k^R_s$ 可以所有头共享，而位置查询 $q^R_{t,i}$ 是每头一个？如果位置键也每头一个，缓存会变成多少？
+
+<details>
+<summary>答案</summary>
+
+位置键要缓存，共享可以把它的开销控制在 $d_R$；位置查询只在当前步计算、不缓存，每头一个几乎不增加成本，且能让不同的头以不同方式使用位置信息。若位置键也每头一个，缓存变为 $d_c + h\,d_R = 512 + 128\times64 = 8704$，是原来的 15 倍，MLA 的优势大半消失。
+
+</details>
+
+4. 在 `grouped_attention` 中，为什么因果掩码写成 `tril(diagonal=S - T)`？当 $T=1$（解码一个 token）时它是什么？
+
+<details>
+<summary>答案</summary>
+
+查询是最后 $T$ 个位置，其绝对位置为 $S-T,\dots,S-1$；第 $t$ 个查询（绝对位置 $S-T+t$）可以看到键 $0,\dots,S-T+t$，即矩阵中列号 $\le$ 行号 $+(S-T)$，正是对角线偏移 $S-T$ 的下三角。$T=1$ 时掩码是一行全 `True`：新 token 可以看到全部缓存与自己。
+
+</details>
+
+5. 有人提议：既然 MLA 只缓存 $c^{KV}$，那就把 $d_c$ 取得更小，比如 64，岂不是比 MQA 还省？这样做的风险是什么？
+
+<details>
+<summary>答案</summary>
+
+$d_c$ 是所有头的键与值矩阵的秩上界。取 64 时，128 个头的键（以及值）都被限制在同一个 64 维子空间的线性像里，各头之间的差异只能来自上投影矩阵，表达能力会明显低于 MHA，质量可能不如 MQA（MQA 的键和值各有 128 维且互相独立）。DeepSeek-V2 的消融选择了 $d_c=4d_h=512$，在缓存与质量之间取得平衡。缓存大小只是一个维度，模型质量需要通过训练实验确认。
+
+</details>
+
+## 参考文献
+
+- Shazeer. [Fast Transformer Decoding: One Write-Head is All You Need](https://arxiv.org/abs/1911.02150). 2019.
+- Ainslie et al. [GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints](https://arxiv.org/abs/2305.13245). 2023.
+- DeepSeek-AI. [DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model](https://arxiv.org/abs/2405.04434). 2024（MLA 与解耦 RoPE，§2.1）.
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024（§2.1.1 的 MLA 公式与维度）.
+- DeepSeek-AI. [DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models](https://arxiv.org/abs/2512.02556). 2025（DSA 在 MLA 的 MQA 模式下实现）.
+- Kimi Team. [Kimi K2: Open Agentic Intelligence](https://arxiv.org/abs/2507.20534). 2025.
+- Pope et al. [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102). 2022（解码阶段的访存分析与 MQA 的多卡切分）.
+- Dao. [FlashAttention-2](https://arxiv.org/abs/2307.08691). 2023（GQA/MQA 的原生支持）.

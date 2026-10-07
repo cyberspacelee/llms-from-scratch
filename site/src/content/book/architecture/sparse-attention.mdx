@@ -2,7 +2,219 @@
 title: 稀疏注意力：从 NSA、DSA 到压缩注意力
 description: 让每个 token 只看一部分上下文：块选择、闪电索引器（DeepSeek Sparse Attention），以及 DeepSeek-V4 的压缩稀疏注意力。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/architecture/sparse_attention.py
+  - tests/architecture/test_sparse_attention.py
 ---
 
-本章正在撰写。
+GQA 与 MLA 缩小了每个 token 的缓存，但没有改变一个事实：每个查询仍要读取**全部**历史。在 128K 乃至 1M 的上下文中，即使每个缓存条目只有几百字节，解码一个 token 也要读上百 MB；prefill 时注意力的计算量随长度平方增长，在 128K 时已远超 FFN。而直觉告诉我们，一个 token 真正需要的往往只是上下文中的一小部分：最近的几百个词、几处相关的定义、一个关键事实。稀疏注意力（sparse attention）就是让每个查询只读取其中一部分键值。
+
+难点在于“哪一部分”。早期的方法使用**固定的稀疏模式**，与内容无关；2025 年以来的方法让模型**根据内容选择**要读的块或 token，并且在预训练或继续训练中就使用稀疏注意力（natively trainable），而不是只在推理时近似。本章按这条线索介绍：固定模式、内容相关的块选择、DeepSeek 的 NSA、DeepSeek-V3.2 的 DSA（闪电索引器加 token 级 top-k），以及 DeepSeek-V4 把序列维压缩与稀疏选择结合起来的 CSA 与 HCA。每种方法都有一个共同的正确性检查：当“选择全部”时，它必须退化为稠密的因果注意力。
+
+## 固定的稀疏模式
+
+2019—2020 年，为了让 Transformer 处理更长的序列，出现了一批固定模式的稀疏注意力。Child 等（2019）的 Sparse Transformer 让一半的头只看局部窗口、另一半的头以固定步长 $s$ 看过去（位置 $i$ 看 $j$ 满足 $(i-j)\bmod s=0$），两层组合后任意两个位置之间都有长度为 2 的路径，复杂度为 $O(T\sqrt T)$。Longformer 与 BigBird 用“滑动窗口 + 少量全局 token + 随机连接”的组合。GPT-3 交替使用稠密层与局部带状稀疏层。
+
+<Diagram width={660} height={246} label="三种固定稀疏模式的注意力掩码：局部窗口、步长、块加全局">
+  <Matrix x={30} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && j > i - 3), tone: 'accent' }]} />
+  <Text x={117} y={22} label="局部窗口（W = 3）" size="sm" bold />
+  <Matrix x={250} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && (i - j) % 3 === 0), tone: 'info' }]} />
+  <Text x={337} y={22} label="步长（s = 3）" size="sm" bold />
+  <Matrix x={470} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && Math.floor(i / 2) === Math.floor(j / 2)), tone: 'accent' }, { cells: Array.from({ length: 8 }, (_, i) => [i, 0]), tone: 'accent2' }]} />
+  <Text x={557} y={22} label="块内 + 全局 token" size="sm" bold />
+  <Text x={330} y={232} label="每行是一个查询，深色是它能看到的键；所有模式都只保留下三角（因果）" size="sm" tone="muted" />
+  <Fragment slot="caption">局部窗口只看最近的位置；步长模式隔 $s$ 个位置看一次，与局部窗口组合后两步可达任意位置；块模式在 2×2 的块内做稠密注意力，再加上所有查询都能看到的全局 token（第 0 列）。这些模式与输入内容无关，在训练前就确定了。</Fragment>
+</Diagram>
+
+固定模式的问题是它们**不知道哪里重要**。“步长 3”的头在第 1000 个位置上能看到 997、994……却可能恰好错过第 995 个位置上的关键信息。在语言建模上，它们大多不如稠密注意力加更好的位置编码，于是在 2021—2024 年间，开源模型几乎都回到了稠密注意力（只保留滑动窗口作为一种局部稀疏，见[长上下文：位置外推与滑动窗口](/architecture/long-context/)）。
+
+## 内容相关的块选择
+
+另一条思路是让每个查询**根据内容**决定读哪些位置。最理想的选择是“注意力分数最大的 $k$ 个键”，但要知道哪些键分数大，就得先算出所有分数，稀疏就失去了意义。所以所有实用方法都需要一个**便宜的代理**来估计重要性。
+
+块选择是最简单的代理：把键序列切成长度为 $B$ 的块，每块用一个代表向量（比如块内键的平均值）概括，查询先与 $T/B$ 个代表向量打分，选出 top-$k$ 块，再在被选块内做精确的注意力。打分的成本是 $T/B$ 次点积，精确注意力的成本是 $kB$ 次点积，当 $k\ll T/B$ 时远小于 $T$。块的粒度还有一个硬件上的好处：GPU 按连续的块读取显存效率最高，逐个 token 随机读取的效率很差。
+
+<CodeFile path="src/llms_from_scratch/architecture/sparse_attention.py" region="block_topk" />
+
+两个细节决定了它的正确性。第一，未来的块分数被设为 $-\infty$，永远不会被选中，在被选块内部还要再叠加 token 级的因果掩码（当前块中查询之后的位置）。第二，查询所在的块分数被设为 $+\infty$，保证一定被选中——否则一个位于块开头的查询可能连自己都看不到。测试 `test_block_topk_with_all_blocks_is_dense` 断言 $k$ 不小于块数时结果与稠密因果注意力一致；`test_block_topk_restricts_to_selected_blocks` 断言 $k=1$ 时只剩查询自己所在的块，等价于“块内因果注意力”。
+
+这种思路在推理加速中有很多变体（如 Quest 按页估计查询相关的上界），它们可以直接用于已训练好的稠密模型，但近似误差在长链推理中会累积。DeepSeek 的工作把选择机制放进训练，让模型从一开始就适应稀疏。
+
+## NSA：压缩、选择与滑窗三个分支
+
+NSA（Native Sparse Attention，Yuan 等 2025）是 DeepSeek 提出的可训练稀疏注意力。它让每个查询同时走三个分支，各自用一组不同的键值，再用门控把三个输出加起来：
+
+<KeyEq label="NSA 的三分支组合">
+
+$$
+o_t = \sum_{c\in\{\text{cmp},\,\text{slc},\,\text{win}\}} g_t^{c}\cdot \operatorname{Attn}\!\big(q_t, \tilde K_t^{c}, \tilde V_t^{c}\big),\qquad g_t^c\in[0,1].
+$$
+
+</KeyEq>
+
+门控 $g_t^c$ 由输入经 MLP 和 sigmoid 得到。三个分支分别是：
+
+- **压缩分支**（compression）：把键序列按长度 $l=32$、步长 $d=16$ 的滑动块，用一个可学习的 MLP（带块内位置编码）压缩成一个键，值也同样处理。查询对所有压缩键做稠密注意力，得到粗粒度的全局信息，成本约为 $T/d$。
+- **选择分支**（selection）：把序列切成长度 $l'=64$ 的块，每个查询选出 $n=16$ 个块（其中固定包含第 1 个块与最近的 2 个块），在这些块的原始 token 上做精确注意力。块的重要性**直接复用压缩分支的注意力分数**，不需要额外的打分计算。
+- **滑窗分支**（sliding window）：最近 $w=512$ 个 token 的稠密注意力，负责局部依赖。论文发现，如果没有单独的滑窗分支，模型会走捷径，让压缩与选择分支都去学习局部模式。
+
+NSA 的另一个关键设计是**硬件对齐**：在 GQA 中，同一组的查询头共享 KV，NSA 让同组的所有头使用**同一组被选块**（把各头的重要性分数求和后再选），这样每个被选块只需从显存读一次，就能服务组内所有查询头。论文在一个 27B 总参数、3B 激活、GQA 4 组 64 头的 MoE 模型上从头预训练，NSA 在通用基准与长上下文检索上与稠密注意力持平或更好；在 64K 长度下，前向、反向与解码分别加速约 9.0 倍、6.0 倍与 11.6 倍。
+
+## DSA：闪电索引器与 token 级 top-k
+
+DeepSeek-V3.2（2025）采用了一个更简单的设计：DeepSeek Sparse Attention（DSA）。它不按块选择，而是为每个查询直接选 $k=2048$ 个 **token**。打分代理是一个极轻量的**闪电索引器**（lightning indexer）：
+
+<KeyEq label="闪电索引器">
+
+$$
+I_{t,s} = \sum_{j=1}^{H^I} w_{t,j}^{I}\cdot \operatorname{ReLU}\!\left(q_{t,j}^{I}\cdot k_s^{I}\right).
+$$
+
+</KeyEq>
+
+$q^I_{t,j}$ 是少量（$H^I$ 个）索引头的查询，$k^I_s$ 是所有索引头共享的一个小维度键，$w^I_{t,j}$ 是由当前 token 算出的每个索引头的权重。用 ReLU 而不是 softmax，是为了让打分可以完全并行、并在 FP8 下高效计算。每个查询选出索引分数最高的 $k$ 个过去的 token，主注意力只在这 $k$ 个 token 上计算。
+
+手算一个小例子。设 1 个查询、2 个索引头，$q^I=(1,0)$ 与 $(0,1)$，权重 $w=(2,3)$；两个键 $k_0=(1,-1)$、$k_1=(0.5,2)$。对 $k_0$：$2\cdot\mathrm{ReLU}(1)+3\cdot\mathrm{ReLU}(-1)=2$；对 $k_1$：$2\cdot\mathrm{ReLU}(0.5)+3\cdot\mathrm{ReLU}(2)=7$。若只选 1 个 token，选中 $k_1$。这个例子就是测试 `test_indexer_formula`。
+
+<CodeFile path="src/llms_from_scratch/architecture/sparse_attention.py" region="indexer" />
+
+索引器本身仍然对每个查询—键对打分，复杂度依旧是 $O(T^2)$；但它只有少数几个头、维度小、用 FP8 计算，常数比主注意力小一到两个数量级。主注意力的复杂度则从 $O(T^2)$ 降到 $O(Tk)$。DSA 建立在 MLA 的“MQA 模式”之上（吸收之后每个潜向量条目被所有查询头共享，见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)），因此每个 token 只需选一次，所有头共用这 2048 个条目。
+
+DSA 的训练是在 DeepSeek-V3.1-Terminus 的检查点上继续进行的，分两个阶段：
+
+1. **稠密预热**：保持稠密注意力，冻结除索引器以外的所有参数，训练 1000 步（共 2.1B token）。目标是让索引器的分布逼近主注意力的分布：把主注意力在所有头上的权重求和并做 L1 归一化，得到目标分布 $p_{t,:}$，最小化 $\sum_t \mathrm{KL}\big(p_{t,:}\,\|\,\mathrm{softmax}(I_{t,:})\big)$。
+2. **稀疏训练**：切换到 top-$k$ 稀疏注意力（$k=2048$），整个模型一起训练 15000 步（共 943.7B token）。索引器的输入从主模型的计算图中分离，只受 KL 损失（此时只在被选中的 token 上计算）驱动，主模型只受语言建模损失驱动。
+
+这个“先对齐、再稀疏”的流程说明了稀疏注意力训练的一个普遍难点：top-$k$ 选择不可导，选择器无法从语言模型损失中直接得到梯度，需要一个蒸馏式的辅助目标。
+
+`topk_token_attention` 实现了“按索引分数选 token”的主注意力。`test_indexer_topk_all_is_dense` 检查 $k\ge T$ 时退化为稠密；`test_topk_selects_highest_scoring_past_tokens` 构造“越早的 token 分数越高”的索引分数，让主注意力的分数全部相等，于是输出恰好是被选中 token 的值的平均，从而直接看到选择了哪些位置。
+
+## DeepSeek-V4：压缩稀疏注意力与重度压缩注意力
+
+DSA 仍然要为每个历史 token 保留缓存，并让索引器扫描每个 token。DeepSeek-V4（2026）把目标推到 100 万 token，于是在**序列维**上也做了压缩：先把每若干个 token 的 KV 合并成一个条目，再在压缩后的条目上做注意力。它设计了两种注意力层，在网络中交替使用。
+
+**压缩稀疏注意力**（Compressed Sparse Attention，CSA）把每 $m=4$ 个 token 的 KV 压缩成一个条目，再用闪电索引器在压缩条目上选 top-$k$（V4-Flash 为 512，V4-Pro 为 1024），即“先压缩、再 DSA”。它的压缩是**重叠**的：每个条目由两路投影 $C^a, C^b$ 组合而成，一路覆盖当前 $m$ 个 token，一路覆盖前一个 $m$ 个 token，相邻条目的感受野互相重叠，减轻了块边界的信息割裂。
+
+**重度压缩注意力**（Heavily Compressed Attention，HCA）把每 $m'=128$ 个 token 压缩成一个条目，不重叠，然后在所有压缩条目上做**稠密**注意力。1M 个 token 只剩约 7800 个条目，稠密注意力完全负担得起。
+
+两种层都附加一个**滑动窗口分支**：最近 $n_{\text{win}}=128$ 个 token 的原始（未压缩）KV 与压缩条目放在同一个 softmax 里，保证局部细节不被压缩抹掉。压缩的方式是带可学习位置偏置的 softmax 加权求和：对 $m'$ 个 token 的候选条目 $c_j$ 与压缩权重 logits $z_j$，
+
+<KeyEq label="HCA 的序列维压缩">
+
+$$
+S_{j} = \operatorname{softmax}_{j\in\text{block}}\big(z_j + B_{j}\big),\qquad
+c^{\text{comp}} = \sum_{j\in\text{block}} S_j\odot c_j ,
+$$
+
+</KeyEq>
+
+softmax 在块内逐维计算，$B$ 是块内位置的可学习偏置。V4 的每个压缩条目**同时作为键和值**，被所有查询头共享（共享 KV 的 MQA，头维 512），RoPE 只作用于最后 64 维；注意力的分母中还加入了每个头一个可学习的汇聚 logit，与 gpt-oss 相同。
+
+<Diagram width={700} height={290} label="DeepSeek-V4 中 CSA 与 HCA 两种注意力层读取的 KV 条目">
+  <Text x={20} y={22} label="原始序列（16 个 token）" anchor="start" size="sm" tone="muted" />
+  <Matrix x={20} y={34} rows={1} cols={16} cell={[36, 22]} gap={4} tone="muted" highlight={[{ cols: [13, 14, 15], tone: 'accent2' }]} />
+  <Region x={10} y={74} w={340} h={206} title="CSA：每 4 个压成 1 个，再选 top-k" />
+  <Matrix x={30} y={110} rows={1} cols={4} cell={[64, 30]} gap={10} values={[['c₀', 'c₁', 'c₂', 'c₃']]} tone="muted" highlight={[{ cols: [0, 2], tone: 'accent' }]} />
+  <Text x={180} y={166} label="索引器从压缩条目中选 top-k（此处 k = 2）" size="sm" />
+  <Text x={180} y={196} label="+ 最近 n_win 个原始 token（滑窗）" size="sm" tone="accent2" />
+  <Text x={180} y={236} label="每查询读取 ≤ k + n_win 个条目" size="sm" bold />
+  <Region x={360} y={74} w={330} h={206} title="HCA：每 128 个压成 1 个，全部稠密" />
+  <Matrix x={390} y={110} rows={1} cols={1} cell={[260, 30]} values={[['c₀（覆盖 128 个 token）']]} tone="accent" />
+  <Text x={525} y={166} label="压缩条目全部参与注意力" size="sm" />
+  <Text x={525} y={196} label="+ 最近 n_win 个原始 token（滑窗）" size="sm" tone="accent2" />
+  <Text x={525} y={236} label="每查询读取 T / 128 + n_win 个条目" size="sm" bold />
+  <Fragment slot="caption">上排是原始序列，最右三格是滑动窗口内的原始 token（两种层都会读取）。CSA 的压缩率低（4 倍），配合索引器只读少数条目，适合精确检索；HCA 的压缩率高（128 倍），不做选择，用很少的条目提供完整的全局视野。V4 在网络中交替放置这两种层。</Fragment>
+</Diagram>
+
+`compress_kv` 实现 HCA 式的不重叠压缩；`compressed_window_attention` 实现共享 KV 的“压缩条目 + 滑窗”注意力：查询 $t$ 只能看到**整块都已过去**的压缩条目（块末位置 $\le t$），否则会泄露未来信息；滑窗部分看最近 `window` 个原始 token。
+
+<CodeFile path="src/llms_from_scratch/architecture/sparse_attention.py" region="compress" />
+
+测试 `test_compress_uniform_weights_is_mean_pooling` 验证权重全零时压缩退化为块内平均；`test_compressed_attention_with_m1_and_no_window_is_dense` 验证 $m=1$、无窗口时等于稠密因果注意力。`entries_per_query` 计算一个查询要读多少个条目，测试中用 V4-Pro 的配置核对了位置 1M 处的数字。
+
+<Bars label="位置约 100 万处，每个查询读取的 KV 条目数" items={[
+  { label: 'HCA（m′ = 128，+128 窗口）', value: 7940, tone: 'info' },
+  { label: 'DSA（V3.2，k = 2048）', value: 2048, tone: 'accent2' },
+  { label: 'CSA（V4-Pro，k = 1024，+128）', value: 1152, tone: 'accent' },
+]}>
+  <Fragment slot="caption">稠密注意力在同一位置要读 100 万个条目，不在图中（会把其他条压成看不见的细线）。DSA 选 2048 个 token；CSA 在 4 倍压缩后选 1024 个条目，等效覆盖约 4096 个原始 token；HCA 读取全部 7812 个压缩条目加 128 个窗口 token。三者都比稠密少两到三个数量级。</Fragment>
+</Bars>
+
+缓存方面，CSA 层只需存 $T/4$ 个压缩条目（外加索引器的小维度键），HCA 层只需存 $T/128$ 个，再加上 128 个窗口条目。DeepSeek-V4 报告：在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV Cache 只有 10%；V4-Flash 分别为 10% 与 7%。V4-Pro 的前两层使用 HCA，V4-Flash 的前两层使用纯滑窗注意力，其余层 CSA 与 HCA 交替。
+
+## 稀疏注意力的取舍
+
+回顾本章的几种设计，可以看到几个反复出现的权衡：
+
+- **选择粒度**：token 级（DSA）最灵活，但读取不连续；块级（NSA）更适合硬件；先压缩再选择（CSA）同时降低了缓存与索引成本。
+- **选择器的成本**：选择器必须比它省下的计算便宜得多。NSA 复用压缩分支的分数，DSA 用 FP8 的少头 ReLU 索引器，CSA 的索引器在压缩后的序列上运行，成本再降为 1/4。
+- **可训练性**：top-$k$ 不可导，选择器要么从另一个可导的分支获得信号（NSA 的压缩分支），要么用蒸馏目标对齐主注意力（DSA 的 KL 损失）。在预训练或继续训练中使用稀疏，比推理时的事后近似更可靠。
+- **局部与全局**：几乎所有方法都保留一个小的滑动窗口，局部依赖用稠密注意力处理最稳妥；全局信息靠选择或压缩获得。
+
+下一章将走得更远：不再从历史中挑选，而是把全部历史压缩进一个固定大小的状态。
+
+## 小结
+
+- 稀疏注意力让每个查询只读一部分键值，复杂度从 $O(T^2)$ 降到 $O(Tk)$；关键是用便宜的代理估计重要性。
+- 固定模式（窗口、步长、全局 token）与内容无关，语言建模效果有限；内容相关的块选择用块的代表向量打分，选 top-$k$ 块后做精确注意力。
+- NSA 组合压缩、选择、滑窗三个分支并用门控加权，选择分数复用压缩分支，同组查询头共享被选块以对齐硬件。
+- DSA 用 FP8 闪电索引器 $\sum_j w_{t,j}\mathrm{ReLU}(q_{t,j}\cdot k_s)$ 为每个查询选 2048 个 token，先用 KL 损失在稠密模式下预热索引器，再整体稀疏训练。
+- DeepSeek-V4 先沿序列维压缩 KV：CSA 每 4 个 token 压缩后再做稀疏选择，HCA 每 128 个 token 压缩后做稠密注意力，二者都附带 128 个 token 的滑窗，并交替使用。
+- 所有稀疏方法在“选择全部”时都应退化为稠密因果注意力，这是检验实现的基本测试。
+
+## 练习
+
+1. 对长度 $T=65536$ 的序列，NSA 的三个分支每个查询各需处理多少个键（取论文配置 $d=16$、$n=16$、$l'=64$、$w=512$）？与稠密注意力相比是多少？
+
+<details>
+<summary>答案</summary>
+
+压缩分支约 $T/d=4096$ 个压缩键；选择分支 $n\cdot l'=16\times64=1024$ 个原始 token；滑窗 512 个。合计约 5632，是稠密 65536 的约 8.6%。实际加速还取决于 kernel 的实现与访存模式，论文报告的解码加速为 11.6 倍，与读取量的减少大致吻合。
+
+</details>
+
+2. 在 `block_topk_attention` 中，若去掉“当前块分数设为 $+\infty$”这一步，会出现什么错误？构造一个具体情形。
+
+<details>
+<summary>答案</summary>
+
+若 $k=1$，某个查询所在块的平均键与查询的点积可能低于某个过去块，那么选中的是过去块，而当前块（包括查询自己）被排除。对位于块中间的查询，这意味着它看不到紧邻的前几个 token；对恰好位于第 0 块的查询，没有其他可选块，但若所在块分数为负而未来块被设为 $-\infty$，仍会选中自己的块。真正的问题出现在前者：局部信息丢失。实际的 NSA 固定包含最近的 2 个块，正是为了避免这一点。
+
+</details>
+
+3. 为什么 `compressed_window_attention` 要求压缩条目的块末位置 $\le t$ 时才能被查询 $t$ 看到？如果允许查询看到它所在的、尚未结束的块的压缩条目，会发生什么？
+
+<details>
+<summary>答案</summary>
+
+压缩条目是整块 token 的加权和，包含块内所有位置的信息。若查询 $t$ 能看到它所在块的条目，而块中还有位于 $t$ 之后的 token，那么查询就间接看到了未来的 token，违反因果性；训练时模型会利用这个泄露“作弊”，推理时（未来 token 尚不存在）表现崩溃。块内尚未压缩的近期 token 由滑窗分支负责。
+
+</details>
+
+4. DSA 的稠密预热阶段为什么要冻结主模型、只训练索引器？如果直接从 V3.1 检查点开始稀疏训练会怎样？
+
+<details>
+<summary>答案</summary>
+
+刚初始化的索引器选出的 token 几乎是随机的，直接稀疏训练会让主模型在大部分查询上读到错误的上下文，损失骤增，可能破坏已训练好的能力。冻结主模型、在稠密模式下用 KL 损失训练索引器，相当于先把主注意力“蒸馏”给索引器，让它学会选出主注意力本来就会关注的 token。预热之后再切换到稀疏，主模型的输入分布变化很小，只需继续训练来适应剩余的差异。
+
+</details>
+
+5. 估算：某模型 61 层，一半是 CSA（$m=4$）、一半是 HCA（$m'=128$），每个压缩条目 512 维、BF16，忽略索引器键与滑窗。1M token 的上下文 KV Cache 约多大？与每层每 token 缓存 576 个 BF16 数的 MLA 相比呢？
+
+<details>
+<summary>答案</summary>
+
+CSA 层每层 $10^6/4=250000$ 个条目，HCA 层每层约 7812 个条目。按 30.5 层各算：$(250000+7812)\times30.5\times512\times2\approx8.05\times10^9$ 字节，约 8 GB。MLA 为 $10^6\times61\times576\times2\approx70.3\times10^9$ 字节，约 70 GB。压缩版约为其 11%，与 V4 报告中“KV Cache 为 V3.2 的 10%”量级一致（实际还需加上索引器缓存、窗口以及可能的低精度存储）。
+
+</details>
+
+## 参考文献
+
+- Child et al. [Generating Long Sequences with Sparse Transformers](https://arxiv.org/abs/1904.10509). 2019.
+- Beltagy et al. [Longformer](https://arxiv.org/abs/2004.05150). 2020；Zaheer et al. [Big Bird](https://arxiv.org/abs/2007.14062). 2020.
+- Tang et al. [Quest: Query-Aware Sparsity for Efficient Long-Context LLM Inference](https://arxiv.org/abs/2406.10774). 2024.
+- Yuan et al. [Native Sparse Attention: Hardware-Aligned and Natively Trainable Sparse Attention](https://arxiv.org/abs/2502.11089). 2025.
+- DeepSeek-AI. [DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models](https://arxiv.org/abs/2512.02556). 2025（§2 DeepSeek Sparse Attention 与闪电索引器）.
+- DeepSeek-AI. [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348). 2026（§2.3 CSA 与 HCA；模型配置见第 4 节）.
+- Brown et al. [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165). 2020（GPT-3 交替使用稠密层与局部带状稀疏层）.
