@@ -1,8 +1,289 @@
 ---
 title: 推理的成本模型：prefill 与 decode
-description: 生成一个 token 需要多少计算和内存读写，prefill 计算受限而 decode 带宽受限，延迟、吞吐与批大小的关系。
+description: 推导生成一个 token 所需的 FLOPs 与显存读写量，说明 prefill 为什么受算力限制、decode 为什么受带宽限制，以及延迟、吞吐、KV Cache 与批大小之间的关系；最后以 Llama-3-8B/70B 在 H100 上做完整核算。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/inference/cost_model.py
+  - tests/inference/test_cost_model.py
 ---
 
-本章正在撰写。
+在[文本生成：解码策略与 KV Cache](/transformer/generation/)中，我们让 GPT 先对整段提示做一次前向、把每层的 K 和 V 存进缓存，然后每步只喂一个新 token。那一章关心的是“结果对不对”；从这一章开始，我们关心“服务一个用户要花多少钱、多少时间”，以及“同一张卡怎样同时服务更多用户”。
+
+答案取决于两个量：一次前向要做多少浮点运算，要从显存搬运多少字节。[性能分析：Roofline 与 Profiler](/gpu/profiling/)给出了把这两个量变成时间的方法——运算时间与访存时间取较大者。本章把它用到自回归生成上，得到全书推理部分的“账本”：prefill 受算力限制，decode 受带宽限制；批处理让 decode 摊薄权重读取，KV Cache 又反过来限制批能有多大。后面每一章的优化——分页 KV Cache、连续批处理、CUDA Graph、量化、投机解码、分布式部署——都是在这本账上找空间。
+
+## 自回归生成的两个阶段
+
+给定长度为 $T_p$ 的提示，生成 $T_o$ 个 token 分成两个性质截然不同的阶段。
+
+**预填充（prefill）**：把整段提示一次送进模型。$T_p$ 个位置并行计算，每层的线性层是一个 $(T_p, d) \times (d, d')$ 的矩阵乘法；同时把所有位置的 K/V 写入缓存，并用最后一个位置的 logits 采样出第一个输出 token。
+
+**解码（decode）**：之后每一步只输入上一步采样出的那一个 token，读取缓存中的全部历史 K/V，算出下一个 token 的分布。生成 $T_o$ 个 token 需要 1 次 prefill 加 $T_o-1$ 次 decode，这些 decode 之间有严格的先后依赖。
+
+<Diagram width={720} height={230} label="prefill 与 decode 两个阶段">
+  <Region x={10} y={20} w={250} h={190} title="prefill：一次前向" tone="accent" />
+  <Box x={30} y={60} w={210} h={44} label="提示 x₁ … x_T" sub="(T_p, d)" tone="accent" />
+  <Box x={30} y={140} w={210} h={44} label="写入 T_p 个位置的 K/V" tone="info" />
+  <Arrow from={[135, 104]} to={[135, 140]} />
+  <Region x={290} y={20} w={420} h={190} title="decode：每步一个 token" tone="ghost" />
+  <Box x={310} y={60} w={110} h={44} label="y₁" sub="(1, d)" />
+  <Box x={450} y={60} w={110} h={44} label="y₂" sub="(1, d)" />
+  <Box x={590} y={60} w={100} h={44} label="y₃ …" sub="(1, d)" />
+  <Box x={310} y={140} w={380} h={44} label="读全部历史 K/V，追加 1 个位置" tone="info" />
+  <Arrow from={[240, 82]} to={[310, 82]} label="采样" />
+  <Arrow from={[420, 82]} to={[450, 82]} />
+  <Arrow from={[560, 82]} to={[590, 82]} />
+  <Arrow from={[365, 104]} to={[365, 140]} dashed head="both" />
+  <Arrow from={[505, 104]} to={[505, 140]} dashed head="both" />
+  <Arrow from={[640, 104]} to={[640, 140]} dashed head="both" />
+  <Fragment slot="caption">prefill 并行处理整段提示并写满缓存；decode 每步只算一个位置，但要把缓存里的全部 K/V 读一遍。两阶段用同一套权重，算术形状却完全不同。</Fragment>
+</Diagram>
+
+同一个模型、同一套权重，prefill 是“胖”矩阵乘法，decode 是“瘦”的矩阵—向量乘法。下面两节分别数清它们的运算量与访存量。
+
+## 一步前向要做多少运算
+
+### 线性层：每个 token、每个参数 2 FLOPs
+
+[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)推导过：一个 $(m, k)\times(k, n)$ 的矩阵乘法需要 $2mkn$ 次浮点运算（每个乘加算 2 次）。线性层 $y = xW^\top$ 中，$W$ 有 $kn$ 个参数，每个 token 贡献 $m=1$，所以**每个 token 对每个参与矩阵乘法的参数做 2 FLOPs**。记 Transformer 层中参与矩阵乘法的参数总量为 $P$，一步处理 $N$ 个 token 的线性层运算量就是 $2PN$。
+
+对 LLaMA 式的块（GQA + SwiGLU），每层参数为
+
+$$
+P_{\text{layer}} = \underbrace{2 d \cdot h d_h}_{W_Q,\,W_O} + \underbrace{2 d \cdot h_{kv} d_h}_{W_K,\,W_V} + \underbrace{3 d \cdot d_{ff}}_{W_1,\,W_3,\,W_2},
+$$
+
+其中 $h$ 是查询头数，$h_{kv}$ 是 K/V 头数，$d_h$ 是头维度。LM head 是 $V\times d$ 的矩阵，但生成时只需要每个序列**最后一个位置**的 logits，所以它只按序列数计费。嵌入层是查表，不做矩阵乘法。
+
+### 注意力：与上下文长度成正比
+
+位置 $p$ 的查询要和 $p+1$ 个键做点积（$2d_h$ FLOPs/头），再用 $p+1$ 个权重对值加权求和（又是 $2d_h$ FLOPs/头）。所以一个查询看一个键的代价是 $4 h d_h$ FLOPs/层。注意这里用的是查询头数 $h$：GQA 减少了 K/V 的存储，但没有减少注意力的计算。
+
+若某个序列这一步新算 $q$ 个 token，之前已缓存 $c$ 个，第 $t$ 个新 token（$t=0,\dots,q-1$）看到 $c+t+1$ 个键，总共是
+
+$$
+\sum_{t=0}^{q-1}(c+t+1) = qc + \frac{q(q+1)}{2}
+$$
+
+个“查询-键对”。把两部分合起来，就得到本章的第一个关键公式。
+
+<KeyEq label="一步前向的运算量">
+
+$$
+F = 2P\sum_i q_i \;+\; 2Vd\cdot n_{\text{seq}} \;+\; 4Lhd_h \sum_i\Big(q_i c_i + \tfrac{q_i(q_i+1)}{2}\Big)
+$$
+
+</KeyEq>
+
+这一个公式覆盖了所有情况：prefill 是 $(q,c)=(T_p,0)$，decode 是 $(1, c)$，后面章节的 chunked prefill 是 $(\text{块长}, \text{已算长度})$，前缀缓存命中则是 $c$ 一开始就不为零。
+
+手算一下 Llama-3-8B（$L=32,\ d=4096,\ h=32,\ h_{kv}=8,\ d_h=128,\ d_{ff}=14336,\ V=128256$）：每层 $2\cdot4096\cdot4096 + 2\cdot4096\cdot1024 + 3\cdot4096\cdot14336 \approx 218.1\text{M}$，32 层合计 $P\approx 6.98\text{B}$；LM head $0.525\text{B}$；加上嵌入表正好是官方的 8.03B。一个 2048 token 的提示：线性层 $2\times6.98\text{B}\times2048 \approx 2.86\times10^{13}$，注意力 $4\cdot32\cdot32\cdot128\times(2048\cdot2049/2)\approx1.1\times10^{12}$，合计约 $2.97\times10^{13}$ FLOPs。注意力只占 4%——在几千 token 的上下文里，运算量几乎全在线性层。
+
+## 一步前向要搬运多少字节
+
+运算量之外，每一步还要把数据从 HBM 搬进 SM。主导项有三个：
+
+1. **权重**：每一步都要把参与矩阵乘法的全部权重读一遍，与这一步处理多少 token 无关。BF16 下是 $2(P + Vd)$ 字节，8B 模型约 15.0 GB。
+2. **读 KV Cache**：每个序列要读它全部 $c+q$ 个位置的 K 和 V。
+3. **写 KV Cache**：新算的 $q$ 个位置写回缓存。
+
+激活值的读写我们忽略：decode 时它只有 $(B, d)$ 那么大，prefill 时它被算子融合与 FlashAttention 尽量留在片上。
+
+每个位置在缓存里占多少字节？每层存一个 K 向量和一个 V 向量，各有 $h_{kv}$ 个头、每头 $d_h$ 维。
+
+<KeyEq label="每个 token 的 KV Cache 字节数">
+
+$$
+b_{kv} = 2 \cdot L \cdot h_{kv} \cdot d_h \cdot (\text{bytes per element})
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/inference/cost_model.py" region="kv_bytes" />
+
+Llama-3-8B 是 $2\cdot32\cdot8\cdot128\cdot2 = 131072$ 字节，正好 128 KiB；Llama-3-70B（$L=80$）是 320 KiB。如果 8B 用的是标准多头注意力（$h_{kv}=h=32$），这个数字会变成 512 KiB——[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)里那些设计，首要动机就是这个公式。一个 8192 token 的对话在 8B 模型上就要 1 GiB 缓存，这在下面估算批大小时会成为主角。
+
+把运算量和访存量放在同一个函数里：
+
+<CodeFile path="src/llms_from_scratch/inference/cost_model.py" region="step_cost" />
+
+测试 `test_step_cost_matches_measured_flops_of_tiny_model` 用 `torch.utils.flop_counter` 在全书共用的 GPT 上实测矩阵乘法的 FLOPs，与公式逐项核对；`test_chunked_prefill_costs_same_flops_as_one_shot` 验证把一段 prefill 拆成两块，总运算量不变（只多算一次 LM head）。
+
+## 算术强度：为什么 decode 受带宽限制
+
+算术强度 $I = F/\text{Bytes}$ 是每搬运一个字节做多少运算。roofline 模型说：$I$ 低于硬件的拐点 $\pi/\beta$（峰值算力除以带宽）时，时间由访存决定；高于拐点时由算力决定。H100 SXM 的 BF16 稠密峰值是 989 TFLOP/s，HBM3 带宽 3.35 TB/s，拐点约 **295 FLOP/B**。
+
+**prefill**：权重读一次，却被 $T_p$ 个 token 复用。忽略注意力与 KV，$I \approx 2PT_p / 2P = T_p$。2048 token 的提示强度约 1900 FLOP/B，远在拐点之上——prefill 是计算受限的，时间约等于 $F/\pi$：在 100% MFU 下 30 ms，现实的 50% MFU 下约 60 ms。
+
+**decode**：批中有 $B$ 个序列，每个序列只算 1 个 token。线性层运算量是 $2PB$，权重仍然要整读一遍 $2P$ 字节，于是**在上下文很短时 $I\approx B$**。单个请求（$B=1$）的 decode 强度约为 1：H100 上 99% 以上的算力都在等数据。一步的时间就是“把权重读一遍”的时间：$15.0\,\text{GB} / 3.35\,\text{TB/s} \approx 4.5\,\text{ms}$，即单用户最多约 220 token/s。
+
+增大批大小 $B$ 是 decode 唯一的出路：权重读取被 $B$ 个序列摊薄。但 KV Cache 的读取**不能**摊薄——每个序列读自己的缓存。设上下文长度为 $c$，把 decode 的强度写全：
+
+<KeyEq label="decode 的算术强度">
+
+$$
+I(B, c) = \frac{B\,\big(2P + 4Lhd_h\,c\big)}{2P + B\,c\,b_{kv}}
+\;\xrightarrow{B\to\infty}\; \frac{2P}{c\,b_{kv}} + \frac{4Lhd_h}{b_{kv}}
+$$
+
+</KeyEq>
+
+$B$ 很大时，强度趋于一个与 $B$ 无关的上限：每个序列的运算量与它自己的 KV 读取量之比。对 Llama-3-8B，第二项 $4Lhd_h/b_{kv} = 524288/131072 = 4$——GQA 下注意力本身的强度只有 $4 = 2h/h_{kv}$ FLOP/B，无论批多大都远低于拐点。第一项随上下文变长而变小。
+
+<Plot
+  label="Llama-3-8B decode 的算术强度随批大小的变化"
+  x={[1, 4096]}
+  y={[0.5, 1000]}
+  logX
+  logY
+  xLabel="批大小 B"
+  yLabel="FLOP / B"
+  series={[
+    { label: 'c = 128', fn: (b) => (b * (2 * 7.5047e9 + 524288 * 129)) / (2 * 7.5047e9 + b * 130 * 131072) },
+    { label: 'c = 1024', fn: (b) => (b * (2 * 7.5047e9 + 524288 * 1025)) / (2 * 7.5047e9 + b * 1026 * 131072), tone: 'info' },
+    { label: 'c = 8192', fn: (b) => (b * (2 * 7.5047e9 + 524288 * 8193)) / (2 * 7.5047e9 + b * 8194 * 131072), tone: 'accent2' },
+    { label: 'H100 拐点', fn: () => 295, tone: 'muted', dashed: true },
+  ]}
+>
+  <Fragment slot="caption">横纵轴都是对数刻度。短上下文时强度几乎等于批大小；上下文越长，KV 读取越早占据主导，强度在远低于 H100 拐点（虚线，295 FLOP/B）的地方饱和：c = 8192 时上限不到 18。长上下文 decode 无论批多大都受带宽限制。</Fragment>
+</Plot>
+
+这幅图解释了推理系统的大部分设计。短上下文下，把批做大就能逼近算力上限；长上下文下，瓶颈是 KV Cache 的容量与带宽，于是有了 GQA/MLA（让 $b_{kv}$ 变小）、KV Cache 量化（每个元素字节更少）和[稀疏注意力](/architecture/sparse-attention/)（每步只读一部分键）。
+
+## 延迟、吞吐与 goodput
+
+用户感受到的不是 FLOPs，而是延迟。服务系统常用四个指标描述一个请求：
+
+| 指标 | 定义 | 主要由什么决定 |
+| --- | --- | --- |
+| TTFT（time to first token） | 请求到达到第一个输出 token 的时间 | 排队 + prefill |
+| TPOT（time per output token） | 首 token 之后平均每个 token 的间隔 | decode 一步的耗时 |
+| ITL（inter-token latency） | 相邻两个 token 的实际间隔（逐个记录） | 同上，但能看到抖动 |
+| E2E latency | 到达到最后一个 token 的时间 | $\text{TTFT} + (T_o-1)\cdot\text{TPOT}$ |
+
+TPOT 是 ITL 的平均。对流式聊天，TTFT 决定“多久开始出字”，TPOT 决定“出字有多快”（人的阅读速度大约每秒几到十几个词，TPOT 在 50 ms 左右就已足够流畅）。系统层面关心**吞吐**：每秒产出多少 token。
+
+<Diagram width={720} height={170} label="一个请求的时间线与延迟指标">
+  <Box x={20} y={50} w={110} h={40} label="排队" tone="muted" />
+  <Box x={130} y={50} w={150} h={40} label="prefill" tone="accent" />
+  <Box x={280} y={50} w={80} h={40} label="y₂" tone="info" />
+  <Box x={360} y={50} w={80} h={40} label="y₃" tone="info" />
+  <Box x={440} y={50} w={80} h={40} label="y₄" tone="info" />
+  <Box x={520} y={50} w={80} h={40} label="…" tone="info" />
+  <Box x={600} y={50} w={100} h={40} label="y_T" tone="info" />
+  <Arrow from={[20, 110]} to={[280, 110]} head="both" tone="accent" label="TTFT" labelSide="below" />
+  <Arrow from={[280, 30]} to={[360, 30]} head="both" tone="accent2" label="ITL" />
+  <Arrow from={[20, 150]} to={[700, 150]} head="both" label="端到端延迟" labelSide="above" />
+  <Fragment slot="caption">第一个 token 在 prefill 结束时产生，所以 TTFT 包括排队与 prefill；之后每个 decode 步产生一个 token，相邻间隔就是 ITL，它们的平均是 TPOT。</Fragment>
+</Diagram>
+
+延迟与吞吐是一对矛盾。批越大，decode 一步越慢（TPOT 上升），但每步产出的 token 越多（吞吐上升）。在上下文 2048 的 Llama-3-8B 上，roofline 给出：
+
+| 批大小 $B$ | 1 | 8 | 32 | 64 | 128 | 256 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 一步耗时（ms） | 4.56 | 5.12 | 7.05 | 9.61 | 14.75 | 25.01 |
+| 吞吐（token/s） | 219 | 1562 | 4541 | 6657 | 8680 | 10234 |
+
+从 1 到 8，耗时只增加 12%，吞吐却增加 7 倍——这一段几乎是免费的午餐，因为权重读取被摊薄了。批继续增大，KV 读取开始主导，耗时近乎线性增长，吞吐的收益递减。
+
+只看吞吐会误导：一个让 TTFT 达到 10 秒的系统吞吐可能很高，但没有用户会等。DistServe 提出用 **goodput** 衡量服务能力：**每秒完成的、同时满足 TTFT 与 TPOT 两个 SLO（服务等级目标）的请求数**。下一章的调度器模拟会直接计算它。
+
+## KV Cache 决定批能有多大
+
+把批做大需要显存放得下所有序列的 KV Cache。设可用显存为 $M$（通常按利用率 0.9 留出余量给激活和框架），权重占 $W$ 字节，每个序列长度 $c$：
+
+<KeyEq label="显存允许的最大批大小">
+
+$$
+B_{\max} = \left\lfloor \frac{M - W}{c \cdot b_{kv}} \right\rfloor
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/inference/cost_model.py" region="max_batch" />
+
+Llama-3-8B 在一张 80 GB 的 H100 上：$M = 72$ GB，$W=16.06$ GB，剩下约 56 GB。上下文 2048 时每个序列 256 MiB，能放 208 个；8192 时每个 1 GiB，只能放 52 个；32768 时只剩 13 个。
+
+<Bars
+  label="Llama-3-8B 在 H100 上的显存构成（BF16，B 个 8192 token 的序列）"
+  unit="GB"
+  max={80}
+  items={[
+    { label: 'B = 8', segments: [{ value: 16.06, label: '权重' }, { value: 8.59, label: 'KV Cache' }] },
+    { label: 'B = 32', segments: [{ value: 16.06, label: '权重' }, { value: 34.36, label: 'KV Cache' }] },
+    { label: 'B = 52', segments: [{ value: 16.06, label: '权重' }, { value: 55.84, label: 'KV Cache' }] },
+    { label: 'KV 用 FP8', segments: [{ value: 16.06, label: '权重' }, { value: 55.84, label: 'KV Cache' }], note: 'B = 104' },
+  ]}
+>
+  <Fragment slot="caption">权重是固定成本，KV Cache 随批大小线性增长。52 个 8K 序列就占满了 72 GB 的可用预算（含 10% 余量）；把 KV 存成 FP8 后同样的显存能放 104 个序列。</Fragment>
+</Bars>
+
+注意这里假设每个序列**恰好**占用 $c\cdot b_{kv}$ 字节。早期系统按“最大长度”为每个请求预留一整段连续显存，真实长度往往只有几分之一，实际可用的批要小得多。下一章的 PagedAttention 就是为了让上面这个公式成真。
+
+把 $B_{\max}$ 代回上一节：8K 上下文的 8B 模型最多 52 个序列，此时一步约 22 ms、吞吐约 2400 token/s，强度约 14 FLOP/B——H100 的算力只用了不到 5%。这就是为什么后续章节会花这么多力气在 KV Cache 上。
+
+## 完整核算：Llama-3 在 H100 上
+
+把上面的公式放在一起，做两个模型的完整账目（BF16 权重与 KV，100% 利用率的理论界）：
+
+| | Llama-3-8B | Llama-3-70B |
+| --- | ---: | ---: |
+| 参数量 | 8.03 B | 70.55 B |
+| 权重（BF16） | 16.1 GB | 141.1 GB |
+| 每 token KV | 128 KiB | 320 KiB |
+| 2048 token prefill 运算量 | $2.97\times10^{13}$ | $2.86\times10^{14}$ |
+| 2048 token prefill 时间（1 卡 / 4 卡，100% MFU） | 30 ms | 72 ms（4 卡） |
+| decode 一步，$B=1$ | 4.6 ms | 42 ms（单卡等效） |
+| decode 一步，$B=64$、$c=2048$ | 9.6 ms | 54 ms（单卡等效） |
+| 8K 上下文的最大批 | 52（1 卡） | 54（4 卡），162（8 卡） |
+
+70B 的权重本身就超过一张 H100，必须切到多张卡上（[分布式推理](/inference/distributed-inference/)讨论怎样切）。表中“单卡等效”是把所有字节压在一张卡的带宽上的时间；4 路张量并行时，每卡读四分之一，理想情况下 decode 一步约 10.4 ms——再加上每层两次 all-reduce 的通信开销。
+
+这些数字都是上界。真实系统的 MFU 在 prefill 时通常是 40%–60%，decode 时 MBU（带宽利用率）在 60%–80%：PyTorch 团队的 gpt-fast 在 A100 上让 7B 模型的 batch=1 decode 跑到 107 token/s，对应 72% MBU，并指出“连纯拷贝都很难超过 85%”。还有一个被这个模型完全忽略的开销：CPU 启动 kernel 的时间。decode 一步只有几毫秒，却要启动上千个小 kernel，[CUDA Graph](/inference/cuda-graph/)一章会专门处理它。
+
+<StatGrid items={[
+  { value: '≈ T_p', label: 'prefill 的算术强度（FLOP/B）' },
+  { value: '≈ B', label: '短上下文 decode 的强度' },
+  { value: '295', label: 'H100 BF16 的 roofline 拐点' },
+  { value: '4.5 ms', label: '8B 模型单步 decode 的带宽下界' },
+]} />
+
+## 小结
+
+- 生成分为 prefill 与 decode。prefill 一次处理整段提示，强度约等于提示长度，受算力限制；decode 每步每个序列一个 token，强度约等于批大小，受带宽限制。
+- 一步前向的运算量 $F = 2P\sum q_i + 2Vd\,n_{\text{seq}} + 4Lhd_h\sum(q_ic_i + q_i(q_i+1)/2)$，同一公式覆盖 prefill、decode 与 chunked prefill。
+- 每 token 的 KV Cache 是 $2Lh_{kv}d_h$ 个元素；它与权重一起决定显存允许的最大批，而 KV 读取不能被批摊薄，使长上下文 decode 的强度在远低于拐点处饱和。
+- 延迟指标是 TTFT、TPOT/ITL 与端到端延迟，系统指标是吞吐与 goodput；批大小在 TPOT 与吞吐之间折中。
+- 这本账指出了后续各章的方向：减少 KV 的浪费与体积（PagedAttention、量化）、让批更满（连续批处理）、去掉 CPU 开销（CUDA Graph）、每次读权重多产出几个 token（投机解码）。
+
+## 练习
+
+1. 推导 Llama-3-70B 每层的参数量，并验证 80 层加嵌入与 LM head 合计约 70.55B。
+2. 某模型 $L=61$，使用 MLA，每层每个 token 只缓存一个 512 维的潜向量和一个 64 维的 RoPE 键（DeepSeek-V3 的设计）。BF16 下每 token 的 KV 是多少？与同层数、128 个头、$d_h=128$ 的标准 MHA 相比缩小多少倍？
+3. 在 H100 上，Llama-3-8B 的 decode 要达到 roofline 拐点，上下文为 0 时批大小至少多大？为什么上下文为 8192 时无论批多大都达不到？
+4. 一个请求的提示 1000 token、输出 500 token，TTFT 为 200 ms，TPOT 为 40 ms，端到端延迟是多少？如果 SLO 是 TTFT ≤ 500 ms、TPOT ≤ 50 ms，它算不算 goodput？
+5. 把一段 4096 token 的 prefill 拆成 4 个 1024 token 的块（chunked prefill），总运算量和总访存量各如何变化？
+
+<details>
+<summary>答案</summary>
+
+1. 每层：$W_Q,W_O$ 各 $8192\times8192$，共 $134.2$M；$W_K,W_V$ 各 $8192\times1024$，共 $16.8$M；FFN $3\times8192\times28672 = 704.6$M；合计 $855.6$M。80 层 $68.45$B，嵌入与 LM head 各 $128256\times8192 = 1.05$B，再加归一化参数，约 $70.55$B。
+
+2. MLA 每 token 每层缓存 $512 + 64 = 576$ 个元素，61 层 BF16 是 $576\times61\times2 = 70272$ 字节，约 68.6 KiB。MHA 是 $2\times128\times128\times61\times2 \approx 3.81$ MiB，约为 MLA 的 57 倍。
+
+3. 上下文为 0 时 $I\approx B$，所以需要 $B \gtrsim 295$。上下文 8192 时强度上限是 $2P/(c\,b_{kv}) + 4 \approx 15.0\text{e9}/(8192\times131072) + 4 \approx 18$，与 $B$ 无关，永远低于 295。
+
+4. $0.2 + 499\times0.04 = 20.16$ 秒。TTFT 与 TPOT 都在 SLO 内，算作 goodput。
+
+5. 线性层运算量不变（每个 token 仍然对每个参数做 2 FLOPs）；注意力的查询-键对总数也不变（$\sum_t(c+t+1)$ 只是被分段求和），只多了 3 次 LM head。访存量增加：权重要读 4 遍而不是 1 遍，前面块的 KV 要被后面的块重复读取。因为 prefill 受算力限制、每块仍有 1024 个 token（强度约 1000），多出来的访存几乎不增加时间。
+
+</details>
+
+## 参考文献
+
+- Stanford CS336 Spring 2025, Lecture 10: Inference. [课程主页](https://cs336.stanford.edu/spring2025/)；[讲义代码](https://github.com/stanford-cs336/spring2025-lectures)
+- Pope et al. *Efficiently Scaling Transformer Inference*. MLSys 2023. [arXiv:2211.05102](https://arxiv.org/abs/2211.05102)
+- Meta. *The Llama 3 Herd of Models*. 2024. [arXiv:2407.21783](https://arxiv.org/abs/2407.21783)；模型配置见 [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B/blob/main/config.json)
+- NVIDIA. *H100 Tensor Core GPU Datasheet*. [nvidia.com](https://www.nvidia.com/en-us/data-center/h100/)
+- Zhong et al. *DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving*. OSDI 2024. [arXiv:2401.09670](https://arxiv.org/abs/2401.09670)
+- PyTorch Team. *Accelerating Generative AI with PyTorch II: GPT, Fast*. 2023. [pytorch.org/blog](https://pytorch.org/blog/accelerating-generative-ai-2/)
+- Williams, Waterman, Patterson. *Roofline: An Insightful Visual Performance Model for Multicore Architectures*. CACM 2009. [doi:10.1145/1498765.1498785](https://doi.org/10.1145/1498765.1498785)

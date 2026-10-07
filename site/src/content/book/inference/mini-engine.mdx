@@ -1,8 +1,211 @@
 ---
 title: 从零实现一个推理引擎
-description: 把本部分的机制串起来：用几百行 PyTorch 实现带分页 KV Cache、连续批处理与 CUDA Graph 的迷你 vLLM。
+description: 把本部分的机制串起来：用几百行 PyTorch 实现带分页 KV Cache、前缀缓存、连续批处理、chunked prefill、抢占与可选 CUDA Graph 的迷你 vLLM；核心不变量是“并发批处理的贪心输出与逐个 generate 完全一致”，并用它验证每一个机制。
 order: 9
-draft: true
+code:
+  - src/llms_from_scratch/inference/engine/paged_model.py
+  - src/llms_from_scratch/inference/engine/model_runner.py
+  - src/llms_from_scratch/inference/engine/llm_engine.py
+  - src/llms_from_scratch/inference/engine/sampler.py
+  - tests/inference/test_engine.py
 ---
 
-本章正在撰写。
+这一部分走到这里，所有零件都已经分别造好、分别测过：[成本模型](/inference/inference-cost/)告诉我们每步该算多少；[分页 KV Cache 与前缀缓存](/inference/paged-attention/)管理显存；[调度器](/inference/batching-scheduling/)决定每步给每个请求多少 token；[CUDA Graph 运行器](/inference/cuda-graph/)消除启动开销；[vLLM 剖析](/inference/vllm/)展示了它们在生产引擎里的位置。本章把零件装配成一个可以运行的引擎，并回答最后一个问题：**怎么知道它是对的？**
+
+迷你引擎是针对第三部分那个共用的 GPT（RMSNorm + RoPE + GQA + SwiGLU）写的，不包含任何新模型代码，只做三件事：把批里所有请求的 token 展平成一条序列，让注意力从分页 KV Cache 读取，并把所有 KV 状态交给调度器与块管理器。全部加起来只有几百行 Python。
+
+## 引擎的构成
+
+<Diagram width={720} height={330} label="迷你推理引擎的模块与一步的数据流">
+  <Box x={20} y={30} w={140} h={50} label="LLMEngine" sub="add_request / step" tone="strong" size="sm" />
+  <Box x={220} y={30} w={140} h={50} label="Scheduler" sub="token 预算 / 抢占" tone="accent" size="sm" />
+  <Box x={420} y={30} w={140} h={50} label="KVCacheManager" sub="块池 / 前缀缓存" tone="info" size="sm" />
+  <Box x={20} y={150} w={140} h={50} label="ModelRunner" sub="展平输入 / 取 logits" tone="accent2" size="sm" />
+  <Box x={220} y={150} w={140} h={50} label="PagedGPT" sub="共用 GPT 的权重" tone="accent2" size="sm" />
+  <Box x={420} y={150} w={140} h={50} label="CUDAGraphRunner" sub="可选；按批大小分桶" tone="accent2" size="sm" />
+  <Box x={20} y={260} w={140} h={44} label="Sampler" sub="温度 / top-k / 种子" size="sm" />
+  <Arrow from={[160, 55]} to={[220, 55]} label="1 schedule" />
+  <Arrow from={[360, 55]} to={[420, 55]} head="both" />
+  <Arrow from={[90, 80]} to={[90, 150]} label="2 execute" labelSide="left" />
+  <Arrow from={[160, 175]} to={[220, 175]} />
+  <Arrow from={[360, 175]} to={[420, 175]} head="both" tone="muted" dashed />
+  <Arrow from={[90, 200]} to={[90, 260]} label="3 sample" labelSide="left" />
+  <Text x={180} y={286} label="4 update_from_output：回到调度器，推进状态、登记满块、释放已完成请求" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">引擎的一步：调度器根据 token 预算和空闲块决定本步的批；运行器把批展平成一维 token 序列，并让 PagedGPT 读写分页 KV Cache（decode 批可走 CUDA Graph）；采样后调度器更新状态。分页缓存的所有权属于 KVCacheManager，物理张量由 PagedGPT 持有。</Fragment>
+</Diagram>
+
+代码分布在 `inference/engine/` 的四个文件和前几章已有的模块中：
+
+| 文件 | 职责 | 对应 vLLM |
+| --- | --- | --- |
+| `scheduler.py`（前文） | 统一 token 预算、抢占 | `Scheduler` |
+| `prefix_cache.py`（前文） | 块池、块哈希、写时复制 | `KVCacheManager` / `BlockPool` |
+| `engine/paged_model.py` | 读取分页 KV 的前向 | 模型 + 注意力后端 |
+| `engine/model_runner.py` | 展平输入、CUDA Graph 派发、取 logits | `GPUModelRunner` |
+| `engine/sampler.py` | 每请求采样 | `Sampler` |
+| `engine/llm_engine.py` | 忙循环的一步 | `EngineCore.step` |
+
+## PagedGPT：只重写注意力的数据通路
+
+第三部分的 GPT 假设批里每个序列同样长，且 KV Cache 是 `[B, n_kv, max_len, d]` 的连续张量。分页引擎里每一行是不同请求的任意 token，所以需要换一条路径，但权重、RMSNorm、RoPE、SwiGLU 全都复用。`PagedGPT` 持有每层的分页缓存张量，而 `forward` 直接取 `GPT` 的各个子模块：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/paged_model.py" region="forward" />
+
+这里值得停下来想三件事。
+
+**输入是展平的。** `input_ids`、`positions`、`slots`、`seq_lens` 都是长度为 $N$ 的一维张量，$N$ 是本步所有请求的 token 总数；`block_tables` 是 `[N, max_blocks]`。prefill、chunked prefill、decode、前缀缓存命中之后的剩余部分，在这里没有任何区别，每一行只是“位置 $p$ 的一个 token，它要读自己请求的前 $p+1$ 个 K/V”。这正是 vLLM `_prepare_inputs` 做的事，也是调度器不区分阶段的原因。
+
+**RoPE 用每个 token 自己的绝对位置。** `m.freqs[positions]` 按位置取出旋转频率，而不是像训练时那样 `freqs[:T]`。不同请求的位置各不相同，chunked prefill 的第二块从中间开始，都能正确处理。
+
+**先写后读。** 注意力先用 `write_kv` 把本步的 K、V 按槽位写进缓存，再让 `paged_attention` 按块表读取——读到的包括刚写入的本步 token，这正是因果注意力需要的（一个 token 看得到自己）。同一步中同一请求的多个 token（prefill 块）因此互相可见，而可见长度 `seq_lens = p + 1` 保证了因果性：位置 $p$ 的行只看前 $p+1$ 个 K/V。
+
+## ModelRunner：把调度结果变成张量
+
+调度器的输出是“哪些请求、各算多少 token”，`ModelRunner.prepare_inputs` 把它们翻译成上面的五个张量：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/model_runner.py" region="prepare" />
+
+对每个请求的每个待算位置 `p`：token 是 `all_token_ids[p]`，槽位由块表算出，可见长度是 `p + 1`，块表补零到固定宽度 `max_blocks`（补零指向空块，但因为可见长度限制，它永远不会被读到）。`logits_indices` 记下每个请求**最后一个** token 在展平序列里的下标——prefill 中间那些 token 的 logits 没有用，只算每个请求最后一行的 `lm_head`，这既省了 `lm_head` 的计算量（词表 128K 时它不小），也是 chunked prefill 的中间块不需要采样的原因。
+
+然后是执行：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/model_runner.py" symbol="ModelRunner.execute" />
+
+只有“纯 decode”的批才走 CUDA Graph：这时每个请求恰好一个 token，批的形状只由批大小决定，可以分桶 padding。含 prefill 的批每次形状都不同，直接 eager 执行。这是 vLLM 早期 FULL 模式的简化版，也是 [CUDA Graph](/inference/cuda-graph/) 一章里讨论过的取舍。`cuda_graph` 有三个取值：`None`（eager）、`"cuda"`（真图，需 GPU）、`"fake"`（CPU 上模拟同样的静态地址契约，用于测试）。
+
+## 引擎的一步
+
+`LLMEngine` 把调度器、块管理器、运行器、采样器连在一起。`add_request` 构造请求，`step` 就是前一章说的“忙循环的一步”：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/llm_engine.py" region="step" />
+
+`generate` 只是一个同步封装：把所有提示加入引擎，循环 `step()`，直到调度器没有未完成的请求。
+
+引擎里有一条值得提的错误路径：`schedule()` 返回空批意味着连队头那一个请求也放不下——KV 块不足以容纳任何请求，此时抛出异常而不是死循环。真实系统会在入口处拒绝过长的请求，或者用 `max_model_len` 保证单个请求总能放下。
+
+## 不变量：并发批处理的输出 = 逐个 generate
+
+怎么证明这些机制没有弄坏任何东西？最强的检验是一条不变量：
+
+<KeyEq label="引擎的正确性不变量">
+
+$$
+\text{LLMEngine.generate}(\text{prompts})_i \;=\; \text{GPT.generate}(\text{prompt}_i,\ T{=}0)\quad\forall i .
+$$
+
+</KeyEq>
+
+即把所有请求同时丢给引擎，不论调度器怎样把它们拆开、混合、抢占、重算，每个请求的贪心输出必须与把它单独交给 `GPT.generate` 完全一致。这条不变量成立的理由，恰好是前几章各个机制的正确性之和：
+
+1. **分页注意力等价于连续注意力**（PagedAttention 一章的测试）：块物理位置怎么打乱都不影响结果。
+2. **每个 token 的 K/V 只依赖它之前的内容**（因果性）：因此前缀缓存复用的 K/V 与重新计算的完全相同，抢占后重算也得到相同的值。
+3. **展平的批对每一行独立**：矩阵乘法、RMSNorm、SwiGLU 都是逐 token 的运算，注意力通过 `seq_lens` 与块表把每行限制在自己的请求内，请求之间互不可见。
+4. **CUDA Graph 的 padding 行落在空块上**，不污染任何请求的 KV。
+
+`test_engine.py` 把它当作测试，并在五种配置下检验：
+
+<CodeFile path="tests/inference/test_engine.py" symbol="test_concurrent_greedy_matches_sequential_generate" />
+
+配置如下：
+
+| 配置 | 检验的机制 |
+| --- | --- |
+| 默认（预算 512） | 所有提示一步 prefill，之后全员 decode |
+| `max_num_batched_tokens=16` | chunked prefill：提示被切成多块，与 decode 同批 |
+| `block_size=8, long_prefill_token_threshold=5` | 每个请求每步最多拿 5 个 token |
+| `num_blocks=25`（显存紧张） | 抢占与重计算 |
+| `cuda_graph="fake"` | 分桶、padding、静态地址 |
+
+另外还有几个针对性的测试：`test_preemption_actually_happens` 确认紧张配置下确实发生了抢占（否则前一个测试什么也没验证），且抢占后输出仍然一致；`test_prefix_cache_hits_do_not_change_outputs` 让 4 个共享 20 token 系统提示的请求依次运行，第一个命中 0，其余命中 20（5 个满块），输出不变；`test_context_limit_matches_generate` 验证上下文被耗尽时与 `generate` 一样停在边界；`test_seeded_sampling_matches_generate` 验证带温度与 top-$k$ 的采样，在相同种子下与 `generate` 逐 token 相同——因为引擎的采样器与 `GPT.generate` 使用同一个 `multinomial` 步骤和同一个生成器。
+
+<Callout tone="warn" title="精确相等只在 CPU 上成立">
+这些测试用 float32 在 CPU 上运行，同一行的计算与批的组成无关，所以输出能逐位相等。在 GPU 上，不同批大小会选择不同的 GEMM 算法、不同的归约顺序，同一个 token 的 logits 会有 $10^{-6}$ 量级的差别；两个 token 概率几乎相等时，贪心可能翻转选择。生产系统因此说“数值上等价”而不是“逐位相同”，也要有专门的批不变（batch-invariant）kernel 才能保证可复现（见 Thinking Machines 的 *Defeating Nondeterminism in LLM Inference*）。`test_cuda_graph_engine_matches_eager_on_gpu` 在有 GPU 的机器上比较图与 eager 的整句输出，该测试在没有 GPU 时被跳过。
+</Callout>
+
+## 运行一次：看调度器怎么工作
+
+用一个 2 层、宽度 64 的小 GPT，6 个共享 20 token 系统提示的请求（总长 27—39 token，每个生成 12 个 token），块大小 4。四种配置下，引擎的输出都与逐个 `generate` 相同：
+
+| 配置 | 步数 | 抢占次数 | 前缀缓存命中（每个请求） |
+| --- | --- | --- | --- |
+| 默认 | 12 | 0 | 0, 0, 0, 0, 0, 0 |
+| 预算 16 | 18 | 0 | 0, 20, 20, 20, 20, 20 |
+| 预算 32 + 25 个块 | 26 | 1 | 0, 20, 20, 20, 20, 20 |
+| 默认 + 伪 CUDA Graph | 12 | 0 | 0, 0, 0, 0, 0, 0 |
+
+有趣的是第一行没有命中。预算足够时，6 个请求在**第一步同时**接纳，此时还没有任何块写满并登记进缓存，自然谈不上命中；预算 16 时，请求依次被处理，后来者在接纳时第一个请求的前 20 个 token 已经登记，于是命中。同一个批里的相同前缀无法共享，这是前缀缓存的固有局限——vLLM 也一样，要等第一个请求写完块才能命中。伪图那一行则回放了 8 号图（6 个 decode 请求 padding 到 8，`FakeGraphRunner.replays` 只含 `{8}`）。
+
+预算 16 的那次运行，每一步的 token 构成是（由调度器的 `ScheduledBatch` 统计）：
+
+<Bars
+  label="预算 16 的前 8 步：每步 token 的构成"
+  unit="token"
+  max={16}
+  items={[
+    { label: '第 1 步', segments: [{ value: 16, label: 'prefill 块' }] },
+    { label: '第 2 步', segments: [{ value: 16, label: 'prefill 块' }] },
+    { label: '第 3 步', segments: [{ value: 16, label: 'prefill 块' }] },
+    { label: '第 4 步', segments: [{ value: 2, label: 'decode' }, { value: 14, label: 'prefill 块' }] },
+    { label: '第 5 步', segments: [{ value: 3, label: 'decode' }, { value: 13, label: 'prefill 块' }] },
+    { label: '第 6 步', segments: [{ value: 4, label: 'decode' }, { value: 12, label: 'prefill 块' }] },
+    { label: '第 7 步', segments: [{ value: 4, label: 'decode' }, { value: 12, label: 'prefill 块' }] },
+    { label: '第 8 步', segments: [{ value: 6, label: 'decode' }] },
+  ]}
+>
+  <Fragment slot="caption">前三步第一个请求（33 token）与后续请求逐块做 prefill；从第 4 步起，已经完成 prefill 的请求开始 decode，它们的 token 先占预算，剩下的给 prefill 块；到第 8 步所有提示都处理完，批变成纯 decode，这时才有资格走 CUDA Graph。每一步 token 数都不超过预算 16。</Fragment>
+</Bars>
+
+这与[批处理与调度](/inference/batching-scheduling/)一章里 token 预算的图是同一幅画，只不过现在每一步真的在跑模型，并且输出被证明是正确的。
+
+## 局限与扩展
+
+迷你引擎省略了许多生产引擎必须有的东西，把它们列出来也是为了对照前面各章，决定接下来往哪里走：
+
+- **没有真正的批注意力 kernel。** `paged_attention` 用 gather 加掩码实现，每行复制一份块表，在 CPU 上很慢，在 GPU 上也远不及 FlashInfer 一类的变长 kernel。换成真 kernel 只需替换 `paged_model.py` 里的一个函数。
+- **没有多卡。** 张量并行意味着 `PagedGPT` 里的线性层要切分、加 all-reduce，KV 头按卡切分（见[分布式推理](/inference/distributed-inference/)）。
+- **没有投机解码。** 草稿 token 可以当作额外的待算 token 加入调度器的落差（`num_tokens_with_spec`），验证后回滚 `num_computed_tokens`；接受-拒绝采样已在[投机解码](/inference/speculative-decoding/)中实现。
+- **没有量化。** 把 `PagedGPT` 里的线性层换成量化 kernel、KV 缓存存成 FP8，就是[量化](/inference/quantization/)一章的内容。
+- **没有异步调度。** 调度与前向串行，CPU 开销不能被隐藏。
+- **采样器简化。** 没有重复惩罚、logit bias、logprobs、结构化输出。
+
+## 小结
+
+- 一个能运行的推理引擎由五个部分构成：调度器（token 预算）、KV 管理器（块池与前缀缓存）、模型运行器（展平输入）、模型（读写分页缓存）、采样器。迷你引擎每个只有几十行，结构与 vLLM V1 一一对应。
+- 把批展平成一维 token 序列，每个 token 自带位置、槽位、可见长度与块表，是让 prefill、chunked prefill、decode、前缀缓存命中走同一条代码路径的关键。
+- 核心不变量是并发批处理的贪心输出等于逐个 `generate`。它是各机制正确性的总和，因此既是回归测试，也是调试工具：任何一个机制出错都会让它失败。
+- 抢占测试要先证明抢占**确实发生**，前缀缓存测试要证明命中**确实发生**，否则“输出一致”什么也没验证。
+- 精确相等依赖 CPU 上与批无关的数值；在 GPU 上，要面对的是数值等价与批不变性问题。
+- 到这里，从一个请求的成本，到分页、调度、图、量化、投机、多卡，再到一个完整引擎，推理系统的主线就走完了。
+
+## 练习
+
+1. 在 `LLMEngine.step` 之后打印每步 `batch.total_tokens`，对 `max_num_batched_tokens=16` 和 `512` 各运行一次，解释步数与每步 token 数的区别。
+2. 修改 `Scheduler`，使它在 `waiting` 队列里优先接纳**前缀缓存命中最多**的请求。这对 TTFT 和命中率有什么影响？有什么风险？
+3. 为什么 `logits_indices` 只取每个请求的最后一个 token，而不是算出整个批的 logits 再选？估算 Llama-3-8B 在 2048 token 的 prefill 块上节省的 FLOPs。
+4. 假设要加入遇到 EOS 就结束的终止条件。需要改哪些地方？
+5. `FakeGraphRunner` 检查静态缓冲区的地址不变。写一个会让这个检查失败的“错误用法”，并说明在真实的 CUDA Graph 上会发生什么。
+
+<details>
+<summary>答案</summary>
+
+1. 预算 512 时，6 个提示一步完成 prefill（总共约 199 token 小于 512），之后 12 步全员 decode，共 12 步（第一步同时产出第一个 token）；预算 16 时，199 个 token（扣除 5 个后续请求命中的 100 个，约 99 个）要分七步左右做 prefill，期间已完成的请求开始 decode，共 18 步。预算越小，步数越多，但每步越短，decode 请求更早拿到它的 token——代价是总步数增加（吞吐下降）。
+
+2. 命中多的请求需要计算的 token 少，先服务它们能提高吞吐、降低平均 TTFT，也提高了热门前缀的命中率。风险是饥饿：没有共享前缀的冷门请求可能一直被插队，需要像 SJF 一样加上等待时间的老化。另外，贪心优先热门前缀会让缓存集中在少数前缀，对多租户场景不公平。
+
+3. 每个 token 的 `lm_head` 是 $2\cdot d\cdot V=2\times4096\times128256\approx1.05$ GFLOPs。2048 token 的块若全部计算 logits 是 2.15 TFLOPs；只算最后一个 token 则为 1.05 GFLOPs，节省约 2.15 TFLOPs，相当于整个 8B 模型 prefill 总 FLOPs（约 $2\times8\times10^9\times2048=32.8$ TFLOPs）的 6.5%。同时避免了 $2048\times128256$ 个 float32 logits 占用 1 GB 显存。
+
+4. 调度器的 `Request` 已有 `eos_token_id` 字段，`update_from_output` 也已经判断 `token == req.eos_token_id`；只需让 `add_request`（或 `SamplingParams`）把 EOS 的 token ID 传给 `EngineRequest`。需要注意的是共用 GPT 的 `generate` 没有 EOS 的概念，所以不变量测试的参考输出也要在 EOS 处截断，否则对比会失败。
+
+5. 例如在 `replay` 之前，把 `StaticInputs` 中的某个缓冲区属性替换成新分配的张量（或其 `clone()`）。数据指针变了，`FakeGraphRunner` 的检查抛出 `RuntimeError`。真实的 CUDA Graph 里，kernel 的参数在捕获时已经固定为旧地址，重放时读的仍是旧缓冲区的内容，输出不会反映新输入，而且没有任何报错——这是最隐蔽的 CUDA Graph 错误之一。
+
+</details>
+
+## 参考文献
+
+- Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention*. SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- Yu et al. *Orca: A Distributed Serving System for Transformer-Based Generative Models*. OSDI 2022. [USENIX](https://www.usenix.org/conference/osdi22/presentation/yu)
+- Agrawal et al. *Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve*. OSDI 2024. [arXiv:2403.02310](https://arxiv.org/abs/2403.02310)
+- Thinking Machines Lab. *Defeating Nondeterminism in LLM Inference*. 2025. [thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference](https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/)
+- nano-vllm（提交 `bb823b3`）. [github.com/GeeeekExplorer/nano-vllm](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/v1/engine/core.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/core.py)，[`vllm/v1/worker/gpu_model_runner.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py)
+- Ye et al. *FlashInfer: Efficient and Customizable Attention Engine for LLM Inference Serving*. 2025. [arXiv:2501.01005](https://arxiv.org/abs/2501.01005)

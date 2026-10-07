@@ -1,8 +1,332 @@
 ---
 title: 量化：权重、激活与 KV Cache
-description: 对称与非对称量化，逐通道与分组，GPTQ 与 AWQ，SmoothQuant 与 FP8 推理，KV Cache 量化，以及量化 kernel 的执行方式。
+description: 对称与非对称量化的误差分析，逐张量、逐通道与分组粒度，GPTQ 的 Hessian 误差补偿与 AWQ 的激活感知缩放，SmoothQuant 的离群值迁移与 W8A8，FP8 推理，KV Cache 量化，以及量化 kernel 怎样把省下的字节变成速度。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/inference/quantization.py
+  - tests/inference/test_quantization.py
 ---
 
-本章正在撰写。
+[成本模型](/inference/inference-cost/)已经说明，decode 一步要把全部权重从显存读一遍，时间下界是 $\text{权重字节数}/\text{带宽}$；[KV Cache 管理](/inference/paged-attention/)说明了长上下文下 KV Cache 如何挤占显存。两者都在说同一件事：**推理是字节的生意**。把 BF16 的权重压成 4 比特，Llama-3-8B 从 16 GB 变成约 4 GB，单步读取时间从 4.8 ms 降到 1.2 ms；把 KV Cache 压成 FP8，同样的显存能容纳两倍的并发序列。这就是量化（quantization）。
+
+量化的难点不在“把数变小”，而在**不让模型变差**。本章依次回答：均匀量化的误差有多大、由什么决定（第一节）；为什么粒度越细越好，代价是什么（第二节）；权重量化到 4 比特以下时，怎样利用校准数据让输出误差而不是权重误差最小（GPTQ 与 AWQ）；激活里的离群值为什么让 W8A8 很难、SmoothQuant 如何把难度转移给权重；Hopper 之后 FP8 为什么成了默认选择；KV Cache 的量化有什么不同；最后是量化 kernel 怎样执行，以及什么情况下量化**不会**带来加速。所有算法都用“伪量化”（量化到整数网格再反量化回浮点）在 CPU 上实现，这样可以精确测量误差，代码在 `quantization.py`。
+
+## 均匀量化：把浮点数放到整数网格上
+
+### 对称与非对称
+
+均匀量化用一个**步长**（scale）$\Delta$ 把实数轴切成等距的格子，每个数取最近的格点，格点的编号就是存下来的整数。设位宽为 $b$。
+
+**对称量化**（symmetric）把零点固定在 0：整数码落在 $[-q_{\max}, q_{\max}]$，$q_{\max}=2^{b-1}-1$（INT8 是 $[-127,127]$，故意舍弃 $-128$ 以保持对称）。$\Delta$ 由绝对值最大的元素决定：
+
+$$
+\Delta = \frac{\max|x|}{q_{\max}},\qquad q = \operatorname{clip}\!\Big(\operatorname{round}\big(\tfrac{x}{\Delta}\big),\,-q_{\max},\,q_{\max}\Big),\qquad \hat x = \Delta\, q .
+$$
+
+手算：$x=(-1.0,\,0.5,\,0.25,\,0.1)$，INT8，$\Delta = 1/127$，码为 $(-127,\,64,\,32,\,13)$（$0.5\times127=63.5$ 取整为 64）。反量化得到 $(-1.0,\ 0.5039,\ 0.2520,\ 0.1024)$，每个数的误差都不超过 $\Delta/2\approx0.0039$。
+
+**非对称量化**（asymmetric）允许数据分布偏离 0：整数码落在 $[0, 2^b-1]$，用一个整数**零点**（zero point）$z$ 对齐：
+
+$$
+\Delta = \frac{\max x-\min x}{2^b-1},\qquad z=\operatorname{round}\!\Big(\frac{-\min x}{\Delta}\Big),\qquad q=\operatorname{clip}\big(\operatorname{round}(x/\Delta)+z,\,0,\,2^b-1\big),\qquad \hat x=\Delta\,(q-z).
+$$
+
+当数据全为正（例如 ReLU 之后，或某些 KV 分布）时，非对称量化能把全部 $2^b$ 个格点用在数据实际占据的区间上，而对称量化会浪费一半。代价是反量化多一次减法，矩阵乘法里零点还会引入交叉项。对于近似关于 0 对称的权重，对称量化更简单，也是 INT8 矩阵乘法的默认选择。
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" region="basics" />
+
+`QTensor` 同时保存整数码、scale 和（非对称时的）零点；`dequantize` 就是上面的 $\hat x$。测试 `test_symmetric_int8_example` 复现了手算结果，`test_asymmetric_uses_full_range` 验证 2 比特非对称量化 $(0,1,2,3)$ 能被无损还原。
+
+### 舍入误差：每多一比特，信噪比提高 6 dB
+
+量化误差 $e=\hat x - x$ 有两个来源：落在格点之间的**舍入误差**，以及超出范围被截断的**截断误差**。取 $\Delta$ 为 $\max|x|/q_{\max}$ 时不会发生截断，只剩舍入误差。如果 $x$ 在每个格子内近似均匀分布（位宽不太低时成立），则 $e\sim\mathcal U(-\Delta/2,\Delta/2)$，于是
+
+<KeyEq label="均匀量化的舍入误差">
+
+$$
+\mathbb E[e]=0,\qquad \operatorname{Var}(e)=\frac1\Delta\int_{-\Delta/2}^{\Delta/2}e^2\,de=\frac{\Delta^2}{12}.
+$$
+
+</KeyEq>
+
+测试 `test_rounding_error_variance_is_delta_squared_over_12` 用 20 万个均匀样本验证了这个公式，误差在 2% 以内。把 $\Delta=\max|x|/(2^{b-1}-1)\approx 2\max|x|/2^{b}$ 代入，信号功率若为 $\sigma_x^2$，则信噪比
+
+$$
+\mathrm{SQNR}=\frac{\sigma_x^2}{\Delta^2/12}\approx \frac{3\,\sigma_x^2\,2^{2b}}{\max^2|x|}\quad\Longrightarrow\quad 10\log_{10}\mathrm{SQNR}\ \text{每增加 1 比特增加}\ 20\log_{10}2\approx 6.02\ \text{dB}.
+$$
+
+这个公式同时给出了两条设计准则。第一，**位宽每减少一比特，误差标准差翻倍**，所以 8 比特几乎无损，4 比特要小心，3 比特以下必须借助下面的算法。第二，信噪比与 $\sigma_x/\max|x|$ 成正比：数据里只要有一个远大于其他元素的**离群值**（outlier），$\Delta$ 就被它撑大，其余所有元素的有效位宽都下降。粒度和离群值，是接下来所有内容的主线。
+
+## 粒度：scale 共享多少元素
+
+一个 scale 管多少个元素，决定了离群值能“污染”多大范围。对形状 $[n_{out}, n_{in}]$ 的权重矩阵，常见三档：
+
+- **逐张量**（per-tensor）：整个矩阵一个 scale，开销最小，误差最大。
+- **逐通道**（per-channel）：每个输出通道（每一行）一个 scale。矩阵乘法 $y_i=\sum_j W_{ij}x_j$ 中，行 $i$ 的 scale 可以整体提到求和之外，所以反量化可以放到矩阵乘法**之后**做，不影响整数乘加。
+- **分组**（group-wise）：沿输入维每 $g$ 个元素一个 scale（常见 $g=128$ 或 64）。scale 不能再提到求和外面，kernel 要在每组累加结束时乘一次，但在 4 比特下几乎是必须的。
+
+<Diagram width={720} height={230} label="三种量化粒度下 scale 的覆盖范围">
+  <Text x={20} y={22} label="权重矩阵 W（4 行 × 8 列），同色的格子共享一个 scale" anchor="start" size="sm" tone="muted" />
+  <Matrix x={20} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="逐张量" highlight={[{ rows: [0, 1, 2, 3], tone: 'accent' }]} />
+  <Matrix x={260} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="逐通道"
+    highlight={[{ rows: [0], tone: 'accent' }, { rows: [1], tone: 'info' }, { rows: [2], tone: 'accent2' }, { rows: [3], tone: 'muted' }]} />
+  <Matrix x={500} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="分组（g = 4）"
+    highlight={[
+      { cells: [[0,0],[0,1],[0,2],[0,3],[2,0],[2,1],[2,2],[2,3]], tone: 'accent' },
+      { cells: [[0,4],[0,5],[0,6],[0,7],[2,4],[2,5],[2,6],[2,7]], tone: 'info' },
+      { cells: [[1,0],[1,1],[1,2],[1,3],[3,0],[3,1],[3,2],[3,3]], tone: 'accent2' },
+      { cells: [[1,4],[1,5],[1,6],[1,7],[3,4],[3,5],[3,6],[3,7]], tone: 'muted' },
+    ]} />
+  <Text x={20} y={170} label="1 个 scale" anchor="start" size="sm" />
+  <Text x={260} y={170} label="4 个 scale（每行一个）" anchor="start" size="sm" />
+  <Text x={500} y={170} label="每 4 个元素一个，共 8 个 scale" anchor="start" size="sm" />
+  <Text x={20} y={200} label="粒度越细，离群值影响的范围越小，但 scale 的存储与反量化开销越大。" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">三种粒度的 scale 覆盖范围。逐通道粒度下，一行中的离群值只拉大这一行的步长；分组粒度进一步把影响限制在 $g$ 个元素之内。</Fragment>
+</Diagram>
+
+存储开销可以直接算出来：分组大小 $g$、scale 用 FP16，每个权重多占 $16/g$ 比特。$g=128$ 时是 0.125 比特，所以“4 比特分组量化”的真实位宽约为 4.125 比特；若再存 4 比特零点，则是 4.25。
+
+测试 `test_finer_granularity_reduces_error_with_outlier_rows` 构造了一个各行幅度相差 100 倍的矩阵，4 比特量化的相对误差为：逐张量 28.4%，逐通道 12.6%，分组（$g=32$）9.7%。逐张量的结果几乎不可用，因为小幅度的行全部被舍入成 0。
+
+<Callout tone="note" title="为什么权重量化可以很激进，激活量化却不行？">
+权重在训练结束后就固定了，我们有大量时间用校准数据去优化它的量化；权重分布也相当平滑，近似高斯。激活则是随输入变化的，量化必须在线完成（运行时算 scale），而且大模型的激活存在**涌现的离群通道**：Dettmers 等人（LLM.int8()，2022）发现，从约 6.7B 参数开始，少数隐藏维度上的激活幅度比其余维度大两个数量级，并且这些通道在所有 token 上位置固定。粗粒度的激活量化会被它们毁掉。
+</Callout>
+
+## 权重量化为什么能加速：回到 roofline
+
+在做更复杂的算法之前，先弄清量化在什么条件下有用。
+
+- **仅权重量化**（weight-only，W4A16）：权重以 4 比特存放，kernel 把它搬到片上后**反量化成 BF16**，再用 BF16 张量核心计算。省下的是**显存读取量**。对 decode 这种受带宽限制的步骤，时间下界从 $2P/\text{BW}$ 降到约 $0.52P/\text{BW}$（含 scale）。
+- **权重与激活都量化**（W8A8、FP8）：权重和激活都是 8 比特，直接用 INT8/FP8 张量核心计算，算力也翻倍。省下的是读取量，**并且**提高了峰值算力。
+
+用 [成本模型](/inference/inference-cost/)的记号，H100 的算力拐点是 $989/3.35\approx295$ FLOP/B（BF16）。decode 在小批量时算术强度远低于拐点，瓶颈是权重读取，W4A16 的加速比接近 $16/4.125\approx 3.9$ 倍；当批大小增长、算术强度逼近拐点，权重读取不再是主要成本，反量化的额外指令反而可能拖慢 kernel，加速消失甚至为负。prefill 一开始就受算力限制，仅权重量化**不会**加速它，W8A8/FP8 因为算力翻倍才有收益。
+
+<Bars
+  label="Llama-3 的权重显存（H100 SXM 80 GB）"
+  unit="GB"
+  max={150}
+  items={[
+    { label: '8B BF16', segments: [{ value: 16.06, label: '权重' }] },
+    { label: '8B INT4 g128', segments: [{ value: 4.14, label: '权重' }] },
+    { label: '70B BF16', segments: [{ value: 141.1, label: '权重' }], note: '需要至少 2 张卡' },
+    { label: '70B FP8', segments: [{ value: 70.6, label: '权重' }], note: '单卡放不下 KV' },
+    { label: '70B INT4 g128', segments: [{ value: 36.4, label: '权重' }], note: '单卡可容纳' },
+  ]}
+>
+  <Fragment slot="caption">参数量按 `cost_model.py` 中 Llama-3 的形状计算（8B 为 8.03B，70B 为 70.55B），INT4 按 4.125 比特计。70B 模型量化后能放进单张 80 GB 卡并留出约 40 GB 给 KV Cache。</Fragment>
+</Bars>
+
+## GPTQ：让输出误差而不是权重误差最小
+
+### 目标：逐层重建
+
+最近取整（round-to-nearest, RTN）逐个元素最小化 $|w-\hat w|$，但网络真正关心的是**输出**。设某个线性层的权重为 $W\in\mathbb R^{n_{out}\times n_{in}}$，校准数据的输入矩阵为 $X\in\mathbb R^{n\times n_{in}}$（每行一个 token），目标是找到格点上的 $\hat W$，使
+
+$$
+\min_{\hat W}\ \lVert XW^\top - X\hat W^\top\rVert_F^2 .
+$$
+
+这个目标按输出通道（$W$ 的行）完全可分，每一行 $w\in\mathbb R^{n_{in}}$ 独立求解 $\min_{\hat w}\ (\hat w-w)\,H\,(\hat w-w)^\top$，其中 Hessian $H=2X^\top X$。如果 $H$ 是对角阵，各个权重互不影响，RTN 就是最优的；真实激活的各维度强相关，$H$ 有很大的非对角项，**一个权重的量化误差可以被其他尚未量化的权重补偿**。
+
+### 最优脑外科医生：一个权重的误差如何分摊
+
+这是 Optimal Brain Surgeon（OBS，Hassibi & Stork，1993）的思想。设现在固定第 $q$ 个权重取值 $w_q+\delta_q=\hat w_q$（量化后的格点），问其余权重应如何改变以使二次型损失最小。写出受约束的二次规划：
+
+$$
+\min_{\delta}\ \tfrac12\,\delta^\top H\delta\quad\text{s.t.}\quad e_q^\top\delta=\hat w_q-w_q .
+$$
+
+引入拉格朗日乘子 $\lambda$，令梯度为零得 $H\delta=\lambda e_q$，即 $\delta=\lambda H^{-1}e_q$。代入约束 $e_q^\top\delta=\lambda[H^{-1}]_{qq}=\hat w_q-w_q$，解出
+
+$$
+\delta=\frac{\hat w_q-w_q}{[H^{-1}]_{qq}}\,H^{-1}_{:,q},\qquad
+\Delta\mathcal L=\frac{(\hat w_q-w_q)^2}{2\,[H^{-1}]_{qq}}.
+$$
+
+第一个式子给出了对**所有**权重的更新（对第 $q$ 个分量自然就是 $\hat w_q-w_q$，其余分量是补偿）；第二个式子说明量化第 $q$ 个权重的损失还取决于 $[H^{-1}]_{qq}$：它越大，说明其他权重越容易补偿它。
+
+### 从 OBS 到 GPTQ
+
+OBS 每步要选损失最小的权重、更新 $H^{-1}$，复杂度太高。GPTQ（Frantar 等，2022）做了三个观察：
+
+1. **任意固定顺序也几乎一样好。** 一次量化一整列（所有行用相同的顺序），则所有行共享同一个 $H^{-1}$，可以批量处理。
+2. **用 Cholesky 因子代替逐步更新 $H^{-1}$。** 量化第 $i$ 列之后，剩下的列所对应的子 Hessian 的逆，可以用高斯消元式的更新得到：$H^{-1}\leftarrow H^{-1}-H^{-1}_{:,i}H^{-1}_{i,:}/[H^{-1}]_{ii}$。而这恰好等于 $H^{-1}$ 的上三角 Cholesky 因子 $U$（$H^{-1}=U^\top U$）逐行展开的结果：第 $i$ 行 $U_{i,i:}$ 满足 $U_{ii}^2=[H^{-1}_{(i:)}]_{ii}$，$U_{i,i:}/U_{ii}=H^{-1}_{(i:)}[i,i:]/H^{-1}_{(i:)}[i,i]$，其中 $H^{-1}_{(i:)}$ 是只含第 $i$ 列及之后列的子矩阵的逆。因此只需算一次 Cholesky，之后每列的补偿系数直接读 $U$ 的一行。
+3. **阻尼。** $H$ 可能奇异（某些输入通道在校准集上始终为 0），在对角线上加 $\lambda\,\overline{\operatorname{diag}H}$（常取 1%）保证正定。
+
+于是算法是：对每一列 $i=0,\dots,n_{in}-1$，量化当前（已被补偿过的）第 $i$ 列，记误差 $\varepsilon=(w_i-\hat w_i)/U_{ii}$，然后
+
+$$
+W_{:,\,i+1:}\ \leftarrow\ W_{:,\,i+1:}-\varepsilon\,U_{i,\,i+1:}.
+$$
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" symbol="gptq_quantize" />
+
+实现中的 `h_inv` 就是 $U$；分组量化时，每遇到新的一组，scale 用**已被前面列补偿过的当前权重**重新确定。真实实现还有“懒批量更新”（每处理 128 列再一次性更新后面的所有列，把大量小的向量更新合并成矩阵乘法），数学上等价，只影响速度；为了让代码短，这里省略了它。
+
+测试 `test_gptq_beats_round_to_nearest` 使用一组低秩加噪声的校准激活（真实激活的协方差也集中在少数方向），权重 $64\times128$，分组 32。输出相对误差：
+
+| 位宽 | RTN | GPTQ |
+| --- | --- | --- |
+| 4 比特 | 5.6% | 2.1% |
+| 3 比特 | 13.4% | 5.0% |
+
+GPTQ 的误差降到 RTN 的约三分之一到二分之一，并且量化后的权重**严格落在格点上**（`test_gptq_quantized_weights_lie_on_grid` 验证了这一点：补偿只改变尚未量化的列，已量化的列不再动）。这些数字来自合成数据，用于验证机制而不是预测真实模型的困惑度；GPTQ 论文在 OPT 与 BLOOM 上给出了真实的结果，在 175B 规模上 3—4 比特量化的困惑度损失很小。
+
+## AWQ：保护显著通道
+
+GPTQ 需要二阶信息和逐列的串行更新，对校准集也有一定的过拟合风险。AWQ（Activation-aware Weight Quantization，Lin 等，2023）提出了一个更轻的方案，出发点是一个经验观察：权重并非同等重要，**只有约 1% 的“显著”权重通道**（对应激活幅度大的输入通道）对输出影响很大，保护好它们就能大幅降低量化损失。
+
+关键是**怎样保护**。保留这 1% 为 FP16 会造成混合精度，kernel 很难写。AWQ 改用等价变换：对输入通道 $j$ 乘缩放 $s_j>1$，同时把激活除以 $s_j$：
+
+$$
+y=\sum_j W_{ij}x_j=\sum_j\big(W_{ij}s_j\big)\big(x_j/s_j\big).
+$$
+
+量化的是 $W\operatorname{diag}(s)$。在分组量化下，$\Delta$ 由组内最大元素决定；放大显著通道后，只要它没有成为组内最大值，$\Delta$ 几乎不变，而该通道权重的**相对误差**缩小为原来的 $1/s_j$（绝对舍入误差仍是 $\Delta/2$，但权重本身放大了 $s_j$ 倍）。输出中这个通道的贡献是 $x_j\cdot e_j$，量化后变成 $(x_j/s_j)\cdot e_j'$，其中 $e'_j$ 与 $e_j$ 同量级，所以误差缩小到 $1/s_j$。代价是其他通道的 $\Delta$ 可能略有增大，因此 $s$ 不能无限大。
+
+AWQ 把 $s$ 参数化为激活幅度的幂，$s_j=\overline{|x_j|}^{\,\alpha}$，在网格 $\alpha\in[0,1]$ 上搜索使该层输出误差最小的 $\alpha$。$\alpha=0$ 就是 RTN。
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" symbol="awq_quantize" />
+
+测试 `test_awq_protects_salient_channels` 把 4 个输入通道的激活放大 30 倍，3 比特分组量化：RTN 的输出误差是 21.8%，AWQ 是 14.3%。搜索到的缩放因子中，4 个显著通道约为 1.85，其余通道最大只有 0.59（归一化之后），符合“显著通道被放大”的预期。因为 $s$ 可以融进前一层（LayerNorm 的权重或上一个线性层的输出通道），推理时没有额外开销；AWQ 也不做反向传播，对校准集的依赖比 GPTQ 小，这是它在不同领域数据上更稳健的原因。
+
+### GPTQ 与 AWQ 的取舍
+
+两者都是仅权重量化，产出的格式在推理引擎里是同一类东西：整数权重加分组 scale（可能还有零点）。GPTQ 通过补偿降低误差，AWQ 通过缩放降低误差，二者思想互补，实践中也可以叠加（先 AWQ 缩放，再 GPTQ 量化）。两者在 vLLM 中都有对应的 Marlin、Machete 等融合 kernel 支持。
+
+## SmoothQuant：把激活的难度迁移给权重
+
+仅权重量化只能节省显存读取。要让 prefill 也受益，必须把**激活**量化到 8 比特并使用整数张量核心，即 W8A8。前面提到，激活里的离群通道使它很难量化。SmoothQuant（Xiao 等，2022）的观察是：激活难量化而权重易量化，所以让两者“中和”一下。
+
+线性层 $Y=XW^\top$ 对任意正对角矩阵 $\operatorname{diag}(s)$ 满足
+
+$$
+Y=\big(X\operatorname{diag}(s)^{-1}\big)\big(\operatorname{diag}(s)\,W^\top\big),
+$$
+
+数学上完全等价，但激活第 $j$ 列被缩小 $s_j$ 倍，权重第 $j$ 列被放大 $s_j$ 倍。选 $s$ 让两边“同样好量化”：
+
+<KeyEq label="SmoothQuant 的迁移因子">
+
+$$
+s_j=\frac{\max|X_{:,j}|^{\alpha}}{\max|W_{:,j}|^{1-\alpha}} ,\qquad \alpha\in[0,1].
+$$
+
+</KeyEq>
+
+$\alpha=0.5$ 时，缩放之后激活第 $j$ 列与权重第 $j$ 列的最大值相等，都是 $\sqrt{\max|X_{:,j}|\max|W_{:,j}|}$。离群通道的幅度被两边平摊，不再由激活独自承担。$\alpha$ 越大，迁移给权重的越多；对激活离群特别严重的模型（GLM-130B 等）要取 0.75 左右。
+
+<Diagram width={720} height={250} label="SmoothQuant 把激活离群通道的幅度迁移到权重">
+  <Text x={20} y={22} label="X（激活，每行一个 token）" anchor="start" size="sm" tone="muted" />
+  <Matrix x={20} y={40} rows={4} cols={6} cell={[26, 26]} gap={2}
+    highlight={[{ cols: [2], tone: 'accent2' }]} />
+  <Text x={20} y={188} label="第 2 列是离群通道，幅度 ≈ 50×" anchor="start" size="sm" />
+  <Text x={238} y={90} label="÷ s" size="md" tone="accent" mono />
+  <Arrow from={[200, 100]} to={[272, 100]} tone="accent" />
+  <Text x={294} y={22} label="X̂ = X diag(s)⁻¹" anchor="start" size="sm" tone="muted" />
+  <Matrix x={294} y={40} rows={4} cols={6} cell={[26, 26]} gap={2}
+    highlight={[{ cols: [2], tone: 'accent' }]} />
+  <Text x={294} y={188} label="各列幅度接近，INT8 够用" anchor="start" size="sm" />
+  <Text x={540} y={22} label="Ŵ = W diag(s)" anchor="start" size="sm" tone="muted" />
+  <Matrix x={540} y={40} rows={6} cols={4} cell={[26, 26]} gap={2}
+    highlight={[{ rows: [2], tone: 'info' }]} />
+  <Text x={540} y={218} label="权重的第 2 个输入通道被放大，仍在可量化范围内" anchor="start" size="sm" />
+  <Text x={470} y={90} label="× s" size="md" tone="info" mono />
+  <Arrow from={[452, 100]} to={[536, 100]} tone="info" dashed />
+  <Fragment slot="caption">离群通道固定在少数输入维度上，所以对每个输入通道乘除一个常数就能抹平它。X 侧的 $\operatorname{diag}(s)^{-1}$ 可以融进前面的 LayerNorm，W 侧的放大在量化前离线完成，推理时没有任何额外运算。</Fragment>
+</Diagram>
+
+W8A8 的矩阵乘法按“逐 token 激活 scale、逐输出通道权重 scale”实现：整数乘加得到 INT32 累加和，再乘以两组 scale 的外积还原：$Y_{ti}\approx s^x_t\,s^w_i\sum_j q^x_{tj}q^w_{ij}$。
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" region="smooth" />
+
+测试 `test_smoothquant_is_mathematically_equivalent_and_helps_w8a8` 先验证 $(X/s)(W s)^\top=XW^\top$，然后在含两个 50 倍离群通道的激活上比较 W8A8 误差：不做平滑是 2.43%，平滑之后降到 0.56%，下降 4 倍多。
+
+## FP8：浮点格式自带动态范围
+
+整数格点是等距的，一个数离最大值越远，相对精度越低。浮点数的格点间距随数量级变化，**相对精度大致恒定**，更适合分布跨度大的张量。Hopper（H100）及之后的 GPU 原生支持两种 8 比特浮点：
+
+| 格式 | 指数位 | 尾数位 | 最大值 | 相对舍入误差 | 用途 |
+| --- | --- | --- | --- | --- | --- |
+| E4M3 | 4 | 3 | 448 | $2^{-4}$ | 前向的权重与激活 |
+| E5M2 | 5 | 2 | 57344 | $2^{-3}$ | 反向的梯度（动态范围更大） |
+
+推理只用 E4M3。仍然需要 scale——把张量缩放到恰好用满 $[-448,448]$，再转换格式：
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" region="fp8" />
+
+3 位尾数意味着任何正规数的舍入相对误差不超过 $2^{-4}=6.25\%$（半个 ULP 除以最小的有效数 1.0，$2^{-4}/1$）。测试 `test_fp8_e4m3_relative_error_bound` 在 4096 个高斯样本上验证了这个上界。与 INT8 相比，FP8 在矩阵乘法里不需要零点或复杂的逐元素缩放，H100 上 FP8 稠密峰值是 1979 TFLOP/s，为 BF16 的两倍（NVIDIA 数据手册）。
+
+**scale 的粒度**是 FP8 推理的主要设计选择。逐张量 scale 最简单，但张量内一个离群值会压缩所有其他元素的有效范围；DeepSeek-V3（2024）的 FP8 方案用更细的粒度——激活按 $1\times128$ 的 tile（每个 token 每 128 个通道一个 scale）、权重按 $128\times128$ 的块——并在张量核心累加到一定步数后把部分和提升到 FP32 CUDA core 上累加，以弥补 FP8 张量核心累加精度不足。vLLM 等引擎的“FP8 动态量化”则是权重逐张量或逐通道（离线量化）、激活逐 token（运行时计算 `amax`）。
+
+更低的位宽正在进入推理：OCP 的 Microscaling（MX）格式把 32 个元素分成一块，共享一个 8 比特的 2 的幂 scale，块内元素是 FP4（E2M1）或 FP6/FP8；NVIDIA Blackwell 的 NVFP4 则使用 16 个元素一块、FP8 的块 scale 加一个 FP32 的张量 scale。它们的思路和分组量化完全一致，只是把“整数 + FP16 scale”换成了“小浮点 + 小浮点 scale”并由硬件直接支持。
+
+## KV Cache 量化
+
+[KV Cache 管理](/inference/paged-attention/)一章已经看到，长上下文下 KV Cache 往往比权重还大。把它存成 INT8 或 FP8，同样的显存可以容纳两倍的 token，也使每步读取 KV 的字节减半。KV 量化和权重量化的差异在于：它必须**在线**完成——每生成一个 token，新的 K、V 在写入缓存之前量化，注意力 kernel 读出时再反量化——而且每个 token 的量化必须独立于其他 token，否则新 token 到来会改变旧 token 的 scale。因此最自然的粒度是**每个 token 每个头一个 scale**（沿 `head_dim` 分组）：
+
+<CodeFile path="src/llms_from_scratch/inference/quantization.py" region="kv" />
+
+测试 `test_int8_kv_cache_barely_changes_attention` 把量化后的 K、V 送入因果注意力并比较输出：INT8 的相对误差 0.70%，INT4 升到 13%（随机高斯数据没有任何结构可以利用，这是偏悲观的数字）。真实 LLM 的 Key 有少数幅度很大的通道（与 RoPE 的低频维度有关），按 token 量化会被这些通道拉大 $\Delta$，因此 2—4 比特的方案如 KIVI（Liu 等，2024）改为 **Key 按通道量化、Value 按 token 量化**，并保留最近一小段 token 的全精度；KVQuant（Hooper 等，2024）则先用校准数据找出离群通道做特殊处理。在引擎中，FP8 KV Cache 已经是普通选项（vLLM 的 `--kv-cache-dtype fp8`），INT4 以下仍需按模型验证。
+
+## 量化 kernel 如何执行
+
+量化模型存放在显存里的是“整数码 + scale”，必须有对应的 kernel 才能受益。三种常见实现：
+
+1. **仅权重（W4A16）**：一个线程块把一块 4 比特权重从全局内存读入寄存器，用位运算解包成两个 INT4 → 转成 FP16/BF16 → 乘 scale，再喂给张量核心的 BF16 `mma`。关键是**反量化的指令数必须被访存时间掩盖**：解包需要整数指令，而张量核心空闲着等数据，所以在小批量 decode 时没问题；批大了之后张量核心成为瓶颈，反量化变成额外开销。Marlin（Frantar 等，2024）通过离线重排权重布局，使每个线程一次读取的字节恰好是它后续要用的元素，并在异步拷贝与计算之间做流水线，在批大小到 16—32 时仍能接近 4 倍的理论加速。
+2. **W8A8（INT8 或 FP8）**：权重与激活都是 8 比特，直接调用整数/FP8 张量核心，累加器 INT32/FP32，epilogue 里乘上 scale 向量。激活的逐 token 量化需要一个小 kernel 先算 `amax` 并转换，通常与前一层的 RMSNorm 融合以避免额外读写。
+3. **KV Cache 量化**：反量化发生在注意力 kernel 里，读入 INT8/FP8 的 K、V 块后即时转换成 BF16 再做 $QK^\top$ 与 $PV$。
+
+用成本模型的数字做一个核算：Llama-3-8B 在 H100 上，批大小 8、上下文 2048 时，权重读取占单步访存的约 90%。把权重量化到 4 比特后，单步访存下降约 65%，对应 decode 吞吐提高约 2.9 倍。实际引擎里的加速通常低于这个数，因为反量化、scale 读取以及非矩阵乘法的开销没有变。
+
+<Callout tone="warn" title="量化不是免费的午餐">
+加速只在 decode 受带宽限制时才显著，批大小很大或 prefill 为主的负载中，仅权重量化可能一点也不快（甚至更慢）。精度方面，困惑度几乎不变不代表所有任务都不变：长链推理、数学与代码对量化噪声更敏感，部署前应在目标任务上评测，而不仅看 WikiText 困惑度。
+</Callout>
+
+## 小结
+
+- 均匀量化的舍入误差方差为 $\Delta^2/12$，位宽每减一比特误差标准差翻倍（6 dB）；离群值撑大 $\Delta$ 是主要的损失来源，因此要用更细的粒度（逐通道、分组）。
+- 仅权重量化减少显存读取，主要加速受带宽限制的 decode；W8A8/FP8 同时利用低精度张量核心，也加速 prefill。
+- GPTQ 把逐层重建写成关于 $H=2X^\top X$ 的二次型，用 OBS 的拉格朗日解把每个权重的误差分摊给尚未量化的权重，Cholesky 因子使其只需一次分解。
+- AWQ 用激活幅度的幂缩放保护显著通道，SmoothQuant 把激活离群通道的幅度迁移给权重，二者都是数学等价变换后再量化，缩放因子可融进前一层。
+- FP8 E4M3 的相对精度约 $2^{-4}$，需要细粒度的 scale；KV Cache 必须在线、按 token 量化。
+- 下一章换一个角度提高 decode 的效率：不减少每步读取的字节，而是让每次读取产出更多 token——[投机解码](/inference/speculative-decoding/)。
+
+## 练习
+
+1. 一个张量取值为 $\{-2.0,\,-0.3,\,0.0,\,0.1,\,0.8,\,6.0\}$。用 4 比特对称量化（$q_{\max}=7$）和 4 比特非对称量化分别求 scale、码和反量化值，并比较最大误差。
+2. 证明：若 $H$ 为对角矩阵，GPTQ 的补偿项为零，退化为 RTN。
+3. SmoothQuant 取 $\alpha=0.5$。某输入通道激活最大值 $\max|X_j|=64$，权重最大值 $\max|W_j|=0.25$。求 $s_j$ 以及缩放后两者的最大值。
+4. Llama-3-70B 用 INT4 分组量化（$g=128$，FP16 scale），单卡 H100 上，权重占多少？除去 10% 显存余量，还剩多少给 KV Cache？以每 token 320 KiB 的 KV（BF16）计，最多能缓存多少个 token？
+5. 为什么 KV Cache 量化不能用逐张量的 scale 在整个缓存上取 `amax`？
+
+<details>
+<summary>答案</summary>
+
+1. 对称：$\max|x|=6$，$\Delta=6/7\approx0.857$，码 $(-2,\,0,\,0,\,0,\,1,\,7)$（$-2.0/0.857=-2.33\to-2$，$-0.3/0.857=-0.35\to0$，$0.8/0.857=0.93\to1$），反量化 $(-1.714,\,0,\,0,\,0,\,0.857,\,6.0)$，最大误差 0.286（元素 $-2.0$）。非对称：区间 $[-2,6]$，$\Delta=8/15\approx0.533$，$z=\operatorname{round}(2/0.533)=4$，码 $(0,\,3,\,4,\,4,\,6,\,15)$，反量化 $(-2.133,\,-0.533,\,0,\,0,\,1.067,\,5.867)$，最大误差 0.267。两者相差不大，因为数据的范围 $[-2,6]$ 并不很偏；数据越偏离 0 对称（例如全为正），非对称量化的优势越明显。
+
+2. $H$ 对角则 $H^{-1}$ 对角，Cholesky 因子 $U$ 也对角，$U_{i,i+1:}=0$，更新 $W_{:,i+1:}\leftarrow W_{:,i+1:}-\varepsilon\cdot0$ 不改变后面的列。每列独立取最近的格点，即 RTN。
+
+3. $s_j=64^{0.5}/0.25^{0.5}=8/0.5=16$。缩放后激活最大值 $64/16=4$，权重最大值 $0.25\times16=4$，两者相等（都是 $\sqrt{64\times0.25}=4$）。
+
+4. 权重 36.4 GB（70.55B × 4.125/8）；可用显存 $80\times0.9=72$ GB，剩余约 35.6 GB。每 token 320 KiB = 327680 B，约能缓存 $35.6\times10^9/327680\approx1.09\times10^5$ 个 token，即约 109K（对应 53 个 2048 token 的序列）。若 KV 也存 FP8，容量翻倍。
+
+5. 缓存中的新 token 随时间不断写入，其幅度可能超过此前的 `amax`，这时必须改 scale 并重新量化所有旧 token，开销不可接受。更重要的是，不同 token 的幅度差别很大（尤其是注意力 sink 的第一个 token），共用 scale 会让小幅度的 token 损失全部精度。逐 token（逐头）的 scale 让每个新 token 的量化与历史无关。
+
+</details>
+
+## 参考文献
+
+- Dettmers et al. *LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale*. NeurIPS 2022. [arXiv:2208.07339](https://arxiv.org/abs/2208.07339)
+- Frantar et al. *GPTQ: Accurate Post-Training Quantization for Generative Pre-trained Transformers*. ICLR 2023. [arXiv:2210.17323](https://arxiv.org/abs/2210.17323)
+- Hassibi & Stork. *Second Order Derivatives for Network Pruning: Optimal Brain Surgeon*. NeurIPS 1992.
+- Frantar & Alistarh. *Optimal Brain Compression*. NeurIPS 2022. [arXiv:2208.11580](https://arxiv.org/abs/2208.11580)
+- Lin et al. *AWQ: Activation-aware Weight Quantization for LLM Compression and Acceleration*. MLSys 2024. [arXiv:2306.00978](https://arxiv.org/abs/2306.00978)
+- Xiao et al. *SmoothQuant: Accurate and Efficient Post-Training Quantization for Large Language Models*. ICML 2023. [arXiv:2211.10438](https://arxiv.org/abs/2211.10438)
+- Micikevicius et al. *FP8 Formats for Deep Learning*. 2022. [arXiv:2209.05433](https://arxiv.org/abs/2209.05433)
+- DeepSeek-AI. *DeepSeek-V3 Technical Report*（第 3.3 节 FP8 训练）. 2024. [arXiv:2412.19437](https://arxiv.org/abs/2412.19437)
+- Liu et al. *KIVI: A Tuning-Free Asymmetric 2bit Quantization for KV Cache*. ICML 2024. [arXiv:2402.02750](https://arxiv.org/abs/2402.02750)
+- Hooper et al. *KVQuant: Towards 10 Million Context Length LLM Inference with KV Cache Quantization*. NeurIPS 2024. [arXiv:2401.18079](https://arxiv.org/abs/2401.18079)
+- Frantar et al. *MARLIN: Mixed-Precision Auto-Regressive Parallel Inference on Large Language Models*. 2024. [arXiv:2408.11743](https://arxiv.org/abs/2408.11743)
+- Open Compute Project. *OCP Microscaling Formats (MX) Specification v1.0*. 2023. [opencompute.org](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)
+- NVIDIA. *H100 Tensor Core GPU Datasheet*. [nvidia.com](https://www.nvidia.com/en-us/data-center/h100/)

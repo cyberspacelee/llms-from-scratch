@@ -1,8 +1,252 @@
 ---
 title: 批处理与调度
-description: 静态批处理的浪费，连续批处理（iteration-level scheduling），chunked prefill，抢占与调度策略。
+description: 静态批处理为什么浪费 GPU，连续批处理（迭代级调度）如何让批始终是满的，prefill 与 decode 混合带来的停顿与 chunked prefill，token 预算、抢占（重计算与换出）与调度策略；最后实现一个调度器并用离散事件模拟检验它。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/inference/scheduler.py
+  - tests/inference/test_scheduler.py
 ---
 
-本章正在撰写。
+[成本模型](/inference/inference-cost/)告诉我们 decode 要靠大批才能摊薄权重读取，[PagedAttention](/inference/paged-attention/)让显存能真正容纳那么多序列。但“能放下”不等于“放满了”：请求在任意时刻到达，生成长度各不相同，事先无法知道。本章回答推理引擎每一步都要回答的问题——**这一步让哪些请求前进、各前进多少个 token**。答案决定了 GPU 是满负荷工作还是在等待，也决定了每个用户感到的延迟。
+
+我们先看最朴素的静态批处理浪费在哪里，再引入 Orca 的迭代级调度、Sarathi-Serve 的 chunked prefill，最后实现一个与 vLLM V1 同构的调度器：统一的 token 预算、chunked prefill、按需分配 KV 块、显存不足时抢占。调度器的正确性和性能都用一个离散事件模拟器检验，模拟器的时间由上一章的成本模型给出。
+
+## 静态批处理的浪费
+
+最简单的批处理是把到达的请求凑成大小为 $B$ 的一批，一起 prefill，再一起 decode，直到批中**最长**的那个请求生成完，才接纳下一批。全书共用 GPT 的 `generate` 就是这种模式：输入是一个 `[B, T]` 的张量，所有序列同步前进。
+
+问题在于生成长度差别很大。下图中 4 个槽位的批里，A 只生成 3 个 token，B 要生成 8 个；A 结束后它的槽位空转了 5 步，而队列里等待的 E、F、G、H 必须等整批结束才能开始。
+
+<Lanes
+  label="静态批处理：整批等最长的请求"
+  lanes={['槽 0', '槽 1', '槽 2', '槽 3']}
+  unit="decode 步"
+  span={14}
+  tick={1}
+  items={[
+    { lane: 0, start: 0, end: 3, label: 'A' }, { lane: 0, start: 3, end: 8, label: '空转', tone: 'muted' },
+    { lane: 1, start: 0, end: 8, label: 'B' },
+    { lane: 2, start: 0, end: 5, label: 'C' }, { lane: 2, start: 5, end: 8, label: '空转', tone: 'muted' },
+    { lane: 3, start: 0, end: 2, label: 'D' }, { lane: 3, start: 2, end: 8, label: '空转', tone: 'muted' },
+    { lane: 0, start: 8, end: 12, label: 'E', tone: 'info' }, { lane: 0, start: 12, end: 14, tone: 'muted' },
+    { lane: 1, start: 8, end: 14, label: 'F', tone: 'info' },
+    { lane: 2, start: 8, end: 11, label: 'G', tone: 'info' }, { lane: 2, start: 11, end: 14, label: '空转', tone: 'muted' },
+    { lane: 3, start: 8, end: 13, label: 'H', tone: 'info' }, { lane: 3, start: 13, end: 14, label: '', tone: 'muted' },
+  ]}
+>
+  <Fragment slot="caption">8 个请求共需 36 个槽位步，静态批处理用了 14 步 × 4 槽 = 56 个槽位步，36% 被空转浪费；第二批请求即使早已到达，也要等到第 8 步才开始。</Fragment>
+</Lanes>
+
+设一批中各请求的输出长度为 $n_1,\dots,n_B$，静态批处理的槽位利用率是
+
+$$
+U_{\text{static}} = \frac{\sum_i n_i}{B\cdot \max_i n_i}.
+$$
+
+输出长度的分布越分散，$U$ 越低。聊天负载中，有的回答几个词，有的几千个 token，利用率很容易跌到一半以下。此外，提示长度不同的请求在 prefill 时还要补齐到最长的提示（或者逐个 prefill），又是一份浪费。
+
+## 连续批处理：迭代级调度
+
+Orca（Yu et al., OSDI 2022）的观察是：Transformer 的生成本来就是一步一步的迭代，**调度的粒度也应该是一次迭代，而不是一个请求**。每一步结束后，引擎检查哪些请求已经结束、立即把它们移出批，并从等待队列中补充新请求。这被称为迭代级调度（iteration-level scheduling），后来通称**连续批处理**（continuous batching）。
+
+<Lanes
+  label="连续批处理：每一步都可以换人"
+  lanes={['槽 0', '槽 1', '槽 2', '槽 3']}
+  unit="decode 步"
+  span={14}
+  tick={1}
+  items={[
+    { lane: 0, start: 0, end: 3, label: 'A' }, { lane: 0, start: 3, end: 9, label: 'F', tone: 'info' },
+    { lane: 1, start: 0, end: 8, label: 'B' },
+    { lane: 2, start: 0, end: 5, label: 'C' }, { lane: 2, start: 5, end: 8, label: 'G', tone: 'info' },
+    { lane: 3, start: 0, end: 2, label: 'D' }, { lane: 3, start: 2, end: 6, label: 'E', tone: 'info' }, { lane: 3, start: 6, end: 11, label: 'H', tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">同样的 8 个请求：D 在第 2 步结束，E 立刻补进它的槽位；A 结束后补 F，依此类推。全部完成只需 11 步，E、F、G、H 的首 token 也大幅提前。</Fragment>
+</Lanes>
+
+迭代级调度有一个前提：同一批里的请求处于不同的阶段——有的刚进来要做 prefill，有的在 decode 第 100 个 token，上下文长度各不相同。Orca 的第二个贡献是**选择性批处理**（selective batching）：线性层、归一化、FFN 与位置无关，可以把批里所有请求的 token 拼成一个 `[N, d]` 的大矩阵一起算；只有注意力需要按请求分开，每个 token 只看自己请求的历史。
+
+这正是上一章分页注意力的表达方式：本步所有 token 排成一维，每个 token 带着自己的位置、写入槽、可见长度和块表。不同请求、不同阶段的 token 可以混在同一次前向里，不需要任何补齐。Orca 论文报告，在 GPT-3 175B 上，同等延迟下它的吞吐是 FasterTransformer 的 36.9 倍；vLLM 在 Orca 的调度之上加入分页 KV Cache，又在同等延迟下把吞吐提高了 2–4 倍。
+
+## prefill 与 decode 混在一起：停顿问题
+
+连续批处理带来一个新问题。设批里有 64 个请求正在 decode，这时来了一个 4096 token 的新请求。如果把它的整段 prefill 塞进这一步，这一步就从 decode 的约 10 ms 变成 prefill 的上百毫秒——64 个正在生成的用户同时感到一次明显的卡顿（generation stall）。反过来，如果让 prefill 等到 decode 全部结束，新用户的 TTFT 又会很长。
+
+### chunked prefill 与 token 预算
+
+Sarathi-Serve（Agrawal et al., OSDI 2024）的方案是把长 prefill 切成多个小块，每一步只做一块，与正在进行的 decode 拼在一起。每一步有一个**token 预算**：先给每个 decode 请求 1 个 token，剩下的预算用来推进 prefill。这样每一步的计算量大致恒定，decode 不会被长 prefill 卡住，Sarathi-Serve 称之为“无停顿调度”（stall-free scheduling）。
+
+<Bars
+  label="token 预算 512 时每一步的构成"
+  unit="token"
+  max={512}
+  items={[
+    { label: '第 1 步', segments: [{ value: 8, label: 'decode' }, { value: 504, label: 'prefill 块' }] },
+    { label: '第 2 步', segments: [{ value: 8, label: 'decode' }, { value: 504, label: 'prefill 块' }] },
+    { label: '第 3 步', segments: [{ value: 8, label: 'decode' }, { value: 504, label: 'prefill 块' }] },
+    { label: '第 4 步', segments: [{ value: 8, label: 'decode' }, { value: 488, label: 'prefill 块' }] },
+    { label: '第 5 步', segments: [{ value: 9, label: 'decode' }] },
+  ]}
+>
+  <Fragment slot="caption">8 个请求在 decode，一个 2000 token 的新提示到达。decode 先拿走 8 个 token，剩余 504 个给 prefill；四步之后提示处理完，它在第 5 步加入 decode。每一步的 token 数都不超过 512。</Fragment>
+</Bars>
+
+为什么切块几乎不增加总时间？回到成本模型。decode 一步的时间主要是读一遍权重，$t_0 \approx 2P/(\beta\cdot\text{MBU})$；往这一步里加 $N$ 个 prefill token，额外运算 $2PN$，在算力上需要 $2PN/(\pi\cdot\text{MFU})$。两者相等时
+
+$$
+N^* = \frac{\pi\cdot\text{MFU}}{\beta\cdot\text{MBU}} \approx 295\times\frac{0.5}{0.7}\approx 210 .
+$$
+
+也就是说，在 H100 上，往一个 decode 步里“捎带”两百来个 prefill token，这一步的时间基本还是读权重的时间——这些 prefill 几乎是免费的。块再大，步长才开始随块长线性增长。这也说明了 token 预算的选择：太小，prefill 被切得太碎，长提示的 TTFT 变长、权重被反复读取；太大，又回到了停顿问题。vLLM 的 `max_num_batched_tokens` 就是这个预算；`long_prefill_token_threshold` 进一步限制单个请求每步最多拿多少 token，防止一个长 prefill 独占预算。
+
+### vLLM V1：没有“阶段”的调度
+
+vLLM V1 把这个思路推到底。调度器源码（`vllm/v1/core/sched/scheduler.py` 的 `Scheduler.schedule`）开头的注释写道：
+
+> There's no "decoding phase" nor "prefill phase" in the scheduler. Each request just has the num_computed_tokens and num_tokens_with_spec. … At each step, the scheduler tries to assign tokens to the requests so that each request's num_computed_tokens can catch up its num_tokens_with_spec.
+
+每个请求只有两个数：已写入 KV Cache 的 token 数 `num_computed_tokens`，和当前已知的 token 数（提示 + 已生成 + 投机解码的草稿）。调度就是给每个请求分配若干 token，让前者追上后者。decode 是“差 1 个”，prefill 是“差一整段”，chunked prefill 是“这一步只追一部分”，前缀缓存命中是“一开始就追上了一截”，投机解码是“差 $1+k$ 个”。一个统一的抽象覆盖了所有情况，这也是我们的实现所采用的方式。
+
+## 实现一个调度器
+
+请求的状态只有几个字段。`num_computed_tokens` 与 `num_tokens` 的差就是还需要计算的 token 数。
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" region="request" />
+
+<Diagram width={720} height={260} label="调度器的数据结构与一步的流程">
+  <Box x={20} y={40} w={170} h={60} label="WAITING 队列" sub="新请求 / 被抢占的请求" tone="muted" />
+  <Box x={20} y={160} w={170} h={60} label="RUNNING 列表" sub="正在 prefill 或 decode" tone="accent" />
+  <Box x={270} y={100} w={190} h={60} label="schedule()" sub="token 预算 B_tok" tone="strong" />
+  <Box x={540} y={30} w={160} h={56} label="KVCacheManager" sub="命中 / 分配 / 释放" tone="info" />
+  <Box x={540} y={110} w={160} h={44} label="ScheduledBatch" sub="{请求: token 数}" />
+  <Box x={540} y={180} w={160} h={56} label="模型执行 + 采样" sub="update_from_output()" />
+  <Arrow from={[190, 190]} to={[270, 140]} label="① 先服务" labelSide="below" />
+  <Arrow from={[190, 70]} to={[270, 120]} label="② 再接纳" />
+  <Arrow from={[460, 115]} to={[540, 60]} dashed head="both" />
+  <Arrow from={[460, 132]} to={[540, 132]} />
+  <Arrow from={[620, 154]} to={[620, 180]} />
+  <Arrow from={[540, 230]} via={[[105, 245]]} to={[105, 220]} tone="accent2" dashed label="结束：移出 RUNNING 并释放块" labelSide="below" />
+  <Arrow from={[270, 100]} via={[[230, 30], [105, 30]]} to={[105, 40]} tone="accent2" dashed label="抢占：放回队头" />
+  <Fragment slot="caption">每一步先在预算内服务 RUNNING 请求（decode 与未完成的 chunked prefill），需要新块时向 KV 管理器申请，不够就抢占；本步没有发生抢占且仍有预算时，才从 WAITING 队列接纳新请求。</Fragment>
+</Diagram>
+
+### 一步调度
+
+`schedule()` 分两轮。第一轮遍历 RUNNING 列表：每个请求拿 `min(还差的 token 数, 剩余预算, 单请求上限)` 个 token，并向 KV 管理器申请容纳这些 token 的块。申请失败说明显存不够，于是抢占排序最靠后的请求（FCFS 下是最后加入的，优先级策略下是优先级最低的）释放它的块，然后重试；如果被抢占的恰好是自己，就放弃本步。第二轮只在本步**没有发生抢占**时进行：按策略从 WAITING 队列取请求，先查前缀缓存命中多少 token，再为剩余部分分配块。
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" region="schedule" />
+
+几个设计与 vLLM V1 一致：
+
+- **RUNNING 优先**：已经在生成的请求先拿预算，保证它们的 TPOT；新请求只能用剩下的部分。
+- **发生抢占就不接纳新请求**：显存已经紧张，再接纳只会引起更多抢占。
+- **队头请求放不下就停**：不跳过它去调度后面的小请求。这避免了长请求被饿死，代价是一定的队头阻塞。vLLM 在“还有 RUNNING 请求可以服务”的少数情形下允许跳过（源码注释称其“not strictly follow the FCFS”），我们的简化版没有这样做。
+
+模型执行完一步后，`update_from_output` 推进每个请求的 `num_computed_tokens`、把新写满的块登记进前缀缓存；只有当一个请求的全部已知 token 都已计算（不是 chunked prefill 的中间块）时，才采纳本步的采样结果，并检查是否达到最大长度或遇到 EOS。
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" region="update" />
+
+`test_chunked_prefill_runs_alongside_decode` 手工驱动这个过程：一个请求在 decode，另一个 100 token 的提示到达，预算 32。之后四步里 decode 请求每步都拿到 1 个 token，提示被切成 31、31、31、7 四块；只有最后一块的采样结果被采纳为它的第一个输出 token。
+
+## 抢占：重计算还是换出
+
+KV 块按需分配，意味着系统可能“超售”：接纳请求时显存够用，随着大家生成得越来越长，某一步发现没有空闲块了。此时必须让某个请求让出显存。有两种恢复方式：
+
+**换出（swap）**：把被抢占请求的 KV 块拷到 CPU 内存，之后再拷回来。代价是两次 PCIe 传输，每次 $c\cdot b_{kv}/\beta_{\text{PCIe}}$。
+
+**重计算（recompute）**：直接丢掉它的 KV，回到等待队列队头；重新调度时把“提示 + 已生成的 token”当作一个新提示做一次 prefill。代价是一次长度为 $c$ 的 prefill，约 $2Pc/(\pi\cdot\text{MFU})$。
+
+以 Llama-3-8B、$c=2048$ 为例：KV 共 $2048\times128\,\text{KiB} = 256$ MiB，按 PCIe 5.0 x16 单向约 64 GB/s 计，换出加换入约 8 ms；重计算是一次 2048 token 的 prefill，50% MFU 下约 60 ms。看起来换出更便宜，但它要求 CPU 端有足够的锁页内存、需要管理两层存储，而且小块的拷贝很难跑满 PCIe 带宽。vLLM 论文的实验发现，块大小较小时换出的开销很大，重计算的开销与块大小无关；块大小在 16 到 64 之间时两者端到端性能相当。重计算还有一个经常被忽视的优势：生成阶段逐个产生的 token，重算时被合并成一次高效的 prefill。
+
+vLLM V1 只保留了重计算：`Scheduler._preempt_request` 释放请求的块、把 `num_computed_tokens` 置零、放回等待队列队头。前缀缓存让它更便宜——被释放的块只是引用计数归零，内容和哈希都还在空闲队列里；如果在重新调度前没有被别的请求挤掉，重算时这些块会直接命中缓存。我们的实现也是这样：
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" symbol="Scheduler._preempt" />
+
+`test_preemption_by_recompute_still_finishes_everything` 用只有 24 个块的显存服务 6 个最终各需 15 块的请求：抢占必然发生，但每个请求最终都生成了正确数量的 token；`test_preemption_returns_blocks_to_pool` 检查被抢占的请求确实归还了块、回到了队头。
+
+## 调度策略
+
+在“先 RUNNING、再 WAITING”的框架内，排序方式决定了谁先被服务、谁先被抢占：
+
+- **FCFS（先来先服务）**：按到达时间排序，抢占最后到达的。简单、可预期，是 vLLM 的默认策略。
+- **优先级**：每个请求带一个优先级（vLLM 中数值越小越优先，配合 `--scheduling-policy priority`），按 (优先级, 到达时间) 排序，抢占优先级最低的。适合区分在线与离线流量。
+- **最短作业优先**：如果能预测输出长度，先服务短请求可以显著降低平均延迟，但需要长度预测，且可能饿死长请求。
+- **公平性**：多租户场景下，按请求数轮转并不公平——一个租户可能发送很长的请求。Sheng et al.（OSDI 2024）提出用“虚拟 token 计数器”记录每个租户已获得的服务量（加权的输入与输出 token 数），优先服务计数最低的租户。
+
+我们的实现支持前两种，排序键由 `_rank` 给出；`test_priority_policy_admits_and_preempts_by_priority` 检查优先级高、到达晚的请求先被接纳，显存不足时被抢占的是优先级低的那个。
+
+## 离散事件模拟
+
+真实地压测一个调度器需要 GPU。但调度器只关心“每一步分配了什么”和“这一步花了多久”，所以可以用一个假模型（总是输出同一个 token）驱动它，用成本模型计算每一步的时长，在 CPU 上模拟上千个请求的服务过程。
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" region="simulate" />
+
+步长函数直接复用上一章的 `step_cost`：本步每个请求贡献 (分配的 token 数, 已缓存长度)，再按 roofline 取算力时间与访存时间的较大者。
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" symbol="roofline_step_time" />
+
+用它模拟 Llama-3-8B 在一张 H100 上的服务（MFU 0.5、MBU 0.7，每步另加 2 ms 固定开销）：300 个请求按泊松过程以每秒 8 个到达，提示长度在 256、512、1024、4096 中随机，输出 64–512 个 token。改变 token 预算：
+
+| token 预算 | 吞吐（token/s） | TTFT p50 | TTFT p99 | TPOT p50 | 最长 decode 停顿 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 8192 | 2250 | 47 ms | 327 ms | 17.7 ms | 251 ms |
+| 2048 | 2251 | 49 ms | 280 ms | 16.9 ms | 67 ms |
+| 512 | 2254 | 64 ms | 370 ms | 13.5 ms | 19 ms |
+| 256 | 2255 | 155 ms | 657 ms | 11.1 ms | 13 ms |
+
+这个负载下 GPU 没有满载，吞吐由到达率决定，四种预算几乎相同；差别全在延迟上。预算 8192 时一个 4096 token 的提示可以一步做完，正在 decode 的用户会遇到 251 ms 的停顿；预算降到 512，最长停顿只剩 19 ms，TPOT 也更平稳，代价是长提示的 TTFT 稍有增加；预算降到 256，prefill 被切得太碎，TTFT 明显恶化。这与上一节 $N^*\approx 210$ 的估计吻合：预算在几百到两千之间是合理的折中，vLLM 的默认值也在这个量级（随部署场景而定）。
+
+再比较静态与连续批处理（同一负载，最多 $B$ 个并发）：
+
+| 并发上限 $B$ | 静态：吞吐 | 静态：TTFT p50 | 连续：吞吐 | 连续：TTFT p50 |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 494 | 73.5 s | 777 | 39.5 s |
+| 32 | 1094 | 24.4 s | 1963 | 3.4 s |
+| 64 | 1366 | 20.8 s | 2251 | 0.09 s |
+
+并发上限 8 时两者都处理不过来，队列越排越长；但同样的硬件，连续批处理在 $B=64$ 时已经能跟上到达率，而静态批处理的请求仍在排队二十秒。这些数字来自模拟，不是实测，但它们的相对关系正是 Orca 与 vLLM 论文所报告的现象。`test_continuous_batching_beats_static_batching` 与 `test_smaller_token_budget_shortens_decode_stalls` 把这两个结论固定成测试。
+
+## 小结
+
+- 静态批处理按最长请求对齐，槽位利用率是 $\sum n_i / (B\max n_i)$；输出长度越分散，浪费越大。
+- 连续批处理在每一次迭代重新组批：请求结束立即离开，新请求立即补入；选择性批处理让不同阶段的 token 共享线性层，只在注意力处按请求分开。
+- 长 prefill 与 decode 同步执行会造成停顿；chunked prefill 用 token 预算限制每一步的计算量。H100 上往 decode 步里捎带约 200 个 prefill token 几乎不增加步长。
+- vLLM V1 的调度器不区分阶段：每个请求只追赶“已计算 token 数”，统一处理 prefill、decode、chunked prefill、前缀缓存与投机解码。
+- 显存不足时抢占：重计算丢掉 KV、之后重新 prefill，换出把 KV 拷到 CPU；vLLM V1 只用重计算，前缀缓存常常让重算命中缓存。
+- 调度策略（FCFS、优先级、公平性）只改变排序键；离散事件模拟可以在 CPU 上评估调度器的延迟与吞吐。
+
+[下一章](/inference/cuda-graph/)处理成本模型忽略的最后一项开销：CPU 启动 kernel 的时间。
+
+## 练习
+
+1. 一批 4 个请求的输出长度为 10、20、30、200。静态批处理的槽位利用率是多少？
+2. 在 A100（312 TFLOP/s、2.04 TB/s）上，MFU 0.5、MBU 0.7 时，往 decode 步里捎带多少个 prefill token 可以“几乎免费”？
+3. 为什么 `schedule()` 在本步发生抢占后不再接纳新请求？如果去掉这个限制会发生什么？
+4. 被抢占的请求已经生成了 50 个 token。重计算时它要 prefill 多少个 token？如果它的提示是 1000 token、块大小 16，并且被抢占后块都还在前缀缓存里，实际需要计算多少个？
+5. 设计一个场景，使 FCFS 下的“队头阻塞”很严重；说明最短作业优先在这个场景下的好处与风险。
+
+<details>
+<summary>答案</summary>
+
+1. $\sum n_i = 260$，$B\max n_i = 800$，利用率 32.5%。
+
+2. 拐点 $312/2.04\approx153$ FLOP/B，$N^* \approx 153\times0.5/0.7\approx 109$ 个 token。A100 的算力带宽比更低，能“免费”捎带的 prefill 更少。
+
+3. 抢占说明显存已经不足以让 RUNNING 请求继续前进。此时接纳新请求会立刻占用刚释放的块，下一步 RUNNING 请求又要抢占，形成“抢占—接纳—再抢占”的抖动，大量计算被重计算浪费掉。
+
+4. 重计算要处理提示与已生成的全部 1050 个 token。若块仍在缓存里，前 $\lfloor 1049/16\rfloor = 65$ 个满块（1040 个 token）命中，实际只需计算最后 10 个 token。注意已生成的 token 所在的满块也会命中，因为它们在被写满时已经登记进了缓存。
+
+5. 例如一个 30000 token 的提示先到，紧接着来了 100 个 100 token 的短请求，显存只够放下长请求。FCFS 下短请求都要等长请求的 prefill（以及占用的显存）；最短作业优先让短请求先完成，平均 TTFT 大幅下降。风险是长请求可能一直被插队而饿死，需要按等待时间提升优先级（aging）或设置上限。
+
+</details>
+
+## 参考文献
+
+- Yu et al. *Orca: A Distributed Serving System for Transformer-Based Generative Models*. OSDI 2022. [USENIX](https://www.usenix.org/conference/osdi22/presentation/yu)
+- Agrawal et al. *Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve*. OSDI 2024. [arXiv:2403.02310](https://arxiv.org/abs/2403.02310)
+- Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention*. SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- Sheng et al. *Fairness in Serving Large Language Models*. OSDI 2024. [arXiv:2401.00588](https://arxiv.org/abs/2401.00588)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/v1/core/sched/scheduler.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/sched/scheduler.py)（`Scheduler.schedule`、`_preempt_request`、`update_from_output`）
+- nano-vllm 的调度器：[`nanovllm/engine/scheduler.py`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/scheduler.py)
+- Stanford CS336 Spring 2025, Lecture 10: Inference. [课程主页](https://cs336.stanford.edu/spring2025/)
