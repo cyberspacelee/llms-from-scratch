@@ -35,7 +35,7 @@ const lang = /\.cuh?$/.test(path) ? 'cpp' : 'python'
   {run && <p class="m-0 border-b border-rule px-4 py-3 text-sm">运行：<code class="font-mono wrap-anywhere">{run}</code></p>}
   {excerpts.map(excerpt => <div class="prose prose-book max-w-none [&_pre]:my-0! [&_pre]:rounded-none! [&_pre]:border-0!" data-source-start={excerpt.start} data-source-end={excerpt.end}>
     <p class="m-0 px-4 py-2 text-xs text-muted">源码第 {excerpt.start}–{excerpt.end} 行</p>
-    <Code code={excerpt.code} lang={lang} themes={themes} defaultColor={false} />
+    <Code code={excerpt.code.replace(/^\s*\n|\s+$/g, "")} lang={lang} themes={themes} defaultColor={false} />
   </div>)}
   <details class="m-0! rounded-none! border-0! bg-transparent!">
     <summary class="px-4 py-3 text-sm font-semibold">完整源码 · {source.trimEnd().split('\n').length} 行</summary>
