@@ -1,8 +1,379 @@
 ---
 title: RLHF：奖励模型与 PPO
-description: Bradley–Terry 奖励模型，从策略梯度到 PPO 的裁剪目标，KL 惩罚、价值函数与 GAE，InstructGPT 的完整流程。
+description: 偏好数据与 Bradley–Terry 奖励模型，把语言模型看作策略，从策略梯度定理到 PPO 的裁剪目标，价值函数与 GAE，token 级 KL 惩罚，InstructGPT 的完整流程与奖励黑客。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/post_training/reward_model.py
+  - src/llms_from_scratch/post_training/ppo.py
+  - tests/post_training/test_reward_model.py
+  - tests/post_training/test_ppo.py
 ---
 
-本章正在撰写。
+[监督微调与对话模板](/post-training/sft/)的结尾留下了两个问题：SFT 只能模仿示范，上限是示范者的水平；它在示范的前缀上训练，从不检查模型自己生成的回复好不好。对许多任务来说，写出一个理想回复很难，判断两个回复哪个更好却容易得多。基于人类反馈的强化学习（Reinforcement Learning from Human Feedback，RLHF）利用的正是这种不对称：先从人类的**比较**中学出一个奖励模型，再让语言模型在自己的采样上最大化这个奖励。
+
+这一章沿着 InstructGPT（Ouyang 等，2022）的流程展开。我们先推导并实现 Bradley–Terry 奖励模型；然后把语言模型形式化为强化学习中的策略，从策略梯度定理一步步推到 PPO 的裁剪目标，实现广义优势估计（GAE）并与手算对照；最后讨论 KL 惩罚的作用与奖励黑客。PPO 的机制在后面几章会不断被简化和改造（DPO 去掉了奖励模型和采样，GRPO 去掉了价值函数），理解它是理解这些方法的前提。
+
+## InstructGPT 的三阶段流程
+
+<Diagram width={720} height={300} label="InstructGPT 的三阶段训练流程">
+  <Region x={10} y={10} w={220} h={280} title="① 监督微调" tone="ghost" />
+  <Region x={250} y={10} w={220} h={280} title="② 训练奖励模型" tone="ghost" />
+  <Region x={490} y={10} w={220} h={280} title="③ PPO 强化学习" tone="ghost" />
+  <Box x={30} y={50} w={180} h={50} label="提示 + 人写示范" sub="约 1.3 万条提示" tone="info" />
+  <Box x={30} y={140} w={180} h={50} label="SFT" sub="交叉熵" tone="accent" />
+  <Box x={30} y={225} w={180} h={50} label="π_SFT" tone="neutral" />
+  <Box x={270} y={50} w={180} h={50} label="π_SFT 采样 K 个回复" sub="K = 4…9" tone="info" />
+  <Box x={270} y={140} w={180} h={50} label="标注员排序" sub="约 3.3 万条提示" tone="info" />
+  <Box x={270} y={225} w={180} h={50} label="奖励模型 r_φ" sub="Bradley–Terry 损失" tone="accent" />
+  <Box x={510} y={50} w={180} h={50} label="新提示，策略采样" sub="约 3.1 万条提示" tone="info" />
+  <Box x={510} y={140} w={180} h={50} label="r_φ 打分 − β·KL" tone="neutral" />
+  <Box x={510} y={225} w={180} h={50} label="PPO 更新 π_θ" tone="strong" />
+  <Arrow from={[120, 100]} to={[120, 140]} />
+  <Arrow from={[120, 190]} to={[120, 225]} />
+  <Arrow from={[360, 100]} to={[360, 140]} />
+  <Arrow from={[360, 190]} to={[360, 225]} />
+  <Arrow from={[600, 100]} to={[600, 140]} />
+  <Arrow from={[600, 190]} to={[600, 225]} />
+  <Arrow from={[210, 250]} via={[[240, 250], [240, 75]]} to={[270, 75]} tone="muted" dashed />
+  <Arrow from={[450, 250]} via={[[480, 250], [480, 165]]} to={[510, 165]} tone="accent" />
+  <Fragment slot="caption">三个阶段使用三批不同的提示。SFT 模型既是奖励模型数据的采样来源，也是 PPO 策略的初始化与 KL 惩罚的参考模型；奖励模型在 PPO 中为策略的每条采样打分。</Fragment>
+</Diagram>
+
+InstructGPT 的三个阶段如上图。第一阶段就是上一章的 SFT。第二阶段对每条提示用 SFT 模型采样 $K$ 个回复（$K$ 在 4 到 9 之间），由标注员排序，训练一个奖励模型 $r_\phi(x,y)$。第三阶段以 SFT 模型为初始策略，用 PPO 最大化奖励模型的分数，同时用 KL 惩罚约束策略不要离 SFT 模型太远。
+
+这个流程最引人注目的结果是：在人类偏好评测中，**13 亿参数**的 InstructGPT 优于 **1750 亿参数**的 GPT-3。后训练并没有增加模型的知识，却显著改变了模型对用户的有用程度。
+
+## 偏好数据
+
+为什么收集比较而不是评分？绝对分数（“这个回答打几分”）在标注员之间、甚至同一个标注员的不同时间之间都很难校准；而“A 和 B 哪个更好”是一个相对稳定的判断。即便如此，人类偏好本身也是有噪声的：InstructGPT 报告的标注员之间一致率约为 73%。奖励模型的准确率很难显著超过这个水平。
+
+把 $K$ 个回复排序，等价于给出 $\binom K2$ 个两两比较；$K=9$ 时一次排序就产生 36 对。InstructGPT 注意到，如果把这些对打乱后当作独立样本，同一个回复会在一个轮次中出现 $K-1$ 次，奖励模型很快过拟合。他们的做法是把来自同一提示的所有比较放在同一个批次元素中，只做一次前向。
+
+人工比较很昂贵。后来的许多工作用强模型代替人类给出偏好，称为 RLAIF（AI 反馈的强化学习）：Constitutional AI 让模型按照一组书面原则批评与比较回复；UltraFeedback 用 GPT-4 按多个维度给多个模型的回复打分，再构造偏好对。今天开源的偏好数据大多是这样合成的。
+
+## Bradley–Terry 奖励模型
+
+### 从比较概率到损失
+
+我们需要一个模型，把“$y_w$ 优于 $y_l$”的概率与每个回复的标量分数联系起来。Bradley–Terry 模型（1952）假设每个选项有一个潜在的“实力” $r$，比较的胜率由实力之差决定：
+
+<KeyEq label="Bradley–Terry 偏好模型">
+
+$$
+P(y_w \succ y_l \mid x) = \frac{\exp r(x,y_w)}{\exp r(x,y_w) + \exp r(x,y_l)} = \sigma\big(r(x,y_w) - r(x,y_l)\big)
+$$
+
+</KeyEq>
+
+第二个等号把分子分母同除以 $\exp r(x,y_w)$ 即得，$\sigma(z) = 1/(1+e^{-z})$ 是 sigmoid 函数。给定偏好数据集 $\mathcal D = \{(x, y_w, y_l)\}$，对奖励模型参数 $\phi$ 做最大似然，负对数似然就是奖励模型的损失：
+
+$$
+\mathcal L_{\text{RM}}(\phi) = -\,\mathbb E_{(x,y_w,y_l)\sim\mathcal D}\Big[\log\sigma\big(r_\phi(x,y_w) - r_\phi(x,y_l)\big)\Big].
+$$
+
+这是对“哪个更好”这个二分类问题的逻辑回归，只是 logit 是两个分数之差。记 $\Delta = r_w - r_l$，单个样本的损失对 $r_w$ 的导数为
+
+$$
+\frac{\partial}{\partial r_w}\big[-\log\sigma(\Delta)\big] = -\big(1-\sigma(\Delta)\big) = -\sigma(-\Delta),
+$$
+
+对 $r_l$ 的导数则是它的相反数。梯度总是把选中回复的分数往上推、把被拒回复的分数往下压，推力的大小是“模型认为排错的概率” $\sigma(-\Delta)$：已经排对且间隔很大的样本几乎不再贡献梯度。
+
+<Plot label="Bradley–Terry 损失与梯度大小" x={[-6, 6]} y={[0, 6]} xLabel="分数差 Δ = r_w − r_l" yLabel="数值"
+  series={[{ fn: (t) => Math.log1p(Math.exp(-t)), label: '损失 −log σ(Δ)' }, { fn: (t) => 1 / (1 + Math.exp(t)), label: '梯度大小 σ(−Δ)', tone: 'accent2', dashed: true }]}
+  markers={[{ at: [0, Math.log(2)], label: 'Δ = 0 时损失为 log 2' }]}>
+  <Fragment slot="caption">Δ 越大，奖励模型越确信选中回复更好，损失趋于 0，梯度也趋于 0；Δ 为负（排错）时损失近似线性增长，梯度趋于 1。这与逻辑回归的交叉熵完全相同。</Fragment>
+</Plot>
+
+损失只依赖分数之差，所以给所有分数加上同一个常数不改变损失（测试 `test_bt_loss_is_shift_invariant`）。奖励模型的绝对值没有意义，InstructGPT 在训练后加了一个偏置，使标注员示范的平均奖励为 0，这样 PPO 的奖励在一个固定的尺度附近。
+
+### 奖励模型的结构
+
+奖励模型通常就是一个语言模型：取 SFT 模型，去掉输出词表的 unembedding 层，换成一个输出标量的线性头。把提示与回复拼接后送入 Transformer，在**最后一个 token** 的隐藏状态上读出分数。因果注意力下，只有最后一个 token 看到了完整的回复。InstructGPT 用了一个 6B 的奖励模型，因为 175B 的奖励模型训练不稳定，而且作为 PPO 中的价值函数初始化时计算代价太大。
+
+<CodeFile path="src/llms_from_scratch/post_training/reward_model.py" region="reward_model" />
+
+`forward` 接收每条序列的有效长度，在右侧填充的批次中取出最后一个有效位置；测试 `test_reward_read_at_last_valid_token` 验证了填充的内容不影响分数。我们用一个可验证的玩具偏好检验整个机制：对 25 道个位数加法题，各构造一对“正确答案 vs 错误答案”的回复，在随机初始化的极小 GPT 上训练 80 步。训练后奖励模型对训练对的排序准确率超过 90%：
+
+<CodeFile path="tests/post_training/test_reward_model.py" symbol="test_reward_model_learns_to_rank_correct_answers" />
+
+## 把语言模型看作策略
+
+强化学习研究的是智能体在环境中通过试错最大化累积奖励。把语言模型的生成过程放进这个框架很直接：
+
+- **状态** $s_t$：提示 $x$ 加上已经生成的前缀 $y_{\lt t}$；
+- **动作** $a_t$：下一个 token $y_t$，动作空间就是词表；
+- **策略** $\pi_\theta(a_t\mid s_t)$：语言模型给出的下一个 token 分布；
+- **转移**：确定性的，$s_{t+1}$ 就是把 $y_t$ 接到 $s_t$ 后面；
+- **奖励**：生成结束（输出 EOS）时由奖励模型给出 $r(x,y)$，中间步骤奖励为 0。
+
+于是 RLHF 的目标是最大化期望奖励。只最大化 $r_\phi$ 会让策略跑到奖励模型从未见过的区域去“钻空子”，所以还要加一项与参考策略 $\pi_{\text{ref}}$（通常就是 SFT 模型）的 KL 散度惩罚：
+
+<KeyEq label="KL 正则化的 RLHF 目标">
+
+$$
+\max_\theta\; \mathbb E_{x\sim\mathcal D,\;y\sim\pi_\theta(\cdot\mid x)}\big[r_\phi(x,y)\big] \;-\; \beta\,\mathbb E_{x\sim\mathcal D}\Big[\mathrm{KL}\big(\pi_\theta(\cdot\mid x)\,\big\|\,\pi_{\text{ref}}(\cdot\mid x)\big)\Big]
+$$
+
+</KeyEq>
+
+这个目标在[直接偏好优化 DPO](/post-training/dpo/)中会被求出闭式最优解。这一章我们用梯度方法去优化它。
+
+## 策略梯度定理
+
+### 对数导数技巧
+
+困难在于：目标是关于**采样分布**的期望，$\theta$ 出现在分布里而不是被积函数里，不能直接对样本求导。先忽略 KL 项，记 $J(\theta) = \mathbb E_{y\sim\pi_\theta}[r(y)]$（省略对 $x$ 的条件）。展开期望再求导：
+
+$$
+\nabla_\theta J = \nabla_\theta \sum_y \pi_\theta(y)\,r(y) = \sum_y r(y)\,\nabla_\theta\pi_\theta(y) = \sum_y r(y)\,\pi_\theta(y)\,\nabla_\theta\log\pi_\theta(y) = \mathbb E_{y\sim\pi_\theta}\big[r(y)\,\nabla_\theta\log\pi_\theta(y)\big].
+$$
+
+第三个等号用了 $\nabla\pi = \pi\,\nabla\log\pi$，这就是对数导数技巧（log-derivative trick）。它把梯度重新写成了一个期望，于是可以用采样估计：采样 $y\sim\pi_\theta$，计算 $r(y)\nabla\log\pi_\theta(y)$，这个估计是无偏的。对自回归模型，序列概率是条件概率之积，
+
+$$
+\log\pi_\theta(y\mid x) = \sum_{t=1}^{|y|}\log\pi_\theta(y_t\mid x, y_{\lt t}),
+$$
+
+所以梯度是每个 token 的对数概率梯度之和，乘以整条序列的奖励。这就是 REINFORCE（Williams，1992）。它的直觉非常清晰：奖励高的回复，提高它每个 token 的概率；奖励低的，降低概率。与 SFT 对比：SFT 的梯度是 $\nabla\log\pi_\theta(y^{\text{demo}})$，相当于奖励恒为 1、样本来自示范；策略梯度的样本来自模型自己，权重由奖励决定。
+
+### 基线：不改变期望、降低方差
+
+REINFORCE 无偏，但方差很大。考虑所有奖励都是正数（如 4 到 6 分）的情形：无论采到什么，梯度都在提高它的概率，只是幅度不同；真正的信号（哪个回复比别的好）淹没在这个公共分量里。
+
+解决办法是减去一个与动作无关的**基线**（baseline）$b$：
+
+$$
+\hat g = \big(r(y) - b\big)\,\nabla_\theta\log\pi_\theta(y).
+$$
+
+基线不改变期望，因为
+
+$$
+\mathbb E_{y\sim\pi_\theta}\big[b\,\nabla_\theta\log\pi_\theta(y)\big] = b\sum_y\pi_\theta(y)\frac{\nabla_\theta\pi_\theta(y)}{\pi_\theta(y)} = b\,\nabla_\theta\sum_y\pi_\theta(y) = b\,\nabla_\theta 1 = 0.
+$$
+
+但它可以大幅降低方差。最自然的选择是期望奖励 $b = \mathbb E[r]$（理论上方差最小的基线还要按梯度的范数加权，但差别通常不大），此时 $r(y)-b$ 称为**优势**（advantage）：这个回复比平均水平好多少。
+
+在单步的类别策略上，我们可以对所有动作求和，**精确**地计算估计量的均值和方差，而不必采样：
+
+<CodeFile path="src/llms_from_scratch/post_training/ppo.py" region="reinforce_variance" />
+
+以 4 个动作、logits 为 $(1, 0, -1, 0.5)$、奖励为 $(5, 4, 6, 5.5)$ 为例，期望奖励约为 5.03。不用基线时梯度估计的总方差约为 16.9，用 $b=\mathbb E[r]$ 时降到约 0.25，降低了近 70 倍，而两者的均值都精确等于 $\pi\odot(r-\mathbb E[r])$。测试 `test_baseline_keeps_mean_and_reduces_variance` 核对了这些数值。后面的 PPO 用一个学出来的价值函数做基线，GRPO 则用同一提示下多个采样的平均奖励做基线。
+
+### 按 token 分配功劳
+
+对一条序列，所有 token 共享同一个序列奖励，这在信用分配（credit assignment）上很粗糙。更一般的写法是给每个 token 一个优势 $\hat A_t$：
+
+$$
+\nabla_\theta J \approx \mathbb E\Big[\sum_t \hat A_t\,\nabla_\theta\log\pi_\theta(y_t\mid s_t)\Big],\qquad \hat A_t \approx Q(s_t, y_t) - V(s_t),
+$$
+
+其中 $V(s_t)$ 是从状态 $s_t$ 出发的期望回报，$Q(s_t,y_t)$ 是先选 $y_t$ 再按策略继续的期望回报。下一节的 GAE 就是估计 $\hat A_t$ 的一种方法。
+
+## PPO：在同一批数据上安全地多走几步
+
+### 重要性采样与信赖域
+
+在大模型上，采样（生成）比梯度更新贵得多。我们希望一批采样能用于多次梯度更新。但第二次更新时，参数已经从采样时的 $\theta_{\text{old}}$ 变成了 $\theta$，样本不再来自当前策略。重要性采样（importance sampling）修正这一点：
+
+$$
+\mathbb E_{y\sim\pi_\theta}\big[\hat A\,\nabla\log\pi_\theta\big] = \mathbb E_{y\sim\pi_{\theta_{\text{old}}}}\Big[\frac{\pi_\theta(y)}{\pi_{\theta_{\text{old}}}(y)}\hat A\,\nabla\log\pi_\theta\Big] = \nabla_\theta\,\mathbb E_{y\sim\pi_{\theta_{\text{old}}}}\big[\rho_\theta\,\hat A\big],\qquad \rho_\theta = \frac{\pi_\theta(y)}{\pi_{\theta_{\text{old}}}(y)}.
+$$
+
+（最后一步用了 $\nabla\rho = \rho\,\nabla\log\pi_\theta$。）于是可以最大化代理目标 $\mathbb E[\rho_\theta\hat A]$。问题是：当 $\pi_\theta$ 离 $\pi_{\theta_{\text{old}}}$ 很远时，优势 $\hat A$（在旧策略下估计的）不再准确，重要性比也可能极大，更新会失控。TRPO（Schulman 等，2015）的办法是加一个 KL 约束，要求每步更新后的策略与旧策略的 KL 不超过 $\delta$，但这需要二阶优化，实现复杂。
+
+### 裁剪目标
+
+PPO（Schulman 等，2017）用一个简单得多的办法达到类似的效果：把重要性比裁剪到 $[1-\epsilon, 1+\epsilon]$ 内，再与未裁剪的项取较小值。
+
+<KeyEq label="PPO 的裁剪代理目标">
+
+$$
+L^{\text{CLIP}}(\theta) = \mathbb E_t\Big[\min\big(\rho_t\hat A_t,\;\mathrm{clip}(\rho_t, 1-\epsilon, 1+\epsilon)\,\hat A_t\big)\Big],\qquad \rho_t = \frac{\pi_\theta(y_t\mid s_t)}{\pi_{\theta_{\text{old}}}(y_t\mid s_t)}
+$$
+
+</KeyEq>
+
+逐个情形看它做了什么（$\epsilon$ 通常取 0.2）：
+
+- $\hat A_t > 0$（好动作）：目标随 $\rho_t$ 增大而增大，鼓励提高概率；但 $\rho_t > 1+\epsilon$ 后，min 取裁剪项，目标变平，梯度为零。**已经涨够了，不再推。**
+- $\hat A_t < 0$（坏动作）：目标随 $\rho_t$ 减小而增大，鼓励降低概率；$\rho_t < 1-\epsilon$ 后同样变平。**已经降够了，不再压。**
+- 反方向的情形不裁剪：$\hat A_t>0$ 但 $\rho_t < 1-\epsilon$（好动作的概率反而降低了），min 取未裁剪的 $\rho_t\hat A_t$，梯度照常，允许纠正错误。
+
+取 min 使 $L^{\text{CLIP}}$ 是未裁剪目标的一个**下界**（悲观估计）：只忽略“让目标变得更好”的那部分变化，从不忽略“让目标变得更差”的部分。
+
+<Plot label="PPO 裁剪目标随重要性比的变化" x={[0, 2]} y={[-2, 1.5]} xLabel="重要性比 ρ" yLabel="单个 token 的目标"
+  series={[{ fn: (t) => Math.min(t, Math.min(Math.max(t, 0.8), 1.2)), label: 'Â = +1' }, { fn: (t) => Math.min(-t, -Math.min(Math.max(t, 0.8), 1.2)), label: 'Â = −1', tone: 'accent2' }, { fn: (t) => t, label: '未裁剪 ρÂ（Â = +1）', tone: 'muted', dashed: true }]}
+  markers={[{ at: [1.2, 1.2], label: '1 + ε' }, { at: [0.8, -0.8], label: '1 − ε' }]}>
+  <Fragment slot="caption">ε = 0.2。Â 为正时，目标在 ρ = 1.2 之后变平，继续增大 ρ 没有收益；Â 为负时，目标在 ρ = 0.8 之前是平的。两条曲线在 ρ = 1 处的斜率都等于 Â，此时 PPO 退化为普通的策略梯度。</Fragment>
+</Plot>
+
+实现时取负号作为损失，并对回复 token 做掩码平均：
+
+<CodeFile path="src/llms_from_scratch/post_training/ppo.py" region="ppo_loss" />
+
+测试 `test_clip_removes_gradient_outside_trust_region` 构造了四个 token，分别落在上面讨论的四种情形中，检查梯度是否恰好在应当为零的地方为零。价值函数的损失也做了类似的裁剪：新的价值估计相对旧值变化超过 $\epsilon$ 时，取裁剪后与未裁剪两种误差中较大的一个。
+
+## 价值函数与广义优势估计
+
+### TD 残差
+
+PPO 用一个价值网络 $V_\psi(s_t)$ 估计每个状态的期望回报，用它构造逐 token 的优势。最简单的估计是一步时间差分（TD）残差：
+
+$$
+\delta_t = r_t + \gamma V(s_{t+1}) - V(s_t).
+$$
+
+若 $V$ 是准确的，$\delta_t$ 就是 $Q(s_t,y_t)-V(s_t)$ 的无偏估计：“走了这一步之后的实际奖励加上新状态的价值”减去“走之前预期的价值”。但 $V$ 总是不准的，$\delta_t$ 因此有偏差。另一个极端是蒙特卡洛估计：直接用实际的累积回报减去 $V(s_t)$，它无偏，但方差大，因为包含了后续所有随机采样的噪声。
+
+### GAE：两个极端之间的插值
+
+广义优势估计（Generalized Advantage Estimation，Schulman 等，2016）对未来的 TD 残差做指数加权求和：
+
+<KeyEq label="广义优势估计">
+
+$$
+\hat A_t^{\text{GAE}(\gamma,\lambda)} = \sum_{l=0}^{\infty}(\gamma\lambda)^l\,\delta_{t+l} = \delta_t + \gamma\lambda\,\hat A_{t+1}
+$$
+
+</KeyEq>
+
+右边的递推式说明它可以从序列末尾往前一次扫描算出。两个极端可以直接验证：
+
+- $\lambda = 0$：$\hat A_t = \delta_t$，即一步 TD 残差，方差小、偏差大；
+- $\lambda = 1$：求和中的 $V$ 项逐项抵消，
+
+$$
+\sum_{l\ge0}\gamma^l\big(r_{t+l} + \gamma V(s_{t+l+1}) - V(s_{t+l})\big) = \sum_{l\ge0}\gamma^l r_{t+l} - V(s_t),
+$$
+
+即蒙特卡洛回报减去基线，无偏但方差大。
+
+$\lambda$ 在两者之间权衡偏差与方差。RLHF 中的回复是有限长的，通常取 $\gamma = 1$（不打折扣）、$\lambda = 0.95$ 左右。价值网络的回归目标是 $\hat A_t + V(s_t)$。
+
+### 手算一个例子
+
+取三个 token 的回复，奖励只在最后一步：$r = (0, 0, 1)$，价值估计 $V = (0.5, 0.6, 0.8)$，回复结束后价值为 0，$\gamma=1$，$\lambda=0.5$。TD 残差为
+
+$$
+\delta_0 = 0 + 0.6 - 0.5 = 0.1,\quad \delta_1 = 0 + 0.8 - 0.6 = 0.2,\quad \delta_2 = 1 + 0 - 0.8 = 0.2.
+$$
+
+从后往前递推：$\hat A_2 = 0.2$，$\hat A_1 = 0.2 + 0.5\times0.2 = 0.3$，$\hat A_0 = 0.1 + 0.5\times0.3 = 0.25$。实现与这个递推一一对应，并处理了掩码：提示位置与 EOS 之后的填充不参与计算，也不把值传递给前面的位置。
+
+<CodeFile path="src/llms_from_scratch/post_training/ppo.py" region="gae" />
+
+测试 `test_gae_matches_hand_computation` 就是上面这个例子；`test_gae_limits` 在随机数据上验证 $\lambda=0$ 与 $\lambda=1$ 两个极限；`test_gae_respects_prompt_and_padding_mask` 检查掩码位置的优势为零。
+
+## token 级 KL 惩罚
+
+目标中的 KL 项在实现上通常被拆进逐 token 的奖励。对采样到的回复，$\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$ 的单样本估计是 $\sum_t\big(\log\pi_\theta(y_t\mid s_t) - \log\pi_{\text{ref}}(y_t\mid s_t)\big)$。把它的每一项作为该 token 的负奖励，再把奖励模型的分数加在最后一个 token 上：
+
+$$
+r_t = -\beta\big(\log\pi_\theta(y_t\mid s_t) - \log\pi_{\text{ref}}(y_t\mid s_t)\big) + \mathbb 1[t = |y|]\;r_\phi(x, y).
+$$
+
+<CodeFile path="src/llms_from_scratch/post_training/ppo.py" region="kl_rewards" />
+
+这样做的好处是 KL 惩罚也获得了逐 token 的信用分配：哪个 token 偏离参考模型最多，哪个 token 就被罚得最多，GAE 会把这些信息传播到前面的位置。$\beta$ 可以固定，也可以像 Ziegler 等（2019）那样自适应地调整，使实际 KL 保持在目标值附近。
+
+KL 惩罚有两个作用。其一是防止奖励黑客（下文详述）：奖励模型只在 SFT 模型的分布附近被训练过，离开那里它的打分不可信。其二是保留预训练与 SFT 获得的能力。InstructGPT 还观察到 RLHF 会让模型在一些公开 NLP 基准上退步，称为“对齐税”（alignment tax）；他们的 PPO-ptx 变体在 PPO 的梯度中混入预训练数据的语言建模梯度，减轻了这种退步。
+
+## 把它们放在一起
+
+一次完整的 RLHF-PPO 迭代涉及**四个模型**：
+
+1. **策略** $\pi_\theta$（可训练，从 SFT 初始化）：生成回复，并计算 $\log\pi_\theta$；
+2. **参考策略** $\pi_{\text{ref}}$（冻结的 SFT 模型）：计算 KL 惩罚所需的 $\log\pi_{\text{ref}}$；
+3. **奖励模型** $r_\phi$（冻结）：为每条完整回复打分；
+4. **价值模型** $V_\psi$（可训练，常从奖励模型初始化）：估计每个位置的价值，用于 GAE。
+
+每次迭代的步骤是：策略对一批提示采样回复，记录 $\log\pi_{\theta_{\text{old}}}$；参考模型与奖励模型分别前向；组合出逐 token 奖励，用价值模型做 GAE 得到优势与回报；然后在这批数据上做若干轮小批量的梯度更新，同时优化裁剪的策略损失与价值损失。
+
+四个模型意味着四份权重（两份还带优化器状态），以及在训练与生成之间来回切换。这是 RLHF 在工程上很重的原因，也是 DPO 和 GRPO 试图简化的地方：DPO 去掉了奖励模型、价值模型和在线采样，GRPO 去掉了价值模型。在[大规模强化学习的工程与改进](/post-training/rl-at-scale/)中我们会看到，生成往往占了 RL 训练时间的大头，系统设计围绕它展开。
+
+## 奖励黑客
+
+奖励模型只是人类偏好的一个不完美代理。策略在优化它时，会找到让代理分数升高、却不让真实质量升高的方向，这称为奖励黑客（reward hacking），是古德哈特定律（“一个指标一旦成为目标，就不再是好指标”）的一个实例。RLHF 中常见的表现有：回复越来越长（标注员和奖励模型都倾向于更详细的回答），堆砌套话与格式，迎合用户的观点（sycophancy），以及在奖励模型的盲区中生成无意义但高分的文本。
+
+Gao 等（2023）系统地测量了这一现象。他们用一个大的“金标准”奖励模型代替人类，用它的标注训练较小的代理奖励模型，再用代理奖励模型做 RL 或 best-of-$n$ 采样。随着策略离初始模型越来越远（以 $d=\sqrt{\mathrm{KL}}$ 度量），代理奖励单调上升，金标准奖励却先升后降。对 RL，他们拟合出的函数形式是 $R(d) = d(\alpha - \beta\log d)$。
+
+<Plot label="奖励过度优化（示意）" x={[0, 10]} y={[0, 2.5]} xLabel="离初始策略的距离 d = √KL" yLabel="奖励"
+  series={[{ fn: (t) => 0.25 * t, label: '代理奖励', tone: 'muted', dashed: true }, { fn: (t) => (t <= 0 ? 0 : 0.6 * t * (1 - 0.43 * Math.log(t))), label: '金标准奖励' }]}
+  markers={[{ at: [Math.exp(1 / 0.43 - 1), 0.6 * Math.exp(1 / 0.43 - 1) * 0.43], label: '最优停止点' }]}>
+  <Fragment slot="caption">示意图，参数为任意选取（α = 0.6，β ≈ 0.26），只用于展示 Gao 等（2023）拟合的函数形状：代理奖励持续上升，真实奖励在 d = e^(α/β − 1) 处达到最大后下降。KL 惩罚的作用就是把策略限制在峰值附近。</Fragment>
+</Plot>
+
+缓解奖励黑客的手段大致有：KL 惩罚（限制 $d$）；更大、更好的奖励模型（Gao 等发现奖励模型越大，过度优化来得越晚）；多个奖励模型的集成；在 RL 过程中用新策略的采样继续收集偏好、迭代地更新奖励模型（Llama 2 等的做法）；对长度等已知的偏差做显式惩罚。在推理任务上，DeepSeek-R1 干脆不用神经网络奖励模型，改用基于规则的可验证奖励，这正是[GRPO 与推理模型](/post-training/grpo/)的主题。
+
+## 小结
+
+- RLHF 从人类的成对比较中学习：Bradley–Terry 模型把偏好概率写成 $\sigma(r_w - r_l)$，奖励模型的损失是 $-\log\sigma(r_w-r_l)$，梯度大小等于“排错的概率”。
+- 语言模型是一个策略：状态是前缀，动作是下一个 token，奖励在序列末尾给出；目标是期望奖励减去对参考策略的 KL 惩罚。
+- 策略梯度定理通过对数导数技巧得到 $\nabla J = \mathbb E[r\nabla\log\pi]$；减去基线不改变期望，可以大幅降低方差，$r-b$ 即优势。
+- PPO 用重要性比在同一批数据上做多步更新，并通过裁剪 $\min(\rho\hat A, \mathrm{clip}(\rho)\hat A)$ 在策略变化过大时让梯度消失；GAE 用 $\lambda$ 在 TD 与蒙特卡洛之间权衡偏差与方差。
+- InstructGPT 的三阶段流程需要策略、参考、奖励、价值四个模型；KL 惩罚防止奖励黑客与能力退化，奖励过度优化表现为真实奖励先升后降。
+
+## 练习
+
+1. 证明 Bradley–Terry 模型满足“若 $P(A\succ B) = P(B \succ C) = 0.73$，则 $P(A\succ C) > 0.73$”，并算出具体数值。
+
+<details>
+<summary>答案</summary>
+
+$\sigma(r_A - r_B) = 0.73$ 给出 $r_A - r_B = \log(0.73/0.27)\approx 0.995$，同理 $r_B - r_C\approx 0.995$。于是 $r_A - r_C \approx 1.99$，$P(A\succ C) = \sigma(1.99)\approx 0.88 > 0.73$。BT 模型把偏好嵌入一条实数轴上，因此满足这种传递性；真实的人类偏好并不总是如此（可能出现循环），这是 BT 假设的一个局限。
+
+</details>
+
+2. 在 REINFORCE 中用一个依赖于所采动作的“基线” $b(y)$ 还能保持无偏吗？
+
+<details>
+<summary>答案</summary>
+
+一般不能。无偏性的证明依赖于 $b$ 能被提到求和号外面：$\sum_y \pi(y) b\,\nabla\log\pi(y) = b\nabla\sum_y\pi(y) = 0$。若 $b$ 依赖于 $y$，$\sum_y b(y)\nabla\pi(y)$ 一般不为零，估计就有偏。基线可以依赖状态（例如 $V(s_t)$ 依赖于前缀），但不能依赖当前要评估的动作本身。GRPO 中用同组其他样本的平均奖励做基线时，严格说当前样本自己的奖励也包含在平均里，会引入一个 $1/G$ 量级的缩放，[GRPO 与推理模型](/post-training/grpo/)中会再讨论。
+
+</details>
+
+3. 对 $\hat A = -1$、$\rho = 1.5$、$\epsilon = 0.2$，PPO 的单 token 目标与梯度分别是多少？这种情形的直观含义是什么？
+
+<details>
+<summary>答案</summary>
+
+未裁剪项 $\rho\hat A = -1.5$，裁剪项 $\mathrm{clip}(1.5)\hat A = 1.2\times(-1) = -1.2$，取较小值 $-1.5$，即未裁剪项，目标对 $\rho$ 的导数为 $\hat A = -1$，梯度照常把这个 token 的概率往下压。直观含义：这是一个坏动作，但新策略反而提高了它的概率（$\rho>1$），PPO 不会忽略这种“越改越差”的变化，而是继续纠正它。
+
+</details>
+
+4. 用 GAE 的递推公式证明：当 $\gamma = 1$、$\lambda=1$ 且奖励只在最后一步给出时，所有位置的优势都等于 $r_\phi - V(s_t)$（忽略 KL 项）。
+
+<details>
+<summary>答案</summary>
+
+$\lambda=\gamma=1$ 时 $\hat A_t = \sum_{l\ge0}\delta_{t+l}$，按前文的伸缩求和等于 $\sum_{l\ge0}r_{t+l} - V(s_t)$。奖励只在最后一步给出，$\sum_{l\ge 0}r_{t+l} = r_\phi$ 对所有 $t$ 都成立，于是 $\hat A_t = r_\phi - V(s_t)$。这时每个 token 的优势只是在同一个序列奖励上减去不同的基线，价值函数起的作用就是逐位置的基线。
+
+</details>
+
+5. 为什么 InstructGPT 不用 175B 的模型做奖励模型？列出至少两个原因。
+
+<details>
+<summary>答案</summary>
+
+论文给出的原因是 175B 奖励模型的训练不稳定，而且把它用作 PPO 的价值函数初始化时计算代价过高。此外，RLHF 中奖励模型要对每条采样做前向，价值模型还要训练，它们与策略同等规模会让每次迭代的计算与显存翻倍；6B 的奖励模型在成本与准确率之间是一个实际的折中。
+
+</details>
+
+## 参考文献
+
+- Ouyang et al. *Training language models to follow instructions with human feedback* (InstructGPT). NeurIPS 2022. https://arxiv.org/abs/2203.02155
+- Christiano et al. *Deep Reinforcement Learning from Human Preferences*. NeurIPS 2017. https://arxiv.org/abs/1706.03741
+- Ziegler et al. *Fine-Tuning Language Models from Human Preferences*. 2019. https://arxiv.org/abs/1909.08593
+- Stiennon et al. *Learning to summarize from human feedback*. NeurIPS 2020. https://arxiv.org/abs/2009.01325
+- Bradley and Terry. *Rank Analysis of Incomplete Block Designs: I. The Method of Paired Comparisons*. Biometrika 1952.
+- Williams. *Simple Statistical Gradient-Following Algorithms for Connectionist Reinforcement Learning*. Machine Learning 1992.
+- Schulman et al. *Trust Region Policy Optimization*. ICML 2015. https://arxiv.org/abs/1502.05477
+- Schulman et al. *High-Dimensional Continuous Control Using Generalized Advantage Estimation*. ICLR 2016. https://arxiv.org/abs/1506.02438
+- Schulman et al. *Proximal Policy Optimization Algorithms*. 2017. https://arxiv.org/abs/1707.06347
+- Bai et al. *Constitutional AI: Harmlessness from AI Feedback*. 2022. https://arxiv.org/abs/2212.08073
+- Cui et al. *UltraFeedback: Boosting Language Models with Scaled AI Feedback*. ICML 2024. https://arxiv.org/abs/2310.01377
+- Gao, Schulman, Hilton. *Scaling Laws for Reward Model Overoptimization*. ICML 2023. https://arxiv.org/abs/2210.10760
+- Huang et al. *The N+ Implementation Details of RLHF with PPO: A Case Study on TL;DR Summarization*. COLM 2024. https://arxiv.org/abs/2403.17031

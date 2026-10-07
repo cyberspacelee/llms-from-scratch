@@ -1,8 +1,234 @@
 ---
 title: 知识蒸馏
-description: 软标签与温度，序列级蒸馏与在线策略蒸馏，用大模型推理轨迹蒸馏小模型的实践。
+description: 软标签与温度（含温度平方因子的推导），前向 KL 与反向 KL 的模式覆盖与模式寻找，序列级蒸馏与用推理轨迹蒸馏小模型，以及学生采样、教师逐 token 打分的在线策略蒸馏。
 order: 7
-draft: true
+code:
+  - src/llms_from_scratch/post_training/distill.py
+  - tests/post_training/test_distill.py
 ---
 
-本章正在撰写。
+[GRPO 与推理模型](/post-training/grpo/)的结尾有一个出人意料的结果：用 DeepSeek-R1 生成的 80 万条推理轨迹对 Qwen2.5-32B 做 SFT，AIME 2024 达到 72.6%；在同一个基座上直接做大规模 RL，只有 47.0%。对小模型而言，向强模型学习比自己摸索高效得多。这就是知识蒸馏（knowledge distillation）：用一个大的教师（teacher）模型的输出训练一个小的学生（student）模型。
+
+蒸馏贯穿了整个后训练。今天开源模型的 SFT 数据大多由更强的模型生成，这本身就是蒸馏；Qwen3、Gemma 等系列的小模型都由同家族的大模型蒸馏而来。本章从 Hinton 等（2015）的软标签与温度开始，推导温度平方因子；然后用一个可以画出来的例子对比前向 KL 与反向 KL，这个区别决定了蒸馏方法的分野；接着讨论序列级蒸馏，即“用教师生成的数据做 SFT”；最后实现在线策略蒸馏（on-policy distillation）：学生自己采样，教师在每个 token 上打分。它把蒸馏与前几章的强化学习联系在了一起。
+
+## 软标签与温度
+
+### 暗知识
+
+一个训练好的分类器对“这是一张宝马的图片”给出的分布，可能是宝马 0.9、垃圾车 $10^{-6}$、胡萝卜 $10^{-9}$。硬标签只告诉学生“宝马”，而这个分布还告诉学生：宝马与垃圾车虽然都不太像，但比与胡萝卜像得多。Hinton 等把这些小概率中蕴含的类别相似性称为“暗知识”（dark knowledge）。对语言模型，教师在每个位置给出的下一个 token 分布同样包含了大量信息：哪些同义词也可以，哪些续写也合理。
+
+问题是这些信息藏在极小的概率里，交叉熵对它们几乎不敏感。办法是用温度 $T$ 软化分布：
+
+$$
+p_i^{(T)} = \frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}.
+$$
+
+$T=1$ 是普通的 softmax，$T$ 越大分布越平。以 logits $(4,2,1,0)$ 为例：$T=1$ 时概率为 $(0.831, 0.112, 0.041, 0.015)$，$T=4$ 时为 $(0.409, 0.248, 0.193, 0.150)$，次要类别之间的相对关系被放大到交叉熵能感知的量级。
+
+### 蒸馏损失与温度平方因子
+
+学生与教师用同一个温度 $T$ 软化，蒸馏损失是两个软分布之间的交叉熵（等价于 KL，二者只差教师分布的熵，与学生无关）。设教师 logits 为 $v$、软分布为 $p$，学生 logits 为 $z$、软分布为 $q$，
+
+$$
+C = -\sum_i p_i\log q_i,\qquad q_i = \frac{\exp(z_i/T)}{\sum_j\exp(z_j/T)}.
+$$
+
+对学生 logits 求导。由 $\partial\log q_i/\partial z_k = \frac1T(\delta_{ik} - q_k)$ 与 $\sum_i p_i = 1$：
+
+$$
+\frac{\partial C}{\partial z_k} = -\sum_i p_i\cdot\frac1T(\delta_{ik} - q_k) = \frac1T\big(q_k - p_k\big).
+$$
+
+当 $T$ 远大于 logits 的量级时，用 $e^{x}\approx 1+x$ 展开：$q_k\approx\frac{1+z_k/T}{N + \sum_jz_j/T}$，$p_k$ 同理，其中 $N$ 是类别数。若 logits 在每个样本上都是零均值的（$\sum_j z_j = \sum_j v_j = 0$），分母都约为 $N$，于是
+
+$$
+\frac{\partial C}{\partial z_k}\approx\frac1T\Big(\frac{1+z_k/T}{N} - \frac{1+v_k/T}{N}\Big) = \frac{1}{NT^2}\big(z_k - v_k\big).
+$$
+
+这个结果有两层含义。第一，在高温极限下，蒸馏等价于让学生的 logits 去匹配教师的 logits（$\frac{1}{2NT^2}\sum_k(z_k-v_k)^2$ 的梯度），这正是更早的“logit 匹配”方法。第二，**软目标产生的梯度按 $1/T^2$ 缩小**。实践中常把蒸馏损失与硬标签的交叉熵加权组合，若不做补偿，换一个温度就会改变两项的相对权重。因此蒸馏损失要乘以 $T^2$：
+
+<KeyEq label="带温度的蒸馏损失">
+
+$$
+\mathcal L_{\text{KD}} = T^2\,\mathrm{KL}\big(p^{(T)}_{\text{teacher}}\,\big\|\,p^{(T)}_{\text{student}}\big)
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/post_training/distill.py" region="kd_loss" />
+
+测试 `test_kd_gradient_and_temperature_squared_factor` 精确验证了上面的推导：对 $T\in\{1,4\}$，梯度等于 $T\cdot(q-p)$（乘上 $T^2$ 之后的 $\frac1T(q-p)$）；对 $T = 1000$ 与零均值 logits，梯度与 $(z-v)/N$ 的差小于 $10^{-3}$。在语言模型上，`kd_loss` 对每个位置的整个词表分布计算 KL，再在回复 token 上平均，这称为 token 级（word-level）蒸馏。它要求能拿到教师的完整 logits，并且学生与教师使用同一个词表。
+
+## 前向 KL 与反向 KL
+
+### 两个方向
+
+上面的蒸馏损失是 $\mathrm{KL}(p\,\|\,q)$，期望在**教师**分布 $p$ 下取：
+
+$$
+\mathrm{KL}(p\,\|\,q) = \mathbb E_{y\sim p}\Big[\log\frac{p(y)}{q(y)}\Big],\qquad
+\mathrm{KL}(q\,\|\,p) = \mathbb E_{y\sim q}\Big[\log\frac{q(y)}{p(y)}\Big].
+$$
+
+前者称为前向 KL，后者称为反向 KL。KL 不对称，当学生的容量不足以精确复制教师时，两个方向会给出很不同的近似。
+
+**前向 KL 是“模式覆盖”的。** 只要 $p(y)>0$ 而 $q(y)\to0$，$\log\frac{p}{q}\to\infty$，损失爆炸。所以 $q$ 必须在 $p$ 有质量的每个地方都放一些质量，宁可把质量摊开、在 $p$ 质量很少的地方也放上一些。SFT 与 token 级 KD 都在最小化前向 KL（[监督微调与对话模板](/post-training/sft/)中已经指出，最大似然等价于最小化数据分布到模型的前向 KL）。
+
+**反向 KL 是“模式寻找”的。** 期望在 $q$ 下取，$q(y)=0$ 的地方不贡献任何损失；但 $q$ 在 $p(y)\approx0$ 的地方放质量会被重罚。于是 $q$ 倾向于集中在 $p$ 的某一个峰上，放弃其他的峰。
+
+### 用一个高斯拟合双峰分布
+
+最清楚的演示是用单个高斯 $q = \mathcal N(m, s^2)$ 去拟合一个双峰分布 $p = \frac12\mathcal N(-2, 0.6^2) + \frac12\mathcal N(2, 0.6^2)$。对前向 KL 有一个解析结论：在指数族中最小化 $\mathrm{KL}(p\|q)$ 等价于矩匹配。对高斯，$\mathrm{KL}(p\|q) = \mathbb E_p[-\log q] + \text{const} = \log s + \frac{\mathbb E_p[(y-m)^2]}{2s^2} + \text{const}$，对 $m$ 求导得 $m = \mathbb E_p[y] = 0$，对 $s$ 求导得 $s^2 = \mathrm{Var}_p(y) = 0.6^2 + 2^2 = 4.36$，即 $s\approx 2.088$。反向 KL 没有解析解，我们在网格上数值优化：
+
+<CodeFile path="src/llms_from_scratch/post_training/distill.py" region="gaussian_fit" />
+
+结果是：前向 KL 给出 $m = 0$、$s = 2.088$，与矩匹配的解析解一致；反向 KL 从 $(m, s) = (1, 0.5)$ 出发给出 $m\approx1.997$、$s\approx0.605$，几乎完全锁定在右边的峰上。
+
+<Plot label="单个高斯拟合双峰分布：前向 KL 与反向 KL" x={[-6, 6]} y={[0, 0.7]} xLabel="y" yLabel="密度"
+  series={[
+    { fn: (t) => 0.5 * Math.exp(-0.5 * ((t + 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)) + 0.5 * Math.exp(-0.5 * ((t - 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)), label: '教师 p', tone: 'neutral' },
+    { fn: (t) => Math.exp(-0.5 * (t / 2.088) ** 2) / (2.088 * Math.sqrt(2 * Math.PI)), label: '前向 KL 拟合', tone: 'info', dashed: true },
+    { fn: (t) => Math.exp(-0.5 * ((t - 1.997) / 0.605) ** 2) / (0.605 * Math.sqrt(2 * Math.PI)), label: '反向 KL 拟合', tone: 'accent2' },
+  ]}>
+  <Fragment slot="caption">前向 KL 的最优解覆盖两个峰，把大量质量放在两峰之间 p 几乎为零的区域；反向 KL 的解只覆盖一个峰，在那里与 p 的形状很接近，完全忽略另一个峰。</Fragment>
+</Plot>
+
+还有一个值得注意的细节：如果反向 KL 从 $(m, s) = (0.5, 1)$ 出发，它会收敛到 $m = 0$、$s\approx1.79$ 这个对称的解，而不是锁定某个峰。反向 KL 的目标是非凸的，对称解是一个局部极小值（或鞍点附近的平稳点），初始化决定了落在哪里。测试 `test_forward_kl_covers_modes_reverse_kl_seeks_one` 用默认初始化检查了两种拟合的结果。
+
+### 对语言模型意味着什么
+
+语言模型的“峰”是不同的合理回答方式。容量有限的学生用前向 KL 蒸馏时，会试图覆盖教师的所有回答方式，把概率摊到峰与峰之间，也就是教师自己不会生成的、混合了多种风格的低质量序列；生成时这些区域被采样到，表现为胡言乱语或幻觉。反向 KL 则让学生专注于教师的一部分回答方式，并把它们做好。对生成任务，后者通常更合适。
+
+Gu 等（2024）的 MiniLLM 据此提出用反向 KL 蒸馏生成式语言模型。由于期望在学生分布下取，必须从学生采样，梯度通过策略梯度计算，这已经是一个强化学习问题。Agarwal 等（2024）的 GKD（Generalized Knowledge Distillation）进一步统一了这些做法：可以选择前向 KL、反向 KL 或广义 JS 散度，可以在固定数据、教师样本或学生样本上计算。他们的核心发现是：在**学生自己生成的序列**上蒸馏，能纠正训练与推理的分布不匹配。
+
+## 序列级蒸馏
+
+### 从 token 级到序列级
+
+token 级蒸馏在每个位置匹配教师的下一个 token 分布，但前缀来自训练数据。Kim 与 Rush（2016）提出在**序列**上蒸馏：理想的目标是让学生匹配教师的整个序列分布，
+
+$$
+\mathcal L_{\text{seq}} = -\sum_{y}p_{\text{teacher}}(y\mid x)\log q_{\text{student}}(y\mid x),
+$$
+
+求和遍历所有可能的序列，无法计算。他们用教师分布的**众数**近似它：用束搜索从教师得到 $\hat y\approx\arg\max_y p_{\text{teacher}}(y\mid x)$，把 $p_{\text{teacher}}$ 近似为集中在 $\hat y$ 上的点质量，于是
+
+$$
+\mathcal L_{\text{seq}}\approx -\log q_{\text{student}}(\hat y\mid x).
+$$
+
+这就是在教师生成的数据上做普通的 SFT。在机器翻译上，序列级蒸馏比 token 级蒸馏效果更好，学生甚至可以去掉束搜索、用贪心解码而几乎不损失质量，因为它学到的分布已经很尖锐了。
+
+### 用推理轨迹蒸馏小模型
+
+今天几乎所有“合成数据 SFT”都是序列级蒸馏：Alpaca 用 text-davinci-003 的回答，DeepSeek-R1 的蒸馏系列用 R1 的推理轨迹。后者的做法是：用 R1 的流水线中第三阶段收集的约 80 万条样本（经过拒绝采样，答案正确、格式可读），对 Qwen2.5-Math-1.5B/7B、Qwen2.5-14B/32B、Llama-3.1-8B 与 Llama-3.3-70B-Instruct 做 SFT，不做任何 RL。用采样（而非束搜索）得到多条轨迹、再按正确性筛选，可以看作对教师分布在“正确回答”这个子集上的蒙特卡洛近似。
+
+序列级蒸馏的优点是简单：只需要教师的文本输出，不需要 logits，甚至不需要同一个词表，教师可以是只能通过 API 访问的黑盒模型。缺点与 SFT 相同：它是**离策略**的。学生只在教师走过的前缀上学习，一旦自己生成时偏离了教师的轨迹，就进入了没见过的状态，错误逐步累积。教师轨迹中的有些推理步骤，学生的能力也未必够得着，只能在形式上模仿。
+
+## 在线策略蒸馏
+
+### 两全其美
+
+把前几章的训练方法按两个维度排列：样本来自哪里（离策略的固定数据，还是在线策略的学生采样），以及学习信号有多密（每个 token 都有，还是整条序列一个）：
+
+<Diagram width={720} height={260} label="按采样来源与信号密度划分的后训练方法">
+  <Text x={130} y={95} label="离策略" size="md" bold anchor="middle" />
+  <Text x={130} y={115} label="（固定数据）" size="sm" tone="muted" anchor="middle" />
+  <Text x={130} y={195} label="在线策略" size="md" bold anchor="middle" />
+  <Text x={130} y={215} label="（学生采样）" size="sm" tone="muted" anchor="middle" />
+  <Text x={330} y={30} label="稀疏信号（每条序列一个）" size="sm" tone="muted" />
+  <Text x={560} y={30} label="稠密信号（每个 token）" size="sm" tone="muted" />
+  <Box x={220} y={60} w={220} h={80} label="拒绝采样微调" sub="只保留高奖励样本再做 SFT" tone="muted" />
+  <Box x={450} y={60} w={220} h={80} label="SFT / 序列级蒸馏" sub="教师轨迹，逐 token 监督" tone="info" />
+  <Box x={220} y={160} w={220} h={80} label="强化学习（PPO、GRPO）" sub="学生采样，序列级奖励" tone="accent" />
+  <Box x={450} y={160} w={220} h={80} label="在线策略蒸馏" sub="学生采样，教师逐 token 打分" tone="strong" />
+  <Fragment slot="caption">SFT 有稠密的信号，但学生从不在自己的分布上学习；RL 在自己的采样上学习，但每条回复只有一个标量奖励。在线策略蒸馏同时具备两者：学生自己采样，教师为每个 token 提供信号。</Fragment>
+</Diagram>
+
+在线策略蒸馏占据了右下角。做法是：学生对一批提示采样回复；教师对这些回复做一次前向，得到每个 token 的对数概率 $\log\pi_{\text{T}}(y_t\mid s_t)$；每个 token 的“奖励”是教师与学生对数概率之差，
+
+$$
+r_t = \log\pi_{\text{T}}(y_t\mid s_t) - \log\pi_{\text{S}}(y_t\mid s_t),
+$$
+
+它正是逐 token 反向 KL $\mathrm{KL}(\pi_{\text{S}}\|\pi_{\text{T}})$ 的单样本估计的相反数。学生说了教师认为不太可能的 token，就被惩罚；说了教师也会说的 token，惩罚接近零。
+
+### 梯度为什么是对的
+
+只看一个位置 $s$，目标是最小化 $\mathrm{KL}(\pi_{\text{S}}\|\pi_{\text{T}}) = \mathbb E_{y\sim\pi_{\text{S}}}[\log\pi_{\text{S}}(y) - \log\pi_{\text{T}}(y)]$。期望的分布与被积函数都依赖学生参数 $\theta$，用对数导数技巧：
+
+$$
+\nabla_\theta\,\mathrm{KL} = \mathbb E_{y\sim\pi_{\text{S}}}\Big[\big(\log\pi_{\text{S}}(y) - \log\pi_{\text{T}}(y)\big)\nabla_\theta\log\pi_{\text{S}}(y)\Big] + \underbrace{\mathbb E_{y\sim\pi_{\text{S}}}\big[\nabla_\theta\log\pi_{\text{S}}(y)\big]}_{=\,0}.
+$$
+
+所以最小化 $-\mathbb E[r_t\cdot\log\pi_{\text{S}}(y_t)]$（$r_t$ 不回传梯度）恰好给出这个位置反向 KL 的无偏梯度。这与策略梯度的形式完全相同，只是奖励换成了教师给出的逐 token 信号。
+
+这里还做了一个简化：每个 token 只对自己的 $r_t$ 负责，不考虑它对后续 token 的 KL 的影响（相当于强化学习中折扣因子取 0）。完整的序列级反向 KL 梯度应当包含“当前 token 改变了后续状态”这一项，MiniLLM 保留了它；Thinking Machines 的实现与本章的代码取折扣为 0，以更低的方差换取一点偏差。由于样本来自当前学生，重要性比为 1，不需要 PPO 式的裁剪：
+
+<CodeFile path="src/llms_from_scratch/post_training/distill.py" region="on_policy" />
+
+测试用两个不同随机种子初始化的极小 GPT 分别做教师与学生，教师的输出层乘以 20 使分布更尖锐。在固定的一批学生采样上，精确计算（对整个词表求和）每个回复位置的 $\mathrm{KL}(\pi_{\text{S}}\|\pi_{\text{T}})$；15 步在线策略蒸馏后，这个量降到原来的 70% 以下。另一个测试检查学生与教师相同时，逐 token 信号与损失都恰为零。
+
+### 实践中的效果
+
+Thinking Machines 的“On-Policy Distillation”（Lu 等，2025）系统地展示了这种方法的效率。在数学推理上，以 Qwen3-8B-Base 为学生、Qwen3-32B 为教师：先用约 40 万条教师轨迹做离策略的 SFT，AIME'24 达到约 60%；再做约 150 步在线策略蒸馏，提高到约 70%。若想靠继续扩大 SFT 数据达到同样的分数，他们估计在线策略蒸馏可以节省 9 倍（SFT 数据现成可用时）到约 30 倍（计入生成教师数据的成本时）的计算。Qwen3 的技术报告也报告了类似的结论：对小模型做在线策略蒸馏，以约十分之一的 GPU 小时取得了比直接做 RL 更高的 AIME 分数。
+
+他们还展示了一个“持续学习”的用法：在内部文档上继续训练会让模型丢掉指令遵循能力（IF-eval 从 85% 降到 45%）；以训练前的模型自己为教师做在线策略蒸馏，可以把指令遵循恢复到 83%，同时保留新学到的文档知识。
+
+在线策略蒸馏的代价是每一步都要对学生的采样做一次教师前向，并且需要教师的对数概率（同一个词表）。与 RL 相比，它不需要奖励函数，信号密度高得多；与 SFT 相比，它在学生自己的分布上学习，没有曝光偏差。它的上限是教师：学生最多学到教师的水平，所以它不能取代用于突破能力边界的大规模 RL，而是一种高效地把能力从大模型转移到小模型、或者从专家模型转移到通用模型的方法。
+
+## 小结
+
+- 温度 $T$ 软化教师分布，暴露小概率中的“暗知识”；软目标梯度为 $\frac1T(q-p)$，高温下约为 $\frac{1}{NT^2}(z-v)$，因此蒸馏损失要乘 $T^2$，高温极限等价于 logit 匹配。
+- 前向 KL $\mathrm{KL}(p\|q)$ 是模式覆盖的（对高斯即矩匹配），反向 KL $\mathrm{KL}(q\|p)$ 是模式寻找的；SFT 与 token 级 KD 对应前者，MiniLLM、在线策略蒸馏对应后者。
+- 序列级蒸馏用教师生成的序列近似教师的序列分布，就是在合成数据上做 SFT；DeepSeek-R1 用 80 万条轨迹 SFT 出强大的小模型，但它是离策略的。
+- 在线策略蒸馏让学生采样、教师逐 token 打分，$r_t = \log\pi_{\text{T}} - \log\pi_{\text{S}}$，损失 $-\mathbb E[r_t\log\pi_{\text{S}}]$ 给出逐 token 反向 KL 的无偏梯度；它结合了 RL 的在线采样与 SFT 的稠密信号。
+
+## 练习
+
+1. 对教师 logits $(4,2,1,0)$ 与学生 logits $(2,2,1,0)$，分别计算 $T=1$ 与 $T=4$ 时蒸馏梯度 $\frac1T(q-p)$ 的第一个分量，并说明乘以 $T^2$ 的作用。
+
+<details>
+<summary>答案</summary>
+
+$T=1$：$p=(0.831,0.112,0.041,0.015)$；学生 $q\propto(e^2,e^2,e^1,1) = (7.389,7.389,2.718,1)$，$q = (0.399,0.399,0.147,0.054)$，第一个分量 $\frac11(0.399-0.831) = -0.432$。$T=4$：$p=(0.409,0.248,0.193,0.150)$；$q\propto(e^{0.5},e^{0.5},e^{0.25},1) = (1.649,1.649,1.284,1)$，$q=(0.296,0.296,0.230,0.179)$，第一个分量 $\frac14(0.296-0.409)\approx-0.028$。高温下梯度小了一个数量级以上。乘以 $T^2=16$ 后变为约 $-0.45$，与 $T=1$ 时的量级相当，使得换温度时不需要重新调整蒸馏项与硬标签项的相对权重。
+
+</details>
+
+2. 证明：在所有高斯分布中，最小化 $\mathrm{KL}(p\|q)$ 的解满足 $m = \mathbb E_p[y]$、$s^2 = \mathrm{Var}_p(y)$，对任意（方差有限的）$p$ 都成立。
+
+<details>
+<summary>答案</summary>
+
+$\mathrm{KL}(p\|q) = \mathbb E_p[\log p] - \mathbb E_p[\log q]$，第一项与 $q$ 无关。$-\log q(y) = \log s + \frac12\log 2\pi + \frac{(y-m)^2}{2s^2}$，于是只需最小化 $f(m,s) = \log s + \frac{\mathbb E_p[(y-m)^2]}{2s^2}$。对 $m$：$\mathbb E_p[(y-m)^2]$ 在 $m = \mathbb E_p[y]$ 处最小，此时它等于 $\mathrm{Var}_p(y)=:\sigma^2$。对 $s$：$\frac{\partial f}{\partial s} = \frac1s - \frac{\sigma^2}{s^3} = 0$，得 $s^2=\sigma^2$。整个推导只用到 $p$ 的一阶与二阶矩，与 $p$ 的具体形状无关。
+
+</details>
+
+3. 在线策略蒸馏中，若学生在某个位置采到一个教师概率为 0.5、学生概率为 0.05 的 token，信号 $r_t$ 是多少？梯度会怎样改变这个 token 的概率？反过来呢（教师 0.05、学生 0.5）？
+
+<details>
+<summary>答案</summary>
+
+第一种：$r_t = \log0.5 - \log0.05 = \log10\approx2.30 > 0$，损失 $-r_t\log\pi_{\text{S}}$ 的梯度提高这个 token 的学生概率：学生低估了教师认为合理的 token。第二种：$r_t = \log0.05-\log0.5\approx-2.30 < 0$，梯度降低这个 token 的概率：学生在教师不太会说的地方放了太多质量，这正是反向 KL 的“模式寻找”所惩罚的情形。
+
+</details>
+
+4. 序列级蒸馏与在线策略蒸馏分别需要教师提供什么？如果教师只能通过一个返回文本的 API 访问，能用哪一种？
+
+<details>
+<summary>答案</summary>
+
+序列级蒸馏只需要教师生成的文本，可以使用只返回文本的 API；教师与学生甚至可以使用不同的分词器。在线策略蒸馏需要教师对**学生**生成的序列给出逐 token 的对数概率，因此需要能对任意给定序列打分的接口，并且（在 token 级比较时）要求相同或可对齐的词表。只返回文本的 API 只能做序列级蒸馏。
+
+</details>
+
+## 参考文献
+
+- Hinton, Vinyals, Dean. *Distilling the Knowledge in a Neural Network*. 2015. https://arxiv.org/abs/1503.02531
+- Kim and Rush. *Sequence-Level Knowledge Distillation*. EMNLP 2016. https://arxiv.org/abs/1606.07947
+- Gu et al. *MiniLLM: Knowledge Distillation of Large Language Models*. ICLR 2024. https://arxiv.org/abs/2306.08543
+- Agarwal et al. *On-Policy Distillation of Language Models: Learning from Self-Generated Mistakes* (GKD). ICLR 2024. https://arxiv.org/abs/2306.13649
+- Lu and Thinking Machines Lab. *On-Policy Distillation*. 2025. https://thinkingmachines.ai/blog/on-policy-distillation/
+- Qwen Team. *Qwen3 Technical Report*. 2025. https://arxiv.org/abs/2505.09388
+- DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. 2025. https://arxiv.org/abs/2501.12948
+- Taori et al. *Stanford Alpaca: An Instruction-following LLaMA model*. 2023. https://github.com/tatsu-lab/stanford_alpaca

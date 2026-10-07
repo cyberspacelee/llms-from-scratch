@@ -1,8 +1,270 @@
 ---
 title: 大规模强化学习的工程与改进
-description: DAPO、Dr. GRPO、GSPO 等改进，熵坍缩与长度偏置，异步 rollout 与训练推理分离的 RL 系统。
+description: Dr. GRPO 的长度与标准差偏置，DAPO 的 clip-higher、动态采样、token 级损失与超长惩罚，GSPO 的序列级重要性比，熵坍缩，训练与推理的精度不一致与截断重要性采样，异步 rollout 的系统架构，以及奖励的来源。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/post_training/rl_losses.py
+  - tests/post_training/test_rl_losses.py
 ---
 
-本章正在撰写。
+[GRPO 与推理模型](/post-training/grpo/)中的 GRPO 在玩具任务上几行代码就能跑通。把它放大到数百亿参数、数万 token 的思维链、成千上万步的训练，会冒出一系列在小规模下看不见的问题：错误回答越写越长，策略的熵迅速坍缩、不再探索，大量批次因为全对或全错而没有梯度，推理引擎与训练引擎对同一个 token 给出不同的概率，以及占训练时间大头的长尾生成让 GPU 空等。
+
+2025 年的一批工作分别回答了这些问题。本章按“算法 → 数值 → 系统”的顺序展开：先分析 GRPO 目标中的两个偏置（Dr. GRPO），再看 DAPO 的四项改进与 GSPO 的序列级重要性比；然后讨论熵坍缩，以及训练—推理不一致与截断重要性采样（TIS）；最后介绍训推分离、异步 rollout 的 RL 系统，以及奖励从何而来。损失层面的改动都实现在 `rl_losses.py` 中，并用测试量化它们的差异。
+
+## 损失怎样聚合：长度与难度偏置
+
+### 每个 token 的权重
+
+GRPO 的目标对一个批次的 token 损失做了两层平均：先在每条回复内部除以 $|o_i|$，再在 $G$ 条回复间平均。只看这一步，每个 token 损失的权重是 $\frac{1}{G\,|o_i|}$，取决于它所在回复的长度。把聚合方式抽象出来，常见的有三种：
+
+| 名称 | 归一化 | 单个 token 的权重 | 使用者 |
+| --- | --- | --- | --- |
+| seq-mean-token-mean | 先样本内平均，再样本间平均 | $\frac{1}{G\,\lvert o_i\rvert}$ | GRPO（DeepSeekMath） |
+| token-mean | 除以批次内 token 总数 | $\frac{1}{\sum_j\lvert o_j\rvert}$ | DAPO |
+| seq-mean-token-sum-norm | 除以常数 $G\cdot L_{\max}$ | $\frac{1}{G\,L_{\max}}$ | Dr. GRPO |
+
+<CodeFile path="src/llms_from_scratch/post_training/rl_losses.py" region="aggregate" />
+
+一个具体的例子：一组里有两条回复，分别长 2 和 6 个 token，$L_{\max}=8$。测试 `test_effective_token_weights` 通过对聚合结果求梯度得到每个 token 的实际权重：
+
+<Bars label="三种聚合方式下单个 token 的权重（两条回复，长度 2 与 6）"
+  items={[
+    { label: 'GRPO 短回复', value: 0.25, tone: 'accent' },
+    { label: 'GRPO 长回复', value: 0.0833, tone: 'accent' },
+    { label: 'DAPO 短回复', value: 0.125, tone: 'info' },
+    { label: 'DAPO 长回复', value: 0.125, tone: 'info' },
+    { label: 'Dr. GRPO 短回复', value: 0.0625, tone: 'muted' },
+    { label: 'Dr. GRPO 长回复', value: 0.0625, tone: 'muted' },
+  ]}>
+  <Fragment slot="caption">GRPO 中短回复的每个 token 权重（1/4）是长回复（1/12）的 3 倍；DAPO 与 Dr. GRPO 中所有 token 等权，区别只在分母是批内 token 总数（8）还是常数 G·L_max（16）。</Fragment>
+</Bars>
+
+### 长度偏置
+
+Liu 等（2025）在“Understanding R1-Zero-Like Training”中指出了 $1/|o_i|$ 带来的后果。同一组里的所有 token 共享该回复的优势 $\hat A_i$：
+
+- 优势为正（答对了）时，短回复的每个 token 被推得更用力，模型偏好**更短的正确回答**；
+- 优势为负（答错了）时，长回复的每个 token 受到的惩罚更轻，模型对**更长的错误回答**惩罚不足。
+
+后者意味着：模型答错时，把回答拉长就能“摊薄”惩罚。训练中观察到的回复长度增长，有一部分可能并不是“更深的思考”，而是这种偏置的产物，尤其是错误回答的长度在持续增加。测试 `test_length_bias_of_grpo_on_negative_samples` 直接验证了这一点。
+
+### 难度偏置
+
+另一个偏置来自除以组内标准差。0/1 奖励下，一组的标准差是 $\sqrt{p(1-p)}$（$p$ 为组内正确率），它在 $p=0.5$ 时最大、在 $p$ 接近 0 或 1 时趋于 0。除以它等于给“几乎全对”或“几乎全错”的问题更大的权重，给中等难度的问题更小的权重。这是一种问题层面的加权，它与策略梯度的目标无关。
+
+### Dr. GRPO：恢复无偏的目标
+
+Dr. GRPO（“GRPO Done Right”）的修改很简单：去掉 $1/|o_i|$，改为除以一个与样本无关的常数（如最大生成长度），并且只减均值、不除标准差。这样目标就回到了标准的策略梯度形式。他们报告这能在保持准确率的同时显著抑制错误回答长度的增长，提高 token 效率。用这个“极简配方”（Dr. GRPO、Qwen-Math 模板、MATH 3–5 级题目）在 Qwen2.5-Math-7B 上训练，AIME 2024 达到 43.3%，在 8 张 A100 上只用了约 27 小时。
+
+DAPO 的 token-mean 也消除了样本内的长度依赖，但分母是批内 token 总数，它会随批次组成变化：同一条回复在一个长回复多的批次里权重更小。Dr. GRPO 的常数分母使每个 token 的权重完全固定。两者在实践中差别通常不大，但概念上只有后者对应一个固定的目标函数。
+
+## DAPO：四项改进
+
+DAPO（Decoupled Clip and Dynamic sAmpling Policy Optimization，Yu 等，2025）是字节跳动 Seed 与清华 AIR 开源的一套大规模推理 RL 配方。它在 Qwen2.5-32B 基座上，以 DeepSeek-R1-Zero-Qwen-32B 一半的训练步数，在 AIME 2024 上达到 50 分（后者为 47 分）。DAPO 去掉了 KL 惩罚，理由是在长思维链训练中策略本来就需要大幅偏离初始模型。它的四项改进分别针对四个问题。
+
+### clip-higher：给低概率 token 留出上涨空间
+
+PPO 的裁剪区间 $[1-\epsilon, 1+\epsilon]$ 是对称的，但它对高概率与低概率 token 的影响很不对称。取 $\epsilon = 0.2$：概率 0.9 的 token 一次更新最多涨到 $0.9\times1.2 = 1.08$，实际上不受限制；概率 0.01 的 token 最多涨到 0.012。正是这些低概率 token 代表了“探索”：一个罕见但有用的推理步骤。对称裁剪使它们很难被放大，而高概率 token 越来越高，策略的熵迅速下降。
+
+DAPO 把上下界解耦，取 $\epsilon_{\text{low}} = 0.2$、$\epsilon_{\text{high}} = 0.28$：下界保持不变，防止把 token 的概率压到零；上界放宽，让正优势的低概率 token 有更多上涨空间。测试 `test_clip_higher_allows_rare_tokens_to_grow` 中，一个概率从 0.01 涨到 0.0125（$\rho = 1.25$）的 token，在对称裁剪下梯度为零，在 clip-higher 下仍有梯度。
+
+### 动态采样：只保留有信号的问题
+
+[GRPO 与推理模型](/post-training/grpo/)中说过，一组奖励全相同时优势全为零。训练进行到后期，越来越多的题目被模型全部做对，一个批次中有效的问题越来越少，梯度的方差随之增大。DAPO 的做法是过采样：持续采样，丢弃组内正确率为 0 或 1 的问题，直到批次被“有梯度”的问题填满。
+
+### token 级损失
+
+即上一节的 token-mean 聚合。DAPO 的动机描述的正是长度偏置：样本级平均使长回复中的 token 贡献过小，模型既学不到长的正确推理中的好模式，也无法有效惩罚长回复中的重复与胡言乱语。
+
+### 超长奖励塑形
+
+最大生成长度 $L_{\max}$ 会截断过长的回复。被截断的回复通常没有答案，得到 0 分，但它的推理过程可能是合理的，只是写得太长。直接给 0 分会引入奖励噪声。DAPO 先尝试了**超长过滤**（对被截断的样本不计算损失），然后提出**软超长惩罚**：在 $L_{\max}$ 之前留一段长度为 $L_{\text{cache}}$ 的缓冲区，进入缓冲区后惩罚线性增大：
+
+$$
+R_{\text{length}}(y) = \begin{cases}0, & |y|\le L_{\max}-L_{\text{cache}}\\[2pt] \dfrac{(L_{\max}-L_{\text{cache}}) - |y|}{L_{\text{cache}}}, & L_{\max}-L_{\text{cache}}\lt |y|\le L_{\max}\\[6pt] -1, & |y| \gt L_{\max}\end{cases}
+$$
+
+这项惩罚加在准确性奖励上。DAPO 中 $L_{\max} = 20480$、$L_{\text{cache}} = 4096$。
+
+<Plot label="DAPO 的软超长惩罚" x={[0, 24]} y={[-1.2, 0.2]} xLabel="回复长度（千 token，1k = 1024）" yLabel="长度惩罚" xTicks={[0, 4, 8, 12, 16, 20, 24]}
+  series={[{ fn: (t) => (t <= 16 ? 0 : t <= 20 ? (16 - t) / 4 : -1), label: 'L_max = 20k，L_cache = 4k', samples: 600 }]}
+  markers={[{ at: [16, 0], label: 'L_max − L_cache' }, { at: [20, -1], label: 'L_max' }]}>
+  <Fragment slot="caption">长度不超过 16384 时不罚；在最后 4096 个 token 的缓冲区内惩罚从 0 线性降到 −1；超过最大长度一律 −1。它给模型一个平滑的“写短一点”的信号，而不是在截断处突然从可能得分变成 0 分。</Fragment>
+</Plot>
+
+<CodeFile path="src/llms_from_scratch/post_training/rl_losses.py" region="dapo" />
+
+## GSPO：序列级的重要性比
+
+### token 级重要性比的问题
+
+GRPO 与 PPO 一样，在每个 token 上计算重要性比 $\rho_{i,t} = \pi_\theta(o_{i,t}\mid\cdot)/\pi_{\theta_{\text{old}}}(o_{i,t}\mid\cdot)$。Qwen 团队的 GSPO（Group Sequence Policy Optimization，Zheng 等，2025）指出这里有一个概念上的错位。重要性采样要修正分布的差异，需要在行为分布下对许多样本取平均；而在每个 token 位置，我们只有**一个**从 $\pi_{\theta_{\text{old}}}(\cdot\mid o_{i,\lt t})$ 中采到的样本，单个样本的权重起不到分布修正的作用，只会引入高方差的噪声。长序列上这些噪声不断累积，再经过裁剪的非线性放大，可能导致训练不可逆地崩溃。
+
+另一方面，奖励是给整条序列的，优势也是序列级的。既然如此，重要性比也应该定义在序列上。
+
+### 序列级比值与裁剪
+
+GSPO 用序列似然之比，并按长度归一化（取几何平均），避免长序列上比值的数值范围爆炸：
+
+<KeyEq label="GSPO 的序列级重要性比">
+
+$$
+s_i(\theta) = \Big(\frac{\pi_\theta(o_i\mid q)}{\pi_{\theta_{\text{old}}}(o_i\mid q)}\Big)^{1/|o_i|} = \exp\Big(\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\log\frac{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}{\pi_{\theta_{\text{old}}}(o_{i,t}\mid q,o_{i,\lt t})}\Big)
+$$
+
+</KeyEq>
+
+目标对整条序列做裁剪：$\frac1G\sum_i\min\big(s_i\hat A_i, \mathrm{clip}(s_i, 1-\epsilon,1+\epsilon)\hat A_i\big)$。由于 $s_i$ 是几何平均，它的变化幅度比单个 token 的比值小得多，裁剪范围也小两个数量级：GSPO 的实验中左右裁剪范围分别取 $3\times10^{-4}$ 与 $4\times10^{-4}$（GRPO 为 0.2 与 0.27）。有意思的是，GSPO 被裁剪掉的 token 比例比 GRPO 高两个数量级，训练效率却更高，说明 GRPO 的 token 级梯度中有大量噪声。
+
+求导后，序列中所有 token 的对数概率梯度被同一个系数 $s_i\hat A_i/|o_i|$ 加权，不再像 GRPO 那样逐 token 由 $\rho_{i,t}$ 加权。测试 `test_gspo_ratio_is_geometric_mean` 验证了这一点：三个 token 的对数比为 $(0.3,-0.1,0.1)$，序列比值为 $e^{0.1}$，每个 token 的梯度都是 $-e^{0.1}/3$；在默认的极小裁剪范围下，这个比值被裁剪，梯度全为零。
+
+<CodeFile path="src/llms_from_scratch/post_training/rl_losses.py" region="gspo" />
+
+### 对 MoE 的意义
+
+GSPO 的另一个动机来自 MoE 模型。一次梯度更新之后，同一个 token 激活的专家可能变了（论文报告在 48 层的 Qwen3-30B-A3B 上，每次更新后约 10% 的专家选择会改变），于是 $\pi_\theta$ 与 $\pi_{\theta_{\text{old}}}$ 在这个 token 上的概率可能差别很大，token 级比值剧烈波动。为此，Qwen 团队在 GRPO 中不得不使用“路由回放”（Routing Replay）：缓存旧策略的专家选择，计算新策略的概率时强制使用相同的路由。GSPO 只依赖整条序列的似然，它对单个 token 的波动不敏感，因此不需要路由回放，简化了 RL 基础设施。GSPO 被用于 Qwen3 系列模型的 RL 训练。
+
+## 熵坍缩
+
+策略的熵 $H(\pi(\cdot\mid s)) = -\sum_a\pi(a\mid s)\log\pi(a\mid s)$ 衡量它在每个位置的不确定程度。推理 RL 中普遍观察到熵在训练初期迅速下降：策略越来越确定，同一问题的多条采样越来越相似。DAPO 观察到不加 clip-higher 时，熵很快降到接近零、采样几乎完全相同。熵坍缩的后果是探索停止：组内回复雷同，奖励趋于一致，优势为零，学习停滞；pass@$k$ 也随之下降。
+
+Cui 等（2025）从理论与实验上刻画了这种现象。他们推导出，在 softmax 策略的一步策略梯度更新中，熵的变化近似正比于“动作的对数概率”与“它的优势”之间的协方差的相反数：当高概率动作恰好获得正优势（模型做对了它本来就倾向做的事），熵就会下降，这在 RL 中是常态。他们还在大量实验中拟合出下游性能 $R$ 与熵 $H$ 之间的经验关系 $R = -a\,e^{H} + b$，意味着熵耗尽时性能也到了上限。相应的对策是限制高协方差 token 的更新（Clip-Cov、KL-Cov）。
+
+其他控制熵的手段包括：clip-higher（让低概率 token 能涨上来）；熵奖励（在损失中加 $-\alpha H$，但效果对系数很敏感，容易导致熵爆炸）；只在高熵的“分叉” token 上更新（Wang 等 2025 发现只用熵最高的约 20% token 的梯度即可达到甚至超过完整更新的效果）；以及调节采样温度（Kimi K2 在训练早期用较高温度鼓励探索，之后逐渐降低）。监控逐 token 的熵是推理 RL 中最重要的诊断之一，计算它只需要 logits：
+
+<CodeFile path="src/llms_from_scratch/post_training/rl_losses.py" symbol="entropy_from_logits" />
+
+## 训练与推理的不一致
+
+### 同样的权重，不同的概率
+
+大规模 RL 系统几乎都用专门的推理引擎（vLLM、SGLang）生成 rollout，用训练框架（FSDP、Megatron）计算梯度。理论上，两边加载的是同一份权重，对同一个 token 应给出相同的概率。实际上它们并不相同：两个引擎使用不同的 kernel（注意力实现、融合方式），BF16 下的累加顺序不同，推理引擎的结果还会随批次组成变化（连续批处理使同一个请求在不同时刻与不同的请求同批），使用 FP8 等低精度 rollout 时差异更大。MoE 模型中，微小的数值差异还可能改变专家选择，带来更大的偏差。
+
+后果是：我们以为在做在线策略（on-policy）RL，实际上 rollout 来自一个略有不同的策略 $\pi_{\text{rollout}}$，而梯度按 $\pi_{\text{train}}$ 计算，这已经是离策略（off-policy）的了。MiniMax-M1 的报告中就记录了这类问题：他们发现训练模式与推理模式下 rollout token 的概率存在明显偏差，导致奖励无法增长；逐层排查后定位到输出层 LM head 中的大幅值激活，把 LM head 的精度提高到 FP32 后，两者概率的相关系数从约 0.9 提高到约 0.99，训练恢复正常。
+
+### 截断重要性采样
+
+Yao 等（2025）的分析提出了一个简单的修正：既然 rollout 来自 $\pi_{\text{rollout}}$，就在策略梯度上乘以重要性权重 $\pi_{\text{train}}/\pi_{\text{rollout}}$；为了控制方差，把权重截断到上限 $C$：
+
+$$
+w_t = \min\Big(\frac{\pi_{\text{train}}(y_t\mid s_t)}{\pi_{\text{rollout}}(y_t\mid s_t)},\; C\Big).
+$$
+
+这里 $\pi_{\text{train}}$ 用训练引擎在 rollout 后重新计算（即 PPO 中的 $\pi_{\theta_{\text{old}}}$），$\pi_{\text{rollout}}$ 是推理引擎采样时记录的对数概率。权重不回传梯度，乘在原来的逐 token 策略损失上。这种截断重要性采样（Truncated Importance Sampling，TIS）几乎没有额外开销，却能显著稳定训练，并使 INT8/FP8 量化 rollout 在不损失效果的前提下加速生成。
+
+<CodeFile path="src/llms_from_scratch/post_training/rl_losses.py" region="tis" />
+
+从根本上消除不一致的另一条路线是让推理确定且“批不变”：Thinking Machines 的“Defeating Nondeterminism in LLM Inference”（He 等，2025）分析了推理结果随批大小变化的根源（归约顺序随批次切分改变），实现了批不变的 kernel，使推理与训练可以逐位一致，从而做到真正的在线策略 RL，代价是一定的推理速度。
+
+## RL 系统：训推分离与异步 rollout
+
+### 生成是瓶颈
+
+推理 RL 的一步包含生成、打分、计算参考与旧策略的对数概率、更新四个阶段。长思维链下，生成通常占据大部分时间，而且生成时间由**最长**的那条回复决定：一个批次里只要有一条回复写到了最大长度，其他所有 GPU 都要等它。这种长尾效应使同步 RL 的 GPU 利用率很低。
+
+两种常见的部署方式是：**共置**（colocated），训练与推理轮流使用同一批 GPU，切换时把一方的权重和状态卸载出去（verl 的 HybridFlow、Kimi K2 的做法）；以及**分离**（disaggregated），训练与推理使用不同的 GPU 集群，每步之后把新权重从训练端同步到推理端。分离部署允许两边并行工作，代价是推理端使用的权重落后一步或几步。
+
+<Lanes label="同步与异步 RL 的时间线" width={660} lanes={['同步：推理', '同步：训练', '异步：推理', '异步：训练']} unit="时间（任意单位）" tick={2} span={16}
+  items={[
+    { lane: 0, start: 0, end: 3, label: 'rollout 1' },
+    { lane: 0, start: 3, end: 5, label: '长尾', tone: 'accent2' },
+    { lane: 1, start: 5, end: 8, label: '训练 1', tone: 'info' },
+    { lane: 0, start: 8, end: 11, label: 'rollout 2' },
+    { lane: 0, start: 11, end: 13, label: '长尾', tone: 'accent2' },
+    { lane: 1, start: 13, end: 16, label: '训练 2', tone: 'info' },
+    { lane: 2, start: 0, end: 5, label: 'rollout 1' },
+    { lane: 2, start: 5, end: 10, label: 'rollout 2' },
+    { lane: 2, start: 10, end: 15, label: 'rollout 3' },
+    { lane: 3, start: 5, end: 8, label: '训练 1', tone: 'info' },
+    { lane: 3, start: 8, end: 8.6, label: '', tone: 'muted' },
+    { lane: 3, start: 10, end: 13, label: '训练 2', tone: 'info' },
+    { lane: 3, start: 13, end: 13.6, label: '', tone: 'muted' },
+  ]}>
+  <Fragment slot="caption">同步 RL（上两行）中，推理要等最长的回复写完（红色长尾）才能开始训练，训练时推理 GPU 空闲。异步 RL（下两行）中，训练第 n 批的同时推理端已在用旧权重生成第 n+1 批，训练后把权重同步（灰色小块）到推理端；rollout 因此落后一步，变成轻度离策略。</Fragment>
+</Lanes>
+
+### 异步与部分 rollout
+
+异步 RL 让生成与训练流水线化：训练第 $n$ 批时，推理端已经在用第 $n-1$ 步的权重生成第 $n+1$ 批。GPU 不再空等，但样本变成了离策略的（来自稍旧的策略），需要用重要性比修正，并限制样本的“陈旧度”（staleness）。PPO 的裁剪目标本来就是为轻度离策略设计的，所以一步左右的延迟通常可以接受。AReaL 等系统把这种思路推到“完全异步”，并在损失中显式处理陈旧样本。
+
+处理长尾的另一种办法是**部分 rollout**（partial rollout），来自 Kimi k1.5：每轮只给生成一个固定的 token 预算，没写完的长回复暂停，下一轮从断点继续，之前的片段从缓冲区复用。这样一个批次不会被少数超长回复拖住，而长回复依然可以完成。Kimi K2 沿用了这个机制，并实现了一个“检查点引擎”在训练与推理的不同切分方式之间重新分片、广播参数，每次更新的权重同步约需 30 秒。
+
+## 奖励从哪里来
+
+### 规则、结果奖励模型与过程奖励模型
+
+可验证奖励之外，奖励的来源还有几种：
+
+- **结果奖励模型**（Outcome Reward Model，ORM）：对完整回复打一个分，即 RLHF 中的奖励模型。适用于无法用规则验证的任务，但容易被黑。
+- **过程奖励模型**（Process Reward Model，PRM）：对推理的每一步打分，提供更密集的信号。Lightman 等（2023）的“Let's Verify Step by Step”构建了 80 万条逐步人工标注的 PRM800K，表明在 best-of-$n$ 选择中过程监督优于结果监督。但 DeepSeek-R1 的论文列出了 PRM 在大规模 RL 中的困难：“一步”难以明确定义，逐步标注昂贵且难以自动化，基于模型的 PRM 同样会被奖励黑客利用。他们最终没有使用 PRM。
+- **生成式奖励模型与 LLM 评委**：让一个语言模型阅读回复（常常还有参考答案或评分细则），先写出评判理由，再给出分数或比较结果。它能处理规则难以覆盖的情形（如答案的等价性判断、开放式写作的质量）。
+
+### Kimi 的实践
+
+Kimi k1.5（2025 年 1 月）与 Kimi K2（2025 年 7 月）的技术报告提供了另一条与 GRPO 不同的路线。k1.5 的策略优化是在线镜像下降的一个变体：目标同样是带 KL 正则（相对上一轮策略）的奖励最大化，用一个平方形式的代理损失 $\big(r - \bar r - \tau\log\frac{\pi_\theta}{\pi_{\text{old}}}\big)^2$ 近似，其中 $\bar r$ 是同一提示的平均奖励。它同样不使用价值网络，理由是在长思维链中，即使中间走了弯路，只要最终得到正确答案，这些探索也值得保留；价值网络会过早地惩罚这些弯路。k1.5 还引入了长度惩罚：在同一问题的回复中，正确回复越长奖励越低，错误的长回复也被惩罚，缓解“过度思考”；以及按正确率倒数采样题目的优先级采样、从易到难的课程采样。
+
+K2 沿用了 k1.5 的算法，在此之上加入了：**预算控制**（按任务类型设定每个样本的最大 token 预算，超出部分截断并惩罚）；**PTX 损失**（在 RL 中混入高质量 SFT 数据的语言建模损失，防止遗忘，与 InstructGPT 的 PPO-ptx 同源）；**温度衰减**（早期高温探索、后期降温利用）；以及用于不可验证任务的**自我批评评分细则奖励**（self-critique rubric reward）：由模型自己作为评委，按照核心价值、防止奖励黑客的约束与人工编写的细则对回复做两两比较，并用可验证任务上的信号持续校准这个评委。
+
+## 小结
+
+- GRPO 的 $1/|o_i|$ 让短回复的 token 权重更大，导致对长的错误回答惩罚不足；除以组内标准差则偏向过易或过难的问题。Dr. GRPO 去掉两者，DAPO 改用 token-mean。
+- DAPO 的四项改进：clip-higher（$\epsilon_{\text{high}}=0.28$）给低概率 token 上涨空间、缓解熵坍缩；动态采样丢弃全对全错的组；token 级损失；软超长惩罚。
+- GSPO 用长度归一化的序列似然比做重要性采样与裁剪，降低 token 级比值的噪声，并使 MoE 的 RL 不再依赖路由回放。
+- 熵坍缩使探索停止；熵的变化由对数概率与优势的协方差驱动，可用 clip-higher、协方差裁剪、高熵 token 选择、温度调节等手段控制。
+- 推理引擎与训练引擎对同一 token 的概率不同，使 RL 变成隐式的离策略；截断重要性采样 $\min(\pi_{\text{train}}/\pi_{\text{rollout}}, C)$ 是低成本的修正。
+- 生成的长尾是 RL 系统的主要瓶颈；共置与分离部署、异步流水线与部分 rollout 用轻度的离策略换取吞吐。
+
+## 练习
+
+1. 一组有两条答错的回复（优势均为 $-1$），长度分别为 100 与 1000 个 token。在 GRPO（seq-mean-token-mean）与 Dr. GRPO（常数 $L_{\max} = 1000$）下，两条回复受到的**总**惩罚（所有 token 权重之和乘以优势）分别是多少？
+
+<details>
+<summary>答案</summary>
+
+$G=2$。GRPO：每条回复内 token 权重为 $\frac{1}{2|o_i|}$，总权重都是 $\frac{|o_i|}{2|o_i|} = \frac12$，两条回复的总惩罚相同，都是 $-\frac12$；但长回复的**每个 token** 只受到 $\frac{1}{2000}$ 的惩罚，短回复是 $\frac{1}{200}$，相差 10 倍。Dr. GRPO：每个 token 的权重都是 $\frac{1}{2\times1000}$，短回复的总惩罚为 $-\frac{100}{2000} = -0.05$，长回复为 $-\frac{1000}{2000} = -0.5$。在 Dr. GRPO 下，同样是错误，写得越长受到的总惩罚越大；在 GRPO 下，总惩罚与长度无关，每个 token 的惩罚反而随长度稀释。
+
+</details>
+
+2. 对 0/1 奖励，组内正确率为 $p$，组大小足够大。写出除以标准差后，正确回复的优势关于 $p$ 的表达式，并说明 $p\to1$ 时会发生什么。
+
+<details>
+<summary>答案</summary>
+
+均值为 $p$，标准差约为 $\sqrt{p(1-p)}$，正确回复的优势为 $\frac{1-p}{\sqrt{p(1-p)}} = \sqrt{\frac{1-p}{p}}$，错误回复的优势为 $-\sqrt{\frac{p}{1-p}}$。$p\to1$ 时正确回复的优势趋于 0，而少数错误回复的优势趋于 $-\infty$。也就是说，几乎全对的问题上，偶尔出现的错误回复会得到一个非常大的负优势，这些问题的梯度被不成比例地放大。
+
+</details>
+
+3. 为什么 GSPO 的裁剪范围比 GRPO 小两个数量级是合理的？用 $s_i$ 的定义解释。
+
+<details>
+<summary>答案</summary>
+
+$s_i$ 是 $|o_i|$ 个逐 token 比值的几何平均：$\log s_i$ 是逐 token 对数比的平均值。若各 token 的对数比大致独立、幅度为 $\sigma$，它们的平均值的幅度约为 $\sigma/\sqrt{|o_i|}$，再加上正负相消，长度为数千 token 的序列上 $\log s_i$ 远小于单个 token 的对数比。因此 $s_i$ 离 1 的偏差天然很小，裁剪范围必须相应缩小，否则几乎不会触发裁剪，起不到信赖域的作用。
+
+</details>
+
+4. 在异步 RL 中，rollout 来自落后 $k$ 步的策略。说明此时 PPO 目标中的三个策略（rollout 策略、$\pi_{\theta_{\text{old}}}$、当前 $\pi_\theta$）分别是什么，以及 TIS 权重与 PPO 重要性比各自修正了什么。
+
+<details>
+<summary>答案</summary>
+
+rollout 策略是推理引擎上落后 $k$ 步的权重（还带有推理引擎自身的数值差异）；$\pi_{\theta_{\text{old}}}$ 通常是训练端在开始这一步更新前用当前权重对这批 rollout 重新计算的概率；$\pi_\theta$ 是正在更新的策略。PPO 的比值 $\pi_\theta/\pi_{\theta_{\text{old}}}$ 修正同一批数据上多次更新造成的偏移，并通过裁剪限制步长；TIS 权重 $\min(\pi_{\theta_{\text{old}}}/\pi_{\text{rollout}}, C)$ 修正 rollout 并非来自训练端当前策略的偏差，包括延迟与引擎间的数值差异。两者相乘，才得到对“从 rollout 策略采样”这一事实的完整修正。
+
+</details>
+
+## 参考文献
+
+- Liu et al. *Understanding R1-Zero-Like Training: A Critical Perspective* (Dr. GRPO). 2025. https://arxiv.org/abs/2503.20783
+- Yu et al. *DAPO: An Open-Source LLM Reinforcement Learning System at Scale*. 2025. https://arxiv.org/abs/2503.14476
+- Zheng et al. *Group Sequence Policy Optimization*. 2025. https://arxiv.org/abs/2507.18071
+- Cui et al. *The Entropy Mechanism of Reinforcement Learning for Reasoning Language Models*. 2025. https://arxiv.org/abs/2505.22617
+- Wang et al. *Beyond the 80/20 Rule: High-Entropy Minority Tokens Drive Effective Reinforcement Learning for LLM Reasoning*. 2025. https://arxiv.org/abs/2506.01939
+- Yao et al. *Your Efficient RL Framework Secretly Brings You Off-Policy RL Training*. 2025. https://fengyao.notion.site/off-policy-rl ；另见 Flash-RL 实现 https://github.com/yaof20/Flash-RL
+- He and Thinking Machines Lab. *Defeating Nondeterminism in LLM Inference*. 2025. https://thinkingmachines.ai/blog/defeating-nondeterminism-in-llm-inference/
+- MiniMax. *MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention*. 2025. https://arxiv.org/abs/2506.13585
+- Kimi Team. *Kimi k1.5: Scaling Reinforcement Learning with LLMs*. 2025. https://arxiv.org/abs/2501.12599
+- Kimi Team. *Kimi K2: Open Agentic Intelligence*. 2025. https://arxiv.org/abs/2507.20534
+- Sheng et al. *HybridFlow: A Flexible and Efficient RLHF Framework* (verl). EuroSys 2025. https://arxiv.org/abs/2409.19256
+- Fu et al. *AReaL: A Large-Scale Asynchronous Reinforcement Learning System for Language Reasoning*. 2025. https://arxiv.org/abs/2505.24298
+- Lightman et al. *Let's Verify Step by Step*. ICLR 2024. https://arxiv.org/abs/2305.20050
+- DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. 2025. https://arxiv.org/abs/2501.12948
