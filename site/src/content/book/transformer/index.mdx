@@ -2,9 +2,50 @@
 title: 从零实现 Transformer
 description: 沿 CS336 第一次作业的路径，从字节到文本生成，亲手实现一个现代的 GPT 式 Decoder 并在小语料上训练它。
 order: 0
-draft: true
 ---
 
-沿 CS336 第一次作业的路径，从字节到文本生成，亲手实现一个现代的 GPT 式 Decoder 并在小语料上训练它。
+前两部分准备了工具：数学告诉我们模型在优化什么，PyTorch 告诉我们怎样把计算写成张量程序并算清它的代价。这一部分把它们用起来，从一个空目录出发，亲手写出一个能训练、能生成文本的 GPT 式语言模型。路线与 Stanford CS336 第一次作业一致：分词器、注意力、Transformer 块、整个模型、AdamW 与训练循环、解码。每一块都是几十到两百行的 Python，都有测试，并且最终合成全书共用的那个模型 `src/llms_from_scratch/transformer/model.py`。
+
+这里实现的不是 2017 年原始论文的模型，而是今天开源大模型的共同骨架：字节级 BPE、Pre-Norm 的 RMSNorm、RoPE 位置编码、可选的分组查询注意力（GQA）、SwiGLU 前馈网络、权重绑定可选，以及支持 KV Cache 的生成。原始 Transformer 的设计和它为什么被这些部件逐步取代，会在各章的相应位置讲到；更远的演进（MoE、MLA、线性注意力等）留给下一部分。
+
+## 知识脉络
+
+<Diagram width={720} height={250} label="从文本到生成的八个环节">
+  <Box x={10} y={30} w={100} h={50} label="分词" sub="字节 → BPE" />
+  <Box x={130} y={30} w={100} h={50} label="注意力" sub="QKᵀ·V" tone="accent" />
+  <Box x={250} y={30} w={100} h={50} label="多头与掩码" tone="accent" />
+  <Box x={370} y={30} w={100} h={50} label="位置编码" sub="RoPE" tone="accent" />
+  <Box x={490} y={30} w={100} h={50} label="Transformer 块" sub="Norm·残差·FFN" tone="accent" />
+  <Box x={610} y={30} w={100} h={50} label="组装 GPT" sub="参数量·FLOPs" tone="strong" />
+  <Arrow from={[110, 55]} to={[130, 55]} />
+  <Arrow from={[230, 55]} to={[250, 55]} />
+  <Arrow from={[350, 55]} to={[370, 55]} />
+  <Arrow from={[470, 55]} to={[490, 55]} />
+  <Arrow from={[590, 55]} to={[610, 55]} />
+  <Box x={190} y={150} w={140} h={50} label="训练 GPT" sub="AdamW·调度·裁剪" tone="accent2" />
+  <Box x={390} y={150} w={140} h={50} label="文本生成" sub="采样·KV Cache" tone="info" />
+  <Arrow from={[660, 80]} via={[[660, 115], [260, 115]]} to={[260, 150]} />
+  <Arrow from={[330, 175]} to={[390, 175]} />
+  <Text x={20} y={175} label="model.py：全书共用的模型" size="sm" anchor="start" tone="muted" />
+  <Text x={20} y={205} label="前六章构建模型，后两章让它学习并说话" size="sm" anchor="start" tone="muted" />
+  <Fragment slot="caption">上排是模型的组成部件，自左向右逐章累积，到“组装 GPT”时汇合成一个完整模型；下排是让模型有用的两步：训练出参数，再用参数生成文本。</Fragment>
+</Diagram>
+
+八章依次回答这样几个问题。**分词**把任意文本变成整数序列，是语言模型与世界的接口。**注意力**让序列中的每个位置按内容读取其他位置，**多头与因果掩码**把它变成能并行训练的自回归结构，**位置编码**补上注意力本身缺失的顺序信息。**Transformer 块**把注意力与前馈网络用归一化和残差连接稳定地堆叠起来，**组装 GPT**数清整个模型的参数与计算量。最后，**训练**让参数从随机数变成有用的表示，**生成**把训练好的模型用于采样，并引入 KV Cache——它是整个推理系统部分的出发点。
+
+## 与前后部分的关系
+
+这一部分建立在[数学基础](/math/)与[PyTorch 与资源核算](/pytorch/)之上：softmax 与交叉熵的推导、反向传播、`nn.Module`、FLOPs 与显存的核算方法，在这里被直接使用，不再重复。它的产出则被后面的部分共用：[现代架构](/architecture/)在 `model.py` 的基础上替换注意力和前馈网络，[预训练](/pretraining/)把这里的小型训练循环扩展到数据、优化器、缩放定律和稳定性，分布式训练、后训练和推理系统部分都以这个模型作为实验对象。本部分的数字（参数量、FLOPs、缓存大小）都用代码核对过，后续部分遇到同样的问题会直接引用，不会重新推导。
+
+## 阅读与动手建议
+
+建议按顺序读，因为每章都使用前一章的实现。读的时候把对应的源文件打开，书中的代码块摘自真实被测试的文件；读完每章跑一遍它的测试，再改一两处（比如去掉缩放因子 $1/\sqrt{d_k}$、把 Pre-Norm 换成 Post-Norm），看哪些测试和数值性质会失败，这比单纯阅读更能说明每个设计为什么存在。
+
+```sh
+uv run pytest tests/transformer          # 本部分全部测试，CPU 上数十秒
+uv run python -m llms_from_scratch.transformer.train   # 约 12 分钟训练出一个会写小故事的模型
+```
+
+没有 GPU 也能完成全部实验：训练用离线生成的 TinyStories 风格故事，模型只有 90 多万参数。想验证到真实数据，把 TinyStories 文本文件交给训练脚本的 `--data` 参数即可。如果想对照标准答案的思路，可以尝试 Stanford CS336 的 [assignment1-basics](https://github.com/stanford-cs336/assignment1-basics)，两者的路线基本一致。
 
 <ChapterList part="transformer" />

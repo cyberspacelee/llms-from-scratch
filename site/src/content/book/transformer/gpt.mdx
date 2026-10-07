@@ -2,7 +2,254 @@
 title: 组装 GPT：完整的 Decoder
 description: 把嵌入、N 个 Transformer 块、最终归一化与输出头组装成一个 GPT 式语言模型，数清参数量与 FLOPs。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/transformer/model.py
+  - src/llms_from_scratch/transformer/accounting.py
+  - tests/transformer/test_model.py
+  - tests/transformer/test_accounting.py
 ---
 
-本章正在撰写。
+前五章分别实现了分词器、注意力、多头与掩码、位置编码和 Transformer 块。本章把它们组装成一个完整的 GPT 式语言模型：输入 token ID，输出每个位置上下一个 token 的 logits。这个模型就是全书共用的 `src/llms_from_scratch/transformer/model.py`——第四部分在它的基础上替换注意力与 FFN，第五到第七部分用它做预训练与后训练实验，第九部分为它搭建推理引擎。
+
+我们先沿数据流逐段阅读 `model.py`，解释嵌入、权重绑定、final norm 与初始化的设计；然后推导参数量与前向 FLOPs 的公式，用代码对照真实模型核对（公式算出的 LLaMA 2 7B 与 LLaMA 3 8B 参数量与官方数字完全一致），并分析计算量在各部件之间如何分配；最后与 GPT-2、LLaMA 的配置对照，为第四部分的架构演进做铺垫。
+
+## 从 token ID 到 logits
+
+一个 decoder-only 语言模型的前向过程只有四步：
+
+1. **嵌入**：查表 $E \in \mathbb R^{V \times d}$，把 `idx: [B, T]` 变成 `x: [B, T, d]`。
+2. **$L$ 个 Transformer 块**：每块先做 Pre-Norm 的多头注意力（带 RoPE 与因果掩码），再做 Pre-Norm 的 SwiGLU FFN，形状保持 `[B, T, d]`。
+3. **final norm**：对残差流做最后一次 RMSNorm。
+4. **输出层**（LM head）：线性映射 $W_{\text{out}} \in \mathbb R^{V \times d}$，得到 `logits: [B, T, V]`。
+
+位置 $t$ 的 logits 经 softmax 后就是模型给出的 $P(x_{t+1} \mid x_{\le t})$。由于因果掩码，一次前向同时给出了全部 $T$ 个位置的预测。
+
+<Diagram width={720} height={330} label="GPT 的整体结构与张量形状">
+  <Box x={20} y={140} w={110} h={50} label="token ID" sub="[B, T]" />
+  <Box x={160} y={140} w={110} h={50} label="嵌入 E" sub="[B, T, d]" tone="info" />
+  <Region x={300} y={30} w={190} h={270} title="× L 个块" />
+  <Box x={320} y={230} w={150} h={36} label="RMSNorm → MHA" tone="accent" size="sm" />
+  <Box x={380} y={186} w={30} h={26} label="+" size="sm" />
+  <Box x={320} y={130} w={150} h={36} label="RMSNorm → FFN" tone="accent" size="sm" />
+  <Box x={380} y={86} w={30} h={26} label="+" size="sm" />
+  <Text x={395} y={60} label="RoPE 旋转因子 [T, d_h/2]" size="xs" tone="muted" />
+  <Box x={520} y={140} w={80} h={50} label="final\nnorm" tone="info" size="sm" />
+  <Box x={620} y={140} w={90} h={50} label="LM head" sub="[B, T, V]" tone="strong" />
+  <Arrow from={[130, 165]} to={[160, 165]} />
+  <Arrow from={[270, 165]} via={[[285, 165], [285, 280], [395, 280]]} to={[395, 266]} />
+  <Arrow from={[395, 230]} to={[395, 212]} />
+  <Arrow from={[395, 186]} to={[395, 166]} />
+  <Arrow from={[395, 130]} to={[395, 112]} />
+  <Arrow from={[395, 86]} via={[[395, 76], [505, 76], [505, 165]]} to={[520, 165]} />
+  <Arrow from={[600, 165]} to={[620, 165]} />
+  <Arrow from={[665, 190]} via={[[665, 315], [215, 315]]} to={[215, 190]} tone="accent2" dashed head="both" label="权重绑定：W_out = E（可选）" labelSide="above" />
+  <Fragment slot="caption">数据从左到右流动：嵌入查表后进入 L 个相同结构的块（每块内部是上一章的 Pre-Norm 结构），经 final norm 后由 LM head 映射到词表。虚线表示输出层与嵌入层可以共享同一个矩阵。RoPE 不是参数，而是每层注意力共用的固定旋转因子。</Fragment>
+</Diagram>
+
+### 配置
+
+模型的全部超参数集中在一个数据类中。`n_kv_heads` 小于 `n_heads` 时是分组查询注意力（GQA），默认与 `n_heads` 相等即标准多头注意力；`d_ff` 默认按上一章的规则取 $\tfrac 83 d$ 并向上取整到 64 的倍数：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol="GPTConfig" />
+
+### 模型主体
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol={["GPT.__init__", "GPT.forward"]} />
+
+逐段说明几处设计。
+
+**嵌入层不加位置向量。** 与 GPT-2 不同，这里没有 `nn.Embedding(context_length, d)` 形式的位置嵌入，位置信息完全由每层注意力里的 RoPE 提供。`freqs` 在构造时按 `context_length` 预先算好，注册为非持久 buffer：它跟随 `model.to(device)` 移动，但不保存在 `state_dict` 中，因为它可以由配置重新计算。
+
+**final norm。** 上一章说明了 Pre-Norm 网络的残差流从不被归一化，范数随深度增长。final norm 把它拉回统一的尺度，再交给输出层；没有它，logits 的尺度会随层数漂移。
+
+**`start_pos` 与缓存。** `forward` 的 `cache` 与 `start_pos` 参数用于生成：已缓存 `start_pos` 个位置时，新输入的 $T$ 个 token 的位置是 `start_pos` 到 `start_pos + T - 1`，所以切出 `freqs[start_pos:start_pos + T]`。训练时不传这两个参数，等价于 `start_pos = 0`。它们的用法在[文本生成](/transformer/generation/)一章详细讨论。
+
+**输出与损失的对齐。** `forward` 返回所有位置的 logits，形状 `[B, T, V]`。训练时输入是 $x_{1:T}$，目标是右移一位的 $x_{2:T+1}$：位置 $t$ 的 logits 与 token $x_{t+1}$ 计算交叉熵。数据加载器直接返回对齐好的 `(x, y)` 对，见[训练 GPT](/transformer/training-gpt/)。
+
+### 权重绑定
+
+输入嵌入 $E$ 把 token 映射到 $d$ 维空间；输出层 $W_{\text{out}}$ 的每一行可以看作一个 token 的“输出嵌入”，logit 是最终隐藏状态与它的内积。两者都在描述“每个 token 在 $d$ 维空间中的位置”，Press 与 Wolf（2017）、Inan 等（2017）提出让它们共享同一个矩阵：$W_{\text{out}} = E$。在 PyTorch 中只需让两个模块持有同一个 `Parameter`：
+
+```python
+self.lm_head.weight = self.embed.weight   # 同一个张量，梯度来自两条路径并自动相加
+```
+
+绑定省下 $Vd$ 个参数，在词表大、模型小时尤其可观（GPT-2 small 的 $Vd \approx 3860$ 万，占其 1.24 亿参数的约三成）；它还让罕见 token 的输入嵌入也能从输出端获得梯度。代价是输入与输出被迫使用同一组向量，而两者的最优表示未必相同。GPT-2 使用绑定；LLaMA、DeepSeek-V3 等大模型不绑定，因为当 $d$ 与总参数都很大时，$Vd$ 占比很小，解耦带来的灵活性更划算；Gemma、Qwen 的小尺寸模型则又使用绑定。全书的 `GPTConfig` 默认绑定（`tie_embeddings=True`），因为我们训练的都是小模型。
+
+### 初始化与初始损失
+
+所有线性层与嵌入以 $\mathcal N(0, 0.02^2)$ 初始化（GPT-2 的做法），写回残差流的 $W_O$ 与 $W_2$ 再乘以 $1/\sqrt{2L}$，理由见[上一章](/transformer/transformer-block/)。初始化是否合理有一个简单的检查：小初始化下 logits 接近 0，预测接近均匀分布，交叉熵应约等于
+
+$$
+\mathcal L_0 \approx -\log \frac 1V = \log V .
+$$
+
+$V = 512$ 时 $\log 512 \approx 6.24$；我们的 4 层模型初始损失实测为 6.27，logits 的标准差约 0.24。如果训练开始时损失明显高于 $\log V$（例如 10 以上），说明 logits 尺度过大，模型一开始就“自信地猜错”，前几百步会浪费在把尺度降下来上。测试 `test_initial_loss_is_near_uniform` 锁定了这一点。
+
+## 形状追踪：一次前向
+
+用本部分训练的小模型（$V = 512$，$T = 128$，$d = 128$，$L = 4$，$h = 4$，$d_h = 32$，$d_{\text{ff}} = 384$）走一遍前向，取 $B = 16$：
+
+| 步骤 | 张量 | 形状 |
+| --- | --- | --- |
+| 输入 | `idx` | `[16, 128]` |
+| 嵌入 | `x = embed(idx)` | `[16, 128, 128]` |
+| 旋转因子 | `freqs[0:128]` | `[128, 16]`（复数） |
+| 注意力内部 | `q, k, v` | `[16, 4, 128, 32]` |
+| 注意力权重（概念上） | `softmax(qkᵀ/√32)` | `[16, 4, 128, 128]` |
+| FFN 隐藏层 | `silu(w1(x)) * w3(x)` | `[16, 128, 384]` |
+| 每块输出 | `x` | `[16, 128, 128]` |
+| logits | `lm_head(norm(x))` | `[16, 128, 512]` |
+
+最大的激活张量是注意力权重（每层 $16 \times 4 \times 128^2 = 104$ 万个数）与 logits（$16 \times 128 \times 512 = 105$ 万个数）。前者随 $T^2$ 增长，后者随 $V$ 增长，这两者在大模型训练中都是显存的主要来源之一。
+
+## 参数量
+
+逐部件计数（忽略 RMSNorm 的增益，它们只有 $(2L + 1)d$ 个）：
+
+| 部件 | 参数量 |
+| --- | --- |
+| 嵌入 $E$ | $Vd$ |
+| 每层注意力：$W_Q, W_O$ 各 $d^2$，$W_K, W_V$ 各 $d \cdot d_{kv}$ | $2d^2 + 2d\,d_{kv}$ |
+| 每层 SwiGLU：$W_1, W_3, W_2$ | $3d\,d_{\text{ff}}$ |
+| 输出层（不绑定时） | $Vd$ |
+
+其中 $d_{kv} = n_{kv}\, d_h$ 是 K、V 投影的输出宽度，标准多头注意力时 $d_{kv} = d$。在标准多头注意力与 $d_{\text{ff}} = \tfrac 83 d$ 下，每层是 $4d^2 + 8d^2 = 12d^2$，于是
+
+<KeyEq label="GPT 的参数量">
+
+$$
+N \approx 12 L d^2 + V d\,(1 + [\text{不绑定}])
+$$
+
+</KeyEq>
+
+$12Ld^2$ 称为**非嵌入参数**，它决定了每个 token 的大部分计算量，缩放定律的研究通常用它作为模型规模的度量。`accounting.count_parameters` 把这个公式写成代码，GQA 与非 $\tfrac 83$ 的 $d_{\text{ff}}$ 都按精确形式计算：
+
+<CodeFile path="src/llms_from_scratch/transformer/accounting.py" region="params" />
+
+测试在标准注意力、GQA、不绑定且自定义 $d_{\text{ff}}$ 三种配置下，核对公式与 `sum(p.numel() for p in model.parameters())` 完全相等。更有说服力的检验是代入公开模型的配置：
+
+| 模型 | $V$ | $d$ | $L$ | $h / n_{kv}$ | $d_{\text{ff}}$ | 公式结果 | 官方数字 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| LLaMA 2 7B | 32,000 | 4096 | 32 | 32 / 32 | 11,008 | 6,738,415,616 | 6.74B |
+| LLaMA 3 8B | 128,256 | 4096 | 32 | 32 / 8 | 14,336 | 8,030,261,248 | 8.03B |
+
+两个模型的结构与我们的 `GPT` 相同（Pre-Norm、RMSNorm、RoPE、SwiGLU、无偏置、不绑定），公式给出的数字与官方报告的参数量逐位一致。LLaMA 3 8B 的嵌入与输出层合计 $2 \times 128256 \times 4096 \approx 10.5$ 亿，占总数的 13%；LLaMA 2 7B 的词表只有 32K，这一比例不到 4%。
+
+## 前向 FLOPs
+
+只统计矩阵乘法（逐元素运算是低阶项），一次乘加计 2 FLOPs。长度为 $T$ 的序列做一次前向：
+
+- 所有线性层（注意力投影、FFN、输出层）：每个参数对每个 token 参与一次乘加，共 $2 N_{\text{mm}} T$，其中 $N_{\text{mm}}$ 是参与矩阵乘法的参数数，即**除输入嵌入外**的全部参数（嵌入只是查表；但若权重绑定，输出层仍要做一次 $[T, d] \times [d, V]$ 的乘法，需单独计入 $2TdV$）。
+- 注意力核心：每层 $QK^\top$ 与 $AV$ 各 $2T^2 d$，共 $4LT^2 d$（按完整的 $T \times T$ 计算，不扣除因果掩码省下的一半）。
+
+<KeyEq label="前向 FLOPs">
+
+$$
+C_{\text{fwd}} \approx 2 N_{\text{mm}} T + 4 L T^2 d
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/transformer/accounting.py" region="flops" />
+
+验证分两部分。线性层部分用 `torch.utils.flop_counter.FlopCounterMode` 实测模型前向，与公式中除注意力核心外的部分逐位相等（CPU 上融合的 `scaled_dot_product_attention` 不被计数器统计）；注意力核心部分对教学版的逐步实现计数，乘以层数后与公式相等。
+
+训练时反向传播的计算量约为前向的两倍（对每个矩阵乘法，既要算对输入的梯度，也要算对权重的梯度），所以一步训练约 $3 C_{\text{fwd}}$。当 $T \ll d$ 时注意力核心可以忽略，得到常用的估计 $C_{\text{train}} \approx 6NT$——这正是[资源核算](/pytorch/resource-accounting/)一章介绍的 6N 法则。
+
+### 计算花在哪里
+
+沿用 CS336 作业的设定，把 GPT-2 四种尺寸的宽度与深度代入我们的架构（$V = 50257$，不绑定，$T = 1024$），看前向 FLOPs 在各部件之间的分配：
+
+<Bars label="各部件占前向 FLOPs 的百分比（GPT-2 尺寸的本书架构）" unit="%" max={100} totals={false} items={[{ label: 'small', segments: [{ value: 19.9, label: '注意力投影' }, { value: 13.2, label: '注意力核心' }, { value: 39.8, label: 'FFN' }, { value: 27.1, label: '输出层' }] }, { label: 'medium', segments: [{ value: 24.8, label: '注意力投影' }, { value: 12.4, label: '注意力核心' }, { value: 50.1, label: 'FFN' }, { value: 12.7, label: '输出层' }] }, { label: 'large', segments: [{ value: 27.0, label: '注意力投影' }, { value: 10.8, label: '注意力核心' }, { value: 54.8, label: 'FFN' }, { value: 7.4, label: '输出层' }] }, { label: 'XL, T=1024', segments: [{ value: 28.6, label: '注意力投影' }, { value: 9.2, label: '注意力核心' }, { value: 57.5, label: 'FFN' }, { value: 4.7, label: '输出层' }] }, { label: 'XL, T=16384', segments: [{ value: 12.1, label: '注意力投影' }, { value: 61.8, label: '注意力核心' }, { value: 24.2, label: 'FFN' }, { value: 2.0, label: '输出层' }] }]}>
+  <Fragment slot="caption">模型变大时，FFN 与注意力投影（都随 d² 增长）的占比上升，输出层（随 Vd 增长）的占比从 27% 降到 5%。把 GPT-2 XL 的序列长度从 1024 提高到 16384，总计算量增加约 38 倍，注意力核心（随 T² 增长）的占比从 9% 跃升到 62%。</Fragment>
+</Bars>
+
+这张图有三个结论。第一，对小模型，输出层是不可忽视的开销：GPT-2 small 尺寸下超过四分之一的计算花在对 5 万个 token 打分上，这也是小模型常用小词表与权重绑定的原因之一。第二，在常规长度下，FFN 是最大的计算消费者，约占一半以上；这启发了把 FFN 换成稀疏激活的混合专家（MoE），见[混合专家](/architecture/moe/)。第三，长上下文时注意力核心迅速成为主导，这是 FlashAttention、稀疏注意力与线性注意力等工作的出发点。
+
+具体数字：GPT-2 XL 尺寸（16.4 亿参数）在 $T = 1024$ 时一次前向约 $3.5 \times 10^{12}$ FLOPs，$T = 16384$ 时约 $1.3 \times 10^{14}$。我们在 CPU 上训练的小模型（91.9 万参数，$T = 128$）一次前向只有 $2.7 \times 10^8$ FLOPs，其中 FFN 占 56%，注意力投影 25%，注意力核心与输出层各约 6%。
+
+## 与 GPT-2、LLaMA 的对照
+
+我们的 `GPT` 在结构上属于 LLaMA 一脉。下表列出与 GPT-2 的主要差别：
+
+| 部件 | GPT-2（2019） | LLaMA（2023）与本书 |
+| --- | --- | --- |
+| 归一化 | LayerNorm，Pre-Norm | RMSNorm，Pre-Norm |
+| 位置编码 | 可学习绝对位置（1024） | RoPE |
+| FFN | GELU，$4d$ | SwiGLU，约 $\tfrac 83 d$ |
+| 偏置 | 线性层与 LayerNorm 都有 | 无 |
+| 权重绑定 | 是 | LLaMA 否；本书默认是 |
+| 注意力 | 多头 | 多头；LLaMA 2 70B 起与 LLaMA 3 用 GQA |
+| 词表 | 50,257（字节级 BPE） | 32K（SentencePiece）→ 128K（LLaMA 3，tiktoken） |
+
+这些改动单独看都不大，但组合起来在同等计算下有明显收益，并且已经成为 2023 年以来开源模型的共同基线。CS336 作业要求实现的也正是这个组合。至于它们各自从何而来、此后又发生了哪些变化（GQA 与 MLA、MoE、QK-Norm、更大的 RoPE base、多 token 预测、稀疏与线性注意力等），是第四部分的主题，从[架构演进总览](/architecture/evolution/)开始。
+
+## 小结
+
+- GPT 的前向是嵌入查表、$L$ 个 Pre-Norm 块、final norm、输出层四步；因果掩码使一次前向给出全部位置的下一 token 分布。位置信息由每层的 RoPE 提供，没有位置嵌入表。
+- 权重绑定让输出层与嵌入共享矩阵，省下 $Vd$ 个参数，对小模型价值大；大模型通常不绑定。
+- 初始化检查：初始损失应约为 $\log V$。
+- 参数量 $N \approx 12Ld^2 + Vd(1 + [\text{不绑定}])$；代入 LLaMA 2 7B 与 LLaMA 3 8B 的配置，与官方数字逐位一致。
+- 前向 FLOPs $\approx 2N_{\text{mm}}T + 4LT^2 d$，训练约为其 3 倍，即 $6NT$。小模型的输出层、常规长度下的 FFN、长上下文下的注意力核心分别是主要开销。
+
+模型已经组装好，但它的参数还是随机的。下一章实现优化器与训练循环，[训练一个小 GPT](/transformer/training-gpt/)。
+
+## 练习
+
+1. 用参数公式计算 CS336 作业中 GPT-2 XL 尺寸的模型（$V = 50257$，$L = 48$，$d = 1600$，$d_{\text{ff}} = 4288$，不绑定）的参数量，以及以 FP32 存储时需要多少显存。
+
+<details>
+<summary>答案</summary>
+
+每层注意力 $4 \times 1600^2 = 10{,}240{,}000$，FFN $3 \times 1600 \times 4288 = 20{,}582{,}400$，归一化 $3200$，合计 $30{,}825{,}600$；48 层为 $1{,}479{,}628{,}800$。嵌入与输出层各 $50257 \times 1600 = 80{,}411{,}200$，final norm 1600。总计 $1{,}640{,}452{,}800 \approx 16.4$ 亿。FP32 每个参数 4 字节，约 6.56 GB（6.1 GiB）。
+
+</details>
+
+2. 权重绑定时，嵌入矩阵 $E$ 的梯度来自哪两条路径？若一个 token 在批中从未出现，它在 $E$ 中的那一行会得到梯度吗？不绑定时呢？
+
+<details>
+<summary>答案</summary>
+
+一条来自输入端：批中出现过的 token 的嵌入行收到从第一层回传的梯度。另一条来自输出端：logits $= h E^\top$，对 $E$ 的梯度是 $(\operatorname{softmax} - \text{onehot})^\top h$，**每一行**都有非零梯度（softmax 给每个 token 都分配了概率）。所以绑定时，即使某个 token 没有出现在输入中，它的行也会从输出端得到梯度（把它的 logit 往下压）。不绑定时，输入嵌入中未出现的行梯度为 0，只有输出层的对应行收到梯度。
+
+</details>
+
+3. 对 GPT-2 small 尺寸（$L = 12$，$d = 768$），序列长度 $T$ 为多少时，注意力核心的 FLOPs 等于所有块中线性层的 FLOPs？
+
+<details>
+<summary>答案</summary>
+
+每层线性层（注意力投影 $4d^2$ 加 FFN $3d \cdot 2048 \approx 8d^2$）约 $12d^2$ 个参数，FLOPs $24Td^2$；注意力核心 $4T^2 d$。令 $4T^2 d = 24 T d^2$，得 $T = 6d = 4608$。超过约 4600 个 token 后，注意力核心的计算量超过块内全部线性层。（与 $L$ 无关，因为两者都按层累加。）
+
+</details>
+
+4. 为什么训练一步的 FLOPs 约为前向的 3 倍？哪些运算不符合这个比例？
+
+<details>
+<summary>答案</summary>
+
+对线性层 $Y = XW$（$X: [n, k]$，$W: [k, m]$），前向 $2nkm$；反向需要 $\partial L/\partial X = (\partial L/\partial Y) W^\top$ 与 $\partial L/\partial W = X^\top (\partial L/\partial Y)$，各 $2nkm$，合计为前向的 2 倍，总计 3 倍。注意力核心中的 $QK^\top$ 与 $AV$ 同理。不符合的有：嵌入查表（前向无乘法，反向只是按索引累加）；使用激活重计算（activation checkpointing）时，反向前要再做一遍前向，总计约 4 倍；以及逐元素运算（softmax、归一化）的比例各不相同，但它们是低阶项。
+
+</details>
+
+5. 在本部分的小模型中（$V = 512$，$d = 128$，$L = 4$，绑定），若把词表扩大到 8192，参数量与前向 FLOPs 各增加多少？
+
+<details>
+<summary>答案</summary>
+
+参数：嵌入从 $512 \times 128 = 65{,}536$ 增加到 $8192 \times 128 = 1{,}048{,}576$，增加约 98 万，总参数从 91.9 万变为约 190 万，翻了一倍多。FLOPs：输出层每 token 从 $2 \times 128 \times 512 = 131{,}072$ 增加到 $2{,}097{,}152$，$T = 128$ 时前向总量从 $2.68 \times 10^8$ 增加到约 $5.2 \times 10^8$，输出层占比从 6% 升到约 52%。对这样的小模型，大词表会让大部分参数与计算都花在词表上；不过同样的文本 token 数会减少，需要综合比较。
+
+</details>
+
+## 参考文献
+
+- Alec Radford et al. [Improving Language Understanding by Generative Pre-Training](https://cdn.openai.com/research-covers/language-unsupervised/language_understanding_paper.pdf). 2018；[Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf). 2019.（GPT 与 GPT-2）
+- Hugo Touvron et al. [LLaMA](https://arxiv.org/abs/2302.13971). 2023；[Llama 2](https://arxiv.org/abs/2307.09288). 2023.
+- Meta. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783). 2024；配置文件见 [meta-llama/llama3](https://github.com/meta-llama/llama3).
+- Ofir Press, Lior Wolf. [Using the Output Embedding to Improve Language Models](https://arxiv.org/abs/1608.05859). EACL 2017；Hakan Inan, Khashayar Khosravi, Richard Socher. [Tying Word Vectors and Word Classifiers](https://arxiv.org/abs/1611.01462). ICLR 2017.
+- Jared Kaplan et al. [Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361). 2020.（非嵌入参数与 $6N$ 的 FLOPs 估计）
+- Stanford CS336. [Assignment 1: Basics](https://github.com/stanford-cs336/assignment1-basics)（transformer_accounting 一题）
+- Andrej Karpathy. [nanoGPT](https://github.com/karpathy/nanoGPT).
+- PyTorch. [torch.utils.flop_counter](https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py).

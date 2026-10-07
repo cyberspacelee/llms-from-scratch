@@ -2,7 +2,299 @@
 title: Transformer 块：归一化、残差与前馈网络
 description: 残差连接为什么让深网络可训练，Post-Norm 与 Pre-Norm，LayerNorm 与 RMSNorm，FFN 与 SwiGLU。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/transformer/layers.py
+  - src/llms_from_scratch/transformer/model.py
+  - tests/transformer/test_layers.py
 ---
 
-本章正在撰写。
+前三章得到了一个能按内容、按相对位置读取上下文的多头注意力层。单独一层注意力能做的事情很有限：它只能对值向量做加权平均，无法对每个位置的内容做复杂的非线性加工，而且一层只能完成一次“读取”。要构建真正的语言模型，需要把几十层堆叠起来，在每层之间加入逐位置的非线性变换。本章讨论让这种深层堆叠成为可能的三个部件：**残差连接**（residual connection）为梯度提供高速公路；**归一化**（normalization）控制激活的尺度，我们会比较它的两种放置方式（Post-Norm 与 Pre-Norm）与两种形式（LayerNorm 与 RMSNorm）；**前馈网络**（feed-forward network, FFN）对每个 token 独立地做非线性变换，我们会推导现代模型使用的 SwiGLU，以及为什么它的隐藏维度是 $\tfrac{8}{3}d$。最后把它们组装成全书共用的 Pre-Norm 解码器块。
+
+先修：[反向传播](/math/backprop/)中的雅可比与 VJP，[nn.Module、参数与初始化](/pytorch/modules/)中的方差推导。
+
+## 残差连接：梯度的高速公路
+
+### 深层网络为什么难训练
+
+把 $L$ 个变换直接串联，$h_{l+1} = F_l(h_l)$，损失对第 $l$ 层输入的梯度由链式法则给出：
+
+$$
+\frac{\partial \ell}{\partial h_l} = \frac{\partial \ell}{\partial h_L}\, J_{L-1} J_{L-2} \cdots J_l, \qquad J_k = \frac{\partial F_k}{\partial h_k}.
+$$
+
+这是 $L - l$ 个雅可比矩阵的连乘。如果每个雅可比的“增益”（大致是它的谱范数）略小于 1，梯度随深度指数衰减；略大于 1，则指数爆炸。要让几十层的乘积保持在合理范围，每一层的增益都必须非常精确地接近 1，这在训练过程中几乎无法维持。
+
+### 残差：把乘积变成和
+
+He 等人（2016）在 ResNet 中提出的残差连接让每一层只学习一个**增量**：
+
+$$
+h_{l+1} = h_l + F_l(h_l), \qquad \frac{\partial h_{l+1}}{\partial h_l} = I + J_l .
+$$
+
+展开从第 $l$ 层到顶层的映射，$h_L = h_l + \sum_{k=l}^{L-1} F_k(h_k)$，于是
+
+<KeyEq label="残差连接的梯度">
+
+$$
+\frac{\partial \ell}{\partial h_l} = \frac{\partial \ell}{\partial h_L}\left( I + \sum_{k=l}^{L-1} \frac{\partial F_k(h_k)}{\partial h_l} \right)
+$$
+
+</KeyEq>
+
+括号中的单位矩阵 $I$ 意味着：无论中间各层的雅可比是什么，顶层的梯度总有一份**原封不动**地传到第 $l$ 层。这就是“梯度高速公路”。残差还给出另一种理解：$h_L = h_0 + \sum_k F_k$，网络的输出是输入加上所有层贡献的增量之和，每一层都在读取并修改一个共享的向量——这个贯穿全网络的 $h$ 被称为**残差流**（residual stream）。注意力层和 FFN 都从残差流中读取，再把结果加回残差流。
+
+我们用 12 层的块在初始化时实测梯度在各层输入处的范数 $\|\partial \ell / \partial h_l\|$。三种排布分别是：无残差（`plain`，$h_{l+1} = N(F(h_l))$）、原始 Transformer 的 Post-Norm、以及 Pre-Norm（下一节定义）。权重以标准差 $1/\sqrt d$ 初始化，损失是对随机目标的均方误差：
+
+<Plot label="初始化时损失对各层输入的梯度范数（12 层，d = 64）" x={[0, 12]} y={[0.001, 3]} logY xLabel="层编号 l（0 为最底层输入）" yLabel="‖∂ℓ/∂hₗ‖（对数刻度）" height={270} series={[{ points: [[0, 1.912], [1, 1.102], [2, 0.782], [3, 0.491], [4, 0.364], [5, 0.245], [6, 0.151], [7, 0.0798], [8, 0.0424], [9, 0.0244], [10, 0.0131], [11, 0.0079], [12, 0.0223]], label: '无残差', tone: 'accent2' }, { points: [[0, 0.255], [1, 0.180], [2, 0.151], [3, 0.114], [4, 0.0867], [5, 0.069], [6, 0.0505], [7, 0.0373], [8, 0.0296], [9, 0.0225], [10, 0.018], [11, 0.0162], [12, 0.022]], label: 'Post-Norm', tone: 'info' }, { points: [[0, 0.0453], [1, 0.0226], [2, 0.0154], [3, 0.0114], [4, 0.0092], [5, 0.0077], [6, 0.0066], [7, 0.0058], [8, 0.0052], [9, 0.0047], [10, 0.0043], [11, 0.004], [12, 0.0037]], label: 'Pre-Norm' }]}>
+  <Fragment slot="caption">没有残差时，梯度从顶层到底层变化超过两个数量级（这里是逐层放大）；有残差的两种排布变化约一个数量级。若再按 GPT-2 的做法把写回残差流的投影缩小 1/√(2L)，Pre-Norm 与 Post-Norm 各层的梯度都落在 0.012–0.022 之间，几乎平坦。数据由 residual_gradient_norms 计算。</Fragment>
+</Plot>
+
+<CodeFile path="src/llms_from_scratch/transformer/layers.py" region="grad_norms" />
+
+这个实验中，无残差网络的梯度不是衰减而是**逐层放大**：每层末尾的归一化把一个尺度很小的 $F(h)$ 放大回单位尺度，反向时梯度也被同样放大。方向不重要，重要的是连乘让量级失控。测试 `test_residual_keeps_gradients_flowing` 锁定了“残差使各层梯度同量级、无残差则相差悬殊”这一结论。
+
+残差的另一个前提是**初始化时增量要小**。若 $F_k$ 的输出与 $h$ 同量级，$L$ 层累加后残差流的方差会随深度线性增长，Pre-Norm 中最后几层的增量相对于巨大的残差流微不足道（上图 Pre-Norm 曲线在顶层偏低正是这个原因）。GPT-2 的对策是把每个残差分支最后一个线性层（注意力的 $W_O$ 与 FFN 的 $W_2$）的初始化标准差乘以 $1/\sqrt{2L}$（每块两个分支，共 $2L$ 个增量），使残差流在初始化时的方差与深度无关。全书共用的 `model.GPT` 正是这样初始化的。
+
+## 归一化放在哪里：Post-Norm 与 Pre-Norm
+
+归一化层把每个 token 的向量重新调整到固定的尺度。原始 Transformer 把它放在残差相加**之后**（Post-Norm）；GPT-2 以来几乎所有大模型都把它放在子层**之前**（Pre-Norm）：
+
+$$
+\text{Post-Norm:}\quad h_{l+1} = \operatorname{Norm}\big(h_l + F(h_l)\big), \qquad
+\text{Pre-Norm:}\quad h_{l+1} = h_l + F\big(\operatorname{Norm}(h_l)\big).
+$$
+
+<Diagram width={720} height={300} label="Post-Norm 与 Pre-Norm 的数据流">
+  <Region x={10} y={10} w={340} h={280} title="Post-Norm（2017）" />
+  <Region x={370} y={10} w={340} h={280} title="Pre-Norm（GPT-2 之后）" />
+  <Box x={130} y={250} w={100} h={30} label="hₗ" size="sm" />
+  <Box x={60} y={170} w={100} h={40} label="F" tone="accent" />
+  <Box x={150} y={110} w={60} h={34} label="+" size="lg" />
+  <Box x={130} y={50} w={100} h={36} label="Norm" tone="info" />
+  <Arrow from={[180, 250]} via={[[180, 230], [110, 230]]} to={[110, 210]} />
+  <Arrow from={[180, 250]} via={[[180, 230], [260, 230], [260, 127]]} to={[210, 127]} tone="accent" width={2.2} label="残差" labelSide="right" />
+  <Arrow from={[110, 170]} via={[[110, 127]]} to={[150, 127]} />
+  <Arrow from={[180, 110]} to={[180, 86]} />
+  <Arrow from={[180, 50]} to={[180, 26]} />
+  <Text x={60} y={70} label="残差流被归一化" size="sm" tone="accent2" anchor="start" />
+  <Box x={490} y={250} w={100} h={30} label="hₗ" size="sm" />
+  <Box x={400} y={190} w={100} h={34} label="Norm" tone="info" />
+  <Box x={400} y={120} w={100} h={40} label="F" tone="accent" />
+  <Box x={510} y={60} w={60} h={34} label="+" size="lg" />
+  <Arrow from={[540, 250]} via={[[540, 238], [450, 238]]} to={[450, 224]} />
+  <Arrow from={[540, 250]} to={[540, 94]} tone="accent" width={2.2} label="恒等通路" labelSide="right" />
+  <Arrow from={[450, 190]} to={[450, 160]} />
+  <Arrow from={[450, 120]} via={[[450, 77]]} to={[510, 77]} />
+  <Arrow from={[540, 60]} to={[540, 26]} />
+  <Text x={580} y={150} label="残差流从不被归一化" size="sm" tone="accent2" anchor="start" />
+  <Fragment slot="caption">左：Post-Norm 在相加之后归一化，梯度从上一层回到 hₗ 必须穿过 Norm。右：Pre-Norm 只归一化送入子层的副本，残差流（加粗）从输入到输出是一条不经任何变换的通路。Pre-Norm 网络的最后需要再加一个 final norm。</Fragment>
+</Diagram>
+
+两者的差别在反向传播中最清楚。Pre-Norm 中，$h_{l+1} = h_l + F(\operatorname{Norm}(h_l))$，雅可比是 $I + J_F J_N$，含有单位矩阵，正是上一节的高速公路。Post-Norm 中，$h_{l+1} = \operatorname{Norm}(h_l + F(h_l))$，雅可比是 $J_N (I + J_F)$：单位矩阵被归一化的雅可比 $J_N$ 左乘了。从顶层回到第 $l$ 层，梯度要连乘 $L - l$ 个 $J_N$，残差的“恒等通路”被每一层的归一化打断。
+
+Xiong 等人（2020）对此做了理论分析：Post-Norm Transformer 在初始化时，靠近输出层的参数梯度很大，用大学习率直接训练容易发散，必须配合学习率**预热**（warmup）才能稳定；Pre-Norm 各层的梯度量级相近，可以去掉预热或用更大的学习率。Liu 等人（2020）进一步指出 Post-Norm 对残差分支的依赖更强，参数的小扰动会被逐层放大。实践结论是一致的：**Pre-Norm 训练更稳定，对超参数更不敏感**，这是 GPT-2 之后的共识。CS336 作业把“改回 Post-Norm”列为消融实验之一。
+
+Pre-Norm 也有代价。残差流本身从不被归一化，随着层数增加，$h$ 的范数不断增长，后面的层对残差流的相对贡献变小，有研究认为这使得深层 Pre-Norm 模型的后几层“效率偏低”。因此 Pre-Norm 网络在输出层之前必须加一个 **final norm**，把残差流拉回统一的尺度再送入输出层。近年也有一些变体试图兼得两者的好处，例如在子层输出处再加一个归一化（OLMo 2、Gemma 2 采用的“三明治”式），这些在[训练稳定性](/pretraining/stability/)与[残差流的扩展](/architecture/residual-streams/)中讨论。
+
+## LayerNorm 与 RMSNorm
+
+### LayerNorm
+
+LayerNorm（Ba 等，2016）对**每个 token 的特征维**独立地做标准化。对向量 $x \in \mathbb R^d$：
+
+$$
+\mu = \frac 1d \sum_{i=1}^d x_i, \qquad \sigma^2 = \frac 1d \sum_{i=1}^d (x_i - \mu)^2, \qquad
+\operatorname{LN}(x)_i = \frac{x_i - \mu}{\sqrt{\sigma^2 + \epsilon}}\, \gamma_i + \beta_i .
+$$
+
+$\gamma, \beta \in \mathbb R^d$ 是可学习的增益与偏置，初始化为 1 与 0；$\epsilon$（如 $10^{-5}$）防止除以零。注意方差用的是**有偏**估计（除以 $d$），与 `nn.LayerNorm` 一致。与计算机视觉中的 BatchNorm 不同，LayerNorm 的统计量只来自单个 token 自身，不依赖批中的其他样本，因此训练与推理的行为相同，也不受批大小与序列长度影响——这对变长序列与逐 token 生成至关重要。
+
+### RMSNorm
+
+Zhang 与 Sennrich（2019）提出的 RMSNorm 去掉了减均值与偏置，只做尺度归一化：
+
+<KeyEq label="RMSNorm">
+
+$$
+\operatorname{RMS}(x) = \sqrt{\frac 1d \sum_{i=1}^d x_i^2 + \epsilon}, \qquad \operatorname{RMSNorm}(x)_i = \frac{x_i}{\operatorname{RMS}(x)}\, \gamma_i
+$$
+
+</KeyEq>
+
+他们的论证是：LayerNorm 的效果主要来自**重缩放不变性**（输入整体乘以常数，输出不变），而不是重中心化。去掉均值计算后，RMSNorm 少了一次归约与一组参数，在他们的实验中速度提升 7%–64%，质量与 LayerNorm 相当。LLaMA、Qwen、DeepSeek、Mistral 等现代模型都使用 RMSNorm，也是 CS336 作业指定的形式。
+
+两种归一化的教学实现都只有几行：
+
+<CodeFile path="src/llms_from_scratch/transformer/layers.py" region="norms" />
+
+全书共用的 `model.RMSNorm` 多做了一件事：先把输入转成 float32 计算，再转回原来的精度。在 BF16 训练中，平方和的累加若在低精度下进行会丢失大量精度，这是一个不可省略的工程细节：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol="RMSNorm" />
+
+测试核对了教学版 `LayerNorm` 与 `F.layer_norm`、`RMSNorm` 与 `F.rms_norm` 以及 `model.RMSNorm` 的输出一致，并检查 LayerNorm 输出的均值为 0。
+
+**一个手算例子。** 取 $x = (1, 2, 3, 6)$，$\gamma = 1$，$\beta = 0$，忽略 $\epsilon$。LayerNorm：$\mu = 3$，$\sigma^2 = (4 + 1 + 0 + 9)/4 = 3.5$，输出 $(-2, -1, 0, 3)/\sqrt{3.5} \approx (-1.07, -0.53, 0, 1.60)$。RMSNorm：$\operatorname{RMS} = \sqrt{(1 + 4 + 9 + 36)/4} = \sqrt{12.5} \approx 3.54$，输出 $\approx (0.28, 0.57, 0.85, 1.70)$。RMSNorm 保留了向量的方向（所有分量同号），只把它的均方根缩放到 1；LayerNorm 先把它平移到零均值，方向随之改变。
+
+## 前馈网络：逐 token 的 MLP
+
+### FFN 的角色
+
+注意力负责在**位置之间**搬运信息，FFN 负责在**每个位置内部**加工信息。原始 Transformer 的 FFN 是一个两层 MLP，对每个 token 独立地、用同一组参数作用：
+
+$$
+\operatorname{FFN}(x) = W_2\, \phi(W_1 x), \qquad W_1 \in \mathbb R^{d_{\text{ff}} \times d},\; W_2 \in \mathbb R^{d \times d_{\text{ff}}},
+$$
+
+其中 $\phi$ 是激活函数，隐藏维度通常取 $d_{\text{ff}} = 4d$（现代模型的线性层一般不带偏置）。参数量 $2 d \cdot 4d = 8d^2$，是注意力 $4d^2$ 的两倍——Transformer 约三分之二的参数在 FFN 里。Geva 等人（2021）的分析给出一种解读：$W_1$ 的每一行是一个“键”，检测输入中的某种模式；$W_2$ 的对应列是一个“值”，模式被激活时写入残差流的内容。FFN 因而像一个巨大的键值记忆，很多事实性知识被认为存储在这里。
+
+“逐 token”意味着 FFN 不在位置之间交换任何信息。把形状 `[B, T, d]` 的输入看作 $BT$ 个独立的向量，FFN 就是对它们做同一个 MLP——`nn.Linear` 天然作用于最后一维，代码里不需要任何 reshape。
+
+### 从 ReLU、GELU 到 SwiGLU
+
+原始 Transformer 用 ReLU。GPT-2、BERT 改用 GELU（Hendrycks 与 Gimpel, 2016）：
+
+$$
+\operatorname{GELU}(x) = x\, \Phi(x),
+$$
+
+$\Phi$ 是标准正态分布函数。它是 ReLU 的光滑版本，在 0 附近可导，负半轴有一个小的负值区域。另一个形状相近的函数是 SiLU（也叫 Swish）：$\operatorname{SiLU}(x) = x\,\sigma(x)$，$\sigma$ 是 sigmoid。
+
+<Plot label="ReLU、GELU 与 SiLU" x={[-4, 4]} y={[-0.6, 4]} xLabel="x" yLabel="φ(x)" height={250} series={[{ fn: (t) => Math.max(0, t), label: 'ReLU', tone: 'muted' }, { fn: (t) => 0.5 * t * (1 + Math.tanh(0.7978845608 * (t + 0.044715 * t * t * t))), label: 'GELU', tone: 'info' }, { fn: (t) => t / (1 + Math.exp(-t)), label: 'SiLU', tone: 'accent' }]}>
+  <Fragment slot="caption">GELU 与 SiLU 都是“光滑的 ReLU”：正半轴近似恒等，负半轴趋于 0，在原点附近连续可导。SiLU 的负值区域更深（最小值约 −0.28）。</Fragment>
+</Plot>
+
+Shazeer（2020）系统比较了 FFN 的多种**门控**变体。门控线性单元（GLU，Dauphin 等，2017）用两个线性投影，一个经过激活作为“门”，逐元素地调制另一个：
+
+$$
+\operatorname{SwiGLU}(x) = W_2\big(\operatorname{SiLU}(W_1 x) \odot W_3 x\big).
+$$
+
+$\odot$ 是逐元素乘法。门控让每个隐藏单元的输出是两个输入投影的**乘积**，相当于给 FFN 引入了二次交互，表达能力更强。Shazeer 的实验中 SwiGLU、GeGLU 在同等参数下的困惑度一致优于 ReLU 与 GELU 版本；他在论文中坦言无法解释原因，“归功于神的恩典”。此后 PaLM、LLaMA 及几乎所有开源大模型都采用了 SwiGLU。
+
+### 参数量对齐：为什么是 8/3
+
+SwiGLU 有三个矩阵（$W_1, W_3 \in \mathbb R^{d_{\text{ff}} \times d}$，$W_2 \in \mathbb R^{d \times d_{\text{ff}}}$），参数量 $3 d\, d_{\text{ff}}$。为了与 $d_{\text{ff}} = 4d$ 的两矩阵 FFN（$8d^2$ 参数）公平比较，令二者相等：
+
+$$
+3 d\, d_{\text{ff}} = 8 d^2 \quad\Longrightarrow\quad d_{\text{ff}} = \tfrac{8}{3} d .
+$$
+
+$\tfrac 83 d$ 通常不是整数，实践中再取整到某个倍数，使矩阵形状对 GPU 友好。LLaMA 7B 的 $d = 4096$，$\tfrac 83 d \approx 10923$，取整到 256 的倍数得 $d_{\text{ff}} = 11008$。CS336 作业取 $d = 512$ 时的 $d_{\text{ff}} = 1344$（最接近 $1365.3$ 的 64 的倍数）；全书共用的 `GPTConfig` 向上取整到 64 的倍数，$d = 512$ 时得 1408。三种做法在参数量上只差几个百分点。
+
+<CodeFile path="src/llms_from_scratch/transformer/layers.py" region="ffn" />
+
+测试核对了教学版 `SwiGLUFeedForward` 与 `model.SwiGLU` 输出一致，并且 $d = 96$ 时 SwiGLU（$d_{\text{ff}} = 256$）与 GELU FFN（$d_{\text{ff}} = 384$）的参数量相差不到 5%（这个尺寸下恰好都是 $73{,}728$）。
+
+## 组装一个块
+
+把三个部件按 Pre-Norm 方式组合，就是现代解码器块：
+
+$$
+z = x + \operatorname{MHA}\big(\operatorname{RMSNorm}(x)\big), \qquad y = z + \operatorname{SwiGLU}\big(\operatorname{RMSNorm}(z)\big).
+$$
+
+<Diagram width={720} height={320} label="Pre-Norm 解码器块的完整数据流">
+  <Box x={300} y={280} w={120} h={32} label="x" sub="[B, T, d]" size="sm" />
+  <Box x={120} y={220} w={140} h={36} label="RMSNorm" tone="info" />
+  <Box x={120} y={160} w={140} h={44} label="多头注意力" sub="+ RoPE, 因果掩码" tone="accent" size="sm" />
+  <Box x={330} y={150} w={60} h={34} label="+" size="lg" />
+  <Box x={460} y={110} w={140} h={36} label="RMSNorm" tone="info" />
+  <Box x={460} y={50} w={140} h={44} label="SwiGLU FFN" sub="d → 8d/3 → d" tone="accent" size="sm" />
+  <Box x={330} y={20} w={60} h={34} label="+" size="lg" />
+  <Arrow from={[360, 280]} via={[[360, 268], [190, 268]]} to={[190, 256]} />
+  <Arrow from={[190, 220]} to={[190, 204]} />
+  <Arrow from={[190, 160]} via={[[190, 140], [300, 140], [300, 167]]} to={[330, 167]} />
+  <Arrow from={[360, 280]} to={[360, 184]} tone="accent" width={2.4} />
+  <Arrow from={[360, 150]} via={[[360, 140], [530, 140]]} to={[530, 146]} />
+  <Arrow from={[530, 110]} to={[530, 94]} />
+  <Arrow from={[530, 50]} via={[[530, 37]]} to={[390, 37]} />
+  <Arrow from={[360, 150]} to={[360, 54]} tone="accent" width={2.4} />
+  <Text x={380} y={230} label="残差流" size="sm" tone="accent" anchor="start" />
+  <Text x={20} y={182} label="位置间交换信息" size="sm" tone="muted" anchor="start" />
+  <Text x={620} y={72} label="逐位置加工" size="sm" tone="muted" anchor="start" />
+  <Text x={400} y={12} label="输出 [B, T, d]，送入下一块" size="sm" tone="muted" anchor="start" />
+  <Fragment slot="caption">粗线是残差流，自下而上贯穿整个块。两个子层各自从残差流读取一份归一化后的副本，计算后再加回残差流。输入与输出的形状都是 [B, T, d]，块可以任意堆叠。</Fragment>
+</Diagram>
+
+教学版的 `TransformerBlock` 用一个参数在三种排布之间切换，便于做上面的梯度实验：
+
+<CodeFile path="src/llms_from_scratch/transformer/layers.py" region="blocks" />
+
+全书共用的 `model.Block` 只保留 Pre-Norm，并把 RoPE 的旋转因子、KV Cache 与起始位置一路传给注意力层：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol="Block" />
+
+一个块的参数量（不计归一化的 $2d$ 个增益）为注意力的 $4d^2$ 加上 FFN 的 $3d\,d_{\text{ff}} \approx 8d^2$，合计约 $12d^2$。这个数字会在下一章计算整个模型的参数量时用到。
+
+**关于 dropout 与偏置。** 原始 Transformer 与 GPT-2 在残差分支和注意力权重上使用 dropout，线性层带偏置。今天的大模型预训练通常只过一遍数据（甚至不足一个 epoch），过拟合不是主要问题，因此普遍去掉 dropout；线性层的偏置对效果几乎没有贡献，也被去掉了（LLaMA 起成为惯例；部分模型如 Qwen2 在 QKV 投影上保留了偏置）。本书的实现两者都不使用。
+
+## 小结
+
+- 残差连接 $h_{l+1} = h_l + F(h_l)$ 把雅可比的连乘变成 $I$ 加若干项，给梯度一条恒等通路；残差流是所有层共同读写的向量。初始化时把写回残差流的投影缩小 $1/\sqrt{2L}$，使残差流方差与深度无关。
+- Post-Norm 把归一化放在残差相加之后，恒等通路被每层的归一化打断，训练需要预热且对学习率敏感；Pre-Norm 只归一化子层的输入，训练更稳定，但需要 final norm。
+- LayerNorm 减均值、除标准差，RMSNorm 只除均方根；RMSNorm 更快、质量相当，是现代模型的标准选择。归一化应在 float32 中计算。
+- FFN 是逐 token 的 MLP，占参数的约三分之二；SwiGLU 用 SiLU 门控调制另一个投影，取 $d_{\text{ff}} = \tfrac 83 d$ 使参数量与 $4d$ 的普通 FFN 持平。
+- 一个 Pre-Norm 解码器块约有 $12d^2$ 个参数，输入输出形状相同，可以任意堆叠。
+
+下一章把嵌入层、$L$ 个这样的块、final norm 与输出层组装起来，得到[完整的 GPT](/transformer/gpt/)，并数清它的参数量与计算量。
+
+## 练习
+
+1. 写出 RMSNorm（$\gamma = 1$）的雅可比矩阵 $\partial y/\partial x$，并说明它对输入整体缩放 $x \to cx$（$c > 0$）的不变性在雅可比中如何体现。
+
+<details>
+<summary>答案</summary>
+
+令 $r = \sqrt{\frac 1d \|x\|^2}$（忽略 $\epsilon$），$y = x / r$。$\partial r / \partial x_j = x_j / (d r)$，所以 $\frac{\partial y_i}{\partial x_j} = \frac{\delta_{ij}}{r} - \frac{x_i x_j}{d r^3}$，即 $J = \frac 1r \left(I - \frac{x x^\top}{d r^2}\right) = \frac 1r (I - \hat x \hat x^\top)$，其中 $\hat x = x / \|x\|$（因为 $d r^2 = \|x\|^2$）。$J x = \frac 1r (x - x) = 0$：沿 $x$ 自身方向的扰动（即缩放）不改变输出，这正是缩放不变性；雅可比整体还带着 $1/r$ 的因子，输入越大，梯度越小。
+
+</details>
+
+2. 在 Pre-Norm 网络中，若每个残差分支在初始化时输出方差为 $\sigma^2$ 且相互独立，$L$ 个块（$2L$ 个分支）之后残差流的方差是多少？为什么把分支输出缩小 $1/\sqrt{2L}$ 可以解决问题？
+
+<details>
+<summary>答案</summary>
+
+设输入嵌入方差为 $\sigma_0^2$，每个分支的增量独立地加到残差流上，方差相加：$\operatorname{Var}(h_L) = \sigma_0^2 + 2L\sigma^2$，随深度线性增长。若分支最后一层权重的标准差乘以 $1/\sqrt{2L}$，分支输出方差变为 $\sigma^2 / (2L)$，总和为 $\sigma_0^2 + \sigma^2$，与 $L$ 无关。
+
+</details>
+
+3. 用本章的手算例子 $x = (1, 2, 3, 6)$，若 $\gamma = (1, 1, 1, 1)$，$\beta = (0, 0, 0, 1)$，LayerNorm 的输出是什么？把 $x$ 换成 $x + 10 = (11, 12, 13, 16)$ 后，LayerNorm 与 RMSNorm 的输出分别会怎样变化？
+
+<details>
+<summary>答案</summary>
+
+LayerNorm 输出 $(-1.07, -0.53, 0, 1.60 + 1) = (-1.07, -0.53, 0, 2.60)$。平移 10 后 LayerNorm 的均值变为 13、方差不变，减均值后完全相同，输出不变（平移不变性）。RMSNorm 没有减均值：$\operatorname{RMS} = \sqrt{(121 + 144 + 169 + 256)/4} = \sqrt{172.5} \approx 13.13$，输出 $\approx (0.84, 0.91, 0.99, 1.22)$，与原来 $(0.28, 0.57, 0.85, 1.70)$ 明显不同——RMSNorm 只对缩放不变，对平移敏感。
+
+</details>
+
+4. $d = 4096$ 时，GELU FFN（$d_{\text{ff}} = 4d$）与 SwiGLU（$d_{\text{ff}} = 11008$）的参数量各是多少？每个 token 的前向 FLOPs 呢？
+
+<details>
+<summary>答案</summary>
+
+GELU FFN：$2 \times 4096 \times 16384 = 134{,}217{,}728 \approx 1.34 \times 10^8$。SwiGLU：$3 \times 4096 \times 11008 = 135{,}266{,}304 \approx 1.35 \times 10^8$，多约 0.8%。每个参数在前向中参与一次乘加，FLOPs 约为参数量的 2 倍：分别约 $2.68 \times 10^8$ 与 $2.71 \times 10^8$（激活与逐元素乘法是低阶项）。
+
+</details>
+
+5. 为什么 BatchNorm 不适合语言模型的自回归生成？
+
+<details>
+<summary>答案</summary>
+
+BatchNorm 的统计量沿批维（以及序列维）计算，训练时依赖同一批中的其他样本与其他位置。这带来三个问题：因果性——在序列维上统计会让位置 $t$ 的归一化依赖未来位置的激活，泄露信息；生成时一次只有一个新 token，批统计量无法可靠估计，只能用训练时的滑动平均，训练与推理的行为不一致；变长序列与 padding 会污染统计量。LayerNorm 与 RMSNorm 只用单个 token 自身的统计量，没有这些问题。
+
+</details>
+
+## 参考文献
+
+- Kaiming He et al. [Deep Residual Learning for Image Recognition](https://arxiv.org/abs/1512.03385). CVPR 2016.
+- Jimmy Lei Ba, Jamie Ryan Kiros, Geoffrey Hinton. [Layer Normalization](https://arxiv.org/abs/1607.06450). 2016.
+- Biao Zhang, Rico Sennrich. [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467). NeurIPS 2019.
+- Ruibin Xiong et al. [On Layer Normalization in the Transformer Architecture](https://arxiv.org/abs/2002.04745). ICML 2020.
+- Liyuan Liu et al. [Understanding the Difficulty of Training Transformers](https://arxiv.org/abs/2004.08249). EMNLP 2020.
+- Noam Shazeer. [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202). 2020.
+- Dan Hendrycks, Kevin Gimpel. [Gaussian Error Linear Units (GELUs)](https://arxiv.org/abs/1606.08415). 2016.
+- Mor Geva et al. [Transformer Feed-Forward Layers Are Key-Value Memories](https://arxiv.org/abs/2012.14913). EMNLP 2021.
+- Hugo Touvron et al. [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971). 2023.（Pre-Norm + RMSNorm + SwiGLU + RoPE 的组合）
+- Alec Radford et al. [Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf). 2019.（Pre-Norm 与 $1/\sqrt{N}$ 残差初始化）

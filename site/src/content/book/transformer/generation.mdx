@@ -2,7 +2,253 @@
 title: 文本生成：解码策略与 KV Cache
 description: 贪心、温度、top-k 与 top-p 采样；为什么自回归生成需要 KV Cache，如何实现，以及它带来的显存代价。
 order: 8
-draft: true
+code:
+  - src/llms_from_scratch/transformer/sampling.py
+  - src/llms_from_scratch/transformer/model.py
+  - tests/transformer/test_sampling.py
+  - tests/transformer/test_model.py
 ---
 
-本章正在撰写。
+训练好的语言模型给出的是条件分布 $P(x_{t+1} \mid x_{\le t})$，生成文本则要从这个分布中一个接一个地选出 token。本章讨论生成的两个问题。第一个是**选什么**：每一步从分布中怎样挑出下一个 token——贪心、温度、top-k、top-p 与重复惩罚，它们决定了生成文本的质量与多样性。第二个是**怎样快**：朴素的自回归生成每一步都要把整个前缀重新送进模型，大量计算是重复的；我们将推导为什么只需缓存每层的键和值（KV Cache），实现它，并测试带缓存与不带缓存的生成逐 token 一致。最后分析生成的两个阶段（prefill 与 decode）和 KV Cache 的显存公式，它们是第四部分 GQA/MLA 与第九部分推理系统的出发点。
+
+## 自回归生成
+
+生成过程是一个循环：把当前序列送入模型，取**最后一个位置**的 logits，按某种策略选出下一个 token，拼到序列末尾，重复，直到生成了指定数量的 token、遇到结束符 `<|endoftext|>`，或者序列达到上下文长度上限。
+
+```python
+for _ in range(max_new_tokens):
+    logits = model(idx)[:, -1]           # [B, V]：只用最后一个位置
+    nxt = choose(logits)                 # [B, 1]
+    idx = torch.cat([idx, nxt], dim=1)
+```
+
+模型对所有位置都给出了预测，但生成时只有最后一个位置的预测是“新”的，前面位置的预测对应的 token 早已确定。这个观察是后面 KV Cache 的起点。
+
+## 解码策略
+
+### 贪心解码
+
+最直接的做法是每步取概率最大的 token：$x_{t+1} = \arg\max_v P(v \mid x_{\le t})$。贪心是确定性的，适合有唯一正确答案的任务（如短的事实性回答、代码补全中的确定部分）。它的问题是缺乏多样性，并且容易陷入**重复循环**：一旦模型生成了一句话，这句话本身又提高了再次生成它的概率，于是同一句话一遍遍出现。Holtzman 等人（2020）把这种现象称为**神经文本退化**（neural text degeneration）。更深层的原因是，人类写的文本并不是每一步都选最可能的词——人类文本中每个 token 在模型下的概率分布相当分散，最大概率的序列反而不像人写的。
+
+另一种确定性的方法是**束搜索**（beam search）：同时保留 $k$ 个累积概率最高的候选序列。它在机器翻译等输出受输入强约束的任务上有效，但在开放式生成中同样会产生重复、平淡的文本，今天的对话模型很少使用。
+
+### 温度
+
+采样则按模型的分布随机抽取下一个 token。温度（temperature）$\tau > 0$ 在 softmax 之前缩放 logits：
+
+<KeyEq label="温度采样">
+
+$$
+P_\tau(v) = \frac{\exp(z_v / \tau)}{\sum_{u} \exp(z_u / \tau)}
+$$
+
+</KeyEq>
+
+$\tau = 1$ 是模型原本的分布；$\tau < 1$ 放大 logits 之间的差距，分布变尖锐，$\tau \to 0$ 时趋于贪心；$\tau > 1$ 缩小差距，分布变平坦，$\tau \to \infty$ 时趋于均匀分布。任意两个 token 的概率比 $P_\tau(u)/P_\tau(v) = \exp((z_u - z_v)/\tau)$，温度直接控制了这个比例的指数。
+
+### top-k 与 top-p
+
+纯采样的问题在“长尾”：词表有几万个 token，每个罕见 token 的概率很小，但它们的**总概率**可能不小。每一步都有一定机会抽到一个不合适的 token，而一旦抽到，后面的生成会在一个错误的上下文上继续，越走越偏。截断采样只在“可信”的候选集合中采样：
+
+- **top-k**（Fan 等，2018）：只保留概率最大的 $k$ 个 token，把其余 logits 置为 $-\infty$ 后重新归一化。问题是 $k$ 是固定的：分布很尖锐时（下一个词几乎确定），$k = 50$ 也会放进许多不合理的候选；分布很平坦时（开放的续写），$k = 50$ 又可能砍掉大量合理的选择。
+- **top-p**，即核采样（nucleus sampling，Holtzman 等，2020）：把 token 按概率从大到小排序，保留累积概率首次达到 $p$ 的最小集合。候选集合的大小随分布自适应：尖锐时只剩一两个，平坦时有很多。
+
+用一个 6 个 token 的例子比较这些策略。logits 为 $(3, 2, 1, 0.5, 0, -1)$：
+
+<Diagram width={720} height={260} label="同一组 logits 在不同温度与截断策略下的采样分布">
+  <Matrix x={190} y={50} rows={5} cols={6} cell={[76, 30]} digits={3} values={[[0.86, 0.116, 0.016, 0.006, 0.002, 0.0], [0.605, 0.222, 0.082, 0.05, 0.03, 0.011], [0.382, 0.232, 0.14, 0.109, 0.085, 0.052], [0.665, 0.245, 0.09, 0, 0, 0], [0.665, 0.245, 0.09, 0, 0, 0]]} highlight={[{ rows: [1], tone: 'info' }, { cells: [[3, 3], [3, 4], [3, 5], [4, 3], [4, 4], [4, 5]], tone: 'muted' }, { cells: [[0, 0]], tone: 'accent' }]} rowLabels={['τ = 0.5', 'τ = 1（原分布）', 'τ = 2', 'top-k, k = 3', 'top-p, p = 0.9']} colLabels={['z=3', 'z=2', 'z=1', 'z=0.5', 'z=0', 'z=−1']} title="采样概率" />
+  <Fragment slot="caption">第二行是原分布，其累积概率为 0.605、0.827、0.909……，所以 p = 0.9 的核恰好是前三个 token，与 k = 3 的结果相同。截断后剩余概率重新归一化：0.605/0.909 = 0.665。降低温度把概率集中到最大者（0.86），升高温度把概率分散到长尾。</Fragment>
+</Diagram>
+
+核采样实现的关键是“首次达到 $p$ 的最小集合”这个边界。排序后计算每个 token **之前**（不含自身）的累积概率，若它已经不小于 $p$，这个 token 就是多余的。这样概率最大的 token 前面的累积概率为 0，总会被保留；恰好跨过 $p$ 的那个 token 也会被保留。最后用 `scatter` 把排序空间中的掩码放回原来的词表顺序：
+
+<CodeFile path="src/llms_from_scratch/transformer/sampling.py" region="filters" />
+
+**重复惩罚**（repetition penalty，CTRL，Keskar 等，2019）直接压低已经出现过的 token：正的 logit 除以惩罚系数 $\rho > 1$，负的 logit 乘以 $\rho$。必须区分正负号——如果对负 logit 也做除法，它会被“拉向 0”，概率反而升高。OpenAI API 中的 `frequency_penalty` 与 `presence_penalty` 是另一种形式：从 logit 中减去与出现次数成比例或固定的量。
+
+各种处理的顺序也有讲究。我们的 `sample_next` 依次做重复惩罚、温度、top-k、top-p，然后从剩余分布中抽样；温度在截断之前，于是 top-p 看到的是温度调整后的分布（Hugging Face 的默认顺序也是如此）：
+
+<CodeFile path="src/llms_from_scratch/transformer/sampling.py" region="sample" />
+
+测试核对了这些过滤器的分布性质：top-k 恰好保留最大的 $k$ 个；top-p 在 $p = 0.75$、$0.79$ 时保留概率为 0.5 与 0.3 的两个 token，$p = 0.81$ 时加入第三个，$p$ 再小也至少保留一个，截断后重新归一化为 $(0.625, 0.375)$；温度为 0 时退化为 argmax，温度 0.05 时 50 次抽样全部是最大者；重复惩罚区分正负号。
+
+<Callout tone="tip" title="实践中的默认值">
+开放式生成常用 $\tau \in [0.7, 1.0]$ 加 $p \in [0.9, 0.95]$；代码与数学推理常用较低的温度或贪心。近年还出现了 min-p 采样（Nguyen 等，2024）：只保留概率不低于 $p_{\min} \cdot p_{\max}$ 的 token，截断阈值随最大概率缩放，在高温下比 top-p 更稳定。具体模型的推荐参数应以其官方说明为准。
+</Callout>
+
+## 无缓存生成的浪费
+
+现在转向效率。朴素循环在第 $t$ 步把长度为 $t$ 的整个序列送入模型，计算全部 $t$ 个位置的输出，却只用最后一个。生成 $n$ 个 token（提示长度 $t_0$）的总计算量约为
+
+$$
+\sum_{t = t_0}^{t_0 + n} \big(2 N_{\text{mm}} t + 4 L t^2 d\big) = O\!\left(N_{\text{mm}}\, n^2 + L d\, n^3\right) \quad (n \gg t_0),
+$$
+
+其中 $N_{\text{mm}}$ 是参与矩阵乘法的参数量（见[组装 GPT](/transformer/gpt/)）。线性层部分随 $n$ 平方增长，注意力部分随 $n$ 立方增长。而理想情况下，生成每个新 token 只应该付出“处理一个 token”的代价。
+
+问题在于哪些计算是重复的。考虑第 $\ell$ 层、位置 $s < t$ 的隐藏状态 $h_s^{(\ell)}$。由于因果掩码，它只依赖 $x_{\le s}$，与之后生成的任何 token 无关。所以第 $t$ 步重新计算出的 $h_s^{(\ell)}$ 与第 $s$ 步算出的**完全相同**，所有过去位置的计算都是白做的。
+
+## KV Cache 的推导
+
+在第 $t$ 步，我们真正需要的只是新位置 $t$ 在各层的输出。沿着网络往上看位置 $t$ 在第 $\ell$ 层需要什么：
+
+- 嵌入、RMSNorm、FFN、残差相加都是**逐 token** 的，位置 $t$ 的计算只用到位置 $t$ 自己的输入。
+- 注意力是唯一跨位置的运算：$o_t = \sum_{s \le t} \alpha_{ts} v_s$，$\alpha_{ts} = \operatorname{softmax}_s(q_t k_s^\top / \sqrt{d_h})$。位置 $t$ 需要**自己的查询** $q_t$，以及**所有** $s \le t$ 位置的键 $k_s$ 和值 $v_s$。
+
+过去位置的键和值 $k_s = h_s W_K$、$v_s = h_s W_V$（再加 RoPE 旋转）只依赖 $h_s$，而 $h_s$ 不随后续 token 改变，所以 $k_s, v_s$ 也不变——它们可以在第一次计算后**缓存**起来。过去位置的查询 $q_s$ 只在计算位置 $s$ 的输出时用过一次，之后再也不需要；过去位置的注意力输出、FFN 输出也只服务于它自己位置的下一层。因此每层只需要缓存 K 与 V，这就是 **KV Cache**。
+
+<Definition term="KV Cache" kind="定义">
+对每一层，保存所有已处理位置的键与值（RoPE 旋转之后），形状为 $[B, n_{kv}, S, d_h]$。生成新 token 时，只对新 token 计算 $q, k, v$，把 $k, v$ 追加进缓存，再用新的 $q$ 与缓存中全部的 $k, v$ 计算注意力。
+</Definition>
+
+有了缓存，生成第 $t$ 个 token 的线性层计算从 $2N_{\text{mm}} t$ 降为 $2N_{\text{mm}}$，注意力从 $4Lt^2 d$ 降为 $4Ltd$（一个查询对 $t$ 个键），总量从 $O(n^3)$ 降到 $O(n^2)$。代价是显存：缓存随序列长度线性增长。
+
+<Diagram width={720} height={270} label="KV Cache 的 prefill 与 decode：缓存逐步增长，每步只计算一个新 token">
+  <Text x={20} y={40} label="prefill" anchor="start" size="sm" bold />
+  <Matrix x={130} y={25} rows={1} cols={5} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅"]]} tone="accent" />
+  <Text x={380} y={40} label="一次处理整段提示（5 个 token）" anchor="start" size="sm" tone="muted" />
+  <Text x={20} y={100} label="decode 1" anchor="start" size="sm" bold />
+  <Matrix x={130} y={85} rows={1} cols={6} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆"]]} tone="info" highlight={[{ cells: [[0, 5]], tone: 'accent' }]} />
+  <Text x={420} y={100} label="q₆ 与 6 个键做注意力" anchor="start" size="sm" tone="muted" />
+  <Text x={20} y={160} label="decode 2" anchor="start" size="sm" bold />
+  <Matrix x={130} y={145} rows={1} cols={7} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆", "k₇v₇"]]} tone="info" highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
+  <Text x={460} y={160} label="q₇ 与 7 个键做注意力" anchor="start" size="sm" tone="muted" />
+  <Matrix x={130} y={205} rows={1} cols={10} cell={[44, 30]} tone="ghost" />
+  <Text x={20} y={220} label="预分配" anchor="start" size="sm" bold />
+  <Legend x={130} y={255} items={[{ label: '本步新写入', tone: 'accent' }, { label: '读自缓存', tone: 'info' }, { label: '预分配未使用', tone: 'ghost' }]} gap={150} />
+  <Fragment slot="caption">每层各有一份这样的缓存。prefill 一次写入提示的全部 K/V；之后每个 decode 步只为新 token 计算并写入一列，再读取全部已缓存的列。缓存按最大长度预先分配，用一个长度计数器记录写到了哪里。</Fragment>
+</Diagram>
+
+## 实现
+
+全书共用的 `model.py` 已经内置了 KV Cache。缓存类按层预分配固定大小的张量，`update` 把新的 K/V 写入 `[start, start + T)` 位置，并返回从 0 到当前末尾的视图：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol="KVCache" />
+
+注意力层在计算出当前输入的 $q, k, v$ 并施加 RoPE 之后，把 $k, v$ 交给缓存，换回包含全部历史的 $k, v$：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol="CausalSelfAttention.forward" />
+
+这里有三个需要对齐的细节，任何一个出错都会让带缓存的输出与完整前向不同。
+
+**位置。** 新 token 的绝对位置是 `start_pos + t`，RoPE 必须用这个位置旋转。`GPT.forward` 切出 `freqs[start_pos:start_pos + T]` 传给每一层；若误用 `freqs[0:T]`，每个新 token 都会被当成位置 0，相对位置全部错乱。缓存中存的是**已经旋转过**的键，因为键的旋转只依赖它自己的位置，之后不会改变。
+
+**掩码。** 查询有 $T$ 个（prefill 时是提示长度，decode 时是 1），键有 $S = \text{start\_pos} + T$ 个。第 $t$ 个查询的绝对位置是 $S - T + t$，它可以看到绝对位置不超过自己的键，所以掩码是把对角线右移 $S - T$ 的下三角：`tril(diagonal=S - T)`。decode 时 $T = 1$，掩码是一行全为 `True`，新 token 可以看到全部缓存。
+
+**长度推进。** 缓存的 `length` 在**所有层**都写完之后才推进（在 `GPT.forward` 末尾），否则后面的层会读到错误的起点。
+
+生成函数把这些串起来，分为 prefill 与 decode 两个阶段；`use_cache=False` 时退化为朴素循环，用于对照：
+
+<CodeFile path="src/llms_from_scratch/transformer/sampling.py" region="generate" />
+
+## 验证：缓存不改变结果
+
+KV Cache 是纯粹的计算优化，它不能改变模型的任何输出。两个测试从不同层面锁定这一点。`test_model.py` 在 logits 层面核对：先用 7 个 token 做 prefill，再逐个送入后 5 个 token，拼起来的 logits 与一次完整前向的 logits 在 $10^{-5}$ 以内一致（模型使用 GQA，同时检验了 K/V 头共享与缓存的配合）：
+
+<CodeFile path="tests/transformer/test_model.py" symbol="test_kv_cache_matches_full_forward" />
+
+`test_sampling.py` 在生成层面核对：同一个模型、同一个提示，带缓存与不带缓存的贪心生成逐 token 完全相同；用同一个随机种子做 top-k 采样，两者也逐 token 相同。后者更严格：两种路径的 logits 只差浮点舍入，只要每一步的概率分布足够接近，同一个随机数就会选出同一个 token。
+
+在 CPU 上用一个 4 层、$d = 128$ 的模型对比两种生成的耗时（共享机器上的粗测）：生成 512 个 token，带缓存约 13 秒，不带缓存约 41 秒。小模型在 CPU 上的耗时主要是 Python 与算子启动的固定开销，差距被大大低估；在 GPU 上的大模型与长序列中，KV Cache 带来的差距是数量级的。
+
+## prefill 与 decode：两种不同的工作负载
+
+带缓存的生成天然分成两个阶段，它们的性能特征截然不同。
+
+**prefill** 一次处理整段提示的 $t_0$ 个 token，计算是矩阵乘矩阵（`[t_0, d] × [d, d]`），每读取一次权重可以做 $t_0$ 次乘加。它与训练时的前向类似，在 GPU 上通常受**算力**限制。prefill 的耗时决定了首 token 延迟（time to first token, TTFT）。
+
+**decode** 每步只处理 1 个 token（或批中每个请求 1 个），计算是矩阵乘向量。为了生成这一个 token，必须把模型的**全部权重**与这个请求的**全部 KV Cache** 从显存读入计算单元一遍，却只对每个权重做一次乘加。以一个 7B 参数的 BF16 模型为例，每步要读约 14 GB 权重，在带宽 3.35 TB/s 的 H100 上仅读权重就需要约 4 ms，而对应的 $2 \times 7 \times 10^9$ FLOPs 在约 990 TFLOPs 的 BF16 算力下只需约 0.014 ms。decode 因此受**显存带宽**限制，算力大部分闲置。提高 decode 效率的主要办法是把许多请求拼成一个批，让同一次权重读取服务多个 token——这就是第九部分[批处理与调度](/inference/batching-scheduling/)的主题；[推理的成本模型](/inference/inference-cost/)会把这里的估算做成完整的模型。
+
+## KV Cache 的显存代价
+
+每层缓存 K 与 V 两个张量，每个形状 $[B, n_{kv}, S, d_h]$。总字节数为
+
+<KeyEq label="KV Cache 显存">
+
+$$
+M_{\text{KV}} = 2 \cdot L \cdot B \cdot S \cdot n_{kv} \cdot d_h \cdot b
+$$
+
+</KeyEq>
+
+$b$ 是每个元素的字节数（BF16 为 2）。它与批大小和序列长度都成正比。每个 token 的缓存量 $2 L n_{kv} d_h b$ 是衡量一个架构推理成本的关键指标：
+
+<CodeFile path="src/llms_from_scratch/transformer/sampling.py" region="cache_bytes" />
+
+<Bars label="每个 token 的 KV Cache（BF16）" unit="KiB" items={[{ label: 'LLaMA 2 7B（MHA）', value: 512, tone: 'accent2' }, { label: 'LLaMA 2 70B（GQA）', value: 320, tone: 'info' }, { label: 'LLaMA 3 8B（GQA）', value: 128, tone: 'info' }, { label: 'DeepSeek-V3（MLA）', value: 68.6, tone: 'accent' }]}>
+  <Fragment slot="caption">LLaMA 2 7B：32 层 × 32 个 KV 头 × 128 维 × 2（K、V）× 2 字节 = 512 KiB；4096 个 token 即 2 GiB，测试 test_kv_cache_bytes_formula 核对了这个数。LLaMA 2 70B 有 80 层但只有 8 个 KV 头；LLaMA 3 8B 为 32 层 × 8 个 KV 头。DeepSeek-V3 的 MLA 每层只缓存 512 维的压缩潜向量加 64 维的 RoPE 键，61 层共约 68.6 KiB。</Fragment>
+</Bars>
+
+以 LLaMA 2 7B 为例，权重约 13.5 GB；若同时服务 32 个 4096 长度的请求，KV Cache 需要 $32 \times 2 = 64$ GiB，是权重的近五倍。在长上下文与大批量下，KV Cache 而不是权重成为显存的主要占用者，它直接决定了一张卡能同时服务多少请求。
+
+降低 $M_{\text{KV}}$ 的方法沿着公式中的每个因子展开：减少 $n_{kv}$——多查询注意力（MQA）与分组查询注意力（GQA）让多个查询头共享一组 K/V，`model.CausalSelfAttention` 的 `n_kv_heads` 参数就是 GQA；压缩 $n_{kv} d_h$——DeepSeek 的多头潜在注意力（MLA）只缓存一个低秩潜向量，见[注意力变体](/architecture/attention-variants/)；减少 $b$——把缓存量化到 FP8 或 INT4，见[量化](/inference/quantization/)；减少有效的 $S$——滑动窗口与稀疏注意力只保留部分位置；以及消除碎片与重复——PagedAttention 按页管理缓存、前缀缓存让共享提示的请求共用 K/V，见[KV Cache 管理](/inference/paged-attention/)。
+
+## 小结
+
+- 贪心与束搜索在开放式生成中容易产生重复、平淡的文本；温度 $\tau$ 缩放 logits 控制分布的尖锐程度；top-k 保留固定数量的候选，top-p 保留累积概率达到 $p$ 的最小集合，自适应分布形状；重复惩罚必须区分 logit 的正负号。
+- 由于因果掩码，过去位置在每一层的隐藏状态不随新 token 改变；位置 $t$ 只需要自己的查询和所有过去位置的键与值，因此每层只需缓存 K、V。
+- 实现 KV Cache 要对齐三件事：RoPE 使用绝对位置 `start_pos + t`；掩码对角线右移 $S - T$；缓存长度在所有层写完后推进。带缓存与不带缓存的生成逐 token 一致。
+- prefill 是矩阵乘矩阵、受算力限制；decode 是矩阵乘向量、受显存带宽限制。
+- KV Cache 显存为 $2LBSn_{kv}d_hb$，在长序列与大批量下超过权重本身；GQA、MLA、量化与分页管理分别从不同因子降低它。
+
+至此，我们从字节出发，实现了分词器、注意力、位置编码、Transformer 块、完整的 GPT、训练循环与带 KV Cache 的生成——一个完整的、现代的语言模型。第四部分将沿着时间线看这个基线在 2017—2026 年间如何演化，从[架构演进总览](/architecture/evolution/)开始。
+
+## 练习
+
+1. 证明：当 $\tau \to 0^+$ 时，温度采样的分布收敛到最大 logit 上的点质量（假设最大值唯一）；当 $\tau \to \infty$ 时收敛到均匀分布。
+
+<details>
+<summary>答案</summary>
+
+设 $z_1 > z_u$（$u \ne 1$）。$P_\tau(u) / P_\tau(1) = \exp((z_u - z_1)/\tau)$，$\tau \to 0^+$ 时指数趋于 $-\infty$，比值趋于 0，于是 $P_\tau(1) \to 1$。$\tau \to \infty$ 时，对任意 $u, v$，$P_\tau(u)/P_\tau(v) = \exp((z_u - z_v)/\tau) \to 1$，所有概率相等，即均匀分布。
+
+</details>
+
+2. 概率分布为 $(0.4, 0.3, 0.2, 0.05, 0.05)$。$p = 0.7$ 与 $p = 0.71$ 时，核采样分别保留哪些 token？重新归一化后的分布是什么？
+
+<details>
+<summary>答案</summary>
+
+累积概率为 $0.4, 0.7, 0.9, 0.95, 1.0$。每个 token 之前的累积概率为 $0, 0.4, 0.7, 0.9, 0.95$。$p = 0.7$ 时，第三个 token 之前的累积概率 $0.7 \ge 0.7$，被丢弃，保留前两个，归一化为 $(4/7, 3/7) \approx (0.571, 0.429)$。$p = 0.71$ 时，第三个 token 之前的 $0.7 < 0.71$，保留前三个，归一化为 $(0.444, 0.333, 0.222)$。（累积概率恰好等于 $p$ 时的边界取法在不同实现中可能不同，浮点误差也会影响这个边界。）
+
+</details>
+
+3. 为什么 KV Cache 不缓存查询 $Q$？如果模型没有因果掩码（如 BERT 式的双向注意力），KV Cache 还成立吗？
+
+<details>
+<summary>答案</summary>
+
+过去位置的查询只在计算该位置自己的注意力输出时使用，新 token 的输出只需要新查询与全部键值，所以缓存 $Q$ 没有用处。KV Cache 成立的前提是过去位置的表示不随新 token 改变，这由因果掩码保证。双向注意力中每个位置都关注所有位置，新 token 的加入会改变**所有**过去位置在每一层的隐藏状态，进而改变它们的键与值，缓存失效，必须整体重算。
+
+</details>
+
+4. 若在生成时把 RoPE 的位置错误地写成 `freqs[0:T]`（忽略 `start_pos`），带缓存的生成会出现什么问题？哪个测试会发现它？
+
+<details>
+<summary>答案</summary>
+
+decode 时 $T = 1$，每个新 token 都被当作位置 0 旋转（实际上不旋转），而缓存中的键是在正确位置旋转过的。新查询与第 $s$ 个键的相对位置因此变成 $-s$ 而不是 $t - s$，注意力模式完全错乱，生成质量下降，但程序不会报错。`test_kv_cache_matches_full_forward` 会发现它：逐步送入的 logits 与完整前向（使用正确位置）不一致。
+
+</details>
+
+5. 一个 32 层、$d = 4096$、32 个查询头、$d_h = 128$ 的模型，在 80 GB 显存的 GPU 上部署，权重 BF16 占 14 GB。若使用 MHA，最多能同时容纳多少个 8192 长度的请求的 KV Cache？若换成 8 个 KV 头的 GQA 呢？
+
+<details>
+<summary>答案</summary>
+
+MHA 每个 token 缓存 $2 \times 32 \times 32 \times 128 \times 2 = 524{,}288$ 字节 = 0.5 MiB，8192 个 token 为 4 GiB（约 4.3 GB）。可用显存约 $80 - 14 = 66$ GB（忽略激活与碎片），约可容纳 15 个请求。GQA 每 token 缓存减为四分之一，每请求 1 GiB，约可容纳 61 个请求。实际可用的数量还要扣除激活、CUDA 上下文与分配碎片。
+
+</details>
+
+## 参考文献
+
+- Ari Holtzman et al. [The Curious Case of Neural Text Degeneration](https://arxiv.org/abs/1904.09751). ICLR 2020.（核采样）
+- Angela Fan, Mike Lewis, Yann Dauphin. [Hierarchical Neural Story Generation](https://arxiv.org/abs/1805.04833). ACL 2018.（top-k 采样）
+- Nitish Shirish Keskar et al. [CTRL: A Conditional Transformer Language Model for Controllable Generation](https://arxiv.org/abs/1909.05858). 2019.（重复惩罚）
+- Minh Nguyen et al. [Turning Up the Heat: Min-p Sampling for Creative and Coherent LLM Outputs](https://arxiv.org/abs/2407.01082). 2024.
+- Reiner Pope et al. [Efficiently Scaling Transformer Inference](https://arxiv.org/abs/2211.05102). MLSys 2023.（prefill/decode 与 KV Cache 的成本分析）
+- Noam Shazeer. [Fast Transformer Decoding: One Write-Head is All You Need](https://arxiv.org/abs/1911.02150). 2019.（MQA）
+- Joshua Ainslie et al. [GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints](https://arxiv.org/abs/2305.13245). EMNLP 2023.
+- DeepSeek-AI. [DeepSeek-V2](https://arxiv.org/abs/2405.04434). 2024；[DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024.（MLA 的缓存维度）
+- Hugging Face. [Generation strategies](https://huggingface.co/docs/transformers/generation_strategies).
+- NVIDIA. [H100 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/h100/)（SXM 版 HBM3 带宽 3.35 TB/s，稠密 BF16 约 990 TFLOPS）
