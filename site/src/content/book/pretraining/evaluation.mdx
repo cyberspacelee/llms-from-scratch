@@ -2,7 +2,310 @@
 title: 评估：困惑度、基准与污染
 description: 困惑度与 bits-per-byte，主流基准与评估协议，few-shot 与思维链提示，数据污染检测与评估的可信度。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/evaluation.py
+  - tests/pretraining/test_evaluation.py
 ---
 
-本章正在撰写。
+前面几章讨论了怎样把模型训好：数据、优化器、稳定性、精度和规模。但“好”需要被度量。训练损失只说明模型在训练分布上预测下一个 token 有多准；我们真正关心的是模型懂不懂物理、会不会解数学题、能不能写出可运行的代码。评估（evaluation）回答的就是这些问题，而它比看起来困难得多：同一个模型，换一种提示格式、换一种打分方式，在同一个基准上的分数可以相差十几个百分点；一个看似领先的分数，可能只是因为测试题混进了训练数据。
+
+本章从最基础的内在指标出发：困惑度，以及为什么跨分词器比较时要用 bits-per-byte。然后讨论两类下游评估——基于对数似然的多项选择评估（预训练阶段最常用）和生成式评估，推导代码评估中 pass@k 的无偏估计；接着梳理主流基准、它们的规模与饱和、分数的统计误差；最后讨论数据污染的检测，以及用大模型当评委时的偏差。CS336 第 12 讲覆盖的就是这些内容。
+
+## 困惑度与 bits-per-byte
+
+### 困惑度
+
+语言模型给一段文本 $x_1,\dots,x_T$ 赋予概率 $P(x_{1:T})=\prod_tP(x_t\mid x_{<t})$。在留出数据上的平均负对数似然就是测试损失 $\bar\ell=-\frac1T\sum_t\log P(x_t\mid x_{<t})$，**困惑度**（perplexity）是它的指数：
+
+$$
+\text{PPL}=\exp(\bar\ell).
+$$
+
+困惑度可以理解为“模型在每一步平均在多少个等可能的选项中犹豫”：PPL 为 20 相当于每一步在 20 个 token 中均匀猜测。它是预训练中最直接、噪声最小的指标——前一章的缩放定律拟合的就是它。
+
+### 为什么跨分词器要用 bits-per-byte
+
+困惑度有一个陷阱：它是**按 token 平均**的。两个分词器不同的模型，token 的“大小”不同，每 token 的损失不可比较。设想同一段文本，分词器 A 切成 100 个 token，分词器 B 切成 150 个 token。即使两个模型给这段文本的总概率完全相同，A 的每 token 损失也是 B 的 1.5 倍。
+
+<Diagram width={680} height={200} label="同一段文本在两个分词器下的切分">
+  <Text x={20} y={30} label="文本：unbelievable（12 字节）" anchor="start" size="sm" tone="muted" />
+  <Text x={90} y={80} label="分词器 A" anchor="end" bold size="sm" />
+  <Box x={100} y={60} w={80} h={40} label="un" mono tone="info" />
+  <Box x={180} y={60} w={140} h={40} label="believ" mono tone="info" />
+  <Box x={320} y={60} w={100} h={40} label="able" mono tone="info" />
+  <Text x={440} y={80} label="3 个 token" anchor="start" size="sm" tone="muted" />
+  <Text x={90} y={140} label="分词器 B" anchor="end" bold size="sm" />
+  <Box x={100} y={120} w={80} h={40} label="un" mono tone="accent" />
+  <Box x={180} y={120} w={60} h={40} label="bel" mono tone="accent" />
+  <Box x={240} y={120} w={80} h={40} label="iev" mono tone="accent" />
+  <Box x={320} y={120} w={100} h={40} label="able" mono tone="accent" />
+  <Text x={440} y={140} label="4 个 token" anchor="start" size="sm" tone="muted" />
+  <Text x={440} y={180} label="−log P(文本) 相同时，每 token 损失之比为 4 : 3" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">每个格子宽度正比于字节数。两个分词器覆盖的字节完全相同；如果两个模型给这个词的总对数概率相同，它们的“每 token 损失”仍然不同。按字节归一化消除了这个差异。</Fragment>
+</Diagram>
+
+解决办法是用一个与分词无关的单位来归一化：原始文本的 **UTF-8 字节数**。对一段文本，总负对数似然（以 nat 为单位）$\mathcal N=\sum_t-\log P(x_t\mid x_{<t})$ 本质上是 $-\log P(\text{文本})$，与分词器无关（只要分词是确定性的）。把它换算成比特、再除以字节数 $N_{\text{bytes}}$：
+
+<KeyEq label="bits-per-byte">
+
+$$
+\text{BPB}=\frac{\mathcal N}{\ln2\cdot N_{\text{bytes}}}=\frac{T}{N_{\text{bytes}}}\cdot\frac{\bar\ell}{\ln2}.
+$$
+
+</KeyEq>
+
+第二个等号把它写成“每 token 的比特数”乘以“每字节的 token 数”。手算一个例子：模型 A 的每 token 损失为 2.0 nat，分词器平均每 token 4.2 字节，$\text{BPB}=2.0/(0.693\times4.2)\approx0.687$。模型 B 的每 token 损失只有 1.6 nat，看起来更好，但它的分词器每 token 只有 3.0 字节，$\text{BPB}=1.6/(0.693\times3.0)\approx0.770$——B 实际上更差。
+
+BPB 还有一个信息论的解释：它是用这个模型对文本做算术编码时，每个字节平均需要的比特数。一个 BPB 为 0.7 的模型，可以把文本压缩到原来的 $0.7/8\approx8.8\%$。“语言建模就是压缩”这句话在这里是字面意义上成立的。
+
+<CodeFile path="src/llms_from_scratch/pretraining/evaluation.py" region="bpb" />
+
+测试 `test_bpb_and_perplexity_relation` 验证了上面的换算关系。全书共用的 GPT 使用字节级词表（`vocab_size=256`）时，每个 token 恰好是一个字节，BPB 就是每 token 损失除以 $\ln2$。
+
+困惑度和 BPB 的局限也很明显：它们衡量的是对**某个特定分布**的拟合程度。在网页数据上 BPB 低，不代表数学推理好；而且它对后训练后的模型几乎没有意义——指令微调会改变输出分布，使其偏离“自然文本”，困惑度反而上升。
+
+## 多项选择：基于对数似然的评估
+
+预训练过程中最常用的下游评估，是把多项选择题转化为**比较每个选项的对数似然**。给定题干（上下文）$c$ 和选项 $a_1,\dots,a_K$，对每个选项计算模型在上下文后续写出它的概率，选概率最大的：
+
+$$
+\hat k=\arg\max_k\ \log P(a_k\mid c)=\arg\max_k\sum_{t=1}^{|a_k|}\log P\left(a_{k,t}\mid c,a_{k,<t}\right).
+$$
+
+这种做法不需要模型能按格式生成答案，只需要一次前向就能得到每个选项的分数，即使很小、很早期的检查点也能给出有意义的信号。HellaSwag（选择最合理的句子续写）、PIQA、ARC 等基准在预训练阶段都这样评估。
+
+<CodeFile path="src/llms_from_scratch/pretraining/evaluation.py" region="multiple_choice" />
+
+实现上要注意下标：位置 $t$ 的 logits 预测的是第 $t+1$ 个 token，所以第一个续写 token 由上下文的最后一个位置预测。测试 `test_sequence_nll_and_continuation_logprob_on_gpt` 用共用的 GPT 逐项核对了这一点。
+
+### 长度归一化
+
+原始对数似然是各 token 对数概率之**和**，每多一个 token 就多一个负数，所以它系统性地偏向短选项。常见的修正是长度归一化：除以选项的 token 数，或者除以字节数（与分词器无关）。EleutherAI 的 [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness) 报告的 `acc_norm` 就是按字节长度归一化的准确率。
+
+归一化方式会改变结论。测试 `test_length_normalization_changes_the_decision` 构造了一个查表模型：它认为 `a` 很可能（$\log P\approx-0.31$）、`b` 不太可能（$\log P\approx-1.31$）。对选项 `b` 和 `aaaaaaaa`，原始对数似然分别是 $-1.31$ 和 $8\times(-0.31)=-2.5$，选短的 `b`；按字节归一化后分别是 $-1.31$ 和 $-0.31$，选长的。哪种更“对”取决于任务：如果正确答案往往更长、更具体，归一化有帮助；对答案长度均匀的任务，归一化可能引入噪声。
+
+### 完形填空格式与选项字母格式
+
+多项选择还有两种提示格式。**完形填空**（cloze）格式把每个选项的完整文本作为续写来打分，如上所述。**选项字母**（multiple-choice formulation，MCF）格式把所有选项连同字母 A/B/C/D 一起放进提示，只比较下一个 token 是 “A”、“B”、“C” 还是 “D” 的概率。
+
+<Diagram width={680} height={250} label="完形填空格式与选项字母格式">
+  <Region x={10} y={10} w={320} h={230} title="完形填空（cloze）" tone="info" />
+  <Box x={30} y={40} w={280} h={44} label="题干：水在海平面沸腾的温度是" size="sm" />
+  <Box x={30} y={110} w={130} h={36} label="… 100 °C" size="sm" tone="accent" />
+  <Box x={180} y={110} w={130} h={36} label="… 50 °C" size="sm" />
+  <Text x={170} y={175} label="每个选项单独计算 log P(选项 | 题干)" size="sm" tone="muted" />
+  <Text x={170} y={205} label="小模型也能给出信号" size="sm" tone="muted" />
+  <Region x={350} y={10} w={320} h={230} title="选项字母（MCF）" tone="accent" />
+  <Box x={370} y={40} w={280} h={70} label="题干 + A. 100 °C  B. 50 °C\n答案：" size="sm" />
+  <Box x={370} y={130} w={60} h={36} label="A" mono tone="accent" />
+  <Box x={450} y={130} w={60} h={36} label="B" mono />
+  <Text x={510} y={190} label="只比较下一个 token：A / B / C / D" size="sm" tone="muted" />
+  <Text x={510} y={215} label="模型需先学会这种格式" size="sm" tone="muted" />
+  <Fragment slot="caption">完形填空格式对小模型更友好，但不同选项的长度与词频会干扰比较；选项字母格式让所有选项在同一个上下文中直接竞争，需要模型具备理解题目格式的能力，通常要到一定规模才有高于随机的表现。</Fragment>
+</Diagram>
+
+[OLMES](https://arxiv.org/abs/2406.08446)（Gu et al. 2024）系统比较了这两种格式：小模型在选项字母格式上接近随机，在完形填空格式上能显示出进步；大模型则相反，在选项字母格式上更准确。MMLU 的标准评估使用选项字母格式，所以在训练早期或小模型上，MMLU 长时间停在 25%（四选一的随机水平），无法区分不同的数据或配方。这就是为什么 FineWeb、DCLM 这类数据消融用的是 HellaSwag、ARC、PIQA 等对小模型敏感的任务，或者把 MMLU 改成完形填空格式。
+
+## 生成式评估与 pass@k
+
+许多能力无法用选项来测：解数学题、写代码、回答开放问题。生成式评估让模型自由生成，再判断结果是否正确。
+
+**数学**（GSM8K、MATH、AIME）通常比较最终答案。实现上需要从生成的文本中抽取答案，例如 GSM8K 的参考答案以 `#### 72` 结尾，模型的输出则取“最后一个数字”或特定标记之后的内容。答案抽取的规则对分数影响很大：模型可能算对了却用了不同的格式（`1,200` 与 `1200`），也可能在推理过程中提到正确数字而最终答案是错的。
+
+<CodeFile path="src/llms_from_scratch/pretraining/evaluation.py" region="answers" />
+
+**代码**（HumanEval、MBPP、LiveCodeBench）通过执行单元测试判断正确性。由于生成是随机的，常用的指标是 **pass@k**：对每道题生成 $k$ 个样本，只要有一个通过测试就算解出。
+
+### pass@k 的无偏估计
+
+直接按定义估计 pass@k，需要对每道题生成 $k$ 个样本，看是否至少有一个正确。这个估计的方差很大，而且对不同的 $k$ 要分别采样。[Chen et al. 2021](https://arxiv.org/abs/2107.03374)（Codex 论文）提出：对每道题生成 $n\ge k$ 个样本，数出其中正确的个数 $c$，然后用
+
+<KeyEq label="pass@k 的无偏估计">
+
+$$
+\widehat{\text{pass@}k}=1-\frac{\binom{n-c}{k}}{\binom{n}{k}} .
+$$
+
+</KeyEq>
+
+推导如下。设模型对这道题单次采样正确的概率为 $p$，pass@k 的定义是 $1-(1-p)^k$。在 $n$ 个样本中随机选一个大小为 $k$ 的子集，这个子集**全部错误**的概率是“从 $n-c$ 个错误样本中选 $k$ 个”的方法数除以总方法数，即 $\binom{n-c}{k}/\binom nk$。所以上式等于“从 $n$ 个样本中随机抽 $k$ 个、至少一个正确”的概率。由于 $n$ 个样本是独立同分布的，从中均匀随机抽取的 $k$ 个样本本身也是 $k$ 个独立同分布的样本；对 $n$ 个样本的随机性取期望，这个概率的期望恰好是 $k$ 个独立样本至少一个正确的概率 $1-(1-p)^k$。所以估计是无偏的。
+
+相比之下，一个看似自然的做法——先估计 $\hat p=c/n$，再算 $1-(1-\hat p)^k$——是**有偏**的：$1-(1-p)^k$ 是 $p$ 的凹函数，由 Jensen 不等式，$\mathbb E[1-(1-\hat p)^k]\le1-(1-p)^k$，系统性地低估。
+
+计算上，组合数会溢出，可以化成连乘：
+
+$$
+\frac{\binom{n-c}{k}}{\binom nk}=\prod_{i=n-c+1}^{n}\left(1-\frac ki\right).
+$$
+
+（展开两个组合数，分子分母约去公共因子即得。）当 $n-c<k$ 时，任何 $k$ 个样本中必有正确的，估计为 1。
+
+<CodeFile path="src/llms_from_scratch/pretraining/evaluation.py" region="pass_at_k" />
+
+测试 `test_pass_at_k_is_unbiased` 对 $n=10$、$c=3$、$k=4$ 穷举所有 $\binom{10}4=210$ 个子集，验证公式与“至少含一个正确样本的子集比例”完全相等，并检查 $k=1$ 时它退化为 $c/n$。
+
+<Plot label="pass@k 随 k 的增长" x={[1, 100]} y={[0, 1]} logX xLabel="k（每题采样数）" yLabel="pass@k"
+  series={[
+    { fn: (k) => 1 - (1 - 0.5) ** k, label: 'p = 0.5' },
+    { fn: (k) => 1 - (1 - 0.1) ** k, label: 'p = 0.1', tone: 'info' },
+    { fn: (k) => 1 - (1 - 0.01) ** k, label: 'p = 0.01', tone: 'accent2' },
+  ]}>
+  <Fragment slot="caption">单次成功概率 p 不同的三道题，pass@k = 1 − (1 − p)^k。pass@1 衡量“一次就做对”，pass@100 衡量“能不能做对”：一道 p = 0.01 的题 pass@1 几乎为 0，pass@100 却有 63%。这正是强化学习后训练想要利用的差距——把偶尔能做对的题变成稳定做对（见第七部分）。</Fragment>
+</Plot>
+
+### few-shot 与思维链
+
+预训练模型（base model）没有经过指令微调，不一定理解“请回答以下问题”。标准做法是 **few-shot 提示**：在问题前放几个格式相同的例子（MMLU 通常 5-shot，GSM8K 通常 8-shot），让模型通过上下文学习理解任务格式。few-shot 的例子数、例子的选择与顺序都会影响分数，所以比较两个模型时必须使用完全相同的提示。
+
+**思维链**（chain-of-thought，CoT，[Wei et al. 2022](https://arxiv.org/abs/2201.11903)）在 few-shot 例子中写出推理过程，引导模型先推理再回答。它对数学和多步推理任务提升巨大，但只在模型足够大时有效。对于经过推理训练的模型（如 DeepSeek-R1），思维链是模型自己生成的长推理，评估时需要给足够的生成长度，并用多次采样的平均（如 AIME 的 avg@16 或 pass@1 over 16 samples）来降低方差。
+
+## 主流基准与它们的局限
+
+### 常用基准
+
+| 基准 | 内容 | 规模 | 形式 |
+| --- | --- | ---: | --- |
+| MMLU | 57 个学科的知识题 | 测试集约 1.4 万题 | 四选一 |
+| MMLU-Pro | 更难、更重推理的 MMLU 版本 | 约 1.2 万题 | 十选一 |
+| GPQA | 研究生水平的生物、物理、化学题 | 448 题（Diamond 子集 198 题） | 四选一 |
+| HellaSwag | 常识性的句子续写 | 验证集约 1 万题 | 四选一 |
+| ARC | 小学科学题（Easy / Challenge） | 约 7800 题 | 多选 |
+| GSM8K | 小学数学应用题 | 测试集 1319 题 | 生成，比较答案 |
+| MATH | 竞赛数学 | 测试集 5000 题（常用 MATH-500） | 生成，比较答案 |
+| AIME | 美国数学邀请赛 | 每年 30 题 | 生成，整数答案 |
+| HumanEval | Python 函数补全 | 164 题 | 生成，执行测试 |
+| SWE-bench Verified | 修复真实 GitHub 仓库的问题 | 500 题 | 智能体，执行测试 |
+
+GPQA 的设计值得一提：题目由领域专家编写，“Google-proof”——非专家即使可以无限制地上网搜索，正确率也只有约 34%，而领域专家约 65%。这让它在 MMLU 饱和之后成为衡量知识与推理的主要基准之一。
+
+### 饱和
+
+基准有生命周期。MMLU 在 2020 年发布时，GPT-3 的成绩在 44% 左右；到 2024 年前沿模型已超过 90%，剩下的错误中相当一部分是题目本身的问题——MMLU-Redux 重新审核了部分题目，估计约 6.5% 的题目存在错误（错误答案、歧义、题目不完整）。当分数接近天花板，基准就无法区分模型了。HellaSwag、GSM8K 已经饱和，MMLU-Pro、GPQA 也在接近饱和。新的基准不断被提出（Humanity's Last Exam 收集了 2500 道各领域最难的问题），又不断被追平。
+
+### 分数的统计误差
+
+一个常被忽视的事实是：**基准分数是从有限题目中估计的，自带抽样误差**。把每道题看作一次伯努利试验，准确率 $\hat p$ 的标准误为
+
+$$
+\text{SE}=\sqrt{\frac{\hat p(1-\hat p)}{n}} ,
+$$
+
+95% 置信区间约为 $\hat p\pm1.96\,\text{SE}$。
+
+<Bars label="准确率为 50% 时 95% 置信区间的半宽" unit="个百分点" items={[
+  { label: 'AIME（30 题）', value: 17.9, tone: 'accent2' },
+  { label: 'HumanEval（164 题）', value: 7.7, tone: 'accent2' },
+  { label: 'GPQA Diamond（198 题）', value: 7.0, tone: 'accent2' },
+  { label: 'SWE-bench Verified（500 题）', value: 4.4, tone: 'info' },
+  { label: 'GSM8K（1319 题）', value: 2.7, tone: 'info' },
+  { label: 'MMLU（14042 题）', value: 0.8, tone: 'accent' },
+]}>
+  <Fragment slot="caption">按 1.96 · √(0.25 / n) 计算，即只考虑题目抽样的误差，不考虑生成的随机性。在 HumanEval 上，两个模型相差 5 个百分点在统计上并不显著；AIME 的单次得分几乎只能区分非常大的差距，所以通常对每题采样多次取平均。</Fragment>
+</Bars>
+
+`accuracy_stderr` 就是这个公式。在 164 题的 HumanEval 上，50% 准确率的 95% 置信区间是 $\pm7.7$ 个百分点；“我们的模型比基线高 3 分”这种结论在这样的基准上几乎没有意义。严格的比较应该对两个模型做配对检验（同一道题上的结果是相关的，配对后方差更小），或者报告置信区间。对生成式评估，还要加上采样的随机性：同一个模型在不同随机种子下的 AIME 分数可以相差 10 个百分点以上。
+
+## 数据污染
+
+**数据污染**（contamination）指测试题目（或其答案）出现在模型的训练数据中。预训练数据来自网页抓取，而流行基准的题目早已被大量转载到 GitHub、论坛、题库网站上，污染几乎不可避免。被污染的基准测量的是记忆而不是能力。
+
+### n-gram 重叠检测
+
+最直接的检测方法是在训练数据中查找测试题目的片段。GPT-3 的做法是：如果一道测试题与训练数据有任何一个 **13-gram** 重合，就把它标记为“脏”，然后分别报告在干净子集和完整测试集上的分数。之后的模型报告采用了各种变体：PaLM 用 8-gram，并要求 70% 以上的 8-gram 出现在训练数据中才算污染；GPT-4 从每道题中随机抽取 3 个 50 字符的子串，任何一个出现在训练数据中就视为污染；Llama 2 在 token 级别计算被训练数据覆盖的比例。
+
+<CodeFile path="src/llms_from_scratch/pretraining/evaluation.py" region="contamination" />
+
+`NgramIndex` 把训练语料的所有 n-gram 放进一个集合，`overlap` 返回一道测试题中有多少比例的 n-gram 在训练语料中出现过。测试 `test_ngram_contamination` 用 GSM8K 风格的题目验证：题干的前半句被逐字放进了训练语料，检测器能识别；一道无关的题目则不会被误报。真实规模的检测（万亿 token 的训练集）不能用 Python 集合，需要用 Bloom filter 或后缀数组来索引，但原理相同。
+
+n-gram 方法有明显的局限。阈值的选择是任意的：$n$ 太小会把常见短语误报为污染，太大会漏掉轻度改写的题目。它也检测不到**改写**后的题目（换了数字的数学题、翻译成其他语言的题目），而这些仍然能让模型“记住”解法。
+
+### 其他检测方法
+
+当无法访问训练数据时（闭源模型），只能从模型的行为推断。几类常见的方法：
+
+- **成员推断**：被训练过的文本，模型给出的概率通常更高。Min-K% Prob（[Shi et al. 2024](https://arxiv.org/abs/2310.16789)）看一段文本中概率最低的 $k\%$ 个 token 的平均对数概率：训练过的文本中很少有“极其意外”的 token。
+- **扰动对比**：构造与原基准同分布、但从未公开的新题目，比较模型在两者上的表现。GSM1k（[Zhang et al. 2024](https://arxiv.org/abs/2405.00332)）按 GSM8K 的风格重新编写了 1000 道题，发现一些模型家族在新题上的准确率明显下降，而前沿模型几乎没有下降。
+- **动态基准**：LiveCodeBench 按题目发布时间收集新的竞赛题，只用模型训练截止日期之后的题目评估；AIME 每年更新也有类似的效果。
+
+从数据一侧，基准的发布者也会采取措施：BIG-bench 在数据文件中放入一个唯一的“金丝雀字符串”（canary GUID），并呼吁数据收集者过滤包含它的文档；如果模型能复述这个字符串，说明它见过这些数据。许多基准保留一部分不公开的测试集。
+
+## 用模型当评委
+
+对于开放式回答（写作、对话、解释），没有标准答案可以比对。一个越来越常见的做法是 **LLM-as-a-judge**：让一个强大的模型来打分，或者比较两个回答哪个更好。[Zheng et al. 2023](https://arxiv.org/abs/2306.05685) 构建了 MT-Bench，发现 GPT-4 作为评委与人类专家的一致率超过 80%，与人类之间的一致率相当。人类偏好方面，Chatbot Arena 让用户对两个匿名模型的回答投票，用 Bradley–Terry 模型从大量成对比较中估计每个模型的评分。
+
+模型评委有系统性的偏差：
+
+- **位置偏差**：倾向于选择第一个（或第二个）出现的回答。对策是交换两个回答的位置各评一次，只有两次结论一致才计入。
+- **冗长偏差**：倾向于更长、格式更丰富的回答，即使内容并不更好。AlpacaEval 2.0 的长度控制版本（[Dubois et al. 2024](https://arxiv.org/abs/2404.04475)）用回归模型估计并去除长度对胜率的影响；Chatbot Arena 也引入了对长度与 Markdown 格式的“风格控制”。
+- **自我偏好**：倾向于自己（或同一家族模型）生成的回答。对策是使用多个不同来源的评委。
+
+这些偏差在后训练中尤其重要：如果奖励信号来自一个有冗长偏差的评委，模型会学会写得越来越长。我们会在第七部分[后训练与对齐](/post-training/)中再次遇到这一问题（称为奖励劫持）。
+
+## 小结
+
+- 困惑度是每 token 平均 NLL 的指数，依赖分词器；跨分词器比较应使用 $\text{BPB}=\mathcal N/(\ln2\cdot N_{\text{bytes}})$，它等于用模型做算术编码时每字节的比特数。
+- 预训练阶段的多项选择评估比较各选项的对数似然；长度归一化与提示格式（完形填空或选项字母）会显著改变结果，小模型应使用完形填空格式。
+- 生成式评估需要答案抽取或执行测试；pass@k 的无偏估计是 $1-\binom{n-c}{k}/\binom nk$，先估计 $\hat p$ 再代入 $1-(1-\hat p)^k$ 是有偏的。
+- 基准会饱和，也有题目错误；分数自带抽样误差 $\sqrt{p(1-p)/n}$，在百余题的基准上相差几个百分点并不显著。
+- 污染检测可以用 n-gram 重叠（GPT-3 的 13-gram）、成员推断与新题对比；LLM 评委存在位置、冗长与自我偏好偏差，需要交换位置与长度控制等对策。
+
+这一章结束了第五部分。我们已经知道怎样准备数据、选择优化器、保持训练稳定、用低精度计算、规划规模并评估结果。但前面所有的实验都在一块设备上运行，而真实的预训练需要数千张 GPU 协同工作。第六部分[分布式训练](/distributed/)讨论怎样把模型、数据和优化器状态切分到多张卡上。
+
+## 练习
+
+1. 一个模型在某数据集上每 token 损失为 2.3 nat，分词器平均每 token 3.6 字节。计算困惑度与 BPB。若换一个每 token 4.5 字节的分词器，模型需要把每 token 损失降到多少才能得到相同的 BPB？
+2. 证明 $\prod_{i=n-c+1}^{n}(1-k/i)=\binom{n-c}{k}/\binom nk$。
+3. 对一道题生成 $n=5$ 个样本，其中 $c=1$ 个正确。分别用无偏估计和 $1-(1-c/n)^k$ 计算 pass@2。哪个更大？为什么？
+4. 两个模型在 HumanEval（164 题）上分别得到 62% 和 67%。在 132 道题上两者结果相同，在其余 32 道题中模型 B 对而 A 错的有 20 道、A 对而 B 错的有 12 道。用配对的符号检验思路判断这一差异是否显著。
+5. 为什么 n-gram 污染检测对数学题的效果比对阅读理解题差？设计一种更适合数学题的检测方法。
+
+<details>
+<summary>练习 1 答案</summary>
+
+$\text{PPL}=e^{2.3}\approx9.97$；$\text{BPB}=2.3/(0.693\times3.6)\approx0.922$。换分词器后要保持 BPB 不变，每 token 损失需为 $0.922\times0.693\times4.5\approx2.875$ nat。也就是说，每 token 损失“变大”到 2.875 才与原来持平——每个 token 包含更多字节，预测一个 token 本来就更难。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+$\binom{n-c}{k}/\binom nk=\dfrac{(n-c)!\,(n-k)!}{(n-c-k)!\,n!}=\dfrac{(n-k)!/(n-c-k)!}{n!/(n-c)!}=\prod_{j=0}^{c-1}\dfrac{n-k-j}{n-j}$。令 $i=n-j$，$j=0,\dots,c-1$ 对应 $i=n,\dots,n-c+1$，每个因子是 $(i-k)/i=1-k/i$。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+无偏估计：$1-\binom42/\binom52=1-6/10=0.4$。代入法：$1-(1-0.2)^2=1-0.64=0.36$。无偏估计更大。代入法因为 $1-(1-p)^k$ 是凹函数而低估（Jensen 不等式）；直观地说，无偏估计是“不放回”地从 5 个样本中抽 2 个，抽中唯一正确样本的概率是 $2/5$；代入法相当于“有放回”抽样，可能两次都抽到同一个错误样本。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+只有 32 道不一致的题携带了两个模型差异的信息。若两者能力相同，每道不一致的题上 B 胜的概率是 0.5，B 胜的数目服从 $\text{Binomial}(32,0.5)$，均值 16、标准差 $\sqrt{8}\approx2.83$。观察到 20，$z=(20-16)/2.83\approx1.41$，双侧 p 值约 0.16，不显著。5 个百分点的差距在 164 题的基准上不足以下结论。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+数学题的题干往往很短，结构化（“某人有 x 个苹果……”），模板化的表述在网页中极其常见，n-gram 容易误报；同时，污染常以“换数字”的变体出现，逐字匹配检测不到。可以在匹配前把所有数字替换为占位符、把实体名规范化，再做 n-gram 匹配；或者检查训练数据中是否出现了测试题的**最终答案与关键中间结果**的组合；更可靠的方法是像 GSM1k 那样构造同分布的新题，比较模型在新旧题上的表现差距。
+
+</details>
+
+## 参考文献
+
+- Chen et al. 2021. [Evaluating Large Language Models Trained on Code](https://arxiv.org/abs/2107.03374)（HumanEval 与 pass@k 无偏估计）。
+- Hendrycks et al. 2021. [Measuring Massive Multitask Language Understanding](https://arxiv.org/abs/2009.03300)（MMLU）；Wang et al. 2024. [MMLU-Pro](https://arxiv.org/abs/2406.01574)；Gema et al. 2024. [Are We Done with MMLU?](https://arxiv.org/abs/2406.04127)（MMLU-Redux）。
+- Rein et al. 2023. [GPQA: A Graduate-Level Google-Proof Q&A Benchmark](https://arxiv.org/abs/2311.12022).
+- Cobbe et al. 2021. [Training Verifiers to Solve Math Word Problems](https://arxiv.org/abs/2110.14168)（GSM8K）；Zhang et al. 2024. [A Careful Examination of Large Language Model Performance on Grade School Arithmetic](https://arxiv.org/abs/2405.00332)（GSM1k）。
+- Gu et al. 2024. [OLMES: A Standard for Language Model Evaluations](https://arxiv.org/abs/2406.08446).
+- Gao et al. [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness).
+- Brown et al. 2020. [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165)，附录 C（13-gram 污染分析）。
+- Shi et al. 2024. [Detecting Pretraining Data from Large Language Models](https://arxiv.org/abs/2310.16789)（Min-K% Prob）。
+- Jain et al. 2024. [LiveCodeBench](https://arxiv.org/abs/2403.07974).
+- Wei et al. 2022. [Chain-of-Thought Prompting Elicits Reasoning in Large Language Models](https://arxiv.org/abs/2201.11903).
+- Zheng et al. 2023. [Judging LLM-as-a-Judge with MT-Bench and Chatbot Arena](https://arxiv.org/abs/2306.05685)；Dubois et al. 2024. [Length-Controlled AlpacaEval](https://arxiv.org/abs/2404.04475).
+- Phan et al. 2025. [Humanity's Last Exam](https://arxiv.org/abs/2501.14249).
+- Stanford CS336 Spring 2025，[Lecture 12（Evaluation）](https://cs336.stanford.edu/spring2025/)。

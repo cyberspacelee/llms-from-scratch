@@ -1,8 +1,302 @@
 ---
 title: 直接偏好优化 DPO
-description: 从带 KL 约束的奖励最大化推出 DPO 损失，实现与超参数 β 的含义，以及 IPO、SimPO、KTO 等变体。
+description: 从带 KL 约束的奖励最大化推出闭式最优策略与 DPO 损失，隐式奖励与 β 的含义，序列对数概率的正确计算，在线与离线，IPO、KTO、SimPO、ORPO 等变体，以及 DPO 的已知问题。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/post_training/dpo.py
+  - tests/post_training/test_dpo.py
 ---
 
-本章正在撰写。
+[RLHF：奖励模型与 PPO](/post-training/rlhf/)的流程很有效，但也很重：要先训练一个奖励模型，再在线采样、同时维护策略、参考、奖励、价值四个模型，PPO 本身还有一堆需要调的超参数。直接偏好优化（Direct Preference Optimization，DPO，Rafailov 等，2023）的出发点是一个数学观察：上一章的 KL 正则化目标有**闭式最优解**，最优策略与奖励函数之间存在一一对应。利用这个对应，可以把 Bradley–Terry 偏好模型中的奖励直接换成策略的对数概率比，得到一个只需要策略与参考模型、在离线偏好数据上做监督式训练的损失。论文的副标题概括了这一点：你的语言模型其实就是一个奖励模型。
+
+本章先完整推导 DPO，包括配分函数为什么恰好消去；然后实现它，特别注意对数概率要按序列求和且只覆盖回复部分；最后讨论 $\beta$ 的含义、在线与离线的差别、几种主要变体，以及 DPO 在实践中暴露出的问题。
+
+## KL 约束下的最优策略
+
+### 推导
+
+回到 RLHF 的目标。对一个固定的提示 $x$（省略条件以简化记号），我们要在所有分布 $\pi$ 上最大化
+
+$$
+J(\pi) = \mathbb E_{y\sim\pi}\big[r(y)\big] - \beta\,\mathrm{KL}\big(\pi\,\|\,\pi_{\text{ref}}\big) = \sum_y \pi(y)\Big[r(y) - \beta\log\frac{\pi(y)}{\pi_{\text{ref}}(y)}\Big].
+$$
+
+这里把 $\pi$ 看作任意分布，而不是某个参数化的模型。提出 $-\beta$，把 $r(y)$ 写进对数里：
+
+$$
+J(\pi) = -\beta\sum_y\pi(y)\Big[\log\frac{\pi(y)}{\pi_{\text{ref}}(y)} - \frac{r(y)}{\beta}\Big] = -\beta\sum_y\pi(y)\log\frac{\pi(y)}{\pi_{\text{ref}}(y)\exp\big(r(y)/\beta\big)}.
+$$
+
+分母 $\pi_{\text{ref}}(y)\exp(r(y)/\beta)$ 不是一个归一化的分布。定义配分函数（partition function）
+
+$$
+Z = \sum_y \pi_{\text{ref}}(y)\exp\big(r(y)/\beta\big),
+$$
+
+以及归一化后的分布 $\pi^\star(y) = \pi_{\text{ref}}(y)\exp(r(y)/\beta)/Z$。代入分母：
+
+$$
+J(\pi) = -\beta\sum_y\pi(y)\log\frac{\pi(y)}{Z\,\pi^\star(y)} = -\beta\,\mathrm{KL}\big(\pi\,\|\,\pi^\star\big) + \beta\log Z.
+$$
+
+$Z$ 不依赖于 $\pi$，而 KL 散度非负、当且仅当两个分布相同时为零。所以 $J$ 的唯一最大值在 $\pi = \pi^\star$ 处取得：
+
+<KeyEq label="KL 正则化目标的最优策略">
+
+$$
+\pi^\star(y\mid x) = \frac{1}{Z(x)}\,\pi_{\text{ref}}(y\mid x)\exp\!\Big(\frac{r(x,y)}{\beta}\Big),\qquad Z(x) = \sum_y\pi_{\text{ref}}(y\mid x)\exp\!\Big(\frac{r(x,y)}{\beta}\Big)
+$$
+
+</KeyEq>
+
+最优策略把参考策略按 $\exp(r/\beta)$ 重新加权：奖励高的回复概率被放大，$\beta$ 控制放大的程度。这是统计物理中的 Gibbs 分布，$\beta$ 扮演温度的角色。它看似可以直接用来采样，但 $Z(x)$ 要对所有可能的回复求和，回复空间是指数大的，无法计算。
+
+### 一个三回复的例子
+
+设某个提示只有三个可能的回复，参考策略为 $\pi_{\text{ref}} = (0.5, 0.3, 0.2)$，奖励为 $r = (1, 2, 0)$。取 $\beta=1$：未归一化的权重是 $0.5e^1\approx1.359$、$0.3e^2\approx 2.217$、$0.2e^0=0.2$，$Z\approx3.776$，于是 $\pi^\star\approx(0.360, 0.587, 0.053)$。奖励最高的第二个回复从 0.3 升到 0.587，但第一个回复并没有被清零：KL 项不允许策略完全抛弃参考模型认为合理的回复。
+
+<Bars label="不同 β 下的最优策略" max={1} totals={false}
+  items={[
+    { label: 'π_ref', segments: [{ value: 0.5, label: 'y₁ (r = 1)' }, { value: 0.3, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.2, label: 'y₃ (r = 0)', tone: 'muted' }], note: '' },
+    { label: 'π* (β = 2)', segments: [{ value: 0.448, label: 'y₁ (r = 1)' }, { value: 0.443, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.109, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.058' },
+    { label: 'π* (β = 1)', segments: [{ value: 0.360, label: 'y₁ (r = 1)' }, { value: 0.587, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.053, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.205' },
+    { label: 'π* (β = 0.5)', segments: [{ value: 0.182, label: 'y₁ (r = 1)' }, { value: 0.808, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.010, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.587' },
+  ]}>
+  <Fragment slot="caption">每根条是一个概率分布（总长为 1）。β 越小，最优策略越集中到奖励最高的 y₂ 上，期望奖励从 1.335 升到 1.798，代价是与参考策略的 KL 从 0.058 增大到 0.587。β → 0 时退化为只选最高奖励，β → ∞ 时退化为参考策略本身。</Fragment>
+</Bars>
+
+## 从最优策略到 DPO 损失
+
+### 反解奖励
+
+上式可以反过来读：任何奖励函数 $r$ 都对应一个最优策略 $\pi^\star$；反之，给定 $\pi^\star$ 也能把奖励写出来。对最优策略的表达式取对数并整理：
+
+$$
+r(x,y) = \beta\log\frac{\pi^\star(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \beta\log Z(x).
+$$
+
+奖励等于“最优策略相对参考策略的对数概率比”乘以 $\beta$，再加上一个**只依赖于提示 $x$** 的项。
+
+### 配分函数的消去
+
+把这个表达式代入 Bradley–Terry 模型。偏好概率只依赖于同一提示下两个回复的奖励之差：
+
+$$
+P(y_w\succ y_l\mid x) = \sigma\big(r(x,y_w) - r(x,y_l)\big) = \sigma\Big(\beta\log\frac{\pi^\star(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} + \beta\log Z(x) - \beta\log\frac{\pi^\star(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)} - \beta\log Z(x)\Big).
+$$
+
+两个 $\beta\log Z(x)$ 一正一负，**恰好消去**。这一步是整个推导的关键：$Z(x)$ 无法计算，但它在比较中根本不出现。能够消去的原因是比较的两个回复共享同一个提示，这也意味着 DPO 只适用于“同一提示下的成对比较”。
+
+现在把未知的最优策略 $\pi^\star$ 换成我们要训练的参数化策略 $\pi_\theta$，对偏好数据做最大似然，就得到 DPO 损失：
+
+<KeyEq label="DPO 损失">
+
+$$
+\mathcal L_{\text{DPO}}(\theta) = -\,\mathbb E_{(x,y_w,y_l)\sim\mathcal D}\Big[\log\sigma\Big(\beta\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\Big)\Big]
+$$
+
+</KeyEq>
+
+它的形式与奖励模型的损失完全相同，只是“奖励”换成了 $\hat r_\theta(x,y) = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$，称为**隐式奖励**（implicit reward）。训练语言模型就是在训练一个奖励模型，而这个奖励模型对应的最优策略就是语言模型本身。论文还证明，在 Bradley–Terry 假设下，每一类“只差一个提示相关常数”的奖励函数都可以用这种形式表示，所以这种参数化不损失一般性。
+
+<Diagram width={720} height={260} label="DPO 损失的计算图">
+  <Box x={10} y={40} w={110} h={50} label="(x, y_w)" tone="info" mono />
+  <Box x={10} y={170} w={110} h={50} label="(x, y_l)" tone="info" mono />
+  <Box x={180} y={20} w={150} h={44} label="π_θ（可训练）" tone="accent" />
+  <Box x={180} y={76} w={150} h={44} label="π_ref（冻结）" tone="muted" />
+  <Box x={180} y={140} w={150} h={44} label="π_θ（可训练）" tone="accent" />
+  <Box x={180} y={196} w={150} h={44} label="π_ref（冻结）" tone="muted" />
+  <Box x={375} y={45} w={160} h={50} label="r̂_w" sub="β·(log π_θ − log π_ref)" size="md" />
+  <Box x={375} y={165} w={160} h={50} label="r̂_l" sub="β·(log π_θ − log π_ref)" size="md" />
+  <Box x={560} y={105} w={50} h={50} label="−" />
+  <Box x={630} y={100} w={60} h={60} label="−log σ" size="sm" tone="strong" />
+  <Arrow from={[120, 65]} via={[[150, 65], [150, 42]]} to={[180, 42]} />
+  <Arrow from={[150, 65]} via={[[150, 98]]} to={[180, 98]} />
+  <Arrow from={[120, 195]} via={[[150, 195], [150, 162]]} to={[180, 162]} />
+  <Arrow from={[150, 195]} via={[[150, 218]]} to={[180, 218]} />
+  <Arrow from={[330, 42]} via={[[355, 42], [355, 70]]} to={[375, 70]} />
+  <Arrow from={[330, 98]} via={[[355, 98], [355, 70]]} to={[375, 70]} tone="muted" />
+  <Arrow from={[330, 162]} via={[[355, 162], [355, 190]]} to={[375, 190]} />
+  <Arrow from={[330, 218]} via={[[355, 218], [355, 190]]} to={[375, 190]} tone="muted" />
+  <Arrow from={[535, 70]} via={[[585, 70]]} to={[585, 105]} />
+  <Arrow from={[535, 190]} via={[[585, 190]]} to={[585, 155]} />
+  <Arrow from={[610, 130]} to={[630, 130]} />
+  <Fragment slot="caption">每个偏好对需要四次序列对数概率：策略与参考模型各在选中回复和被拒回复上算一次。参考模型的两次可以在训练前预先算好并缓存。损失只依赖于两个隐式奖励之差。</Fragment>
+</Diagram>
+
+## 梯度在做什么
+
+记 $\hat r_w = \hat r_\theta(x,y_w)$、$\hat r_l = \hat r_\theta(x,y_l)$。对 $\theta$ 求导，利用 $\frac{d}{dz}[-\log\sigma(z)] = -\sigma(-z)$：
+
+$$
+\nabla_\theta\mathcal L_{\text{DPO}} = -\beta\,\mathbb E\Big[\underbrace{\sigma\big(\hat r_l - \hat r_w\big)}_{\text{排错的程度}}\Big(\underbrace{\nabla_\theta\log\pi_\theta(y_w\mid x)}_{\text{提高选中回复}} - \underbrace{\nabla_\theta\log\pi_\theta(y_l\mid x)}_{\text{降低被拒回复}}\Big)\Big].
+$$
+
+这个梯度有三个值得注意的地方。第一，方向就是“提高选中回复的似然、降低被拒回复的似然”，与 SFT 加上“反学习”（unlikelihood）相似。第二，每个样本被 $\sigma(\hat r_l-\hat r_w)$ 加权：隐式奖励已经正确排序且间隔很大的样本几乎不贡献梯度，排错的样本贡献最大。DPO 论文的消融实验显示，去掉这个权重、直接做“提高选中、降低被拒”会让模型很快退化，生成无意义的文本。第三，梯度中的 $\beta$ 与权重内的 $\beta$ 共同决定了更新的大小。
+
+## β 的含义
+
+$\beta$ 同时出现在两个地方，有两种理解方式。
+
+**作为 KL 约束的强度。** 它来自 RLHF 目标中的 $\beta\,\mathrm{KL}$。$\beta$ 越小，最优策略越可以远离参考策略（上面的条形图）。
+
+**作为隐式奖励的尺度。** 在损失中，$\beta$ 把对数概率比换算成 Bradley–Terry 的 logit。偏好数据要求的是一个固定的 logit 间隔（比如让 $\sigma$ 达到 0.9 需要间隔约 2.2），$\beta$ 越小，策略需要把对数概率比拉开得越大才能达到同样的间隔，也就越远离参考模型。
+
+DPO 原论文在多数实验中取 $\beta = 0.1$。$\beta$ 的合适取值与对数概率的尺度有关：Tülu 3 使用了按长度归一化的 DPO（对数概率除以回复长度，数值小一个数量级），相应地取 $\beta = 5$。
+
+## 实现
+
+### 序列对数概率：只对回复求和
+
+DPO 中的 $\log\pi_\theta(y\mid x)$ 是**整条回复**的对数概率，即回复中每个 token 条件对数概率的**和**，不包括提示 token。实现时有两个常见错误：一是把提示 token 也算进去（它们在 $\pi_\theta$ 与 $\pi_{\text{ref}}$ 中的对数概率不同，会给隐式奖励带来与回复无关的噪声）；二是用平均代替求和（这改变了目标，使它变成 SimPO 风格的长度归一化，见下文）。与 SFT 一样，位置 $t-1$ 的 logits 预测位置 $t$ 的 token，所以目标与掩码都要错开一位：
+
+<CodeFile path="src/llms_from_scratch/post_training/dpo.py" region="sequence_logprob" />
+
+测试 `test_sequence_logprob_sums_only_response_tokens` 用一个 3 个词的小例子手算：序列 `[0, 1, 2, 1]` 的前两个 token 是提示，回复 token 2 与 1 分别由位置 1、2 的分布预测，概率为 0.8 与 0.6，于是回复对数概率是 $\log0.8 + \log0.6$，与提示的概率无关。
+
+### 损失
+
+<CodeFile path="src/llms_from_scratch/post_training/dpo.py" region="dpo_loss" />
+
+参考模型的对数概率被 `detach`：它是冻结的，不需要梯度，实践中常常在训练开始前对整个数据集预先算好。函数同时返回两个隐式奖励，训练时监控“隐式奖励的间隔”与“排序准确率”比只看损失更有信息量。
+
+手算验证：设选中回复在策略与参考模型下的概率为 0.44 与 0.30，被拒回复为 0.18 与 0.20，$\beta=0.2$。间隔为 $0.2\log\frac{0.44/0.18}{0.30/0.20} = 0.2\log1.630\approx0.0977$，损失为 $\log(1+e^{-0.0977})\approx 0.645$，略低于起点处的 $\log 2\approx0.693$。对两个对数概率的梯度分别是 $\mp\beta\sigma(-0.0977)\approx\mp0.0951$：
+
+<CodeFile path="tests/post_training/test_dpo.py" symbol="test_dpo_matches_hand_calculation" />
+
+另一个测试在极小 GPT 上运行 DPO：对 25 道加法题，以正确答案为选中回复、错一个固定偏移的答案为被拒回复，回复只有一个 token。参考模型是初始策略的冻结副本，训练 30 步后损失降到 $\log2$ 的一半以下，隐式奖励的间隔为正。在起点处策略等于参考模型，所有隐式奖励为 0，损失恰为 $\log 2$（`test_dpo_at_reference_is_log2`）。
+
+## 离线与在线
+
+标准 DPO 是**离线**的：偏好数据在训练前收集好，回复可能来自别的模型（例如 UltraFeedback 中的回复来自十几个不同的模型）。这与 PPO 有本质区别。PPO 在当前策略的采样上学习，DPO 在一个固定的数据集上学习，数据中的回复不一定是当前策略会生成的。
+
+这带来两个后果。第一，分布偏移：DPO 的推导假设最优策略是在 $\pi_{\text{ref}}$ 的支撑上重新加权，而数据中的回复可能在 $\pi_{\text{ref}}$ 下概率极低，隐式奖励的估计不可靠。第二，没有探索：模型从不尝试新的回复，也就不会得到关于它们的反馈。Xu 等（2024）的对比实验发现，调好的 PPO 在对话与代码任务上一致优于 DPO；Tajwar 等（2024）从更一般的角度论证了在线采样（on-policy）与“把概率质量从坏回复上移开”的负梯度的重要性。
+
+一个折中是**在线（迭代）DPO**：每轮用当前策略对一批提示采样多个回复，用奖励模型或 LLM 评委选出最好与最差的组成偏好对，做一轮 DPO，再用新策略重复。许多后训练流水线（例如 Llama 3）采用了多轮这样的迭代，每轮用新收集的偏好数据。
+
+## 变体：IPO、KTO、SimPO、ORPO
+
+DPO 的简洁催生了大量变体，它们各自修改了推导中的一个假设。
+
+### IPO：不要把间隔推向无穷
+
+Azar 等（2023）指出，当某个偏好对的标注是确定的（$P(y_w\succ y_l)=1$，在有限数据中这很常见），Bradley–Terry 的最大似然要求 $\hat r_w-\hat r_l\to\infty$。这时无论 $\beta$ 多大，DPO 都会把被拒回复的概率推向零，KL 正则形同虚设，导致过拟合。IPO 把损失换成一个有最小值的平方损失，把对数概率比之差回归到常数 $1/(2\tau)$：
+
+$$
+\mathcal L_{\text{IPO}} = \mathbb E\Big[\Big(h_\theta - \frac{1}{2\tau}\Big)^2\Big],\qquad h_\theta = \log\frac{\pi_\theta(y_w)}{\pi_{\text{ref}}(y_w)} - \log\frac{\pi_\theta(y_l)}{\pi_{\text{ref}}(y_l)}.
+$$
+
+<Plot label="DPO 与 IPO 的损失随对数概率比之差的变化" x={[-4, 10]} y={[0, 4]} xLabel="h = 对数概率比之差" yLabel="损失"
+  series={[{ fn: (t) => Math.log1p(Math.exp(-0.5 * t)), label: 'DPO（β = 0.5）' }, { fn: (t) => 0.25 * (t - 2) ** 2, label: 'IPO（τ = 0.25，比例缩小）', tone: 'accent2' }]}
+  markers={[{ at: [2, 0], label: 'IPO 的目标 1/(2τ) = 2' }]}>
+  <Fragment slot="caption">DPO 的损失随 h 单调递减，永远有动力继续拉开间隔；IPO 的损失在 h = 1/(2τ) 处取最小值，越过之后反而被拉回。为了同图显示，IPO 曲线乘了 0.25 的系数。</Fragment>
+</Plot>
+
+### KTO：不需要成对数据
+
+成对比较数据比“这个回答好/不好”的单条标签更难收集。KTO（Ethayarajh 等，2024）借鉴行为经济学的前景理论（prospect theory），只用单条的“可取/不可取”标签。它把隐式奖励 $r_\theta = \log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$ 与一个参考点 $z_0$ 比较，$z_0$ 是当前策略与参考模型 KL 散度的估计（实现中用批内不匹配的提示—回复对估计，且不回传梯度）；可取样本的价值为 $\lambda_D\sigma(\beta(r_\theta - z_0))$，不可取样本为 $\lambda_U\sigma(\beta(z_0 - r_\theta))$，损失是 $\lambda$ 减去价值。$\lambda_D$ 与 $\lambda_U$ 可以调节，以模拟“损失厌恶”或弥补两类数据数量的不平衡。
+
+### SimPO：去掉参考模型
+
+SimPO（Meng 等，2024）做了两处修改：用**平均**对数概率 $\frac{\beta}{|y|}\log\pi_\theta(y\mid x)$ 作为隐式奖励，不再除以参考模型；在 sigmoid 里减去一个目标间隔 $\gamma$：
+
+$$
+\mathcal L_{\text{SimPO}} = -\log\sigma\Big(\frac{\beta}{|y_w|}\log\pi_\theta(y_w\mid x) - \frac{\beta}{|y_l|}\log\pi_\theta(y_l\mid x) - \gamma\Big).
+$$
+
+动机是让训练时的奖励与生成时的度量一致：生成（尤其是束搜索）时近似的是平均对数概率，而 DPO 的隐式奖励是相对于参考模型的总和。去掉参考模型也省下了显存与计算。代价是失去了 KL 正则的理论保证。
+
+### ORPO：把 SFT 与偏好对齐合成一步
+
+ORPO（Hong 等，2024）同样不需要参考模型。它在 SFT 的负对数似然上加一项基于**几率比**（odds ratio）的偏好损失，其中 $\mathrm{odds}_\theta(y\mid x) = \frac{P_\theta(y\mid x)}{1-P_\theta(y\mid x)}$，$P_\theta$ 用平均 token 概率计算：
+
+$$
+\mathcal L_{\text{ORPO}} = \mathcal L_{\text{SFT}}(y_w) - \lambda\log\sigma\Big(\log\frac{\mathrm{odds}_\theta(y_w\mid x)}{\mathrm{odds}_\theta(y_l\mid x)}\Big).
+$$
+
+这样从基座模型出发，一个阶段就能同时完成指令微调与偏好对齐。
+
+| 方法 | 参考模型 | 数据 | 隐式奖励 / 关键改动 |
+| --- | --- | --- | --- |
+| DPO | 需要 | 成对 | $\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$（序列求和） |
+| IPO | 需要 | 成对 | 平方损失，回归到 $1/(2\tau)$ |
+| KTO | 需要 | 单条好/坏 | 与 KL 参考点 $z_0$ 比较 |
+| SimPO | 不需要 | 成对 | $\frac{\beta}{\lvert y\rvert}\log\pi_\theta$，外加间隔 $\gamma$ |
+| ORPO | 不需要 | 成对 | SFT 损失 + 几率比项 |
+
+`dpo.py` 中实现了 IPO、SimPO 与 KTO 的损失（KTO 的参考点由调用方传入），测试检查了 IPO 在目标间隔处取最小值、SimPO 的数值，以及 KTO 对好坏样本的梯度方向。
+
+<CodeFile path="src/llms_from_scratch/post_training/dpo.py" region="variants" />
+
+## DPO 的已知问题
+
+### 选中回复的概率也在下降
+
+DPO 的损失只依赖两个隐式奖励之**差**。让 $\hat r_w - \hat r_l$ 增大，既可以提高 $y_w$ 的概率，也可以把 $y_l$ 的概率降得更多，同时 $y_w$ 的概率也跟着下降。实践中后一种情况非常普遍：训练过程中选中回复与被拒回复的对数概率**都在下降**，只是被拒回复下降得更快。Pal 等（2024）的分析表明，当选中与被拒回复很相似（只差几个 token）时，这个问题尤其严重，并提出在损失中加入“选中回复的对数概率不得低于参考模型”的惩罚项（DPOP）。Razin 等（2024）把这种现象称为似然位移（likelihood displacement），发现被移走的概率质量可能流向语义上与选中回复相反的回复，造成意外的“反对齐”。
+
+直观地看，两个回复往往共享大量 token（同样的开头、同样的格式），对这些 token 的梯度一正一负；而概率是归一化的，压低 $y_l$ 时释放的概率质量不一定流向 $y_w$，而可能流向数据中从未出现的回复。这也解释了为什么 DPO 常常需要在 SFT 之后进行，并且训练轮数不能太多。
+
+### 长度偏置
+
+偏好数据中，较长的回复更常被选中（标注员与 LLM 评委都偏爱详细的回答）。DPO 的隐式奖励是对数概率的**总和**，模型可以通过调整长度来影响奖励，于是 DPO 训练后的模型常常变得冗长，在以 LLM 为评委的基准上“刷分”。Park 等（2024）提出 R-DPO，在损失中加入长度差的正则项；SimPO 与 Tülu 3 使用的长度归一化 DPO 则直接用平均对数概率消除长度的影响。报告 DPO 类方法的结果时，同时报告长度受控的胜率（如 AlpacaEval 2 的 LC win rate）已成为惯例。
+
+## 小结
+
+- KL 正则化的奖励最大化有闭式解 $\pi^\star \propto \pi_{\text{ref}}\exp(r/\beta)$；反解得到 $r = \beta\log\frac{\pi^\star}{\pi_{\text{ref}}} + \beta\log Z(x)$。
+- 代入 Bradley–Terry 模型，同一提示下两个回复的 $\beta\log Z(x)$ 相互抵消，得到只依赖策略与参考模型对数概率比的 DPO 损失。
+- 隐式奖励 $\beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}$ 让语言模型本身成为奖励模型；梯度按“排错的程度”加权，提高选中回复、降低被拒回复。
+- 实现中的对数概率必须按序列求和、只覆盖回复 token；$\beta$ 既是 KL 强度，也是隐式奖励的尺度。
+- 离线 DPO 没有探索，存在分布偏移；IPO 防止间隔无限增大，KTO 使用单条标签，SimPO 与 ORPO 去掉参考模型；DPO 的已知问题包括选中回复概率下降与长度偏置。
+
+## 练习
+
+1. 在三回复的例子中，取 $\beta = 1$。计算最优策略的期望奖励与 KL，验证 $J(\pi^\star) = \beta\log Z$。
+
+<details>
+<summary>答案</summary>
+
+$\pi^\star\approx(0.360, 0.587, 0.053)$，期望奖励 $0.360\times1 + 0.587\times 2 + 0 \approx 1.534$；KL 为 $\sum\pi^\star\log(\pi^\star/\pi_{\text{ref}})\approx 0.360\log0.72 + 0.587\log1.957 + 0.053\log0.265\approx -0.118+0.394-0.070 = 0.205$。$J = 1.534 - 0.205 = 1.329$，而 $\log Z = \log 3.776 \approx 1.329$，两者相等。这验证了推导中 $J(\pi) = -\beta\,\mathrm{KL}(\pi\|\pi^\star) + \beta\log Z$ 在 $\pi = \pi^\star$ 处的取值。
+
+</details>
+
+2. 如果两个回复对应不同的提示 $x_1\neq x_2$，还能用 DPO 的形式比较它们吗？
+
+<details>
+<summary>答案</summary>
+
+不能。代入奖励表达式后，偏好概率中会剩下 $\beta\log Z(x_1) - \beta\log Z(x_2)$，这个差不为零，又无法计算。DPO 能够成立，完全依赖于同一提示下配分函数相互抵消。KTO 之所以需要一个参考点 $z_0$，部分原因也在于此：单条样本没有“同一提示的另一个回复”可以用来抵消 $Z(x)$。
+
+</details>
+
+3. 在 `sequence_logprob` 中，如果误把提示 token 也算进序列对数概率，DPO 的损失与梯度会怎样变化？
+
+<details>
+<summary>答案</summary>
+
+选中与被拒回复共享同一个提示，提示部分的对数概率在两者中相同，在 $\log\pi_\theta(y_w) - \log\pi_\theta(y_l)$ 中抵消，参考模型同理；所以只要两个序列的提示完全相同，损失的**数值**不变。但这依赖于提示在两条序列中被同样地分词与对齐（例如左侧填充时位置不同会导致对数概率不同），任何不一致都会引入误差。此外，在 SimPO、KTO 等不成对抵消的变体中，或者在监控单个回复的隐式奖励时，把提示算进去会直接出错。因此正确的做法总是只对回复 token 求和。
+
+</details>
+
+4. 用梯度表达式解释：为什么去掉 $\sigma(\hat r_l - \hat r_w)$ 这个权重会让训练不稳定？
+
+<details>
+<summary>答案</summary>
+
+没有权重时，每个偏好对无论是否已经排对，都以同样的力度“提高 $y_w$、降低 $y_l$”。对已经排对的样本，降低 $\log\pi_\theta(y_l)$ 的梯度会一直持续，而降低一个序列的对数概率没有下界，模型可以把 $y_l$ 的概率压到极小，同时破坏与之共享 token 的其他回复的概率，最终退化。权重 $\sigma(\hat r_l-\hat r_w)$ 在样本排对后迅速趋于 0，起到了自动停止的作用，这正是 Bradley–Terry 最大似然带来的。
+
+</details>
+
+## 参考文献
+
+- Rafailov et al. *Direct Preference Optimization: Your Language Model is Secretly a Reward Model*. NeurIPS 2023. https://arxiv.org/abs/2305.18290
+- Azar et al. *A General Theoretical Paradigm to Understand Learning from Human Preferences* (IPO). AISTATS 2024. https://arxiv.org/abs/2310.12036
+- Ethayarajh et al. *KTO: Model Alignment as Prospect Theoretic Optimization*. ICML 2024. https://arxiv.org/abs/2402.01306
+- Meng, Xia, Chen. *SimPO: Simple Preference Optimization with a Reference-Free Reward*. NeurIPS 2024. https://arxiv.org/abs/2405.14734
+- Hong, Lee, Thorne. *ORPO: Monolithic Preference Optimization without Reference Model*. EMNLP 2024. https://arxiv.org/abs/2403.07691
+- Xu et al. *Is DPO Superior to PPO for LLM Alignment? A Comprehensive Study*. ICML 2024. https://arxiv.org/abs/2404.10719
+- Tajwar et al. *Preference Fine-Tuning of LLMs Should Leverage Suboptimal, On-Policy Data*. ICML 2024. https://arxiv.org/abs/2404.14367
+- Pal et al. *Smaug: Fixing Failure Modes of Preference Optimisation with DPO-Positive*. 2024. https://arxiv.org/abs/2402.13228
+- Razin et al. *Unintentional Unalignment: Likelihood Displacement in Direct Preference Optimization*. ICLR 2025. https://arxiv.org/abs/2410.08847
+- Park et al. *Disentangling Length from Quality in Direct Preference Optimization*. ACL Findings 2024. https://arxiv.org/abs/2403.19159
+- Lambert et al. *Tülu 3: Pushing Frontiers in Open Language Model Post-Training*. 2024. https://arxiv.org/abs/2411.15124
+- Llama Team. *The Llama 3 Herd of Models*. 2024. https://arxiv.org/abs/2407.21783

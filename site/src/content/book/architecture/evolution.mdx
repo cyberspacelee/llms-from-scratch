@@ -2,7 +2,273 @@
 title: 架构演进总览：从 Transformer 到 DeepSeek-V4
 description: 沿时间线比较 GPT、LLaMA、Mistral、Qwen、DeepSeek 等模型的结构与超参数选择，总结已经形成共识的设计。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/architecture/specs.py
+  - tests/architecture/test_specs.py
 ---
 
-本章正在撰写。
+第三部分实现的 GPT 有五个关键部件：Pre-Norm、RMSNorm、RoPE、SwiGLU 和 GQA。它们没有一个出现在 2017 年的《Attention Is All You Need》里。原始 Transformer 用的是 Post-Norm 的 LayerNorm、正弦位置编码、ReLU 前馈网络和标准多头注意力，而且是一个编码器—解码器结构。从那时到 2026 年的 DeepSeek-V4，主干结构经历了两个阶段：2017—2023 年是**收敛**，各种尝试最终汇聚成以 LLaMA 为代表的“共识配方”；2023 年之后是**分化**，为了更长的上下文、更大的参数量和更低的推理成本，注意力、前馈网络乃至残差连接都被重新设计。
+
+本章是这一部分的地图。我们先沿时间线看结构怎样变化、每一步的理由是什么；再把十几个代表模型的超参数放进同一张表，并写一段代码从超参数算出参数量，与官方公布的数字核对；最后总结宽深比、FFN 比例、头维、词表大小这些超参数的经验规律。后续各章会对其中每个新部件单独展开。
+
+## 2017：编码器—解码器 Transformer
+
+原始 Transformer 是为机器翻译设计的。编码器读入源语言句子，每层做双向自注意力和前馈网络；解码器逐个生成目标语言 token，每层先做带因果掩码的自注意力，再用**交叉注意力（cross-attention）**读取编码器的输出——查询来自解码器，键和值来自编码器最后一层。论文的 base 配置是 $d=512$、6 层编码器加 6 层解码器、8 个头、$d_{ff}=2048$，英德翻译用 37000 个 token 的共享 BPE 词表，约 6500 万参数。
+
+这一版有三处细节后来都被替换了。第一，**Post-Norm**：每个子层的写法是 $x \leftarrow \mathrm{LayerNorm}(x + \mathrm{Sublayer}(x))$，归一化放在残差相加之后。这样残差路径上每一层都插着一次归一化，梯度要穿过所有 LayerNorm 才能回到浅层，深层网络必须依赖学习率预热才能训练。Xiong 等（2020）证明 Post-Norm 在初始化时靠近输出层的梯度期望很大，而把归一化移到子层之前的 **Pre-Norm**，$x \leftarrow x + \mathrm{Sublayer}(\mathrm{Norm}(x))$，让残差路径成为一条“干净”的恒等通路，梯度可以无衰减地流回浅层。第二，**正弦位置编码**加在输入嵌入上，是绝对位置；第三，前馈网络是 $\mathrm{ReLU}(xW_1)W_2$，两个矩阵、比例 $d_{ff}=4d$。
+
+<Diagram width={700} height={300} label="编码器—解码器 Transformer 与只有解码器的 GPT 对比">
+  <Region x={10} y={10} w={420} h={280} title="编码器—解码器（2017，T5）" />
+  <Box x={30} y={200} w={150} h={44} label="源序列 x" sub="双向可见" />
+  <Box x={30} y={110} w={150} h={60} label="编码器 × N" sub="自注意力 + FFN" tone="info" />
+  <Box x={245} y={200} w={160} h={44} label="已生成的 y<t" sub="因果掩码" />
+  <Box x={230} y={60} w={190} h={110} label="解码器 × N" sub="自注意 → 交叉注意 → FFN" tone="accent" />
+  <Box x={245} y={20} w={160} h={30} label="预测 y_t" size="sm" tone="strong" />
+  <Arrow from={[105, 200]} to={[105, 170]} />
+  <Arrow from={[180, 140]} to={[230, 140]} label="K, V" tone="info" />
+  <Arrow from={[325, 200]} to={[325, 170]} />
+  <Arrow from={[325, 60]} to={[325, 50]} />
+  <Region x={445} y={10} w={250} h={280} title="只有解码器（GPT，2018—）" />
+  <Box x={490} y={200} w={180} h={44} label="一条序列 t_0 … t_T" sub="提示与回答拼在一起" />
+  <Box x={490} y={90} w={180} h={80} label="解码器 × N" sub="因果自注意力 + FFN" tone="accent" />
+  <Box x={490} y={36} w={180} h={34} label="每个位置预测下一个" size="sm" tone="strong" />
+  <Arrow from={[580, 200]} to={[580, 170]} />
+  <Arrow from={[580, 90]} to={[580, 70]} />
+  <Fragment slot="caption">左：源序列由编码器双向编码，解码器通过交叉注意力读取它，只在目标序列上计算损失。右：只有解码器时，条件和输出放在同一条序列里，每个位置都产生一个“预测下一个 token”的训练信号，生成时的 KV Cache 也覆盖整条序列。</Fragment>
+</Diagram>
+
+## 只留下解码器：GPT、BERT 与 T5
+
+2018 年出现了三条路线。GPT 只保留解码器，用“预测下一个 token”做预训练；BERT 只保留编码器，用掩码语言模型（masked language modeling）做预训练，再接分类头微调；T5（2019）坚持编码器—解码器，把所有任务都写成“文本到文本”，用 span corruption 预训练。到 2020 年 GPT-3 展示了上下文学习（in-context learning）之后，大语言模型几乎全部走向了 decoder-only。理由可以从三个角度理解。
+
+**训练信号的密度。** 因果语言模型的每个位置都有一个预测目标，一条长度为 $T$ 的序列产生 $T$ 个损失项。BERT 只在被掩码的约 15% 位置计算损失；T5 的 span corruption 也只在被破坏的片段上产生目标。在同样的计算量下，decoder-only 从数据中拿到的监督更多。Wang 等（2022）在 5B 参数规模上系统比较了架构与目标的组合，结论是：只做无监督预训练时，因果解码器加语言模型目标的零样本泛化最好；编码器—解码器只有在多任务微调之后才占优。
+
+**统一的接口。** 编码器—解码器需要预先决定哪部分是“输入”、哪部分是“输出”。而对话、代码补全、工具调用、长链推理都是不断追加的序列：上一轮的输出就是下一轮的输入。decoder-only 把一切都看作同一条序列的延续，提示、回答、工具结果交替拼接即可，不需要重新编码。
+
+**推理的效率。** 生成时 decoder-only 只需维护一份 KV Cache，新 token 追加到末尾；多轮对话可以复用前缀的缓存。编码器—解码器要同时缓存编码器输出（供交叉注意力使用）和解码器自注意力的 K/V，追加输入时编码器部分还需要重算。参数利用上也更简单：同样的参数量全部堆在一个栈上，而不是分成两半。
+
+编码器与编码器—解码器并没有消失：句向量与检索模型大多仍是双向编码器，Whisper 这样的语音模型和许多翻译系统仍是编码器—解码器，多模态模型的视觉部分（见[多模态：视觉语言模型](/architecture/multimodal/)）也是一个 ViT 编码器。但在“通用语言模型”这一主线上，2020 年之后的讨论默认都是 decoder-only。
+
+GPT-2（2019）与 GPT-3（2020）在 GPT 的基础上做了两处后来被普遍接受的改动：把 LayerNorm 移到子层之前（Pre-Norm），并在最后一层之后再加一个 LayerNorm；把残差分支输出投影的初始化按 $1/\sqrt{N}$ 缩放（$N$ 为残差层数）。第三部分 `GPT._init` 中的 $0.02/\sqrt{2L}$ 正是这一做法。GPT-3 175B 的配置是 96 层、$d=12288$、96 个头（头维 128）、上下文 2048，用 50257 个 token 的字节级 BPE。
+
+## LLaMA 配方：共识设计的形成
+
+2022 年的 PaLM 与 2023 年的 LLaMA 把一组分散的改进固定成了“默认配方”。LLaMA 论文明确列出了它相对 GPT-3 的三处改动及来源，加上一些更早已被采用的选择，构成了第三部分 `model.py` 的全部结构：
+
+| 部件 | 原始 Transformer | 共识选择 | 出处与理由 |
+| --- | --- | --- | --- |
+| 归一化位置 | Post-Norm | Pre-Norm（最后再加一层 Norm） | GPT-2；残差路径保持恒等，深层可训 |
+| 归一化方式 | LayerNorm | RMSNorm | Zhang & Sennrich（2019）；去掉减均值与偏置，更快，效果相当 |
+| 位置编码 | 正弦，加在输入上 | RoPE，作用在每层的 Q/K 上 | Su 等（2021）；只依赖相对位置，可外推 |
+| 前馈网络 | ReLU，$d_{ff}=4d$ | SwiGLU，$d_{ff}\approx\frac{8}{3}d$ | Shazeer（2020）；门控激活在同参数量下更好 |
+| 偏置项 | 线性层带偏置 | 去掉所有偏置 | PaLM；训练更稳定，几乎不损失质量 |
+| 注意力头 | MHA | GQA（LLaMA-2 70B 起） | Ainslie 等（2023）；缩小 KV Cache |
+| Dropout | 0.1 | 预训练不用 | 单轮遍历大数据，不存在过拟合 |
+
+这些改动的共同特点是**几乎不增加计算、却让训练更稳定或推理更便宜**。RMSNorm 比 LayerNorm 少一次归约和一个偏置向量，在 GPU 上这类“小算子”是访存受限的，省下的是带宽而不是 FLOPs。SwiGLU 多了一个矩阵，但把 $d_{ff}$ 从 $4d$ 缩到 $\frac{8}{3}d$ 后参数量不变：$3\cdot d\cdot\frac{8}{3}d = 8d^2 = 2\cdot d\cdot 4d$。RoPE 不增加参数，且让注意力分数只依赖相对位置，这为[长上下文：位置外推与滑动窗口](/architecture/long-context/)中的各种扩展留下了接口。
+
+2024—2025 年又有几项选择进入了“默认值”：**QK-Norm**（对每个头的 $q$、$k$ 再做一次 RMSNorm，防止注意力 logits 随训练膨胀；OLMo 2、Gemma 3、Qwen3 采用），**更大的 RoPE 底数**（LLaMA 3 用 500000），以及**更大的词表**（LLaMA 3 从 32000 扩到 128256）。它们的训练动力学原因在[训练稳定性](/pretraining/stability/)中讨论。
+
+## 2023—2026：效率驱动的分化
+
+当基础配方稳定下来，结构研究的重心转向了效率。下面这张时间线按“替换了哪一个部件”来组织，而不是按模型罗列。
+
+<Diagram width={720} height={300} label="2017 到 2026 年主干结构的变化时间线">
+  <Text x={76} y={14} label="2017" bold />
+  <Text x={218} y={14} label="2018—2020" bold />
+  <Text x={360} y={14} label="2022—2023" bold />
+  <Text x={502} y={14} label="2023—2024" bold />
+  <Text x={644} y={14} label="2025—2026" bold />
+  <Region x={10} y={28} w={132} h={236} title="Transformer" />
+  <Box x={18} y={56} w={116} h={40} label="编码器-解码器" size="sm" tone="muted" />
+  <Box x={18} y={106} w={116} h={40} label="Post-Norm" size="sm" tone="muted" />
+  <Box x={18} y={156} w={116} h={40} label="正弦位置" size="sm" tone="muted" />
+  <Box x={18} y={206} w={116} h={40} label="ReLU FFN" size="sm" tone="muted" />
+  <Region x={152} y={28} w={132} h={236} title="GPT-2/3, T5" />
+  <Box x={160} y={56} w={116} h={40} label="只用解码器" size="sm" />
+  <Box x={160} y={106} w={116} h={40} label="Pre-Norm" size="sm" />
+  <Box x={160} y={156} w={116} h={40} label="学习的位置" size="sm" />
+  <Box x={160} y={206} w={116} h={40} label="GELU FFN" size="sm" />
+  <Region x={294} y={28} w={132} h={236} title="PaLM, LLaMA" />
+  <Box x={302} y={56} w={116} h={40} label="去掉偏置" size="sm" tone="accent" />
+  <Box x={302} y={106} w={116} h={40} label="RMSNorm" size="sm" tone="accent" />
+  <Box x={302} y={156} w={116} h={40} label="RoPE" size="sm" tone="accent" />
+  <Box x={302} y={206} w={116} h={40} label="SwiGLU" size="sm" tone="accent" />
+  <Region x={436} y={28} w={132} h={236} title="Mistral, DeepSeek" />
+  <Box x={444} y={56} w={116} h={40} label="GQA / MLA" size="sm" tone="info" />
+  <Box x={444} y={106} w={116} h={40} label="滑动窗口" size="sm" tone="info" />
+  <Box x={444} y={156} w={116} h={40} label="YaRN 扩展" size="sm" tone="info" />
+  <Box x={444} y={206} w={116} h={40} label="细粒度 MoE" size="sm" tone="info" />
+  <Region x={578} y={28} w={132} h={236} title="Qwen3, Kimi, V4" />
+  <Box x={586} y={56} w={116} h={40} label="稀疏/压缩注意力" size="sm" tone="accent2" />
+  <Box x={586} y={106} w={116} h={40} label="线性注意力混合" size="sm" tone="accent2" />
+  <Box x={586} y={156} w={116} h={40} label="QK-Norm, MTP" size="sm" tone="accent2" />
+  <Box x={586} y={206} w={116} h={40} label="mHC 残差流" size="sm" tone="accent2" />
+  <Arrow from={[10, 284]} to={[710, 284]} tone="neutral" />
+  <Text x={700} y={274} label="时间" anchor="end" size="sm" tone="muted" />
+  <Fragment slot="caption">每一列是一个时期，同一行大致对应同一类部件（结构、归一化/残差、位置、前馈）。灰色是已被淘汰的设计，中间一列是 2023 年形成的共识配方，右侧两列是为长上下文与大规模稀疏化引入的新部件。</Fragment>
+</Diagram>
+
+**注意力的 KV Cache 压力。** LLaMA-2 70B 用 GQA 把 64 个查询头配上 8 个 KV 头，缓存缩小到 1/8；Mistral 7B（2023）用 4096 的滑动窗口让缓存不随长度增长；DeepSeek-V2（2024）的 MLA 把每层每 token 的缓存压缩成一个 512 维潜向量加 64 维位置键。2025 年以后，DeepSeek-V3.2 用闪电索引器做 token 级稀疏注意力，Qwen3-Next 与 Kimi Linear 用 3:1 的线性注意力与全注意力混合，DeepSeek-V4 再把 KV 沿序列维压缩 4 倍或 128 倍。这条线贯穿后面四章。
+
+**前馈网络的稀疏化。** Mixtral 8x7B（2023）把每层 FFN 换成 8 个专家、每个 token 激活 2 个，总参数 46.7B、激活 12.9B。DeepSeekMoE（2024）把专家切得更细并加上共享专家，DeepSeek-V3 用 256 个路由专家激活 8 个，配合无辅助损失的负载均衡。到 2025 年，Qwen3、Kimi K2、gpt-oss、LLaMA 4 等旗舰开源模型都是 MoE。
+
+**残差与训练目标。** 2024 年的 Hyper-Connections 把单条残差流扩展成多条，DeepSeek 在 2025 年底用流形约束（mHC）让它在大规模下稳定，并用在了 V4 中。DeepSeek-V3 引入顺序的多 token 预测（MTP）作为附加训练目标，V4 沿用。
+
+## 代表模型的超参数
+
+下表汇总了各时期代表模型的主干超参数。“FFN 比例”对稠密模型是 $d_{ff}/d$，对 MoE 是单个专家的隐藏宽度与 $d$ 之比；“KV 头”一栏对 MLA 写的是潜向量维度。表中数字来自各模型的论文、技术报告或官方 `config.json`，见参考文献。
+
+| 模型（年份） | $d$ | 层数 | 头数 | KV 头 | FFN 比例 | 词表 | 上下文 | 激活 / 总参数 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Transformer base（2017） | 512 | 6+6 | 8 | 8 | 4 | 37K | — | 65M |
+| GPT-2 XL（2019） | 1600 | 48 | 25 | 25 | 4 | 50257 | 1K | 1.5B |
+| GPT-3（2020） | 12288 | 96 | 96 | 96 | 4 | 50257 | 2K | 175B |
+| LLaMA-7B（2023） | 4096 | 32 | 32 | 32 | 2.69 | 32000 | 2K | 6.7B |
+| LLaMA-2-70B（2023） | 8192 | 80 | 64 | 8 | 3.5 | 32000 | 4K | 70B |
+| Mistral 7B（2023） | 4096 | 32 | 32 | 8 | 3.5 | 32000 | 8K（窗口 4K） | 7.3B |
+| Mixtral 8x7B（2023） | 4096 | 32 | 32 | 8 | 3.5 × 8 选 2 | 32000 | 32K | 12.9B / 46.7B |
+| LLaMA-3.1-405B（2024） | 16384 | 126 | 128 | 8 | 3.25 | 128256 | 128K | 405B |
+| DeepSeek-V3（2024） | 7168 | 61 | 128 | MLA 512 | 0.29 × 256 选 8 + 1 共享 | 129280 | 128K | 37B / 671B |
+| Qwen3-235B-A22B（2025） | 4096 | 94 | 64 | 4 | 0.375 × 128 选 8 | 151936 | 32K（YaRN 128K） | 22B / 235B |
+| Kimi K2（2025） | 7168 | 61 | 64 | MLA 512 | 0.29 × 384 选 8 + 1 共享 | 163840 | 128K | 32B / 1.04T |
+| gpt-oss-120b（2025） | 2880 | 36 | 64 | 8 | 1.0 × 128 选 4 | 201088 | 128K | 5.1B / 117B |
+| Qwen3-Next-80B-A3B（2025） | 2048 | 48 | 16 | 2 | 0.25 × 512 选 10 + 1 共享 | 151936 | 256K | 3B / 80B |
+| DeepSeek-V4-Flash（2026） | 4096 | 43 | 64 | 共享 KV | 0.5 × 256 选 6 + 1 共享 | 128K | 1M | 13B / 284B |
+| DeepSeek-V4-Pro（2026） | 7168 | 61 | 128 | 共享 KV | 0.43 × 384 选 6 + 1 共享 | 128K | 1M | 49B / 1.6T |
+
+表里有几处需要说明。Qwen3-Next 的 48 层中只有 12 层是注意力（门控注意力，16 个查询头、2 个 KV 头），其余 36 层是门控 DeltaNet 线性注意力，见[线性注意力、状态空间模型与混合架构](/architecture/linear-attention/)。DeepSeek-V4 的头维是 512，注意力层交替使用压缩稀疏注意力（CSA）与重度压缩注意力（HCA），键和值共享同一个压缩条目，见[稀疏注意力：从 NSA、DSA 到压缩注意力](/architecture/sparse-attention/)。gpt-oss 的层交替使用 128 token 的滑动窗口注意力与全注意力，并带有可学习的注意力汇聚点。“激活参数”的统计口径各家不完全一致：有的把输入嵌入算进去，有的只算输出头，下一节的代码会让这一点变得具体。
+
+<Bars label="代表性 MoE 模型的激活参数与总参数（十亿）" unit="B" items={[
+  { label: 'Mixtral 8x7B', segments: [{ value: 12.9, label: '激活', tone: 'accent' }, { value: 33.8, label: '未激活', tone: 'muted' }] },
+  { label: 'Qwen3-235B', segments: [{ value: 22, label: '激活', tone: 'accent' }, { value: 213, label: '未激活', tone: 'muted' }] },
+  { label: 'DeepSeek-V3', segments: [{ value: 37, label: '激活', tone: 'accent' }, { value: 634, label: '未激活', tone: 'muted' }] },
+  { label: 'Kimi K2', segments: [{ value: 32, label: '激活', tone: 'accent' }, { value: 1008, label: '未激活', tone: 'muted' }] },
+  { label: 'DeepSeek-V4-Pro', segments: [{ value: 49, label: '激活', tone: 'accent' }, { value: 1551, label: '未激活', tone: 'muted' }] },
+]}>
+  <Fragment slot="caption">深色段是每个 token 实际参与计算的参数，浅色段是只占显存、不参与该 token 计算的专家参数。激活比例从 Mixtral 的约 28% 降到 Kimi K2 与 V4-Pro 的约 3%：每 token 的 FLOPs 由激活参数决定，模型容量与显存占用由总参数决定。</Fragment>
+</Bars>
+
+## 用代码核对参数量
+
+表中的“总参数 / 激活参数”可以直接从超参数算出来。这是一个值得亲手做一遍的练习：它迫使你弄清每个矩阵的形状，也能暴露各家统计口径的差别。
+
+对一个 LLaMA 式的稠密层，设查询头数 $h$、KV 头数 $h_{kv}$、头维 $d_h$，注意力有 $W_Q, W_O$ 两个 $d\times hd_h$ 的矩阵和 $W_K, W_V$ 两个 $d\times h_{kv}d_h$ 的矩阵；SwiGLU 有三个 $d\times d_{ff}$ 的矩阵。忽略 RMSNorm 的增益向量（每层只有 $2d$ 个数），每层参数为
+
+<KeyEq label="稠密层参数量">
+
+$$
+P_{\text{layer}} = \underbrace{2d\,h d_h + 2d\,h_{kv} d_h}_{\text{attention}} + \underbrace{3d\,d_{ff}}_{\text{SwiGLU}},
+\qquad
+P = L\cdot P_{\text{layer}} + (1 + \mathbb 1[\text{untied}])\,Vd .
+$$
+
+</KeyEq>
+
+手算 LLaMA-2-7B：$d=4096$、$h=h_{kv}=32$、$d_h=128$，注意力每层 $4d^2 = 67{,}108{,}864$；$d_{ff}=11008$，FFN 每层 $3\times4096\times11008 = 135{,}266{,}304$；32 层合计 $6{,}476{,}005{,}376$。输入嵌入与输出头不共享，各 $32000\times4096$，合计 $262{,}144{,}000$。总数 $6{,}738{,}149{,}376$，正是官方的 6.74B。
+
+MoE 层把 FFN 换成 $E$ 个宽度为 $d_e$ 的专家、$E_s$ 个共享专家和一个 $d\times E$ 的路由器；总参数计入全部专家，激活参数只计入 top-$k$ 个路由专家与共享专家。MLA 的注意力矩阵形状不同（低秩的下投影与上投影，详见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)），但思路一样。下面的 `ModelSpec` 把这些规则写成代码：
+
+<CodeFile path="src/llms_from_scratch/architecture/specs.py" symbol={["ModelSpec.attention_params", "ModelSpec.layer_params", "ModelSpec.count"]} />
+
+用它核对 DeepSeek-V3：MLA 每层 $187{,}105{,}280$ 个参数；单个专家 $3\times7168\times2048=44{,}040{,}192$；前 3 层是 $d_{ff}=18432$ 的稠密层，其余 58 层各有 256 个路由专家、1 个共享专家。代码算出总参数 671.0B、激活参数 37.5B，与技术报告的 671B / 37B 一致（报告的 671B 不含 14B 的 MTP 模块）。Mixtral 算出 46.70B / 12.88B，Qwen3-235B-A22B 算出 235.1B / 22.2B。
+
+<CodeFile path="src/llms_from_scratch/architecture/specs.py" region="specs" />
+
+gpt-oss-120b 是一个有趣的反例：按“嵌入与输出头都算”的口径，激活参数是 5.7B，而 OpenAI 公布的是 5.1B。差额恰好约等于一个 $201088\times2880\approx0.58$B 的嵌入矩阵——它的口径不计输入嵌入。这很合理：嵌入是查表，不产生矩阵乘法 FLOPs。比较不同模型的“激活参数”时，最好先确认口径。`tests/architecture/test_specs.py` 对六个模型断言了 2% 以内的一致性。
+
+## 超参数的经验规律
+
+除了部件选择，超参数本身也形成了相当稳定的经验区间。CS336 第 3 讲对此有系统梳理，这里结合上表总结四条。
+
+### 前馈网络比例
+
+经典 FFN 取 $d_{ff}=4d$；门控 FFN（SwiGLU、GeGLU）取 $\frac{8}{3}d$ 以保持参数量不变，实际常向上取整到 64 或 256 的倍数（LLaMA-7B 的 11008 ≈ 2.69d）。也有模型放宽到 3.5d（LLaMA-2-70B、Mistral）。Kaplan 等（2020）的缩放实验显示，$d_{ff}/d$ 在 1 到 10 左右的范围内损失变化不大，4 附近是一个平坦的最优区。T5 11B 曾用过 $d_{ff}/d=64$ 的极端设置，说明这个比例并不敏感，但也没有带来收益。MoE 的单个专家要窄得多（DeepSeek-V3 是 0.29d），因为每个 token 会同时激活多个专家：DeepSeek-V3 每 token 激活 9 个专家，等效宽度 $9\times2048=18432$，与它的稠密层宽度完全相同。
+
+### 头数与头维
+
+几乎所有模型都满足 $h\cdot d_h = d$，并且 $d_h$ 多取 128。头维太小，单个头的表达能力受限（低秩瓶颈）；头维太大，头数变少，不同头能学到的注意力模式就少。gpt-oss 的 64 与 DeepSeek-V4 的 512 是两个方向的例外：V4 的键和值共享同一个压缩条目，单个大头维反而更划算。GQA 让 KV 头数与查询头数解耦，8 个 KV 头成为中大型模型的常见选择。
+
+### 宽深比
+
+宽深比 $d/L$ 决定参数是“堆宽”还是“堆深”。Kaplan 等发现在固定参数量下，损失在宽深比相差几十倍的范围内只变化几个百分点；上表中多数模型落在 $d/L\approx100\sim200$（GPT-3 为 128，LLaMA-3.1-405B 为 130，DeepSeek-V3 为 118）。系统因素同样重要：更深的网络在流水线并行下更好切分，但每层的串行延迟会累加；更宽的网络矩阵更大、GPU 利用率更高，张量并行切分也更容易。Qwen3-235B 的 $d/L\approx44$ 是一个偏深的例子。
+
+### 词表大小
+
+单语模型的词表多在 3 万到 5 万（GPT-2 为 50257，LLaMA 为 32000）；多语言与代码模型普遍扩大到 10 万到 25 万（LLaMA 3 为 128256，Qwen 为 151936，gpt-oss 为 201088）。更大的词表让同一段文本切出更少的 token，从而降低训练与推理的序列长度；代价是嵌入和输出头参数增加，以及 softmax 的计算量。对 70B 以上的模型，嵌入参数只占 1% 左右，扩大词表几乎是“免费”的；对 1B 以下的小模型，词表参数可能占到 20% 以上，此时常与输出头共享权重（tied embeddings）。
+
+<Callout tone="note" title="哪些设计没有成为共识">
+并行块（PaLM 与 GPT-J 把注意力和 FFN 并联，$x + \mathrm{Attn}(\mathrm{Norm}(x)) + \mathrm{FFN}(\mathrm{Norm}(x))$）能把两次矩阵乘法融合以提速，但大多数后来的模型仍用串行块。Gemma 2 的 logit soft-capping、Gemma 与 OLMo 2 的“子层后再加一次归一化”（sandwich norm / post-norm 变体）也只在部分模型中使用。这些设计各有道理，但没有形成像 RMSNorm、SwiGLU、RoPE 那样的普遍共识。
+</Callout>
+
+## 小结
+
+- 原始 Transformer 是编码器—解码器、Post-Norm、正弦位置编码、ReLU FFN；到 2023 年，主流已收敛为 decoder-only 的 Pre-Norm RMSNorm + RoPE + SwiGLU + 无偏置，再加上 GQA。
+- decoder-only 胜出的原因是训练信号更密、接口统一（一切都是序列延续）、推理只需一份可复用的 KV Cache。
+- 2023 年之后的变化由效率驱动：缓存（GQA、MLA、稀疏/压缩/线性注意力）、容量（MoE）、稳定性（QK-Norm、mHC）与训练目标（MTP）。
+- 参数量可以从超参数精确算出：稠密层 $2dhd_h+2dh_{kv}d_h+3dd_{ff}$；MoE 的总参数计入全部专家，激活参数只计入被选中的专家；“激活参数”的口径需留意是否包含嵌入。
+- 超参数经验：门控 FFN 取约 $\frac{8}{3}d$，$d_h=128$，$d/L\approx100\sim200$，词表 3 万—25 万；这些区间都相当平坦，不必精调。
+
+## 练习
+
+1. 用本章的公式计算 LLaMA-3-8B（$V=128256$、$d=4096$、$L=32$、$h=32$、$h_{kv}=8$、$d_{ff}=14336$，嵌入不共享）的参数量，并指出嵌入占比。
+
+<details>
+<summary>答案</summary>
+
+注意力每层 $2\cdot4096\cdot4096 + 2\cdot4096\cdot1024 = 33{,}554{,}432 + 8{,}388{,}608 = 41{,}943{,}040$；FFN 每层 $3\cdot4096\cdot14336 = 176{,}160{,}768$；32 层合计 $6{,}979{,}321{,}856$。嵌入与输出头 $2\cdot128256\cdot4096 = 1{,}050{,}673{,}152$。总计约 $8.03$B，嵌入占约 13%。与 LLaMA-2-7B 相比，层参数反而略多（FFN 更宽，GQA 省下的 K/V 矩阵被抵消），而词表扩大 4 倍让嵌入多出约 0.8B。
+
+</details>
+
+2. SwiGLU 有三个矩阵，经典 FFN 有两个。要让二者参数量相等，SwiGLU 的 $d_{ff}$ 应是 $d$ 的多少倍？如果两者 FLOPs 也要相等呢？
+
+<details>
+<summary>答案</summary>
+
+经典 FFN 参数为 $2\cdot d\cdot4d=8d^2$，SwiGLU 为 $3d\,d_{ff}$，令其相等得 $d_{ff}=\frac{8}{3}d$。每个参数在前向中恰好参与一次乘加（2 FLOPs/token），所以矩阵乘法 FLOPs 与参数量成正比，参数相等时 FLOPs 也相等；逐元素的 SiLU 与乘法相比可以忽略。
+
+</details>
+
+3. 一个 MoE 层有 64 个宽度为 $d_e$ 的路由专家、每 token 激活 6 个，另有 2 个共享专家。若想让它的激活计算量等于一个 $d_{ff}=4d$ 的经典 FFN，$d_e$ 应取多少？总参数是那个稠密 FFN 的多少倍？
+
+<details>
+<summary>答案</summary>
+
+每 token 经过 $6+2=8$ 个 SwiGLU 专家，激活参数 $8\cdot3\,d\,d_e$，令其等于 $8d^2$ 得 $d_e=d/3$。总参数 $(64+2)\cdot3\,d\cdot\frac{d}{3}=66d^2$，是稠密 FFN 的 $66/8=8.25$ 倍。这就是 MoE 的核心交换：同样的每 token 计算，换来约 8 倍的参数容量。DeepSeekMoE 16B 的配置正是 64 个路由专家选 6 个加 2 个共享专家。
+
+</details>
+
+4. 为什么 Post-Norm 的深层模型对学习率预热特别敏感？从残差路径上梯度的传播角度解释。
+
+<details>
+<summary>答案</summary>
+
+Post-Norm 中第 $l$ 层的输出是 $\mathrm{LN}(x_l + F(x_l))$，反向传播时梯度要依次乘上每一层 LayerNorm 的雅可比，残差路径不再是恒等映射。LayerNorm 的雅可比会按输入范数的倒数缩放梯度，且这些因子在初始化时不受控，层数一多就使靠近输出的层梯度很大、靠近输入的层梯度很小。训练初期用大学习率时，输出侧参数更新过猛而发散；预热让 Adam 的二阶矩估计先稳定下来。Pre-Norm 的残差路径 $x_{l+1}=x_l+F(\mathrm{Norm}(x_l))$ 对 $x_l$ 的雅可比是 $I+\partial F/\partial x_l$，恒等项保证梯度可以直接回到浅层。
+
+</details>
+
+5. 表中 Qwen3-Next-80B-A3B 的 $d=2048$ 而层数为 48，每个专家宽度只有 512。用本章的方法粗略估计：每层 512 个专家的参数大约是多少？这能解释总参数 80B 的大部分吗？
+
+<details>
+<summary>答案</summary>
+
+单个专家 $3\times2048\times512\approx3.15$M，512 个专家约 1.61B，再加 1 个共享专家。48 层合计约 77.3B，确实占了 80B 的绝大部分；注意力（含 DeltaNet）与嵌入只占剩下的 2—3B。这说明在极度稀疏的 MoE 中，参数几乎全在专家里，而每 token 只用 10 个路由专家加 1 个共享专家，约 $48\times11\times3.15\text{M}\approx1.7$B，再加注意力与嵌入，与官方的 3B 激活量级吻合。
+
+</details>
+
+## 参考文献
+
+- Vaswani et al. [Attention Is All You Need](https://arxiv.org/abs/1706.03762). 2017.
+- Radford et al. [Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)（GPT-2）. 2019；Brown et al. [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165)（GPT-3）. 2020.
+- Devlin et al. [BERT](https://arxiv.org/abs/1810.04805). 2018；Raffel et al. [T5](https://arxiv.org/abs/1910.10683). 2019.
+- Wang et al. [What Language Model Architecture and Pretraining Objective Work Best for Zero-Shot Generalization?](https://arxiv.org/abs/2204.05832) 2022.
+- Xiong et al. [On Layer Normalization in the Transformer Architecture](https://arxiv.org/abs/2002.04745). 2020；Zhang & Sennrich. [Root Mean Square Layer Normalization](https://arxiv.org/abs/1910.07467). 2019.
+- Shazeer. [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202). 2020；Su et al. [RoFormer](https://arxiv.org/abs/2104.09864). 2021.
+- Chowdhery et al. [PaLM](https://arxiv.org/abs/2204.02311). 2022；Touvron et al. [LLaMA](https://arxiv.org/abs/2302.13971)、[Llama 2](https://arxiv.org/abs/2307.09288). 2023；Llama Team. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783). 2024.
+- Jiang et al. [Mistral 7B](https://arxiv.org/abs/2310.06825)、[Mixtral of Experts](https://arxiv.org/abs/2401.04088). 2023—2024.
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024；[DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348). 2026.
+- Qwen Team. [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388). 2025；[Qwen3-235B-A22B config.json](https://huggingface.co/Qwen/Qwen3-235B-A22B/blob/main/config.json)；[Qwen3-Next-80B-A3B 模型卡](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct).
+- Kimi Team. [Kimi K2: Open Agentic Intelligence](https://arxiv.org/abs/2507.20534). 2025；[Kimi-K2-Instruct config.json](https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/config.json).
+- OpenAI. [gpt-oss-120b & gpt-oss-20b Model Card](https://arxiv.org/abs/2508.10925). 2025；[gpt-oss-120b config.json](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json).
+- Kaplan et al. [Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361). 2020.
+- Stanford CS336. [Lecture 3: Architectures, Hyperparameters](https://cs336.stanford.edu/spring2025/). 2025.

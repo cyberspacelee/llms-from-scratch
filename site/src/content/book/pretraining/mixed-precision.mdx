@@ -2,7 +2,284 @@
 title: 混合精度训练：从 FP16 到 FP8
 description: 损失缩放与主权重，BF16 的取舍，DeepSeek-V3 的细粒度 FP8 量化与高精度累加。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/precision.py
+  - tests/pretraining/test_precision.py
 ---
 
-本章正在撰写。
+在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)里我们看到，训练的时间几乎全部花在矩阵乘法上，而一块 H100 的 BF16 稠密矩阵乘峰值约是 FP32（不使用 TF32）的十几倍，FP8 又是 BF16 的两倍。用更少的比特表示数，意味着更快的计算、更少的显存和通信。代价是精度：可表示的范围变窄、相邻两个数之间的间隔变大。混合精度训练（mixed-precision training）的全部技术，都是为了在“大部分计算用低精度”的同时，让训练结果与全 FP32 训练几乎一样。
+
+本章按时间顺序走过三代做法。FP16 时代的核心问题是**范围**：梯度太小会下溢成 0，于是有了损失缩放和动态缩放算法。BF16 用与 FP32 相同的指数位解决了范围问题，但只有 8 位有效数字，于是需要 FP32 主权重。FP8 把两个问题同时推到极限：E4M3 只有 4 位有效数字、约 18 个二进制数量级的范围，必须为每个张量甚至每个小块单独选择缩放因子；DeepSeek-V3 的细粒度分块量化和“定期提升到 CUDA Core 做 FP32 累加”是目前在超大规模上被验证过的方案。浮点数的基本结构（符号、指数、尾数，次正规数，舍入）在[浮点数与数值稳定性](/math/numerics/)中已经讲过，这里直接使用。
+
+## 训练中用到的浮点格式
+
+一个二进制浮点数由符号位 $s$、$e$ 位指数和 $m$ 位尾数组成，正规数的值是 $(-1)^s\cdot1.f\cdot2^{E-\text{bias}}$，其中 $\text{bias}=2^{e-1}-1$。两个参数决定了格式的性质：**指数位数决定范围**（能表示多大和多小的数），**尾数位数决定精度**（1 与下一个可表示数之间的距离 $2^{-m}$，称为机器精度 eps）。
+
+<Diagram width={680} height={290} label="五种浮点格式的位布局">
+  <Text x={88} y={48} label="FP32" anchor="end" bold />
+  <Box x={100} y={30} w={18} h={36} label="S" tone="accent2" />
+  <Box x={118} y={30} w={144} h={36} label="E8" tone="accent" />
+  <Box x={262} y={30} w={414} h={36} label="M23" tone="info" />
+  <Text x={88} y={100} label="BF16" anchor="end" bold />
+  <Box x={100} y={82} w={18} h={36} label="S" tone="accent2" />
+  <Box x={118} y={82} w={144} h={36} label="E8" tone="accent" />
+  <Box x={262} y={82} w={126} h={36} label="M7" tone="info" />
+  <Text x={88} y={152} label="FP16" anchor="end" bold />
+  <Box x={100} y={134} w={18} h={36} label="S" tone="accent2" />
+  <Box x={118} y={134} w={90} h={36} label="E5" tone="accent" />
+  <Box x={208} y={134} w={180} h={36} label="M10" tone="info" />
+  <Text x={88} y={204} label="E4M3" anchor="end" bold />
+  <Box x={100} y={186} w={18} h={36} label="S" tone="accent2" />
+  <Box x={118} y={186} w={72} h={36} label="E4" tone="accent" />
+  <Box x={190} y={186} w={54} h={36} label="M3" tone="info" />
+  <Text x={88} y={256} label="E5M2" anchor="end" bold />
+  <Box x={100} y={238} w={18} h={36} label="S" tone="accent2" />
+  <Box x={118} y={238} w={90} h={36} label="E5" tone="accent" />
+  <Box x={208} y={238} w={36} h={36} label="M2" tone="info" />
+  <Text x={430} y={100} label="与 FP32 同范围，精度低" anchor="start" size="sm" tone="muted" />
+  <Text x={430} y={152} label="精度较高，范围窄" anchor="start" size="sm" tone="muted" />
+  <Text x={280} y={204} label="前向的权重与激活" anchor="start" size="sm" tone="muted" />
+  <Text x={280} y={256} label="与 FP16 同范围，常用于梯度" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">每一格宽度正比于位数（1 位 = 18 单位）。橙色是符号位，蓝绿色是指数（决定范围），浅蓝是尾数（决定精度）。BF16 就是截掉低 16 位尾数的 FP32，所以两者之间的转换只是截断与舍入；FP16 用更多尾数换来了更窄的范围。</Fragment>
+</Diagram>
+
+| 格式 | 指数/尾数 | 最大值 | 最小正规数 | 最小次正规数 | eps | 动态范围（二进位） |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| FP32 | 8 / 23 | $3.4\times10^{38}$ | $1.2\times10^{-38}$ | $1.4\times10^{-45}$ | $2^{-23}$ | 277 |
+| BF16 | 8 / 7 | $3.4\times10^{38}$ | $1.2\times10^{-38}$ | $9.2\times10^{-41}$ | $2^{-7}$ | 261 |
+| FP16 | 5 / 10 | 65504 | $6.1\times10^{-5}$ | $6.0\times10^{-8}$ | $2^{-10}$ | 40 |
+| FP8 E4M3 | 4 / 3 | 448 | $2^{-6}$ | $2^{-9}$ | $2^{-3}$ | 17.8 |
+| FP8 E5M2 | 5 / 2 | 57344 | $2^{-14}$ | $2^{-16}$ | $2^{-2}$ | 31.8 |
+
+“动态范围”是 $\log_2(\text{最大值}/\text{最小次正规数})$，即能覆盖多少个 2 的幂。表中 E4M3 的最大值 448 值得解释：按 IEEE 的惯例，指数全 1 的编码保留给无穷大和 NaN，最大值应是 $1.875\times2^7=240$。OCP 的 FP8 规范（也是 NVIDIA 硬件与 PyTorch `float8_e4m3fn` 采用的格式）放弃了无穷大，只把“指数与尾数全 1”保留为 NaN，于是指数全 1 的其余编码都可以表示有限数，最大值变为 $1.75\times2^8=448$。
+
+为了在没有对应硬件的 CPU 上做实验，我们写一个函数，把任意 float 张量就近舍入（ties-to-even）到指定的 (指数位, 尾数位) 格式。思路是：先求出每个数所在的二进位区间 $[2^k,2^{k+1})$，这个区间里相邻可表示数的间距是 $2^{k-m}$；除以间距后取整再乘回。低于最小正规数时间距固定为最小次正规数，这就是渐进下溢。
+
+<CodeFile path="src/llms_from_scratch/pretraining/precision.py" region="formats" />
+
+测试 `test_round_to_format_matches_torch` 在跨越 8 个数量级的随机数上，验证它与 PyTorch 自带的 `float16`、`bfloat16`、`float8_e4m3fn`、`float8_e5m2` 转换逐位一致。后面所有 FP8 实验都建立在这个函数之上。
+
+## FP16 与损失缩放
+
+### 问题：梯度下溢
+
+2017 年前后的 GPU（V100）只有 FP16 Tensor Core。FP16 有 10 位尾数，精度对神经网络来说够用，问题出在范围：最小正规数约 $6\times10^{-5}$，最小次正规数约 $6\times10^{-8}$。而反向传播中的梯度，尤其是深层网络中靠近输入的层、激活值的梯度，大量落在 $10^{-8}$ 甚至更小的量级。[Micikevicius et al. 2018](https://arxiv.org/abs/1710.03740) 统计了多种网络的梯度直方图，发现相当一部分非零梯度小于 $2^{-24}$，转换成 FP16 后直接变成 0。
+
+```python title="FP16 下溢"
+import torch
+g = torch.tensor([1e-8, 2e-8])
+g.half()                          # tensor([0., 0.], dtype=torch.float16)
+(g * 2**16).half().float() / 2**16  # tensor([1.0006e-08, 1.9997e-08])
+```
+
+### 损失缩放
+
+解决办法利用了反向传播的线性性。把损失乘以常数 $S$ 再反向传播，由链式法则，每一个中间梯度和参数梯度都恰好乘以 $S$：
+
+$$
+\frac{\partial(S\,\mathcal L)}{\partial\theta}=S\,\frac{\partial\mathcal L}{\partial\theta}.
+$$
+
+于是整个梯度分布在对数轴上向右平移了 $\log_2S$ 个二进位，原本会下溢的小梯度进入了 FP16 的可表示范围。在更新参数之前，把梯度转成 FP32 并除以 $S$，得到真实的梯度。上面代码的最后一行正是这个过程：$10^{-8}$ 乘以 $2^{16}$ 后约为 $6.6\times10^{-4}$，安全地存入 FP16，再除回来，误差只有 0.06%。
+
+$S$ 取多大？太小，小梯度仍然下溢；太大，大梯度会超过 65504 变成无穷大。最佳的 $S$ 随模型和训练阶段变化，所以实践中用**动态损失缩放**：
+
+<Steps label="动态损失缩放的一步" items={[
+  { title: '缩放', detail: '用 S·L 做反向传播，得到放大了 S 倍的梯度' },
+  { title: '反缩放并检查', detail: '梯度转 FP32 后除以 S，检查是否有 inf 或 NaN' },
+  { title: '有溢出', detail: '跳过本步更新，S ← S/2，计数清零' },
+  { title: '无溢出', detail: '正常更新；连续 N 步无溢出则 S ← 2S' },
+]} />
+
+这是一个“试探上限”的算法：$S$ 不断尝试增大，一旦溢出就退回。溢出的那一步被整个跳过，相当于丢掉了一个批次的数据——只要溢出不频繁，这几乎没有影响。PyTorch 的 `torch.amp.GradScaler` 默认 $S_0=2^{16}$、增长间隔 2000 步、增长因子 2、回退因子 0.5，我们的实现采用相同的默认值：
+
+<CodeFile path="src/llms_from_scratch/pretraining/precision.py" region="loss_scaler" />
+
+<Plot label="动态损失缩放因子随训练步数的变化" x={[0, 700]} y={[9, 17]} xLabel="训练步数" yLabel="log₂ S"
+  series={[{ points: [[0,16],[1,16],[1,15],[2,15],[2,14],[3,14],[3,13],[30,13],[30,12],[31,12],[31,11],[131,11],[131,12],[231,12],[231,13],[232,13],[232,12],[250,12],[250,11],[350,11],[350,12],[450,12],[450,13],[451,13],[451,12],[520,12],[520,11],[620,11],[620,12],[621,12],[621,11],[699,11]], label: 'log₂ S' }]}
+  markers={[{ at: [30, 13], label: '溢出：跳过并减半', tone: 'accent2' }, { at: [131, 12], label: '100 步无溢出：加倍', tone: 'accent' }]}>
+  <Fragment slot="caption">一次模拟（增长间隔取 100 步以便观察）。开始时 S = 2¹⁶ 太大，前三步连续溢出、连续减半；之后 S 在“能容纳的上限”附近形成锯齿：每次加倍后很快溢出，又退回。曲线的平台高度就是当前梯度分布允许的最大缩放。</Fragment>
+</Plot>
+
+测试 `test_dynamic_loss_scaler_skips_and_backs_off` 检查溢出时参数保持不变且 $S$ 减半、连续 `growth_interval` 步无溢出后 $S$ 加倍，以及反缩放后的更新量正确。
+
+注意反缩放必须发生在**梯度裁剪之前**：裁剪阈值是针对真实梯度设定的，用放大了 $S$ 倍的梯度去比较毫无意义。PyTorch 的规范顺序是 `scaler.scale(loss).backward()` → `scaler.unscale_(optimizer)` → `clip_grad_norm_` → `scaler.step(optimizer)` → `scaler.update()`。
+
+## BF16：用精度换范围
+
+BF16（brain floating point）最早由 Google 在 TPU 上使用，A100 之后的 NVIDIA GPU 都支持。它保留了 FP32 的 8 位指数，把尾数从 23 位截到 7 位。范围与 FP32 相同，梯度下溢的问题消失了，**不再需要损失缩放**。这正是今天的大模型训练几乎都用 BF16 的原因：省去了动态缩放的复杂性和跳步。
+
+代价是精度。BF16 的 eps 是 $2^{-7}\approx0.0078$，比 FP16 的 $2^{-10}$ 粗 8 倍。这在两个地方会出问题。
+
+**参数更新会被“淹没”**（swamping）。设权重 $w=1$，某一步的更新是 $10^{-3}$。$1+10^{-3}$ 在 BF16 中最近的可表示数是 1（1 之后的下一个数是 $1+2^{-7}\approx1.0078$，而 $10^{-3}$ 不到半个间距），于是这次更新被完全丢掉。下一步、再下一步也一样：
+
+<CodeFile path="src/llms_from_scratch/pretraining/precision.py" region="master_weights" />
+
+测试 `test_bf16_swamps_small_updates_but_fp32_does_not` 验证：在 BF16 中把 $10^{-3}$ 累加 1000 次，权重仍然是 1；在 FP32 中得到 2。训练后期学习率很小、单步更新相对于权重本身常常小于 $2^{-8}$，如果参数只有 BF16 一份，训练会停滞。
+
+**解决办法是 FP32 主权重**（master weights）：优化器维护一份 FP32 的参数副本，更新在 FP32 中进行；每步更新后再把它转换成 BF16 供前向与反向使用。优化器状态 $m$、$v$ 同理保持 FP32（或至少 BF16 之上的精度）。这就是上一章显存表中“每参数 16 字节”的来源：BF16 参数与梯度各 2 字节，FP32 主权重、$m$、$v$ 各 4 字节。
+
+**归约会累积误差**。对 $n$ 个数求和时，每次加法的舍入误差约为当前部分和的 eps 倍，最坏情况下总误差随 $n$ 线性增长。softmax 的分母、RMSNorm 中的均方、交叉熵中的 logsumexp 都是长归约，在 BF16 中做会明显失真。所以这些算子应在 FP32 中计算。全书共用的 `RMSNorm`（[Transformer 块：归一化、残差与前馈网络](/transformer/transformer-block/)）在内部先把输入转成 float32 再计算，就是这个原因。
+
+### torch.autocast：算子级的精度策略
+
+手工决定每个算子用什么精度既繁琐又容易出错。`torch.autocast` 在一个上下文中自动做这件事：它为每个算子维护一张策略表。以 CUDA 为例，[官方文档](https://docs.pytorch.org/docs/stable/amp.html)把算子分成三类：
+
+- **转为低精度**：`matmul`、`linear`、`conv`、`bmm`、`baddbmm` 等。它们是计算的主体，能用 Tensor Core 加速，且内部累加在 FP32 中进行，精度损失可控。
+- **转为 FP32**：`softmax`、`log_softmax`、`layer_norm`、`exp`、`log`、`pow`、`sum`、`cross_entropy`、`nll_loss` 等。它们包含长归约或对输入误差敏感。
+- **跟随输入**：其余逐元素算子；如果输入的精度不一致（例如 BF16 加 FP32），提升到较宽的类型。
+
+不同设备的策略表不同：在 CPU 上，`softmax`、`layer_norm` 等在 autocast 下仍输出 BF16，只有交叉熵等少数算子被强制为 FP32。我们的 `autocast_dtypes` 在 CPU 上运行几个代表性算子，测试 `test_autocast_policy_on_cpu` 检查矩阵乘输出 BF16、混合输入提升为 FP32、交叉熵为 FP32。这提醒我们：**autocast 只是一张策略表，数值关键的算子最好像 `RMSNorm` 那样显式地转 FP32**，而不是依赖设备默认行为。
+
+需要强调的是，autocast 只管计算精度，不管存储：参数本身仍是 FP32，autocast 在每次进入低精度算子时临时转换。这与“参数存 BF16、另存 FP32 主权重”的手工方案（Megatron、DeepSpeed 的做法）效果类似，但显存占用不同。
+
+## FP8：为每个张量选择尺度
+
+H100 引入了 FP8 Tensor Core，矩阵乘吞吐是 BF16 的两倍。FP8 有两种格式：E4M3 精度较高（3 位尾数），范围只有约 17.8 个二进位；E5M2 范围与 FP16 相当，只有 2 位尾数。NVIDIA 的 [Transformer Engine](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html) 默认采用“混合”配方：前向的权重和激活用 E4M3，反向的梯度用 E5M2（梯度的动态范围更大）。
+
+17.8 个二进位意味着：一个张量中最大值与最小值之比如果超过约 $2^{17.8}\approx2.3\times10^5$，就必然有一端溢出或下溢。神经网络的权重、激活、梯度的绝对尺度相差几个数量级，而且随训练变化，所以 FP8 **必须配合缩放因子使用**：量化时先乘以 $s$，使张量的值恰好填满 FP8 的范围；计算完再除以 $s$。
+
+### 逐张量缩放与延迟缩放
+
+最直接的选择是让张量的最大绝对值 $\text{amax}$ 映射到 FP8 的最大值：
+
+$$
+s=\frac{448}{\text{amax}},\qquad q=\operatorname{round}_{\text{E4M3}}(x\cdot s),\qquad \hat x=q/s .
+$$
+
+这叫**当前缩放**（current scaling）：问题是必须先完整地读一遍张量求出 amax，才能开始量化。对于由上一个算子刚产生的激活，这多出一次显存读写，在访存受限的情况下抵消了 FP8 的收益。
+
+Transformer Engine 早期的默认方案是**延迟缩放**（delayed scaling）：用**过去若干步**的 amax 历史（取最大值）计算本步的缩放因子，本步的 amax 在产生张量的同一个 kernel 中顺便统计，留给下一步使用。这样量化不需要额外的一遍扫描。它的风险是：如果本步突然出现比历史大得多的离群值，这个值会被饱和截断到 448/s。
+
+<CodeFile path="src/llms_from_scratch/pretraining/precision.py" region="fp8_quant" />
+
+测试 `test_delayed_scaling_saturates_on_new_outlier` 演示了这一点：历史 amax 约为 3，本步出现 100，量化后被截断到 3 附近；amax 历史更新为 100，下一步才会适应。
+
+### 离群值：为什么逐张量缩放不够
+
+逐张量缩放的根本问题是：**整个张量共享一个尺度，一个离群值会拖累所有元素**。我们来定量分析。
+
+设一组元素共享缩放因子 $s=448/\text{amax}_G$。对于缩放后落在正规范围内（$|xs|\ge2^{-6}$）的元素，E4M3 的相对舍入误差不超过 $2^{-4}$，与 $\text{amax}_G$ 无关。但对于 $|xs|<2^{-6}$ 的元素，它们落入次正规区，绝对误差不超过半个最小间距 $2^{-10}$。换回原单位：
+
+$$
+|x-\hat x|\ \le\ \frac{2^{-10}}{s}=\frac{\text{amax}_G}{448\cdot2^{10}}\approx\frac{\text{amax}_G}{4.6\times10^{5}} .
+$$
+
+所以**每个元素的绝对误差下限正比于它所在组的 amax**。具体地，绝对值小于 $\text{amax}_G\cdot2^{-6}/448\approx\text{amax}_G/2.9\times10^4$ 的元素失去相对精度，小于 $\text{amax}_G/9.2\times10^5$ 的元素直接变成 0。如果一个张量里大部分值在 1 附近，而某个通道有 $10^5$ 的离群值，那么在逐张量缩放下，几乎所有普通值都落进了次正规区。
+
+大模型的激活恰恰有这样的离群值：[LLM.int8()](https://arxiv.org/abs/2208.07339)（Dettmers et al. 2022）发现，超过一定规模后，少数几个隐藏维度会系统性地出现比其他维度大几十到上百倍的激活值。解决办法是**缩小共享缩放因子的组**：把张量切成小块，每块有自己的 amax 和 $s$。离群值只抬高它所在小块的误差下限，其他块不受影响。
+
+<Plot label="一个通道含离群值时的 FP8 量化误差" x={[10, 100000]} y={[0.01, 1]} logX logY xLabel="离群通道的放大倍数" yLabel="普通元素的相对误差"
+  series={[
+    { points: [[10, 0.0265], [100, 0.0265], [1000, 0.0265], [10000, 0.0365], [100000, 0.3344]], label: '逐张量' },
+    { points: [[10, 0.0264], [100, 0.0265], [1000, 0.0264], [10000, 0.0278], [100000, 0.1174]], label: '128×128 块', tone: 'info' },
+    { points: [[10, 0.0258], [100, 0.0258], [1000, 0.0258], [10000, 0.026], [100000, 0.0503]], label: '1×128 块', tone: 'accent2' },
+  ]}>
+  <Fragment slot="caption">一个 512×1024 的标准正态矩阵，把第 5 列（一个“离群通道”）放大 M 倍，用 E4M3 量化后计算其余元素的相对误差（用 quantize_fp8 与 quantize_blockwise 测得）。离群值在 10⁴ 以内时三者相同（约 2.6%，即 E4M3 的固有舍入误差）；超过之后，逐张量缩放的误差迅速上升，而 1×128 分块只影响与离群通道同块的 127 个元素。</Fragment>
+</Plot>
+
+这张图也说明了 E4M3 范围的实际含义：离群值比普通值大 $10^3$ 倍时，逐张量缩放仍然没有问题，因为普通值仍在正规范围内；只有当比值接近 $2^{14}$ 以上，误差才开始失控。测试 `test_blockwise_quantization_isolates_outliers` 用一个 $10^6$ 倍的离群值验证：逐张量量化时普通元素的误差超过 50%，按 1×128 分块时不到 5%。
+
+## DeepSeek-V3 的 FP8 训练方案
+
+DeepSeek-V3（[技术报告](https://arxiv.org/abs/2412.19437)第 3.3 节）是第一个公开报告在数千亿参数、十万亿 token 规模上用 FP8 完成预训练的模型。它的方案由几个互相配合的决定组成。
+
+**细粒度量化**。激活按 **1×128** 的小块量化（每个 token 每 128 个通道一个缩放因子），权重按 **128×128** 的块量化（每 128 个输入通道 × 128 个输出通道一个缩放因子）。这正好对应上面的分析：激活的离群值出现在少数通道上，1×128 的分组让一个离群通道只影响同一 token 同一块中的 127 个元素；权重的分布更平滑，128×128 的块已经足够。由于分组足够细，DeepSeek-V3 对所有张量（包括梯度）都使用 E4M3，而不需要 E5M2 的更大范围。缩放因子在线计算（current scaling），不使用延迟缩放。
+
+**提升累加精度**。这是一个更隐蔽的问题。FP8 GEMM 在 Tensor Core 内部做乘加时，累加器的精度并不是完整的 FP32：DeepSeek 报告 H800 的 FP8 GEMM 在累加时只保留了约 14 位的有效位。在 $K=4096$ 的内积中，几千次这样的累加使误差显著增大（报告中给出的最大相对误差接近 2%）。DeepSeek 的做法是：沿 $K$ 维每累加 $N_C=128$ 个元素（相当于 4 次 WGMMA 指令），就把 Tensor Core 的部分和拷贝到 CUDA Core 的 FP32 寄存器中，在那里乘上两个对应的缩放因子并做真正的 FP32 累加。
+
+<Diagram width={640} height={350} label="DeepSeek-V3 的细粒度 FP8 GEMM">
+  <Matrix x={60} y={60} rows={4} cols={8} cell={26} gap={2} title="激活 X：每格 1×128" rowLabels={['t1', 't2', 't3', 't4']}
+    highlight={[{ cols: [2], tone: 'accent' }, { cells: [[1, 0]], tone: 'accent2' }]} />
+  <Matrix x={360} y={60} rows={4} cols={8} cell={26} gap={2} title="权重 W：每格 128×128" rowLabels={['n1', 'n2', 'n3', 'n4']}
+    highlight={[{ cols: [2], tone: 'accent' }]} />
+  <Text x={172} y={190} label="K 方向 →（每列 128 个通道）" size="sm" tone="muted" />
+  <Text x={472} y={190} label="K 方向 →" size="sm" tone="muted" />
+  <Box x={30} y={230} w={170} h={64} label="Tensor Core" sub="一段 K=128 的部分和" tone="accent" />
+  <Box x={240} y={230} w={160} h={64} label="反缩放" sub="÷ (s_x · s_w)" />
+  <Box x={440} y={230} w={170} h={64} label="FP32 累加器" sub="CUDA Core 寄存器" tone="strong" />
+  <Arrow from={[200, 262]} to={[240, 262]} />
+  <Arrow from={[400, 262]} to={[440, 262]} />
+  <Arrow from={[525, 294]} via={[[525, 316], [115, 316]]} to={[115, 294]} tone="accent2" dashed label="下一段 K" labelSide="below" />
+  <Fragment slot="caption">上方每一格代表一个量化组，各有自己的缩放因子：激活按 token × 128 通道分组，权重按 128 × 128 分块。蓝色的一列是同一段 K（128 个通道）：Tensor Core 用 FP8 算出这一段的部分和，随后提升到 CUDA Core，乘上这一段的两个缩放因子的倒数并在 FP32 中累加。橙色格表示一个含离群值的组，它只影响自己这一组的精度。</Fragment>
+</Diagram>
+
+这个设计巧妙的地方在于，**分块缩放和提升累加天然契合**：既然缩放因子沿 $K$ 每 128 个元素变化一次，部分和本来就必须在每 128 个元素后乘上不同的缩放因子，这一步只能在 Tensor Core 之外完成，顺便就把累加精度提升到了 FP32。Tensor Core 只负责它擅长的短内积，长累加交给精度足够的 CUDA Core；两组 warpgroup 交替执行，使提升操作与下一段的 Tensor Core 计算重叠。
+
+我们的 `fp8_gemm_blockwise` 用纯 PyTorch 模拟了这一流程，测试 `test_fp8_gemm_blockwise_is_accurate` 验证结果与 FP32 矩阵乘的相对误差小于 5%（实测约 3.7%，主要来自 E4M3 本身的舍入）：
+
+<CodeFile path="src/llms_from_scratch/pretraining/precision.py" region="blockwise_gemm" />
+
+`limited_precision_sum` 则模拟了“受限精度累加器”：每次加法后把累加器舍入到 $m$ 位尾数，可选每 128 项把部分和转入高精度累加器。对 4096 个正数求和，13 位尾数的累加器相对误差约为 $8.7\times10^{-4}$，每 128 项提升一次后降到 $2.5\times10^{-5}$；10 位尾数时从 $7.9\times10^{-2}$ 降到 $2.9\times10^{-4}$。原因是：顺序累加时部分和越来越大，每次舍入的绝对误差随部分和增长；分段后每段的部分和只有总和的 1/32，舍入误差也随之缩小。
+
+**其余的精度选择**。DeepSeek-V3 并不是所有计算都用 FP8。嵌入、输出头、MoE 门控、归一化和注意力算子保持 BF16 或 FP32；主权重和梯度保持 FP32；AdamW 的 $m$、$v$ 用 BF16 存储以节省显存；部分激活以 FP8 缓存供反向使用。报告称，与 BF16 基线相比，FP8 训练的损失相对误差始终低于 0.25%。
+
+### 硬件支持：MXFP8 与之后
+
+DeepSeek 的分块缩放是在软件中实现的（缩放与提升都在 kernel 里手写）。NVIDIA Blackwell 架构把类似的思想做进了硬件：OCP 的 **Microscaling（MX）** 规范定义了 MXFP8 格式——沿内积维度每 **32** 个元素共享一个 8 位的、只能是 2 的幂的缩放因子（E8M0）。Tensor Core 在内部直接应用这些缩放因子，不再需要软件提升。Transformer Engine 提供了 `MXFP8BlockScaling` 等配方，也提供了与 DeepSeek 相同的 128 分块配方。更进一步的 NVFP4 用 16 个元素一组、E4M3 格式的组缩放加上一个逐张量的 FP32 缩放；DeepSeek-V4 报告对路由专家的权重做了 FP4 量化感知训练，FP4 权重反量化为 FP8 后参与计算。
+
+从 FP16 的损失缩放到 MXFP8 的硬件分块缩放，贯穿始终的是同一个思想：**低精度格式只负责局部的相对精度，范围由一个更高精度的缩放因子负责；缩放因子覆盖的范围越小，离群值的影响就越局部**。
+
+## 小结
+
+- 指数位决定范围，尾数位决定精度。FP16 范围窄（最小次正规数约 $6\times10^{-8}$），梯度会下溢；BF16 范围与 FP32 相同但 eps 只有 $2^{-7}$；FP8 E4M3 的动态范围只有约 17.8 个二进位，最大值 448。
+- 损失缩放利用反向传播的线性性把梯度整体放大 $S$ 倍；动态缩放在溢出时跳步并减半、连续无溢出时加倍。反缩放必须在梯度裁剪之前。
+- BF16 不需要损失缩放，但小更新会被淹没，所以要保留 FP32 主权重与优化器状态；长归约（softmax、归一化、损失）要在 FP32 中计算。autocast 按算子策略表自动选择精度，策略随设备而异。
+- FP8 必须配合缩放因子。逐张量缩放让一个离群值抬高整个张量的误差下限；DeepSeek-V3 用 1×128（激活）与 128×128（权重）的细粒度分块把影响限制在组内，并每 128 个元素把 Tensor Core 的部分和提升到 CUDA Core 做 FP32 累加。
+
+即使数据、优化器和数值精度都处理好了，我们仍然不知道“该训练多大的模型、用多少数据”。下一章用缩放定律回答这个问题。
+
+## 练习
+
+1. FP16 训练中，某个梯度的真实值为 $3\times10^{-9}$。损失缩放因子至少取多大，才能让它不变成 0？如果同一步中最大的梯度是 $0.5$，缩放因子最大能取多大？
+2. 在 BF16 中，$256+1$ 等于多少？$256+2$ 呢？用 BF16 的 eps 解释。
+3. 证明对 E4M3（3 位尾数），正规数的相对舍入误差不超过 $2^{-4}$。为什么正文中测得的平均相对误差约为 2.6%，比这个上界小得多？
+4. 一个 4096×4096 的激活张量，按 1×128 分块需要存多少个缩放因子？按 128×128 呢？如果缩放因子用 FP32 存储，额外显存占 FP8 数据本身的百分之几？
+5. 延迟缩放的 amax 历史长度取 1 和取 1024 各有什么风险？
+
+<details>
+<summary>练习 1 答案</summary>
+
+要让它不小于最小次正规数的一半（$2^{-25}\approx2.98\times10^{-8}$，否则舍入为 0），需要 $S\ge2.98\times10^{-8}/3\times10^{-9}\approx10$，取 2 的幂即 $S\ge16$（若要求进入正规范围 $6.1\times10^{-5}$，则需 $S\ge2\times10^4$）。上限由最大梯度决定：$0.5\cdot S\le65504$，$S\le131008$，取 2 的幂为 $2^{16}=65536$。在 $[16,65536]$ 中取大的一端，可以让小梯度保留更多有效位。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+BF16 有 7 位显式尾数，在 $[256,512)$ 区间里相邻可表示数的间距是 $256\times2^{-7}=2$。$257$ 恰好位于 256 和 258 的正中间，按“就近舍入到偶数”舍入到尾数为偶数的 256；$258$ 可以精确表示。所以 $256+1=256$，$256+2=258$。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+在区间 $[2^k,2^{k+1})$ 中可表示数的间距是 $2^{k-3}$，舍入误差不超过半个间距 $2^{k-4}$，相对误差不超过 $2^{k-4}/2^k=2^{-4}=6.25\%$。实际误差在 0 到半个间距之间近似均匀分布，而且数值本身在 $[2^k,2^{k+1})$ 中分布，相对误差的均方根约为 $2^{-4}/\sqrt3$ 再乘以一个小于 1 的因子，约为 2%～3%。正文用的是范数意义下的相对误差（大元素权重更大），测得约 2.6%。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+1×128：每行 4096/128 = 32 个，共 $4096\times32=131072$ 个，FP32 共 512 KB；FP8 数据 16 MB，额外约 3.1%（即 4/128）。128×128：$32\times32=1024$ 个，4 KB，额外约 0.024%。这就是权重可以用大块、而激活用小块代价也不高的原因。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+历史长度 1 相当于用上一步的 amax，任何一步的 amax 增大都会让本步饱和；张量的 amax 有正常的波动，频繁饱和会带来系统性的截断误差。历史长度 1024 时缩放因子由过去 1024 步中最大的 amax 决定：一次偶然的大值会让此后 1000 步的缩放因子都偏小，普通值落入次正规区、精度下降；而且当张量的尺度随训练逐渐变小时，缩放因子要很久才能跟上。实践中常用 16 到 1024 之间的值，并配合 margin 留出余量。
+
+</details>
+
+## 参考文献
+
+- Micikevicius et al. 2018. [Mixed Precision Training](https://arxiv.org/abs/1710.03740).
+- Kalamkar et al. 2019. [A Study of BFLOAT16 for Deep Learning Training](https://arxiv.org/abs/1905.12322).
+- Micikevicius et al. 2022. [FP8 Formats for Deep Learning](https://arxiv.org/abs/2209.05433)；OCP [8-bit Floating Point Specification (OFP8)](https://www.opencompute.org/documents/ocp-8-bit-floating-point-specification-ofp8-revision-1-0-2023-12-01-pdf-1) 与 [Microscaling Formats (MX) Specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
+- PyTorch 文档：[Automatic Mixed Precision](https://docs.pytorch.org/docs/stable/amp.html)（autocast 算子表）与 [GradScaler](https://docs.pytorch.org/docs/stable/amp.html#gradient-scaling).
+- NVIDIA. [Transformer Engine: Using FP8 with Transformer Engine](https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/examples/fp8_primer.html)（延迟缩放、MXFP8 与分块配方）。
+- DeepSeek-AI 2024. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)，第 3.3 节（FP8 训练）。
+- Dettmers et al. 2022. [LLM.int8(): 8-bit Matrix Multiplication for Transformers at Scale](https://arxiv.org/abs/2208.07339)（激活离群值）。
+- DeepSeek-AI 2026. [DeepSeek-V4](https://arxiv.org/abs/2606.19348)（FP4 量化感知训练）。
+- Stanford CS336 Spring 2025，[Lecture 2（PyTorch, resource accounting）](https://cs336.stanford.edu/spring2025/)。

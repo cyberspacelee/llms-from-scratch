@@ -2,7 +2,256 @@
 title: 专家并行与 all-to-all
 description: MoE 的 token 分发与合并，专家并行的通信模式，节点受限路由与 DeepEP 式通信优化。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/distributed/expert_parallel.py
+  - tests/distributed/test_expert_parallel.py
 ---
 
-本章正在撰写。
+[混合专家 MoE](/architecture/moe/) 一章解释了为什么前沿模型几乎都换成了 MoE：每个 token 只激活少数几个专家，参数量可以远大于每个 token 的计算量。DeepSeek-V3 有 671B 参数，但每个 token 只用到 37B。这个“参数多、计算少”的性质对分布式训练提出了新问题：数据并行要求每张卡放下完整模型，而 MoE 层的参数恰恰占了总量的绝大部分（DeepSeek-V3 中约 97%）；张量并行把每个专家再切成 $t$ 片，可专家本来就小（DeepSeek-V3 每个专家的中间维只有 2048），切开后矩阵乘更窄、效率更低。
+
+**专家并行（expert parallelism, EP）**换了一个切法：不切专家，而是把**不同的专家放在不同的卡上**。每张卡持有 $E/p$ 个完整的专家，token 需要哪个专家，就被送到哪张卡去。这一“送去—算完—送回”的过程正是第一章的 all-to-all。本章先写一个单进程的参考 MoE，再实现基于 all-to-all 的专家并行版本并验证前向与梯度都与单进程一致；然后分析通信量、负载不均与容量，介绍 DeepSeek-V3 的节点受限路由，以及 DeepEP 通信库的两类 kernel。
+
+## 参考实现：一个最小的 MoE 层
+
+沿用 MoE 一章的记号：路由器是一个线性层，给出每个 token 对 $E$ 个专家的打分；取 top-$k$，在选中的 $k$ 个专家内对 softmax 概率重新归一化作为门控权重 $g$；输出是选中专家输出的加权和
+
+$$
+y = \sum_{e\in\text{topk}(x)} g_e(x)\,\mathrm{FFN}_e(x).
+$$
+
+专家直接复用第三部分的 `SwiGLU`。参考实现按专家循环：找出路由到专家 $e$ 的所有 (token, 槽位)，批量计算，再用 `index_add` 加权累加回去。
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" region="moe" />
+
+## dispatch 与 combine
+
+设有 $p$ 个 rank，rank $r$ 持有专家 $rE/p,\dots,(r+1)E/p-1$，以及一份**复制**的路由器。每个 rank 有自己的一批 token（它们来自数据并行切分）。一次专家并行的 MoE 前向分五步：
+
+1. **路由与排序。** 每个 token 产生 $k$ 个副本，每个副本的目标 rank 是“它的专家编号整除 $E/p$”。把副本按目标 rank 稳定排序，使发往同一个 rank 的行连续存放。
+2. **交换计数。** 每个 rank 要发给其他 rank 的行数各不相同，接收方事先并不知道。先用一次很小的 all-to-all 交换“我要发给你几行”，接收方据此分配缓冲区。
+3. **dispatch。** 一次变长的 all-to-all，把 token 的隐藏状态（以及它们要去的专家编号）发到目标 rank。
+4. **本地专家计算。** 每个 rank 把收到的行按专家分组，交给本地专家。
+5. **combine。** 结果按原路用反向的 all-to-all 发回，恢复排序前的顺序，用门控权重加权求和。
+
+<Diagram width={720} height={330} label="两个 rank、四个专家、每个 token 一个专家时的 dispatch 与 combine">
+  <Text x={80} y={18} label="本地 token 与路由" size="sm" bold />
+  <Text x={260} y={18} label="按目标 rank 排序" size="sm" bold />
+  <Text x={450} y={18} label="收到后按专家分组" size="sm" bold />
+  <Text x={640} y={18} label="combine 回原位" size="sm" bold />
+  <Region x={10} y={32} w={700} h={136} title="rank 0：专家 E0、E1" />
+  <Region x={10} y={180} w={700} h={136} title="rank 1：专家 E2、E3" />
+  <Box x={30} y={60} w={110} h={28} label="t0 → E2" size="sm" mono />
+  <Box x={30} y={94} w={110} h={28} label="t1 → E0" size="sm" mono />
+  <Box x={30} y={128} w={110} h={28} label="t2 → E3" size="sm" mono />
+  <Box x={30} y={208} w={110} h={28} label="t3 → E1" size="sm" mono />
+  <Box x={30} y={242} w={110} h={28} label="t4 → E2" size="sm" mono />
+  <Box x={30} y={276} w={110} h={28} label="t5 → E0" size="sm" mono />
+  <Box x={200} y={60} w={120} h={28} label="t1 发往 r0" size="sm" tone="accent" />
+  <Box x={200} y={94} w={120} h={28} label="t0 发往 r1" size="sm" tone="info" />
+  <Box x={200} y={128} w={120} h={28} label="t2 发往 r1" size="sm" tone="info" />
+  <Box x={200} y={208} w={120} h={28} label="t3 发往 r0" size="sm" tone="accent" />
+  <Box x={200} y={242} w={120} h={28} label="t5 发往 r0" size="sm" tone="accent" />
+  <Box x={200} y={276} w={120} h={28} label="t4 发往 r1" size="sm" tone="info" />
+  <Box x={390} y={70} w={120} h={34} label="E0：t1, t5" size="sm" tone="accent" />
+  <Box x={390} y={114} w={120} h={34} label="E1：t3" size="sm" tone="accent" />
+  <Box x={390} y={218} w={120} h={34} label="E2：t0, t4" size="sm" tone="info" />
+  <Box x={390} y={262} w={120} h={34} label="E3：t2" size="sm" tone="info" />
+  <Box x={580} y={60} w={110} h={96} label={"y0, y1, y2\n按 g 加权"} size="sm" tone="strong" />
+  <Box x={580} y={208} w={110} h={96} label={"y3, y4, y5\n按 g 加权"} size="sm" tone="strong" />
+  <Arrow from={[140, 108]} to={[200, 108]} label="排序" />
+  <Arrow from={[320, 74]} via={[[340, 74], [340, 87]]} to={[390, 87]} />
+  <Arrow from={[320, 290]} via={[[340, 290], [340, 235]]} to={[390, 235]} />
+  <Arrow from={[320, 142]} via={[[365, 142], [365, 279]]} to={[390, 279]} tone="info" dashed />
+  <Arrow from={[320, 222]} via={[[355, 222], [355, 131]]} to={[390, 131]} tone="accent" dashed />
+  <Arrow from={[510, 108]} to={[580, 108]} label="all-to-all" />
+  <Arrow from={[510, 256]} to={[580, 256]} label="all-to-all" />
+  <Fragment slot="caption">为了画面清楚取 k = 1。每个 rank 先把要发往同一 rank 的 token 排在一起（同色），dispatch 的 all-to-all 让每个 token 到达它的专家所在的 rank（实线是留在本 rank 的，虚线是跨 rank 的，图中各画了一条代表）；专家算完后，combine 沿原路发回，再按门控权重合并。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" region="expert_parallel" />
+
+### all-to-all 的反向
+
+`torch.distributed.all_to_all_single` 本身不参与 autograd，要让梯度流回 token 的隐藏状态，需要自己写反向。由第一章的对偶关系，一次 all-to-all 把 rank $i$ 的第 $j$ 段送到 rank $j$，它的转置就是把梯度从 rank $j$ 送回 rank $i$：交换发送与接收的计数，再做一次 all-to-all。
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" region="all_to_all" />
+
+于是整个 MoE 层的反向自动包含了两次 all-to-all（combine 的反向是梯度的 dispatch，dispatch 的反向是梯度的 combine）。每个 MoE 层在一步训练中共有 **4 次** all-to-all。
+
+### 验证
+
+测试在 4 个进程上构造同一个 8 专家、top-2 的 MoE，每个 rank 处理 12 个 token，并对输出乘一个随机的上游梯度做反向。父进程中的单进程 MoE 处理全部 48 个 token。比较四类量：
+
+- 每个 rank 的输出等于单进程输出的对应 12 行；
+- token 隐藏状态的梯度一致（经过两次 all-to-all 的反向）；
+- 每个专家参数的梯度与单进程中同一专家一致——专家收到了来自**所有 rank** 的 token，它的梯度天然就是完整的，**不需要任何额外同步**；
+- 路由器是复制的，每个 rank 的路由器只看到本地 token，所以它的梯度要 all-reduce（求和）之后才与单进程一致。
+
+<CodeFile path="tests/distributed/test_expert_parallel.py" symbol="test_expert_parallel_matches_single_process" />
+
+最后两条揭示了专家并行与数据并行的关系。在实践中，专家并行几乎总是**嵌在数据并行维度里面**：有 $N_d$ 个数据并行 rank，其中每 $N_{ep}$ 个组成一个专家并行组。注意力、共享专家、路由器等非专家参数在全部 $N_d$ 个 rank 上复制，按数据并行同步梯度；每个路由专家只存在于 $N_d/N_{ep}$ 个 rank 上，只需在这些副本之间同步。DeepSeek-V3 就是 128 路数据并行（2048 卡 / 16 路流水线），其中嵌了 64 路专家并行，每个专家有 2 个副本。
+
+## 通信量：为什么 all-to-all 是 MoE 的瓶颈
+
+一个 rank 上有 $N$ 个 token、每个 token 选 $k$ 个专家、隐藏维 $d$。假设专家均匀分布，每个副本有 $\frac{p-1}{p}$ 的概率去往别的 rank。dispatch 发送 $N k d\,\frac{p-1}{p}$ 个元素，combine 发回同样多。
+
+<KeyEq label="一层 MoE 前向中每个 rank 发出的字节数">
+
+$$
+V_{\text{a2a}} \approx N\,k\,d\,\frac{p-1}{p}\,\big(b_{\text{dispatch}} + b_{\text{combine}}\big)
+$$
+
+</KeyEq>
+
+与稠密模型的张量并行比较：张量并行每层 all-reduce 的数据量与 $N d$ 成正比；而 all-to-all 多了一个因子 $k$。DeepSeek-V3 的 $k=8$，这意味着每个 token 的隐藏状态要被复制 8 份发出去。
+
+代入 DeepEP 测试使用的 DeepSeek-V3 预训练设置：每批 4096 个 token、$d=7168$、$k=8$、FP8 dispatch（1 字节）、BF16 combine（2 字节）、EP = 64。dispatch 约 $4096\times8\times7168\times\frac{63}{64}\approx 231$ MB，combine 约 462 MB。若全部走 50 GB/s 的 InfiniBand，前向一层就要约 14 ms。同一层的专家计算：每个 token 激活 8 个路由专家加 1 个共享专家，每个专家 $3\times7168\times2048\approx 44$M 参数，前向 $2\times9\times44\text{M}\times4096\approx3.2\times10^{12}$ FLOPs，按 H800 约 989 TFLOP/s 的 BF16 峰值只需约 3 ms（DeepSeek-V3 的专家 GEMM 还用了 FP8，峰值翻倍）。**通信比计算慢几倍**——这就是 DeepSeek-V3 报告中说跨节点专家并行的“计算通信比约为 1:1”、必须用 DualPipe 重叠的原因，也是下面两项优化的动机：减少跨节点的流量，以及让通信更快。
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" symbol="all_to_all_bytes" />
+
+## 负载不均与专家容量
+
+all-to-all 中每个 rank 收到的行数取决于路由：如果某个专家特别“热门”，它所在的 rank 收到的 token 远多于平均，其他 rank 都要等它算完——一层的时间由最忙的那个 rank 决定。均衡的路由不只是模型质量问题，也是吞吐问题。
+
+早期的 MoE（GShard、Switch Transformer）用**容量（capacity）**来限制最坏情况：每个专家每步最多处理
+
+$$
+C = \left\lceil \text{cf}\cdot\frac{N k}{E}\right\rceil
+$$
+
+个 token 副本，容量因子 cf 通常取 1.0—1.25。超出容量的副本被丢弃（该副本对输出没有贡献，只经过残差连接）。这让所有缓冲区的形状固定，便于在 TPU 等要求静态形状的硬件上实现，代价是被丢弃的 token 没有得到计算。
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" symbol="dropped_fraction" />
+
+DeepSeek-V3 选择**不丢弃 token**，转而依靠无辅助损失的负载均衡（给每个专家的路由分数加一个可调偏置，见 MoE 一章）让负载在批的尺度上大致均匀；变长的 all-to-all（正如我们的实现）可以处理任意的负载分布。推理时它还部署了**冗余专家**：把高负载的专家多复制几份放在不同的卡上，按观测到的负载周期性调整。
+
+## 节点受限路由
+
+跨节点流量是最大的瓶颈。DeepSeek-V3 的路由有一个约束：**每个 token 最多被送到 $M=4$ 个节点**。256 个路由专家均匀分布在 EP 组的 8 个节点上，每个节点 32 个。路由时先给每个节点打分——该节点上亲和度最高的 $k/M = 2$ 个专家的分数之和——选出得分最高的 4 个节点，再在这 4 个节点的 128 个专家中选 top-8。
+
+<CodeFile path="src/llms_from_scratch/distributed/expert_parallel.py" symbol="node_limited_topk" />
+
+这个约束配合一种两级转发：一个 token 要去某个节点上的若干专家时，只经 InfiniBand 发送**一次**到该节点上与发送方“同一位置”的 GPU，再由它经 NVLink 转发给节点内的目标 GPU。于是每个 token 的跨节点流量至多是 4 份而不是 8 份。技术报告还指出，由于 NVLink 带宽（约 160 GB/s）约为 IB（约 50 GB/s）的 3.2 倍，每个 token 在每个节点上平均可以选约 3.2 个专家而不让 NVLink 成为瓶颈，即在相同的 IB 开销下最多可以扩展到 13 个专家（4 节点 × 3.2）。
+
+<Diagram width={720} height={260} label="节点受限路由下一个 token 的两级发送">
+  <Region x={20} y={20} w={150} h={220} title="源节点" />
+  <Box x={40} y={110} w={110} h={40} label="token" tone="strong" />
+  <Region x={250} y={20} w={450} h={220} title="EP 组中被选中的 4 个节点（共 8 个）" />
+  <Box x={270} y={56} w={90} h={34} label="节点 a" tone="info" size="sm" />
+  <Box x={270} y={100} w={90} h={34} label="节点 b" tone="info" size="sm" />
+  <Box x={270} y={144} w={90} h={34} label="节点 c" tone="info" size="sm" />
+  <Box x={270} y={188} w={90} h={34} label="节点 d" tone="info" size="sm" />
+  <Box x={440} y={46} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
+  <Box x={440} y={76} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
+  <Box x={440} y={110} w={110} h={24} label="GPU · 专家 ×2" size="sm" tone="accent" />
+  <Box x={440} y={154} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
+  <Box x={440} y={188} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
+  <Box x={570} y={188} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
+  <Arrow from={[150, 130]} via={[[210, 130], [210, 73]]} to={[270, 73]} tone="info" label="IB" />
+  <Arrow from={[150, 130]} via={[[210, 130], [210, 117]]} to={[270, 117]} tone="info" />
+  <Arrow from={[150, 130]} via={[[210, 130], [210, 161]]} to={[270, 161]} tone="info" />
+  <Arrow from={[150, 130]} via={[[210, 130], [210, 205]]} to={[270, 205]} tone="info" />
+  <Arrow from={[360, 66]} via={[[400, 66], [400, 58]]} to={[440, 58]} tone="accent" />
+  <Arrow from={[360, 74]} via={[[400, 74], [400, 88]]} to={[440, 88]} tone="accent" />
+  <Text x={625} y={130} label="NVLink 转发" size="sm" tone="muted" />
+  <Arrow from={[360, 117]} via={[[400, 117], [400, 122]]} to={[440, 122]} tone="accent" />
+  <Arrow from={[360, 161]} via={[[400, 161], [400, 166]]} to={[440, 166]} tone="accent" />
+  <Arrow from={[360, 205]} via={[[400, 205], [400, 200]]} to={[440, 200]} tone="accent" />
+  <Arrow from={[550, 200]} to={[570, 200]} tone="accent" />
+  <Fragment slot="caption">token 的 8 个专家分布在至多 4 个节点上。跨节点只发 4 份（每个节点一份），到达后经 NVLink 转发给节点内持有目标专家的 GPU。combine 走相反的路径，并在节点内先归约再跨节点发回。</Fragment>
+</Diagram>
+
+测试验证了两件事：限制为 2 个节点时，每个 token 选中的专家确实只分布在至多 2 个节点上；不加限制时（$M$ 等于节点数），结果退化为普通的 top-$k$。
+
+## DeepEP：专门为 MoE 写的通信库
+
+NCCL 的 all-to-all 是通用的，不知道 MoE 的路由结构，也不支持上面的两级转发。DeepSeek 在 2025 年初开源了 DeepEP，专门实现 MoE 的 dispatch 与 combine。它的第一版（v1）提供两类 kernel：
+
+**常规 kernel（normal kernels）**用于训练与推理的 prefill：吞吐优先，实现了 NVLink 域到 RDMA 域的非对称转发（也就是节点受限路由的两级发送），支持 FP8 dispatch，并且可以控制通信 kernel 占用的 SM 数。DeepEP 在 H800（NVLink 约 160 GB/s）加 400 Gb/s CX7 网卡（约 50 GB/s）上、按 DeepSeek-V3 预训练设置（每批 4096 token、隐藏维 7168、top-4 节点、top-8 专家、FP8 dispatch、BF16 combine）测得：节点内 EP=8 时 dispatch 与 combine 的瓶颈带宽约 153 与 158 GB/s（NVLink），跨节点 EP=16/32/64 时约 43—58 GB/s（RDMA），都接近硬件上限。
+
+**低延迟 kernel（low-latency kernels）**用于推理的 decode：每步只有很少的 token（测试设置是每批 128 个），延迟比带宽更重要。它只用纯 RDMA，并提供一种基于 hook 的重叠方式：发起通信后立即返回，由网卡在后台完成数据传输，**不占用任何 SM**，计算可以照常进行，需要结果时再调用 hook 等待。
+
+<Bars label="DeepEP v1 低延迟 kernel 的 dispatch 延迟（128 token/批，H800 + CX7）" unit="μs"
+  items={[
+    { label: 'EP 8', value: 77 },
+    { label: 'EP 16', value: 118 },
+    { label: 'EP 32', value: 155 },
+    { label: 'EP 64', value: 173 },
+    { label: 'EP 128', value: 192 },
+    { label: 'EP 256', value: 194 },
+  ]}>
+  <Fragment slot="caption">数据取自 DeepEP v1.2.1 的 README（不是本书实测）。EP 规模从 8 增大到 256，dispatch 延迟只从 77 μs 增长到约 194 μs；同表中 combine 的延迟为 114—369 μs。</Fragment>
+</Bars>
+
+DeepEP 此后持续演进：其后的 V2 版本把两类接口统一到一个 `EPBuffer` 中，改用 NCCL 的设备端通信后端，并增加了冗余专家的权重预取与梯度归约等原语；新版明确要求 dispatch 与 combine 占用 SM（不再支持零 SM 的 RDMA 模式）。具体接口以仓库当前文档为准。
+
+### 计算与通信重叠
+
+即使有了 DeepEP，all-to-all 的时间仍与专家计算相当，必须重叠。训练中的主要手段是上一章的 DualPipe：把一个微批的前向与另一个微批的反向配对，一个在算、另一个在传。此外还有两个细节：共享专家不需要通信，它的计算可以在等待 dispatch 时进行；推理时 DeepSeek 用“两个微批交替”的方式，让一个微批的注意力与另一个微批的 all-to-all 重叠。
+
+## 小结
+
+- 专家并行把不同专家放在不同 rank 上，用 all-to-all 把 token 发到专家所在处（dispatch）、再发回（combine）；每个 MoE 层一步训练有 4 次 all-to-all。
+- 变长 all-to-all 需要先交换计数；其反向是交换计数方向后的 all-to-all。专家参数的梯度天然完整，复制的路由器与注意力参数要按数据并行同步。
+- 每个 rank 发出约 $Nkd\frac{p-1}{p}$ 个元素，比稠密层多一个因子 $k$；DeepSeek-V3 规模下跨节点 all-to-all 比专家计算更慢。
+- 负载不均让最忙的 rank 决定速度；容量因子以丢弃 token 为代价固定形状，DeepSeek-V3 不丢 token，依靠无辅助损失均衡与冗余专家。
+- 节点受限路由让每个 token 最多去 4 个节点，配合“IB 发一次、NVLink 转发”的两级发送减少跨节点流量。
+- DeepEP 提供高吞吐（NVLink→RDMA 转发、可控 SM）与低延迟（纯 RDMA、hook 式零 SM 重叠）两类 kernel。
+
+## 练习
+
+1. 一个 rank 上有 8192 个 token，$d = 4096$，$k = 4$，EP = 16，dispatch 与 combine 都用 BF16。前向一层 MoE 每个 rank 发出多少字节？若 EP 组全部在节点内（NVLink 450 GB/s）与全部跨节点（50 GB/s），各需多久？
+
+<details>
+<summary>答案</summary>
+
+$8192\times4\times4096\times\frac{15}{16}\times(2+2) \approx 503$ MB。NVLink 约 1.1 ms，IB 约 10 ms。所以把专家并行组放在一个节点（或一个 NVL72 这样的大 NVLink 域）内收益巨大；跨节点时就需要节点受限路由、FP8 dispatch 与重叠。
+
+</details>
+
+2. 为什么在专家并行的测试中，专家参数的梯度不需要任何同步就与单进程一致，而路由器需要 all-reduce？如果数据并行度是 EP 的 2 倍，专家梯度需要怎样同步？
+
+<details>
+<summary>答案</summary>
+
+每个专家只存在于一个 rank 上，所有选中它的 token（来自所有 rank）都被 dispatch 到这里，前向与反向都在这里完成，所以本地梯度就是全部 token 贡献之和。路由器在每个 rank 上都有一份，每份只处理了本地 token，梯度是部分和。若 $N_d = 2N_{ep}$，每个专家有 2 个副本，分别服务两个专家并行组的 token，需要在这 2 个副本之间 all-reduce 专家梯度（就像数据并行），而非专家参数仍在全部 $N_d$ 个 rank 间同步。
+
+</details>
+
+3. 用 `expert_capacity` 与 `dropped_fraction`：64 个专家、top-8、每批 4096 个 token、容量因子 1.0。若路由完全均匀，丢弃率是多少？若有一个专家收到了平均负载的 3 倍呢？
+
+<details>
+<summary>答案</summary>
+
+$C = \lceil 1.0\times4096\times8/64\rceil = 512$。完全均匀时每个专家恰好 512 份，丢弃率 0。若一个专家收到 1536 份，它丢弃 1024 份，占全部 32768 份副本的约 3.1%（假设其他专家没有超出容量）。实际中负载分布有长尾，丢弃率可能更高，而且被丢弃的往往是“热门”的 token。
+
+</details>
+
+4. 在节点受限路由中，为什么节点得分取“节点上最高的 $k/M$ 个专家亲和度之和”，而不是最高的一个？
+
+<details>
+<summary>答案</summary>
+
+每个 token 要在 $M$ 个节点上选 $k$ 个专家，平均每个节点 $k/M$ 个。节点得分应当反映“如果选这个节点，能从中得到多好的 $k/M$ 个专家”。只看最高的一个，可能选中一个只有一个好专家、其余都很差的节点，浪费名额；看前 $k/M$ 个之和更贴近实际选择。当 $M$ 等于节点数时，任何打分方式都选中全部节点，退化为普通 top-$k$。
+
+</details>
+
+5. `ExpertParallelMoE.forward` 中第一次 all-to-all 只交换了每个 rank 要发的行数。为什么不能省略？DeepEP 的低延迟 kernel 如何避免这一步带来的延迟？
+
+<details>
+<summary>答案</summary>
+
+接收方要知道从每个 rank 收多少行，才能分配缓冲区、确定 `all_to_all_single` 的 `output_split_sizes`；而且这个数字通常需要拷回 CPU（`.tolist()`），造成一次 GPU-CPU 同步。低延迟 kernel 预先按“每个 rank 最多收到的 token 数”分配固定大小的缓冲区（所有 rank 约定 `num_max_tokens_per_rank`），直接写入，接收方读取随数据一起写入的计数与布局信息，省去了单独的计数交换和 CPU 同步，代价是更多的显存。
+
+</details>
+
+## 参考文献
+
+- Lepikhin, D. et al. [GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding](https://arxiv.org/abs/2006.16668), 2020：专家并行与容量因子。
+- Fedus, W., Zoph, B., Shazeer, N. [Switch Transformers](https://arxiv.org/abs/2101.03961). JMLR 2022.
+- Rajbhandari, S. et al. [DeepSpeed-MoE](https://arxiv.org/abs/2201.05596), 2022：专家并行与数据并行、张量并行的组合。
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437), 2024：节点受限路由（2.1.2 节）、跨节点 all-to-all（3.2.2 节）与冗余专家（3.4 节）。
+- DeepSeek-AI. [DeepEP](https://github.com/deepseek-ai/DeepEP)，以及 [v1.2.1 README](https://github.com/deepseek-ai/DeepEP/blob/v1.2.1/README.md) 中的性能表。
+- Gale, T. et al. [MegaBlocks: Efficient Sparse Training with Mixture-of-Experts](https://arxiv.org/abs/2211.15841). MLSys 2023：不丢 token 的分组 GEMM。
+- PyTorch. [torch.distributed.all_to_all_single](https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.all_to_all_single).
+- Stanford CS336. [Lecture 4: Mixture of Experts](https://github.com/stanford-cs336/spring2025-lectures).

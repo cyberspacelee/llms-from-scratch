@@ -2,7 +2,232 @@
 title: 残差流的扩展：Hyper-Connections 与 mHC
 description: 把单条残差流扩展为多条并学习它们的混合，流形约束超连接（mHC）如何恢复恒等映射的稳定性。
 order: 7
-draft: true
+code:
+  - src/llms_from_scratch/architecture/hyper_connections.py
+  - tests/architecture/test_hyper_connections.py
 ---
 
-本章正在撰写。
+前面几章改造的都是注意力和前馈网络——层“内部”的计算。层与层之间的连接方式却几乎没变：从 2015 年的 ResNet 到 2025 年的 DeepSeek-V3，每一层都是 $x_{l+1}=x_l+F_l(\mathrm{Norm}(x_l))$。残差连接是深度网络可训练的基础，[Transformer 块：归一化、残差与前馈网络](/transformer/transformer-block/)已经解释过它为什么有效。那么，它还有改进的余地吗？
+
+2024 年字节跳动提出的超连接（Hyper-Connections，HC）给出了肯定的回答：把一条宽度为 $d$ 的残差流扩展成 $n$ 条，让每一层学习如何从这些流中读取输入、如何把输出写回、以及流与流之间如何混合。HC 在中等规模上带来了稳定的收益，但 DeepSeek 在 27B 规模上发现它会让信号在深度方向上放大数千倍，训练变得不稳定。2025 年底的流形约束超连接（Manifold-Constrained Hyper-Connections，mHC）把流间混合矩阵约束为**双随机矩阵**，恢复了残差连接最重要的性质——恒等映射的稳定性，并被用在了 DeepSeek-V4 中。本章先从“残差流”的视角理解普通残差连接，再推导 HC 与 mHC，最后简要介绍同样作用于残差流的 Engram 条件记忆。
+
+## 残差流视角
+
+把 Pre-Norm Transformer 的递推完全展开：
+
+$$
+x_L = x_0 + \sum_{l=0}^{L-1} F_l\big(\mathrm{Norm}(x_l)\big).
+$$
+
+这个式子提示了一种看待 Transformer 的方式（Elhage 等 2021）：存在一条贯穿所有层的**残差流**（residual stream），嵌入层把 token 写入其中，每个注意力层和 FFN 层从流中**读取**当前内容、计算、再把结果**加回**流中，输出头从流的最终状态读出预测。层与层之间不直接通信，所有信息交换都通过这条共享的“总线”。
+
+残差流有两个关键性质。第一，**恒等映射**：如果某一层的 $F_l$ 输出为零，信号原封不动地传到下一层；反向传播时 $\partial x_L/\partial x_l = I + \sum(\cdots)$，恒等项保证梯度可以直接从输出回到任意浅层。第二，**带宽有限**：所有层共享同一个 $d$ 维空间，每层既要读取前面所有层写入的信息，又要写入自己的结果，各层的信息在同一个空间中叠加。
+
+普通残差还有一个两难。Pre-Norm 梯度稳定，但深层的输出被不断累加的残差“稀释”，越往后的层对最终表示的影响越小，表现为深层之间的表示高度相似（表示塌缩）；Post-Norm 让每层的输出都有相同的权重，却带来梯度消失。HC 的作者把这称为“跷跷板”：两种归一化位置都只是固定的、不可学习的连接强度，而最优的连接方式可能因层、因任务而异。
+
+## Hyper-Connections：n 条残差流
+
+HC 把残差状态从一个向量 $x\in\mathbb R^d$ 扩展为一个矩阵 $X\in\mathbb R^{n\times d}$，即 $n$ 条并行的残差流（$n$ 称为扩展率）。每一层 $F_l$ 本身不变（仍然输入输出 $d$ 维），但它与残差流的交互由三组可学习的系数决定：
+
+<KeyEq label="超连接">
+
+$$
+x^{\text{in}}_l = \mathcal H^{\text{pre}}_l X_l,\qquad
+X_{l+1} = \mathcal H^{\text{res}}_l X_l + \big(\mathcal H^{\text{post}}_l\big)^\top F_l\big(x^{\text{in}}_l\big).
+$$
+
+</KeyEq>
+
+- $\mathcal H^{\text{pre}}_l\in\mathbb R^{1\times n}$：**读**，把 $n$ 条流加权混合成层的 $d$ 维输入；
+- $\mathcal H^{\text{post}}_l\in\mathbb R^{1\times n}$：**写**，把层的输出按不同权重写回每条流；
+- $\mathcal H^{\text{res}}_l\in\mathbb R^{n\times n}$：**混**，流与流之间的线性混合，它取代了普通残差中的恒等映射。
+
+嵌入层的输出被复制成 $n$ 份作为初始的 $X_0$，最后一层之后把 $n$ 条流相加，再交给最终的归一化和输出头。当 $n=1$ 且三组系数都取 1 时，公式退化为 $x_{l+1}=x_l+F_l(x_l)$，即普通残差；测试 `test_hc_with_one_stream_is_plain_residual` 检查的就是这一点。
+
+<Diagram width={700} height={280} label="扩展率 n = 4 的超连接：层从 4 条残差流读取、写回，流之间由 H_res 混合">
+  <Text x={30} y={30} label="Xₗ（4 条流）" size="sm" tone="muted" anchor="start" />
+  <Box x={30} y={50} w={110} h={34} label="流 1" tone="info" />
+  <Box x={30} y={94} w={110} h={34} label="流 2" tone="info" />
+  <Box x={30} y={138} w={110} h={34} label="流 3" tone="info" />
+  <Box x={30} y={182} w={110} h={34} label="流 4" tone="info" />
+  <Box x={200} y={20} w={120} h={40} label="H_pre（读）" tone="accent" />
+  <Box x={370} y={20} w={110} h={40} label="Fₗ" sub="注意力或 FFN" tone="strong" />
+  <Box x={530} y={20} w={130} h={40} label="H_post（写）" tone="accent" />
+  <Box x={250} y={110} w={180} h={80} label="H_res（混合）" sub="n × n" tone="accent2" />
+  <Box x={560} y={94} w={110} h={34} label="流 1′" tone="info" />
+  <Box x={560} y={138} w={110} h={34} label="流 2′" tone="info" />
+  <Box x={560} y={182} w={110} h={34} label="流 3′" tone="info" />
+  <Box x={560} y={226} w={110} h={34} label="流 4′" tone="info" />
+  <Arrow from={[140, 67]} via={[[170, 67], [170, 40]]} to={[200, 40]} />
+  <Arrow from={[320, 40]} to={[370, 40]} />
+  <Arrow from={[480, 40]} to={[530, 40]} />
+  <Arrow from={[595, 60]} to={[595, 94]} tone="accent" />
+  <Arrow from={[140, 155]} to={[250, 155]} tone="accent2" />
+  <Arrow from={[430, 155]} to={[560, 155]} tone="accent2" />
+  <Text x={350} y={240} label="Xₗ₊₁ = H_res Xₗ + H_postᵀ Fₗ(H_pre Xₗ)" size="sm" mono />
+  <Fragment slot="caption">层的计算 $F_l$ 只看到一个 $d$ 维输入，它由 $\mathcal H^{\text{pre}}$ 从 4 条流中混合得到；输出由 $\mathcal H^{\text{post}}$ 按不同权重写回 4 条流（图中只画出一个箭头）；与此同时 4 条流经 $\mathcal H^{\text{res}}$ 互相混合，取代了普通残差中的恒等映射。</Fragment>
+</Diagram>
+
+HC 的系数有**静态**与**动态**两种。静态 HC 中三组系数就是可学习的参数；动态 HC 让它们依赖于当前的残差状态（由 $X_l$ 经归一化与线性投影算出，再加上静态的偏置）。初始化时取 $\mathcal H^{\text{res}}=I$、$\mathcal H^{\text{post}}=\mathbf 1$、$\mathcal H^{\text{pre}}$ 为第 $(l\bmod n)$ 个单位向量，使 HC 在训练开始时等价于 Pre-Norm 残差：层只读一条流，把输出加到每条流上。
+
+<CodeFile path="src/llms_from_scratch/architecture/hyper_connections.py" symbol="HyperConnection" />
+
+测试 `test_hc_init_equals_prenorm_residual_on_each_stream` 验证这种初始化下，每条流都恰好收到 $X_l+F(X_l^{(l\bmod n)})$。
+
+HC 的额外开销主要在**显存与带宽**而不是计算：残差流变宽了 $n$ 倍，每层的激活读写量随之增加（混合本身只是 $n\times n$ 的小矩阵乘法）。HC 的论文报告，在 OLMo 与 OLMoE 等模型上，$n=4$ 的动态 HC 收敛明显更快，下游任务也有提升。
+
+## 不受约束的混合为什么会失稳
+
+HC 用一个可学习的 $\mathcal H^{\text{res}}_l$ 取代了恒等映射。单看一层，这只是增加了自由度；但信号要穿过所有层，残差路径上的总映射是所有层混合矩阵的乘积：
+
+$$
+X_L = \Big(\prod_{l=L-1}^{0}\mathcal H^{\text{res}}_l\Big) X_0 + \sum_{l}(\cdots).
+$$
+
+普通残差中这个乘积恒为单位阵。在 HC 中，即使每个 $\mathcal H^{\text{res}}_l$ 只比单位阵大一点点，几十层的连乘也会指数式地放大（或缩小）信号。mHC 论文用“复合映射的最大增益”（乘积矩阵绝对值行和的最大值）来度量这一点，在 27B 模型上观察到 HC 的这一增益达到约 3000，并伴随损失尖峰与梯度范数的剧烈波动。
+
+`composite_gain` 计算一串矩阵连乘后的最大绝对行和。下图用它对比两种情形：每层的混合矩阵取单位阵加上标准差 0.2 的随机扰动，以及经过 Sinkhorn 投影的双随机矩阵（数据由仓库代码以固定随机种子生成）。
+
+<Plot label="残差混合矩阵连乘后的最大增益随深度的变化" x={[1, 64]} y={[0.5, 200]} logY xLabel="层数" yLabel="最大绝对行和" markers={[]} series={[
+  { points: [[1, 1.79], [4, 2.56], [8, 2.49], [16, 4.86], [24, 6.47], [32, 18.0], [40, 34.86], [48, 52.14], [56, 100.4], [64, 90.17]], label: '不受约束', tone: 'accent2' },
+  { points: [[1, 1.0], [4, 1.001], [8, 1.0], [16, 1.0], [24, 1.001], [32, 1.004], [40, 1.0], [48, 1.0], [56, 1.001], [64, 1.0]], label: '双随机', tone: 'accent' },
+]}>
+  <Fragment slot="caption">纵轴为对数。不受约束的混合矩阵每层只偏离单位阵一点，64 层后增益已接近 100 倍；双随机矩阵无论叠多少层，增益都保持在 1（Sinkhorn 只迭代 20 次时有千分之几的误差）。真实训练中扰动由梯度驱动而非随机，mHC 论文在 27B 模型的 HC 上观测到约 3000 倍的增益。</Fragment>
+</Plot>
+
+测试 `test_unconstrained_mixing_explodes_with_depth` 对应图中的红线：60 层后增益超过 50 倍。
+
+## mHC：把混合矩阵约束在双随机流形上
+
+mHC 的核心思想是：不必回到固定的恒等映射，只需把 $\mathcal H^{\text{res}}$ 限制在一个**在乘法下封闭、且范数有界**的集合里，深度方向上的稳定性就自动得到保证。它选择的集合是双随机矩阵构成的 Birkhoff 多面体：
+
+<Definition term="双随机矩阵" kind="定义">
+一个 $n\times n$ 矩阵 $M$ 若满足 $M\ge0$（逐元素非负）、$M\mathbf 1=\mathbf 1$（每行之和为 1）、$\mathbf 1^\top M=\mathbf 1^\top$（每列之和为 1），则称为双随机矩阵。所有双随机矩阵构成的集合记为 $\mathcal B_n$，称为 Birkhoff 多面体。
+</Definition>
+
+双随机矩阵有三条性质，恰好对应残差连接所需的三种稳定性。
+
+**范数不超过 1。** Birkhoff–von Neumann 定理指出，任何双随机矩阵都是置换矩阵的凸组合：$M=\sum_k\lambda_kP_k$，$\lambda_k\ge0$，$\sum_k\lambda_k=1$。置换矩阵是正交的，谱范数为 1，由三角不等式 $\|M\|_2\le\sum_k\lambda_k\|P_k\|_2=1$。所以每层的混合都不会放大信号的范数。
+
+**乘法封闭。** 若 $A,B\in\mathcal B_n$，则 $AB\ge0$，$AB\mathbf 1=A\mathbf 1=\mathbf 1$，$\mathbf 1^\top AB=\mathbf 1^\top B=\mathbf 1^\top$，所以 $AB\in\mathcal B_n$。任意多层混合矩阵的乘积仍是双随机矩阵，它的范数仍不超过 1、最大行和恰好为 1——这就是上图中蓝线保持水平的原因。
+
+**守恒与凸组合。** 行和为 1 意味着每条输出流都是输入流的**凸组合**（加权平均），不会出现正负抵消或放大；列和为 1 意味着 $\mathbf 1^\top(\mathcal H^{\text{res}}X)=\mathbf 1^\top X$，即所有流的总和（从而均值）在混合前后不变。单位阵本身是双随机的，所以恒等映射是这个集合中的一个特例，mHC 并没有失去普通残差的能力。
+
+`test_doubly_stochastic_closure_and_norm` 验证 60 个双随机矩阵的乘积仍然行和为 1、单个矩阵的谱范数不超过 1；`test_residual_mixing_preserves_stream_sum` 验证混合前后各流之和不变。
+
+### Sinkhorn-Knopp 投影
+
+怎样让一个无约束的参数矩阵变成双随机矩阵？mHC 使用经典的 **Sinkhorn-Knopp** 算法：先取指数得到正矩阵 $M^{(0)}=\exp(\tilde{\mathcal H})$，然后交替做行归一化与列归一化：
+
+<KeyEq label="Sinkhorn-Knopp 迭代">
+
+$$
+M \leftarrow \operatorname{diag}(M\mathbf 1)^{-1}M,\qquad
+M \leftarrow M\operatorname{diag}(\mathbf 1^\top M)^{-1}.
+$$
+
+</KeyEq>
+
+Sinkhorn（1964）证明，对正矩阵，这个迭代收敛到唯一的形如 $D_1M^{(0)}D_2$ 的双随机矩阵（$D_1,D_2$ 为正对角阵）。它也可以理解为熵正则化最优传输的解，因此 mHC 论文称之为把残差矩阵“熵投影”到 Birkhoff 多面体上。整个过程可导，梯度通过迭代反向传播。实践中只迭代固定次数（mHC 与 DeepSeek-V4 都取 20 次），得到的是近似的双随机矩阵：最后一步是列归一化，所以列和精确为 1，行和只是近似为 1。
+
+手算一个 $3\times3$ 的例子。设参数矩阵取指数后为
+
+$$
+M^{(0)}=\begin{bmatrix}2.72&1.22&0.61\\1.35&7.39&1.11\\0.37&1.65&2.23\end{bmatrix}.
+$$
+
+行归一化后第一行为 $(0.598, 0.269, 0.133)$；再做列归一化，各行之和变为 $(1.09, 0.85, 1.06)$，第二行因为原来对角元很大而被压低。继续迭代 20 次后，矩阵约为
+
+$$
+\begin{bmatrix}0.683&0.158&0.160\\0.214&0.603&0.183\\0.104&0.239&0.657\end{bmatrix},
+$$
+
+行和与列和都为 1（误差在 $10^{-4}$ 量级）。注意它仍然保持了“对角占优”的形状——Sinkhorn 只调整行列的尺度，不改变矩阵的“结构”。
+
+<CodeFile path="src/llms_from_scratch/architecture/hyper_connections.py" region="sinkhorn" />
+
+代码在取指数前减去最大值，以避免溢出；由于行列归一化对整体缩放不敏感，这不改变结果。`test_sinkhorn_is_doubly_stochastic` 对一批随机矩阵检查非负性与行列和。
+
+### mHC 的完整参数化
+
+除了 $\mathcal H^{\text{res}}$，mHC 也约束了读写系数：$\mathcal H^{\text{pre}}=\sigma(\cdot)$ 落在 $(0,1)$，$\mathcal H^{\text{post}}=2\sigma(\cdot)$ 落在 $(0,2)$。非负性避免了不同流之间的正负抵消。三组系数都是动态的：把 $X_l$ 展平、做 RMSNorm，经一个线性投影得到原始系数，再乘以一个初始化为小值的标量 $\alpha$ 并加上静态偏置，最后施加上述约束。
+
+<CodeFile path="src/llms_from_scratch/architecture/hyper_connections.py" region="mhc" />
+
+我们把 `b_res` 初始化为 $4I$：取指数后对角元约为非对角元的 $e^4\approx55$ 倍，Sinkhorn 之后接近单位阵，使训练开始时 mHC 接近普通残差。`test_mhc_coefficients_and_shapes` 检查各系数的取值范围与 $\mathcal H^{\text{res}}$ 的行列和。
+
+mHC 论文在 3B、9B、27B 的 MoE 模型（结构仿照 DeepSeek-V3）上实验，$n=4$。与 HC 相比，mHC 消除了损失尖峰，复合增益被控制在接近 1 的水平；与普通残差相比，它保留了 HC 在下游任务上的收益。工程上，论文用算子融合、重计算以及在 DualPipe 调度中重叠通信，把 $n=4$ 时的额外训练开销控制在约 6.7%。DeepSeek-V4 的 Flash 与 Pro 都采用 mHC，扩展率 $n_{hc}=4$、Sinkhorn 迭代 20 次。
+
+## Engram：查表式的条件记忆
+
+同样以残差流为接口的另一项 DeepSeek 工作是 2026 年初发表的 **Engram**（条件记忆）。它的出发点是：Transformer 没有“查表”这种原语，一个事实性的知识（比如某个专有名词后面通常跟着什么）只能通过多层计算来“模拟检索”。MoE 让**计算**稀疏化（每个 token 只用部分专家），Engram 则提出了第二个稀疏轴：**记忆**的稀疏访问。
+
+Engram 模块用当前 token 之前的 $N-1$ 个 token（一个 $N$-gram）作为键，经过多头哈希映射到一张巨大的嵌入表中，取出对应的向量，再经过一个小的卷积与依赖上下文的门控（取值在 0 到 1 之间），注入到某些层的残差流中。查表的计算量是 $O(1)$，与表的大小无关；而且索引只依赖输入 token，可以在前向计算之前就确定，因此表可以放在主机内存中提前预取。论文报告，把一个 100B 参数的嵌入表卸载到主机内存，带来的开销低于 3%。
+
+论文还把“参数预算在 MoE 专家与 Engram 记忆之间如何分配”形式化为一个稀疏分配问题，发现验证损失随分配比例呈 U 形：全部给 MoE 或全部给记忆都不是最优。机制分析表明，Engram 减轻了浅层“重建静态知识”的负担，把网络深度留给更复杂的推理。从残差流的角度看，Engram 就是又一个“向总线写入信息”的模块，只不过它写入的内容来自查表而非计算。
+
+## 小结
+
+- 残差流视角：所有层通过一条共享的 $d$ 维总线读写信息，恒等映射保证了信号与梯度的稳定传播。
+- 超连接把残差流扩展为 $n$ 条，用 $\mathcal H^{\text{pre}}$ 读、$\mathcal H^{\text{post}}$ 写、$\mathcal H^{\text{res}}$ 混合；$n=1$ 且系数为 1 时退化为普通残差。
+- 不受约束的 $\mathcal H^{\text{res}}$ 在深度方向连乘会使信号指数放大，27B 规模的 HC 观测到约 3000 倍的增益。
+- mHC 把 $\mathcal H^{\text{res}}$ 约束为双随机矩阵：谱范数不超过 1、乘法封闭、各流之和守恒，恒等映射是其特例。
+- Sinkhorn-Knopp 交替行列归一化把 $\exp(\tilde{\mathcal H})$ 投影为双随机矩阵，实践中迭代 20 次；读写系数用 sigmoid 约束为非负。
+- Engram 用哈希 $N$-gram 查表向残差流注入静态记忆，开辟了与 MoE 互补的“记忆稀疏”维度。
+
+## 练习
+
+1. 证明：若 $M$ 是双随机矩阵，则对任意 $X\in\mathbb R^{n\times d}$，$MX$ 每一列的最大值不超过 $X$ 该列的最大值，最小值不低于 $X$ 该列的最小值。这说明了什么？
+
+<details>
+<summary>答案</summary>
+
+$MX$ 的第 $i$ 行是 $\sum_jM_{ij}X_j$，其中 $M_{ij}\ge0$、$\sum_jM_{ij}=1$，即 $X$ 各行的凸组合。凸组合的每个坐标都夹在被组合各项该坐标的最小值与最大值之间。所以双随机混合只会让各流“趋于平均”，不会产生超出原有范围的值，信号的幅度在深度方向上不会放大。
+
+</details>
+
+2. 列和为 1 保证了 $\mathbf 1^\top(MX)=\mathbf 1^\top X$。如果只要求行和为 1（行随机矩阵），这个守恒还成立吗？连乘的增益呢？
+
+<details>
+<summary>答案</summary>
+
+不成立。行随机矩阵保证每条输出流是输入流的凸组合，所以增益（最大绝对行和）仍为 1，信号不会爆炸；但各流之和可能改变，例如 $M=\begin{bmatrix}1&0\\1&0\end{bmatrix}$ 把两条流都变成第一条，第二条流的信息被完全抹去，总和从 $x_1+x_2$ 变为 $2x_1$。列和为 1 防止某些流的信息被系统性地丢弃或重复放大，是“守恒”的那一半。
+
+</details>
+
+3. 对矩阵 $\begin{bmatrix}1&1\\1&3\end{bmatrix}$ 手算两轮 Sinkhorn（行归一化 + 列归一化为一轮），并说明它收敛到什么。
+
+<details>
+<summary>答案</summary>
+
+第一轮行归一化得 $\begin{bmatrix}0.5&0.5\\0.25&0.75\end{bmatrix}$，列和为 $(0.75, 1.25)$，列归一化得 $\begin{bmatrix}0.667&0.4\\0.333&0.6\end{bmatrix}$，行和为 $(1.067, 0.933)$。第二轮行归一化得 $\begin{bmatrix}0.625&0.375\\0.357&0.643\end{bmatrix}$，列和 $(0.982, 1.018)$，列归一化得约 $\begin{bmatrix}0.636&0.368\\0.364&0.632\end{bmatrix}$。$2\times2$ 双随机矩阵必为 $\begin{bmatrix}p&1-p\\1-p&p\end{bmatrix}$，且 $D_1MD_2$ 的形式要求 $\frac{p^2}{(1-p)^2}=\frac{1\cdot3}{1\cdot1}=3$（交叉比不变），即 $p=\frac{\sqrt3}{1+\sqrt3}\approx0.634$。
+
+</details>
+
+4. 扩展率 $n=4$ 的 mHC 使残差流变宽 4 倍。估算它对训练时激活显存的影响，并说明为什么 mHC 论文需要重计算。
+
+<details>
+<summary>答案</summary>
+
+每层边界需要保存的残差状态从 $B\cdot T\cdot d$ 变为 $B\cdot T\cdot4d$，若不做任何处理，这部分激活显存变为 4 倍；层内部（注意力、FFN）的激活不变，因为它们仍只处理 $d$ 维输入。对一个 61 层、$d=7168$ 的模型，每层边界多存 $3d$ 个数，相当可观。重计算策略是只保存部分层边界的残差状态，反向时重新计算轻量的混合操作（它们的 FLOPs 很小），用少量计算换取显存，这也是 6.7% 训练开销的一部分来源。
+
+</details>
+
+5. 有人提议：既然要稳定，直接把 $\mathcal H^{\text{res}}$ 约束为正交矩阵（谱范数恰为 1）不是更好吗？比较正交约束与双随机约束。
+
+<details>
+<summary>答案</summary>
+
+正交矩阵也满足乘法封闭与范数保持（不放大也不缩小），但它允许负元素，可能让不同流之间相互抵消，且不保证流的总和守恒；投影到正交群需要 SVD 或矩阵指数，代价比 Sinkhorn 高，梯度也更复杂。双随机矩阵只做非负的加权平均，可解释为“各流之间重新分配信息”，与残差“累加信息”的语义一致，并且 Sinkhorn 只需逐行逐列的归一化，适合高效融合。正交约束是一个合理的替代方案，但 mHC 论文选择了双随机流形。
+
+</details>
+
+## 参考文献
+
+- He et al. [Deep Residual Learning for Image Recognition](https://arxiv.org/abs/1512.03385). 2015；He et al. [Identity Mappings in Deep Residual Networks](https://arxiv.org/abs/1603.05027). 2016.
+- Elhage et al. [A Mathematical Framework for Transformer Circuits](https://transformer-circuits.pub/2021/framework/index.html). 2021.
+- Zhu et al. [Hyper-Connections](https://arxiv.org/abs/2409.19606). 2024.
+- Xie et al. [mHC: Manifold-Constrained Hyper-Connections](https://arxiv.org/abs/2512.24880). DeepSeek-AI, 2025.
+- Sinkhorn. [A Relationship Between Arbitrary Positive Matrices and Doubly Stochastic Matrices](https://doi.org/10.1214/aoms/1177703591). Annals of Mathematical Statistics, 1964.
+- DeepSeek-AI. [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348). 2026（mHC 的使用与配置）.
+- DeepSeek-AI. [Conditional Memory via Scalable Lookup: A New Axis of Sparsity for Large Language Models](https://arxiv.org/abs/2601.07372)（Engram）. 2026；源码 [deepseek-ai/Engram](https://github.com/deepseek-ai/Engram).

@@ -2,7 +2,306 @@
 title: 数据并行、ZeRO 与 FSDP
 description: DDP 的梯度同步与分桶重叠，ZeRO 三个阶段如何切分优化器状态、梯度与参数，FSDP2 的实现方式。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/distributed/ddp.py
+  - src/llms_from_scratch/distributed/zero.py
+  - tests/distributed/test_ddp.py
+  - tests/distributed/test_zero.py
 ---
 
-本章正在撰写。
+有了[集合通信：all-reduce 与它的伙伴](/distributed/collectives/)中的词汇，最简单的并行策略几乎可以一句话说完：每张卡放一份完整的模型，各自处理不同的数据，反向之后把梯度 all-reduce 求平均，然后各自做完全相同的更新。这就是**数据并行（data parallelism, DP）**。它不改动模型的任何一行代码，扩展性又好（上一章证明了环形 all-reduce 的带宽项几乎与卡数无关），所以几乎所有大规模训练的最外层都是数据并行。
+
+但数据并行有两个问题。第一，通信只发生在反向结束之后，GPU 在等待梯度同步时完全空闲；第二，每张卡都要放下完整的参数、梯度和优化器状态，增加卡数只分摊了计算，丝毫没有减轻单卡显存。本章先实现朴素的 DDP 并证明它与单卡训练逐位等价，再用梯度分桶让通信与反向计算重叠，解决第一个问题；然后推导 ZeRO 的三个阶段，实现优化器状态分片（ZeRO-1）与一个最小的全分片线性层（ZeRO-3/FSDP），解决第二个问题；最后比较它们的通信量，并介绍 PyTorch FSDP2 的设计。
+
+## 数据并行为什么与单卡等价
+
+设一步训练的批里有 $N$ 个样本（或 token），损失是逐样本损失的平均：
+
+$$
+\mathcal L(\theta) = \frac1N\sum_{i=1}^N \ell_i(\theta),\qquad
+\nabla\mathcal L = \frac1N\sum_{i=1}^N \nabla\ell_i .
+$$
+
+把批平均分给 $p$ 个 rank，每个 rank 处理 $N/p$ 个样本，计算本地平均损失 $\mathcal L_r$ 及其梯度 $g_r = \frac{p}{N}\sum_{i\in r}\nabla\ell_i$。对 $g_r$ 求平均：
+
+$$
+\frac1p\sum_{r=0}^{p-1} g_r = \frac1p\sum_r \frac pN\sum_{i\in r}\nabla\ell_i = \frac1N\sum_{i=1}^N\nabla\ell_i = \nabla\mathcal L .
+$$
+
+所以“all-reduce 求和再除以 $p$”得到的恰好是整批的梯度。只要所有 rank 从相同的参数出发、用相同的优化器超参数，它们拿到同一个梯度后会做出逐位相同的更新，参数永远保持一致——不需要再同步参数本身。
+
+<Diagram width={720} height={250} label="数据并行的一步">
+  <Box x={20} y={30} w={110} h={44} label="批的前一半" tone="info" size="sm" />
+  <Box x={20} y={160} w={110} h={44} label="批的后一半" tone="info" size="sm" />
+  <Region x={160} y={14} w={280} h={80} title="rank 0" />
+  <Box x={180} y={40} w={110} h={44} label={"完整模型\n前向 + 反向"} tone="accent" size="sm" />
+  <Box x={310} y={40} w={110} h={44} label="局部梯度 g0" tone="accent2" size="sm" />
+  <Region x={160} y={144} w={280} h={80} title="rank 1" />
+  <Box x={180} y={170} w={110} h={44} label={"完整模型\n前向 + 反向"} tone="accent" size="sm" />
+  <Box x={310} y={170} w={110} h={44} label="局部梯度 g1" tone="accent2" size="sm" />
+  <Box x={480} y={95} w={110} h={50} label={"all-reduce\n(g0 + g1) / 2"} tone="strong" size="sm" />
+  <Box x={620} y={40} w={80} h={44} label="更新" tone="neutral" size="sm" />
+  <Box x={620} y={170} w={80} h={44} label="更新" tone="neutral" size="sm" />
+  <Arrow from={[130, 52]} to={[180, 62]} />
+  <Arrow from={[130, 182]} to={[180, 192]} />
+  <Arrow from={[290, 62]} to={[310, 62]} />
+  <Arrow from={[290, 192]} to={[310, 192]} />
+  <Arrow from={[420, 62]} via={[[535, 62]]} to={[535, 95]} tone="accent2" />
+  <Arrow from={[420, 192]} via={[[535, 192]]} to={[535, 145]} tone="accent2" />
+  <Arrow from={[590, 110]} via={[[660, 110]]} to={[660, 84]} tone="accent" />
+  <Arrow from={[590, 130]} via={[[660, 130]]} to={[660, 170]} tone="accent" />
+  <Fragment slot="caption">每个 rank 持有一份完整模型，处理批的不同部分；反向得到的局部梯度经 all-reduce 求平均，所有 rank 用同一个平均梯度做同样的更新，参数始终一致。</Fragment>
+</Diagram>
+
+这个推导有三个前提，每一个在实践中都可能被悄悄打破：
+
+- **各 rank 的样本数相同。** 如果 rank 0 有 5 个有效 token、rank 1 有 9 个（例如变长序列加 padding 掩码），各自求平均后再等权平均，rank 0 的每个 token 权重是 $1/10$，rank 1 的是 $1/18$，而正确的权重都应是 $1/14$。修正方法是先 all-reduce 全局有效 token 数 $N$，每个 rank 用“本地损失之和 $\times p/N$”做反向。
+- **前向不跨样本交互。** BatchNorm 之类的层在各 rank 上只看到本地的样本统计，与整批统计不同。语言模型用的 LayerNorm/RMSNorm 是逐 token 的，不受影响。
+- **梯度裁剪在同步之后。** 先在各 rank 上按本地梯度范数裁剪再平均，与“对全局梯度裁剪”不同。正确顺序是同步 → 计算全局范数 → 裁剪 → 更新。
+
+数据并行还改变了一个超参数的含义：每步的**全局批大小**是“每卡批大小 × 卡数 × 梯度累积步数”。加卡时若保持每卡批大小不变，全局批就变大了，学习率等超参数可能需要重新调（见[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)）。
+
+## 朴素 DDP
+
+最直接的实现：构造时把 rank 0 的参数广播给所有 rank，反向结束后对每个参数的梯度做一次 all-reduce 再除以 $p$。
+
+<CodeFile path="src/llms_from_scratch/distributed/ddp.py" region="naive" />
+
+测试用第三部分的 GPT（2 层，双精度以排除舍入误差的放大）在 2 个进程上训练 3 步 AdamW：每个 rank 只看批的一半，故意让各 rank 用不同的随机种子初始化（构造时的 broadcast 必须把它们统一），最后与单进程在整批上训练的参数逐个比较，误差在 $10^{-10}$ 以内。
+
+<CodeFile path="tests/distributed/test_ddp.py" symbol="_ddp_worker" />
+
+朴素 DDP 有两处浪费。其一，它对每个参数张量各发一次 all-reduce：GPT 有几十个参数张量，大模型有上千个，其中很多（归一化层的权重、偏置）只有几千个元素，每次都要付一个延迟 $\alpha$。其二，它在 backward **全部结束后**才开始通信。设参数量为 $\Psi$，BF16 梯度共 $2\Psi$ 字节，通信时间约
+
+$$
+T_{\text{comm}} \approx 2\,\frac{p-1}{p}\cdot\frac{2\Psi}{B}.
+$$
+
+一个 7B 模型的梯度是 14 GB，跨节点以 $B=50$ GB/s 同步要约 0.56 s。这段时间里 GPU 什么都不做。
+
+## 分桶：让通信与反向计算重叠
+
+观察反向传播的顺序：梯度是从最后一层往前逐层算出来的。最后一层的梯度在反向刚开始不久就已经定型，完全可以立即开始同步，而此时 GPU 还在算前面各层的梯度。只要通信与计算各用各的硬件资源（GPU 上是不同的 CUDA stream），通信时间就能被反向计算掩盖。
+
+实现上有两个要素。第一，**在梯度就绪时得到通知**：PyTorch 允许给参数注册 `post_accumulate_grad` hook，在该参数的 `.grad` 累加完成后被调用。第二，**分桶（bucketing）**：每个参数各发一次异步 all-reduce 会产生大量小消息，而攒齐整个模型再发又失去了重叠的机会。折中的办法是按反向的大致顺序（参数注册顺序的逆序）把参数装进若干个“桶”，一个桶里的梯度全部就绪时，把它们拼成一块连续缓冲区，发起一次异步 all-reduce。
+
+<Lanes width={640} label="朴素 DDP 与分桶 DDP 的时间线" unit="时间（任意单位）" span={14} tick={2}
+  lanes={['朴素：计算', '朴素：通信', '分桶：计算', '分桶：通信']}
+  items={[
+    { lane: 0, start: 0, end: 4, label: '前向', tone: 'accent' },
+    { lane: 0, start: 4, end: 5.5, label: '反向 L4', tone: 'accent2' },
+    { lane: 0, start: 5.5, end: 7, label: '反向 L3', tone: 'accent2' },
+    { lane: 0, start: 7, end: 8.5, label: '反向 L2', tone: 'accent2' },
+    { lane: 0, start: 8.5, end: 10, label: '反向 L1', tone: 'accent2' },
+    { lane: 1, start: 10, end: 14, label: 'all-reduce 全部梯度', tone: 'info' },
+    { lane: 2, start: 0, end: 4, label: '前向', tone: 'accent' },
+    { lane: 2, start: 4, end: 5.5, label: '反向 L4', tone: 'accent2' },
+    { lane: 2, start: 5.5, end: 7, label: '反向 L3', tone: 'accent2' },
+    { lane: 2, start: 7, end: 8.5, label: '反向 L2', tone: 'accent2' },
+    { lane: 2, start: 8.5, end: 10, label: '反向 L1', tone: 'accent2' },
+    { lane: 3, start: 7, end: 9, label: '桶 1', tone: 'info' },
+    { lane: 3, start: 10, end: 12, label: '桶 2', tone: 'info' },
+  ]}>
+  <Fragment slot="caption">四层模型，反向每层 1.5 个单位，同步全部梯度要 4 个单位。朴素 DDP 在反向结束后才开始通信，一步耗时 14；分桶后第一个桶（L4、L3 的梯度）在第 7 个单位就绪并立即开始同步，与 L2、L1 的反向重叠，一步耗时 12。只有最后一个桶的通信无法被掩盖。</Fragment>
+</Lanes>
+
+<CodeFile path="src/llms_from_scratch/distributed/ddp.py" region="bucketed" />
+
+这段代码与 CS336 作业 2 要求实现的 `DDPBucketed` 结构相同。几个细节：
+
+- hook 在 autograd 引擎执行反向的过程中被调用，所以 `_launch` 里发起的异步 all-reduce 确实与之后的反向计算并行。测试用计数器 `launched_in_backward` 检查了这一点：所有桶都是由 hook 发起的，而不是在 `finish_gradient_synchronization` 里补发的。
+- 先除以 $p$ 再求和，与求和后再除数学上相同，但在 FP16/BF16 梯度下更不容易溢出。
+- 某些参数在某一步可能没有梯度（例如 MoE 中没被选中的专家），它所在的桶永远不会“满”。`finish_gradient_synchronization` 会为没发出的桶补发，用零填充缺失的梯度——PyTorch DDP 中对应的选项是 `find_unused_parameters=True`，代价是每步要遍历计算图。
+- 优化器 `step()` 之前必须等待所有通信完成。
+
+**桶多大合适？** 桶太小，每个桶都付一次延迟 $\alpha$，且 all-reduce 达不到峰值带宽；桶太大，第一个桶就绪得晚，重叠的机会少，而且最后一个桶（无法被掩盖的部分）也大。PyTorch DDP 默认 `bucket_cap_mb=25`，并把第一个桶设得更小（1 MB），让通信尽早启动。可以用 α-β 模型估算：最后一个桶的通信时间 $\alpha + 2\frac{p-1}{p}S_{\text{bucket}}\beta$ 是暴露在外的下限。
+
+<Callout tone="tip" title="梯度累积时不要每个微批都同步">
+若一步由 $k$ 个微批累积而成，前 $k-1$ 个微批的反向不需要同步梯度：梯度先在本地累加，最后一个微批反向时再同步一次。PyTorch DDP 用 `with model.no_sync():` 包住前 $k-1$ 个微批的反向。否则通信量会变成 $k$ 倍。
+</Callout>
+
+## 显存：数据并行的真正瓶颈
+
+数据并行加卡只分摊了计算。回顾混合精度 Adam 下每个参数需要的模型状态（[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)）：BF16 参数 2 字节、BF16 梯度 2 字节，加上优化器维护的 FP32 主参数、一阶矩、二阶矩共 $K=12$ 字节，合计 $16\Psi$ 字节。7.5B 参数就是 120 GB，DDP 下每张卡都要放这么多，还没算激活。
+
+ZeRO（Zero Redundancy Optimizer，Rajbhandari 等，2020）的观察是：这些状态在 $N_d$ 个数据并行 rank 上被**完全复制**了 $N_d$ 份，而每份只在更新时被用到。既然更新是逐元素的（Adam 对每个参数独立计算），完全可以把参数切成 $N_d$ 段，每个 rank 只负责一段的更新，只保存这一段的状态。按切分的范围，ZeRO 分三个阶段：
+
+<KeyEq label="ZeRO 各阶段每卡模型状态（Ψ 个参数，N_d 个 rank，优化器 K 字节/参数）">
+
+$$
+\begin{aligned}
+\text{DDP:}\quad & (2 + 2 + K)\,\Psi \\
+\text{ZeRO-1 (optimizer states):}\quad & 2\Psi + 2\Psi + \frac{K\Psi}{N_d} \\
+\text{ZeRO-2 (+ gradients):}\quad & 2\Psi + \frac{(2+K)\Psi}{N_d} \\
+\text{ZeRO-3 (+ parameters):}\quad & \frac{(2+2+K)\Psi}{N_d}
+\end{aligned}
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/distributed/zero.py" region="memory" />
+
+取 ZeRO 论文的例子 $\Psi = 7.5\text{B}$、$N_d = 64$、$K=12$：
+
+<Bars label="7.5B 参数、64 个数据并行 rank 时每卡的模型状态" unit="GB"
+  items={[
+    { label: 'DDP', segments: [{ value: 15, label: 'BF16 参数' }, { value: 15, label: 'BF16 梯度' }, { value: 90, label: '优化器状态' }] },
+    { label: 'ZeRO-1', segments: [{ value: 15, label: 'BF16 参数' }, { value: 15, label: 'BF16 梯度' }, { value: 1.406, label: '优化器状态' }] },
+    { label: 'ZeRO-2', segments: [{ value: 15, label: 'BF16 参数' }, { value: 0.234, label: 'BF16 梯度' }, { value: 1.406, label: '优化器状态' }] },
+    { label: 'ZeRO-3', segments: [{ value: 0.234, label: 'BF16 参数' }, { value: 0.234, label: 'BF16 梯度' }, { value: 1.406, label: '优化器状态' }] },
+  ]}>
+  <Fragment slot="caption">ZeRO 论文图 1 的数值，由 zero_memory_per_gpu 复现：120、31.4、16.6、1.9 GB。优化器状态占了 DDP 显存的四分之三，所以仅仅切分它（ZeRO-1）就把每卡状态降到约四分之一；ZeRO-3 让模型状态随卡数线性下降。</Fragment>
+</Bars>
+
+图中可以看出 ZeRO-1 的性价比：优化器状态占了 $12/16$，切掉它几乎不需要额外代价（下面会看到通信量不变）。ZeRO-2 再切梯度，ZeRO-3 连参数也切。注意这些只是**常驻的模型状态**，激活、通信缓冲、ZeRO-3 在计算时临时 all-gather 出来的完整层参数都不在其中。
+
+### 通信量：ZeRO-1/2 是免费的
+
+DDP 每步做一次梯度 all-reduce。由上一章的分解，all-reduce = reduce-scatter + all-gather，每卡发送 $2\frac{p-1}{p}\cdot 2\Psi$ 字节。ZeRO-1/2 把这两步拆开，中间插入更新：
+
+1. 对梯度做 **reduce-scatter**：rank $r$ 得到第 $r$ 段的全局平均梯度（ZeRO-2 中其余段的梯度随即丢弃）。
+2. rank $r$ 用自己保存的那段优化器状态，更新第 $r$ 段参数。
+3. 对参数做 **all-gather**：每个 rank 拿回完整的新参数。
+
+两步的通信量之和与一次 all-reduce 完全相同。ZeRO-3 则不同：参数平时只保存 $1/N_d$，前向计算每一层之前要 all-gather 该层参数，用完即丢；反向时再 all-gather 一次；算出的梯度直接 reduce-scatter 到各自的分片。参数被 all-gather 两次，所以通信量是 DDP 的 1.5 倍。
+
+| 方案 | 每步通信（每卡发送，以 BF16 元素计） | 每卡模型状态 |
+| --- | --- | --- |
+| DDP | all-reduce 梯度：$2\frac{p-1}{p}\Psi$ | $16\Psi$ |
+| ZeRO-1 / ZeRO-2 | reduce-scatter 梯度 + all-gather 参数：$2\frac{p-1}{p}\Psi$ | $4\Psi + 12\Psi/p$ / $2\Psi+14\Psi/p$ |
+| ZeRO-3 / FSDP | 2 次 all-gather 参数 + reduce-scatter 梯度：$3\frac{p-1}{p}\Psi$ | $16\Psi/p$ |
+
+## 实现 ZeRO-1：优化器状态分片
+
+CS336 作业 2 要求实现一个 `ShardedOptimizer`：包装任意 PyTorch 优化器，每个 rank 只为自己负责的那部分参数创建内部优化器。下面的实现按“当前负载最小的 rank 优先”把参数张量贪心地分给各 rank，使各 rank 负责的元素数大致均衡；`step()` 中每个 rank 只更新自己的参数，再由负责的 rank 把新参数 broadcast 给其他人。
+
+<CodeFile path="src/llms_from_scratch/distributed/zero.py" region="sharded_optimizer" />
+
+这个版本以参数张量为单位切分，实现简单，但它的通信并不是最优的：梯度仍由 DDP 做完整的 all-reduce，更新后又对每个参数做一次 broadcast，总量约为 DDP 的 1.5 倍。生产实现（DeepSpeed ZeRO、Megatron 的 distributed optimizer）把所有梯度和参数展平成一块连续缓冲区，按元素均分，用一次 reduce-scatter 加一次 all-gather 完成，这样通信量与 DDP 相同，而且负载完全均衡。练习 3 请读者改写成这个形式。
+
+测试在两个 rank 上用一个两层 MLP（两个权重张量分别有 60 和 30 个元素）训练 3 步带权重衰减的 AdamW，与单进程结果比较，并检查每个 rank 只保存了自己那个张量的 Adam 一阶、二阶矩：
+
+<CodeFile path="tests/distributed/test_zero.py" symbol="test_zero1_and_zero3_match_single_process" />
+
+## ZeRO-3 与 FSDP
+
+ZeRO-3 在 PyTorch 中的实现叫 **FSDP**（Fully Sharded Data Parallel）。它的核心是一个参数生命周期：每个参数平时只以分片形式常驻；某层计算之前 all-gather 出完整参数，计算之后立即释放；反向时再 all-gather 一次，算出完整梯度后 reduce-scatter，每个 rank 只留下自己分片的梯度。
+
+### 一个最小的全分片线性层
+
+把这个生命周期写进一个自定义的 autograd 函数，就得到一个全分片的线性层。权重展平后补零到 $p$ 的倍数，rank $r$ 只持有第 $r$ 段作为 `nn.Parameter`：
+
+<CodeFile path="src/llms_from_scratch/distributed/zero.py" region="fsdp" />
+
+前向里 `save_for_backward` 只保存输入和**分片**，不保存完整权重——这对应 FSDP 的 `reshard_after_forward=True`：用一次额外的 all-gather 换取前向与反向之间不必常驻完整参数。反向中的 `reduce_scatter` 让梯度直接以分片形式落在负责的 rank 上，除以 $p$ 得到数据并行意义下的平均梯度。因为参数本身就是分片，普通的 `torch.optim.AdamW` 作用在它上面，自然只保存分片的优化器状态——ZeRO-3 的三项状态全部只有 $1/p$。测试中的 `sharded` 模型由两个 `FSDPLinear` 组成，与单进程模型训练 3 步后完全一致，每个 rank 的参数量恰好是总量的一半。
+
+### 预取：把 all-gather 藏起来
+
+FSDP 每层前都要 all-gather，如果“通信—计算—通信—计算”串行执行，GPU 有大量时间在等待。解决办法与分桶 DDP 一样是重叠：在计算第 $i$ 层的同时，预先发起第 $i+1$ 层参数的 all-gather（**前向预取**）；反向时在计算第 $i$ 层梯度的同时，预取第 $i-1$ 层参数，并让第 $i+1$ 层梯度的 reduce-scatter 在后台进行（**反向预取**）。
+
+<Lanes width={640} label="FSDP 的前向与反向预取" unit="时间（任意单位）" span={15} tick={1}
+  lanes={['计算', '通信']}
+  items={[
+    { lane: 1, start: 0, end: 1, label: 'AG 1', tone: 'info' },
+    { lane: 0, start: 1, end: 3, label: '前向 1', tone: 'accent' },
+    { lane: 1, start: 1, end: 2, label: 'AG 2', tone: 'info' },
+    { lane: 0, start: 3, end: 5, label: '前向 2', tone: 'accent' },
+    { lane: 1, start: 3, end: 4, label: 'AG 3', tone: 'info' },
+    { lane: 0, start: 5, end: 7, label: '前向 3', tone: 'accent' },
+    { lane: 1, start: 5, end: 6, label: 'AG 3', tone: 'info' },
+    { lane: 0, start: 7, end: 9, label: '反向 3', tone: 'accent2' },
+    { lane: 1, start: 7, end: 8, label: 'AG 2', tone: 'info' },
+    { lane: 0, start: 9, end: 11, label: '反向 2', tone: 'accent2' },
+    { lane: 1, start: 9, end: 10, label: 'RS 3', tone: 'muted' },
+    { lane: 1, start: 10, end: 11, label: 'AG 1', tone: 'info' },
+    { lane: 0, start: 11, end: 13, label: '反向 1', tone: 'accent2' },
+    { lane: 1, start: 11, end: 12, label: 'RS 2', tone: 'muted' },
+    { lane: 1, start: 13, end: 14, label: 'RS 1', tone: 'muted' },
+  ]}>
+  <Fragment slot="caption">三层模型，AG 是参数 all-gather，RS 是梯度 reduce-scatter。只有第一个 AG 与最后一个 RS 暴露在外，其余通信都与相邻层的计算重叠。代价是同一时刻要容纳两层的完整参数（正在计算的一层与预取的一层）。</Fragment>
+</Lanes>
+
+预取越激进，同时存在的完整参数层越多，显存峰值越高。FSDP 的分片粒度因此很重要：通常把每个 Transformer 块包装成一个 FSDP 单元，一次 all-gather 一整块的参数。块太大，峰值显存高；块太小，消息太碎，延迟主导。
+
+### FSDP1 与 FSDP2
+
+PyTorch 的第一代 FSDP 把一个单元内的所有参数展平拼接成一个 `FlatParameter` 再均分，与上面的 `FSDPLinear` 思路相同。这让通信高效，但参数失去了原来的形状和身份：冻结部分参数、给不同参数设不同的优化器超参数、保存检查点时都很别扭。
+
+**FSDP2**（`torch.distributed.fsdp.fully_shard`，2024 年起成为推荐接口）改为**逐参数**分片：每个参数被表示为一个 `DTensor`，沿第 0 维切成 $p$ 份，每个 rank 持有其中一份。优化器直接作用在 DTensor 上，看到的仍是原来的参数，检查点可以按分片保存与重分片加载。通信时 FSDP2 仍会把一个单元的所有分片拷贝到一块连续缓冲区里做一次 all-gather，再拆回各参数，所以效率并不比 FSDP1 差；它还去掉了 FSDP1 依赖的“记录 CUDA stream 上的内存”机制，显存释放更确定。用法很简单：
+
+```python
+from torch.distributed.fsdp import fully_shard
+
+for block in model.blocks:
+    fully_shard(block)          # 每个 Transformer 块是一个分片单元
+fully_shard(model)              # 根模块：管理嵌入、输出层等剩余参数
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+```
+
+FSDP2 默认会根据模块执行顺序隐式预取下一个单元，也允许用 `set_modules_to_forward_prefetch` 显式指定。另一个常用变体是 **HSDP**（hybrid sharding）：在节点内做全分片、节点之间做复制，参数的 all-gather 只走快速的 NVLink，跨节点只剩梯度的 all-reduce。
+
+## 小结
+
+- 数据并行在 $p$ 个 rank 上复制模型、切分批；all-reduce 平均梯度后与单卡整批训练逐位等价，但要注意样本数不均、跨样本归一化和梯度裁剪的顺序。
+- 分桶 DDP 用梯度 hook 在反向过程中逐桶发起异步 all-reduce，让通信与剩余的反向计算重叠；只有最后一个桶的通信暴露在外。
+- 混合精度 Adam 每参数需要 16 字节模型状态，DDP 下每卡都要完整存储。ZeRO-1/2/3 依次切分优化器状态、梯度、参数，每卡状态分别降到 $4\Psi + 12\Psi/N_d$、$2\Psi + 14\Psi/N_d$、$16\Psi/N_d$。
+- ZeRO-1/2 把 all-reduce 拆成 reduce-scatter 与 all-gather，通信量与 DDP 相同；ZeRO-3/FSDP 多一次参数 all-gather，通信量是 1.5 倍，用预取与计算重叠。
+- FSDP2 以 DTensor 逐参数沿第 0 维分片，保留参数身份，是 PyTorch 当前推荐的全分片接口。
+
+## 练习
+
+1. 在两个 rank 上，rank 0 的微批有 5 个有效 token、rank 1 有 9 个。如果每个 rank 计算本地平均损失，DDP 再平均梯度，每个 token 的实际权重是多少？写出一个只需额外一次 all-reduce 的修正。
+
+<details>
+<summary>答案</summary>
+
+本地平均使 rank 0 的每个 token 权重为 $1/5$，DDP 再除以 2，得 $1/10$；rank 1 为 $1/18$。正确的整批平均应是 $1/14$。修正：先 all-reduce 全局 token 数 $N=14$，每个 rank 反向 $\frac{p}{N}\sum_{i\in r}\ell_i$（本地损失**之和**乘 $2/14$），DDP 除以 $p=2$ 后每个 token 权重恰为 $1/14$。
+
+</details>
+
+2. 一个 13B 参数的模型用 BF16 + Adam（$K=12$）在 32 张 80 GB 显卡上做数据并行。分别计算 DDP、ZeRO-1、ZeRO-2、ZeRO-3 下的每卡模型状态，哪些方案在不考虑激活时就已放不下？
+
+<details>
+<summary>答案</summary>
+
+$\Psi = 13\times10^9$。DDP：$16\Psi = 208$ GB，放不下。ZeRO-1：$4\Psi + 12\Psi/32 = 52 + 4.9 = 56.9$ GB。ZeRO-2：$2\Psi + 14\Psi/32 = 26 + 5.7 = 31.7$ GB。ZeRO-3：$16\Psi/32 = 6.5$ GB。只有 DDP 放不下；ZeRO-1 只剩约 23 GB 给激活和临时缓冲，ZeRO-2 更宽松。
+
+</details>
+
+3. 把 `ShardedOptimizer` 改写成通信最优的 ZeRO-1：所有参数展平成一个缓冲区按元素均分，梯度用 reduce-scatter 而非 all-reduce，更新后用一次 all-gather。权重衰减和 Adam 的逐元素性质为什么保证了这样做与单卡一致？
+
+<details>
+<summary>答案</summary>
+
+思路：构造时记录每个参数在展平缓冲区中的偏移；`step()` 中把各参数的 `.grad` 拼成 `flat_grad`（补零到 $p$ 的倍数），`reduce_scatter` 得到本段平均梯度；本 rank 持有一个形状为 $n/p$ 的 FP32 主参数分片与对应的 AdamW，更新后把结果 `all_gather` 回完整缓冲区，再拆回各参数。正确性来自 AdamW 的更新 $m\leftarrow\beta_1 m + (1-\beta_1)g$、$v\leftarrow\beta_2 v+(1-\beta_2)g^2$、$\theta\leftarrow\theta-\eta(\hat m/(\sqrt{\hat v}+\epsilon)+\lambda\theta)$ 全是逐元素运算，任意按元素切分都不改变结果。若优化器不是逐元素的（例如 Muon 需要对整个矩阵做正交化，或者梯度裁剪需要全局范数），就需要额外的通信：全局范数要 all-reduce 各段的平方和，Muon 则需要按完整矩阵分配所有权。
+
+</details>
+
+4. 分桶 DDP 中，如果模型的某个参数在前向中被使用了两次（例如共享的词嵌入与输出层），`post_accumulate_grad` hook 会被调用几次？这会不会导致桶被提前发出？
+
+<details>
+<summary>答案</summary>
+
+一次。同一个叶子张量在计算图中只有一个 `AccumulateGrad` 节点，两条路径的梯度先在 autograd 引擎中相加，再一次性累加到 `.grad`，然后才调用 hook。所以桶不会被提前发出，共享参数也只被同步一次。这也是本章测试中带权重共享的 GPT 能通过的原因。
+
+</details>
+
+5. 估算 FSDP 在一个 70B 模型、BF16、512 个 rank 上每步的通信量（每卡发送），并与 DDP 比较。如果每卡有效带宽 50 GB/s，每步的通信时间大约多少？要被计算完全掩盖，每步的计算至少要多长？
+
+<details>
+<summary>答案</summary>
+
+DDP：$2\frac{p-1}{p}\cdot 2\Psi\approx 4\times70\times10^9 = 280$ GB，约 5.6 s。FSDP：$3\frac{p-1}{p}\cdot 2\Psi \approx 420$ GB，约 8.4 s。要完全掩盖，每步计算至少约 8.4 s。按 $6\Psi$ FLOPs/token、每卡 400 TFLOP/s 有效算力，8.4 s 能处理约 $8.4\times4\times10^{14}/(6\times7\times10^{10}) \approx 8000$ 个 token，也就是每卡每步至少约一条 8K 序列——这给出了 FSDP 下每卡批大小的下限。
+
+</details>
+
+## 参考文献
+
+- Li, S. et al. [PyTorch Distributed: Experiences on Accelerating Data Parallel Training](https://arxiv.org/abs/2006.15704). VLDB 2020：PyTorch DDP 的分桶、重叠与 `no_sync` 设计。
+- Rajbhandari, S. et al. [ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054). SC 2020：三个阶段的显存与通信分析（图 1 的数字）。
+- Zhao, Y. et al. [PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel](https://arxiv.org/abs/2304.11277). VLDB 2023.
+- PyTorch. [Getting Started with Fully Sharded Data Parallel (FSDP2)](https://docs.pytorch.org/tutorials/intermediate/FSDP_tutorial.html) 与 [torch.distributed.fsdp.fully_shard](https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html)：逐参数 DTensor 分片、预取与 `reshard_after_forward`。
+- PyTorch. [DistributedDataParallel](https://docs.pytorch.org/docs/stable/generated/torch.nn.parallel.DistributedDataParallel.html)：`bucket_cap_mb`、`find_unused_parameters`、`no_sync`。
+- Stanford CS336. [Assignment 2: Systems](https://github.com/stanford-cs336/assignment2-systems)：DDP 分桶与 `ShardedOptimizer`。
+- Hugging Face. [The Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)：数据并行与 ZeRO 一节的通信重叠分析。
+- Goyal, P. et al. [Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour](https://arxiv.org/abs/1706.02677), 2017：大批量数据并行与学习率缩放。

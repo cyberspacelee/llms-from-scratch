@@ -2,7 +2,310 @@
 title: 浮点数与数值稳定性
 description: FP32、BF16、FP16 与 FP8 的位布局与误差；log-sum-exp 与稳定 softmax、方差保持的初始化，以及为什么训练会溢出。
 order: 7
-draft: true
+code:
+  - src/llms_from_scratch/math/numerics.py
+  - tests/math/test_numerics.py
 ---
 
-本章正在撰写。
+到目前为止，我们把数学对象当作理想的实数：导数是精确的，$\exp$ 可以取任意大的值，加法满足结合律。计算机里没有实数，只有有限位的**浮点数**（floating-point number）。绝大多数时候这个差别可以忽略，但在训练大模型时它会以各种方式显现：损失突然变成 `nan`，FP16 训练时梯度悄悄变成 0，BF16 累加的和比真实值小一个数量级，深层网络的激活要么爆炸、要么消失。
+
+这些问题有共同的根源：浮点数的**范围**有限（太大溢出、太小下溢）、**精度**有限（每次运算都有舍入误差）。本章先拆开浮点数的位布局，算出 FP32、BF16、FP16、FP8 各自的范围和精度；再用实验展示舍入误差怎样在累加中积累；然后推导 log-sum-exp 技巧，写出稳定的 softmax 与交叉熵；最后把“数值范围”的视角用在网络的初始化上，推导 Xavier 与 Kaiming 初始化。本章是[混合精度训练](/pretraining/mixed-precision/)与[量化](/inference/quantization/)的基础。
+
+## 浮点数的位布局
+
+### 科学记数法的二进制版本
+
+浮点数就是二进制的科学记数法。一个数被写成
+
+<KeyEq label="正规浮点数的值">
+
+$$
+x = (-1)^{s}\times\bigl(1.m_1m_2\cdots m_p\bigr)_2\times 2^{\,e - \text{bias}},
+$$
+
+</KeyEq>
+
+存储为三个字段：1 位**符号** $s$；$k$ 位**指数** $e$（无符号整数，减去偏置 $\text{bias} = 2^{k-1} - 1$ 后得到真正的指数，这样就能表示负指数）；$p$ 位**尾数**（mantissa，也叫 significand 的小数部分）$m$。正规数的最高位总是 1，所以不存储，称为“隐含的 1”。
+
+手算一个例子：$0.15625 = 5/32 = 1.01_2\times2^{-3}$。在 FP16（5 位指数、10 位尾数、bias 15）中：$s = 0$，$e = -3 + 15 = 12 = 01100_2$，尾数为 $0100000000$。测试 `test_bit_fields` 用 PyTorch 把数值转成 FP16 再读出位模式，验证正是 `0 01100 0100000000`。
+
+指数字段的两个极端值有特殊含义。$e = 0$ 表示**次正规数**（subnormal）：隐含位变成 0，指数固定为 $1 - \text{bias}$，用来在 0 附近均匀地填补空隙，代价是精度逐渐丧失。$e$ 全为 1 在 IEEE 754 格式中保留给 $\pm\infty$（尾数为 0）和 NaN（尾数非 0）。
+
+<Diagram width={720} height={280} label="五种浮点格式的位布局：符号、指数与尾数位数">
+  <Text x={78} y={48} label="FP32" anchor="end" size="sm" bold />
+  <Box x={90} y={30} w={19} h={36} label="S" tone="accent2" size="sm" />
+  <Box x={109} y={30} w={152} h={36} label="8 位指数" tone="info" size="sm" />
+  <Box x={261} y={30} w={437} h={36} label="23 位尾数" tone="accent" size="sm" />
+  <Text x={78} y={96} label="BF16" anchor="end" size="sm" bold />
+  <Box x={90} y={78} w={19} h={36} label="S" tone="accent2" size="sm" />
+  <Box x={109} y={78} w={152} h={36} label="8 位指数" tone="info" size="sm" />
+  <Box x={261} y={78} w={133} h={36} label="7 位尾数" tone="accent" size="sm" />
+  <Text x={78} y={144} label="FP16" anchor="end" size="sm" bold />
+  <Box x={90} y={126} w={19} h={36} label="S" tone="accent2" size="sm" />
+  <Box x={109} y={126} w={95} h={36} label="5 位指数" tone="info" size="sm" />
+  <Box x={204} y={126} w={190} h={36} label="10 位尾数" tone="accent" size="sm" />
+  <Text x={78} y={192} label="FP8 E4M3" anchor="end" size="sm" bold />
+  <Box x={90} y={174} w={19} h={36} label="S" tone="accent2" size="sm" />
+  <Box x={109} y={174} w={76} h={36} label="4" tone="info" size="sm" />
+  <Box x={185} y={174} w={57} h={36} label="3" tone="accent" size="sm" />
+  <Text x={78} y={240} label="FP8 E5M2" anchor="end" size="sm" bold />
+  <Box x={90} y={222} w={19} h={36} label="S" tone="accent2" size="sm" />
+  <Box x={109} y={222} w={95} h={36} label="5 位指数" tone="info" size="sm" />
+  <Box x={204} y={222} w={38} h={36} label="2" tone="accent" size="sm" />
+  <Text x={420} y={96} label="与 FP32 同范围，精度只有 8 位" anchor="start" size="sm" tone="muted" />
+  <Text x={420} y={144} label="精度更高，但最大值只有 65504" anchor="start" size="sm" tone="muted" />
+  <Text x={280} y={192} label="前向（权重、激活）：范围小、精度高" anchor="start" size="sm" tone="muted" />
+  <Text x={280} y={240} label="反向（梯度）：范围大、精度低" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">每个格子的宽度与位数成正比。BF16 就是截掉低 16 位尾数的 FP32，指数位相同，因此范围相同；FP16 把位数更多地分给尾数。两种 FP8 在范围与精度之间做了不同取舍。</Fragment>
+</Diagram>
+
+### 范围与精度由位数决定
+
+从位布局可以直接推出每种格式的关键常数：
+
+- **最大正规数**：指数取最大可用值，尾数全 1：$2^{e_{\max} - \text{bias}}\times(2 - 2^{-p})$。
+- **最小正规数**：$2^{1 - \text{bias}}$；**最小次正规数**：$2^{1 - \text{bias} - p}$。
+- **机器精度**（machine epsilon）$\epsilon = 2^{-p}$：1 与下一个可表示数之间的距离。
+
+| 格式 | 指数/尾数 | bias | 最大值 | 最小正规数 | $\epsilon$ | 十进制有效位 |
+| --- | --- | --- | --- | --- | --- | --- |
+| FP32 | 8 / 23 | 127 | $3.4\times10^{38}$ | $1.2\times10^{-38}$ | $1.2\times10^{-7}$ | 7.2 |
+| BF16 | 8 / 7 | 127 | $3.4\times10^{38}$ | $1.2\times10^{-38}$ | $7.8\times10^{-3}$ | 2.4 |
+| FP16 | 5 / 10 | 15 | $65504$ | $6.1\times10^{-5}$ | $9.8\times10^{-4}$ | 3.3 |
+| FP8 E4M3 | 4 / 3 | 7 | $448$ | $1.6\times10^{-2}$ | $0.125$ | 1.2 |
+| FP8 E5M2 | 5 / 2 | 15 | $57344$ | $6.1\times10^{-5}$ | $0.25$ | 0.9 |
+
+“十进制有效位”是 $\log_{10}2^{p+1}$。FP8 E4M3 是一个例外：它不遵循 IEEE 的特殊值约定，没有 $\pm\infty$，只把 `S.1111.111` 留作 NaN，于是指数全 1 的编码也能表示普通数，最大值为 $2^{15-7}\times1.75 = 448$，而不是按 IEEE 规则的 240。PyTorch 中这个格式叫 `float8_e4m3fn`（fn 表示 finite + NaN）。
+
+<CodeFile path="src/llms_from_scratch/math/numerics.py" symbol={['FloatFormat.max_normal', 'FloatFormat.decode']} />
+
+测试把上表的每个常数与 `torch.finfo` 对照，并对两种 FP8 格式的全部 256 个位模式逐一解码，与 PyTorch 的解释比较——这是检验对格式理解是否完全正确的最直接方法。
+
+<Bars
+  label="各格式的动态范围（最大值与最小次正规数之比，以 10 为底的数量级）"
+  unit=" 个数量级"
+  items={[
+    { label: 'FP32', value: 83.4 },
+    { label: 'BF16', value: 78.6 },
+    { label: 'FP16', value: 12.0, tone: 'accent2' },
+    { label: 'FP8 E5M2', value: 9.6, tone: 'info' },
+    { label: 'FP8 E4M3', value: 5.4, tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">BF16 的动态范围与 FP32 几乎相同，这是它成为大模型训练默认格式的主要原因：不需要像 FP16 那样担心溢出和下溢。代价是精度只有约 2.4 位十进制有效数字。</Fragment>
+</Bars>
+
+## 舍入误差：精度有限的后果
+
+### 相对误差与 ulp
+
+实数 $x$ 存入浮点数时会被舍入到最近的可表示数 $\operatorname{fl}(x)$。在同一个“二进制数量级” $[2^k, 2^{k+1})$ 内，可表示数是等间距的，间距叫 **ulp**（unit in the last place）$= 2^{k-p}$；每跨过一个 2 的幂，间距翻倍。就近舍入的误差不超过半个 ulp，所以**相对误差**有统一的上界：
+
+$$
+\operatorname{fl}(x) = x(1 + \delta),\qquad\lvert\delta\rvert\le u = \epsilon/2 = 2^{-p-1}.
+$$
+
+$u$ 叫单位舍入（unit roundoff）。同一个 $0.1$ 在不同格式中实际存储的值是：
+
+| 格式 | 存储的 $0.1$ | 存储的 $\pi$ |
+| --- | --- | --- |
+| FP32 | 0.100000001490 | 3.14159274 |
+| BF16 | 0.100097656 | 3.140625 |
+| FP16 | 0.099975586 | 3.140625 |
+| FP8 E4M3 | 0.1015625 | 3.25 |
+| FP8 E5M2 | 0.09375 | 3.0 |
+
+IEEE 754 还保证每个基本运算（加减乘除、开方）的结果是精确结果的正确舍入：$\operatorname{fl}(a\circ b) = (a\circ b)(1 + \delta)$，$\lvert\delta\rvert\le u$。单次运算的误差总是很小；问题在于误差会**积累**。
+
+### 累加：大数吃小数
+
+考虑 $s + a$，其中 $\lvert a\rvert$ 比 $s$ 的半个 ulp 还小。精确结果离 $s$ 不到半个 ulp，于是被舍入回 $s$ 本身：$a$ 被完全吞掉。累加大量小数时，部分和越来越大，ulp 也越来越大，最终每一步加法都变成空操作。
+
+用实验看这个现象：把 10000 个 $0.01$ 逐个相加，每一步都把部分和舍入到指定格式（模拟一个低精度累加器）。
+
+<CodeFile path="src/llms_from_scratch/math/numerics.py" region="accumulate" />
+
+<Plot
+  label="逐个累加 10000 个 0.01 时的部分和：FP32、FP16 与 BF16 累加器"
+  x={[0, 10000]}
+  y={[0, 105]}
+  xLabel="已累加的项数"
+  yLabel="部分和"
+  series={[
+    { label: 'FP32', points: [[0, 0.0], [500, 5.0], [1000, 10.0], [1500, 15.0], [2000, 20.0], [2500, 25.0], [3000, 30.001], [3500, 35.0], [4000, 39.999], [4500, 44.998], [5000, 49.998], [5500, 54.997], [6000, 59.996], [6500, 64.995], [7000, 69.997], [7500, 74.998], [8000, 79.999], [8500, 85.0], [9000, 90.001], [9500, 95.002], [10000, 100.003]] },
+    { label: 'FP16', tone: 'info', points: [[0, 0.0], [500, 5.074], [1000, 9.953], [1500, 13.859], [2000, 19.531], [2500, 27.344], [3000, 32.0], [3500, 32.0], [4000, 32.0], [5000, 32.0], [10000, 32.0]] },
+    { label: 'BF16', tone: 'accent2', points: [[0, 0.0], [100, 1.047], [200, 1.828], [300, 3.219], [351, 4.0], [10000, 4.0]] },
+  ]}
+>
+  <Fragment slot="caption">FP32 得到 100.003；FP16 在 32 停住；BF16 在 4 就停住了，最终结果只有真实值的 4%。部分和停在哪里只取决于尾数位数：当 $0.01$ 小于部分和的半个 ulp 时，加法不再改变结果。</Fragment>
+</Plot>
+
+停住的位置可以精确算出。BF16 有 7 位尾数，$[4, 8)$ 区间的 ulp 是 $2^{2-7} = 1/32\approx0.031$，半个 ulp 约 0.0156，大于 0.01，所以部分和一旦到达 4 就再也加不上去。FP16 有 10 位尾数，$[32, 64)$ 的 ulp 是 $2^{5-10} = 1/32$，同理停在 32。
+
+这不是假想的问题。矩阵乘法 $C_{ij} = \sum_kA_{ik}B_{kj}$ 就是长度为 $k$（可达数万）的累加。因此 GPU 的 Tensor Core 在 BF16/FP16 输入下使用 **FP32 累加器**，PyTorch 的 `torch.sum` 等归约也在内部用更高精度累加或采用分块的成对求和（误差增长从 $O(nu)$ 降到 $O(u\log n)$）。另一种办法是 **Kahan 补偿求和**：用一个额外变量 $c$ 记住每次加法丢掉的低位，下一次再加回来。测试中 BF16 的 Kahan 求和得到 99.0，误差只受最终结果本身的表示精度限制（100 附近 BF16 的 ulp 是 0.5）。
+
+<Callout tone="warn" title="浮点加法不满足结合律">
+$(a + b) + c$ 与 $a + (b + c)$ 可能不同。并行归约（GPU 上的 `sum`、分布式 all-reduce）的求和顺序取决于线程调度与切分方式，因此同一个计算在不同硬件、不同并行配置下的结果可能有最后几位的差异。需要逐位可复现时，必须固定归约顺序。
+</Callout>
+
+## 溢出与下溢
+
+**溢出**（overflow）是结果超过最大可表示数，变成 $\pm\infty$；之后 $\infty - \infty$ 或 $0\times\infty$ 产生 NaN，并沿计算图传播到所有下游。在 FP16 中，$300^2 = 90000 > 65504$ 就会溢出；$e^x$ 在 $x > \ln 65504\approx 11.09$ 时溢出。FP32 和 BF16 的界限宽得多，$e^x$ 在 $x > 88.7$ 时才溢出，但对 softmax 的 logits 来说这并不遥远。
+
+**下溢**（underflow）是结果的绝对值小于最小次正规数，被舍入为 0。$10^{-8}$ 在 FP16 中变成 0，在 BF16 中则安然无恙。下溢比溢出更隐蔽：不会产生 NaN，只是悄悄丢失信息。FP16 训练中，很多梯度的量级在 $10^{-6}$ 以下，直接下溢为 0；这正是**损失缩放**（loss scaling）的动机——先把损失乘以一个大数（如 $2^{16}$），让梯度移进 FP16 的可表示范围，更新参数前再除回去。BF16 有与 FP32 相同的指数范围，通常不需要损失缩放。
+
+## log-sum-exp 与稳定的 softmax
+
+### 朴素 softmax 为什么会失败
+
+softmax $s_i = e^{z_i}/\sum_je^{z_j}$ 的朴素实现直接计算指数。若 logits 为 $(1000, 1001, 1002)$，$e^{1000}$ 在 FP32 中溢出为 $\infty$，结果是 $\infty/\infty = \text{NaN}$。反过来，若 logits 为 $(-1000, -1001, -1002)$，所有指数下溢为 0，结果是 $0/0$。可是这两组 logits 的 softmax 都有明确的答案：与 $(0, 1, 2)$ 的 softmax 相同。
+
+### 平移不变性与 log-sum-exp
+
+关键是 softmax 对平移不变：对任意常数 $c$，
+
+$$
+\frac{e^{z_i - c}}{\sum_je^{z_j - c}} = \frac{e^{-c}e^{z_i}}{e^{-c}\sum_je^{z_j}} = \frac{e^{z_i}}{\sum_je^{z_j}} .
+$$
+
+取 $c = m = \max_jz_j$，则所有指数的参数都 $\le 0$，$e^{z_j - m}\in(0, 1]$ 不会上溢；而且至少有一项等于 $e^0 = 1$，分母 $\ge 1$，不会出现 $0/0$。同样的技巧用于对数分母，即 **log-sum-exp**：
+
+<KeyEq label="稳定的 log-sum-exp">
+
+$$
+\operatorname{LSE}(z) = \log\sum_je^{z_j} = m + \log\sum_je^{z_j - m},\qquad m = \max_jz_j .
+$$
+
+</KeyEq>
+
+右边的求和在 $[1, V]$ 之间，所以 $m\le\operatorname{LSE}(z)\le m + \log V$：log-sum-exp 是最大值的一个“软化”版本，误差不超过 $\log V$。
+
+### 稳定的交叉熵
+
+交叉熵 $\ell = -\log s_y$ 如果先算 softmax 再取对数，当 $s_y$ 极小时会下溢为 0，得到 $-\log 0 = \infty$。正确的做法是在对数域直接计算，完全不构造概率：
+
+$$
+\ell = -\log\frac{e^{z_y}}{\sum_je^{z_j}} = \operatorname{LSE}(z) - z_y .
+$$
+
+例如 logits $(0, 200)$、正确类别为 0：真实损失是 $\operatorname{LSE} - 0\approx 200$，一个完全正常的数；而朴素方法中 $s_0 = e^{-200}\approx 10^{-87}$ 在 FP32 中下溢为 0，损失变成 $\infty$。这就是 PyTorch 提供 `F.cross_entropy(logits, targets)` 和 `F.log_softmax`，而不鼓励用户自己写 `torch.log(torch.softmax(...))` 的原因。[反向传播](/math/backprop/)中推导的梯度 $p - e_y$ 也只需要 $p = \exp(z - \operatorname{LSE}(z))$，同样稳定。
+
+<CodeFile path="src/llms_from_scratch/math/numerics.py" region="stable" />
+
+测试用 logits $(1000, 1001, 1002)$ 确认朴素 softmax 产生 NaN、稳定版本与 `torch.softmax` 一致，并用 logits $(0, 200)$ 确认朴素交叉熵为 $\infty$、稳定版本与 `F.cross_entropy` 一致。减去最大值的思想后来发展成**在线 softmax**：分块处理 logits 时，随着看到更大的值不断修正之前的结果，这是 [FlashAttention](/gpu/flash-attention/) 的核心。
+
+## 方差保持的初始化
+
+数值范围的问题不只出现在单个运算上，也出现在**网络的深度方向**。一个 30 层的网络，如果每层把激活放大 1.1 倍，最后放大 $1.1^{30}\approx17$ 倍；放大 2 倍则是 $2^{30}\approx10^9$ 倍，很快溢出。缩小也一样，最后下溢为 0，梯度也随之消失。初始化的任务是让每一层“不放大也不缩小”。
+
+### 线性层的方差传播
+
+考虑一层 $y_i = \sum_{j=1}^{n_{\text{in}}}W_{ij}x_j$。假设权重独立同分布、均值为 0、方差为 $\sigma_W^2$，且与输入独立。由于 $\mathbb E[W_{ij}] = 0$，各项均值为 0、互不相关，方差可以相加：
+
+$$
+\operatorname{Var}(y_i) = \sum_j\operatorname{Var}(W_{ij}x_j) = \sum_j\mathbb E[W_{ij}^2]\,\mathbb E[x_j^2] = n_{\text{in}}\,\sigma_W^2\,\mathbb E[x^2].
+$$
+
+若输入也是零均值，$\mathbb E[x^2] = \operatorname{Var}(x)$，要让方差逐层不变，就要 $n_{\text{in}}\sigma_W^2 = 1$，即 $\sigma_W^2 = 1/n_{\text{in}}$（LeCun 初始化）。
+
+### ReLU 砍掉一半：Kaiming 初始化
+
+ReLU 的输出不是零均值，所以要传递的是二阶矩 $q = \mathbb E[x^2]$。若 $z$ 关于 0 对称分布，ReLU 把负半边置零，正好保留一半的二阶矩：$\mathbb E[\operatorname{relu}(z)^2] = \tfrac12\mathbb E[z^2] = \tfrac12\operatorname{Var}(z)$。于是
+
+$$
+q_{\ell} = \tfrac12\,n_{\text{in}}\,\sigma_W^2\,q_{\ell-1}.
+$$
+
+保持 $q_\ell = q_{\ell-1}$ 需要 $\sigma_W^2 = 2/n_{\text{in}}$，这就是 **Kaiming（He）初始化**。反向传播时梯度经过 $W^\top$，同样的推导给出 $\operatorname{Var}(\bar x) = \tfrac12n_{\text{out}}\sigma_W^2\operatorname{Var}(\bar y)$，要求 $\sigma_W^2 = 2/n_{\text{out}}$。**Xavier（Glorot）初始化**针对线性或 tanh 网络，在前向条件 $1/n_{\text{in}}$ 与反向条件 $1/n_{\text{out}}$ 之间折中，取 $\sigma_W^2 = 2/(n_{\text{in}} + n_{\text{out}})$。
+
+<CodeFile path="src/llms_from_scratch/math/numerics.py" region="init" />
+
+<Plot
+  label="30 层 ReLU 网络（宽 256）中各层激活的均方根，四种初始化标准差"
+  x={[0, 30]}
+  y={[1e-12, 1e11]}
+  yTicks={[1e-12, 1e-8, 1e-4, 1, 1e4, 1e8]}
+  logY
+  xLabel="层数"
+  yLabel="RMS"
+  series={[
+    { label: 'Kaiming', points: [[0, 1.0], [1, 0.994], [2, 0.941], [3, 0.882], [4, 0.838], [5, 0.795], [6, 0.808], [7, 0.813], [8, 0.779], [9, 0.79], [10, 0.796], [11, 0.695], [12, 0.597], [13, 0.588], [14, 0.566], [15, 0.588], [16, 0.624], [17, 0.618], [18, 0.59], [19, 0.57], [20, 0.587], [21, 0.612], [22, 0.596], [23, 0.575], [24, 0.565], [25, 0.535], [26, 0.566], [27, 0.525], [28, 0.528], [29, 0.565], [30, 0.584]] },
+    { label: 'Xavier', tone: 'info', points: [[0, 1.0], [1, 0.703], [2, 0.47], [3, 0.312], [4, 0.21], [5, 0.141], [6, 0.101], [7, 0.0718], [8, 0.0487], [9, 0.0349], [10, 0.0249], [11, 0.0154], [12, 0.00933], [13, 0.00649], [14, 0.00442], [15, 0.00325], [16, 0.00244], [17, 0.00171], [18, 0.00115], [19, 0.000787], [20, 0.000574], [21, 0.000423], [22, 0.000291], [23, 0.000198], [24, 0.000138], [25, 9.24e-05], [26, 6.9e-05], [27, 4.53e-05], [28, 3.22e-05], [29, 2.44e-05], [30, 1.78e-05]] },
+    { label: 'σ = 0.01', tone: 'muted', points: [[0, 1.0], [1, 0.112], [2, 0.012], [3, 0.00128], [4, 0.000137], [5, 1.47e-05], [6, 1.69e-06], [7, 1.93e-07], [8, 2.09e-08], [9, 2.4e-09], [10, 2.74e-10], [11, 2.7e-11], [12, 2.63e-12], [13, 2.92e-13]] },
+    { label: 'σ = 0.2', tone: 'accent2', points: [[0, 1.0], [1, 2.25], [2, 4.82], [3, 10.2], [4, 22.0], [5, 47.1], [6, 108.0], [7, 247.0], [8, 535.0], [9, 1230.0], [10, 2800.0], [11, 5540.0], [12, 10800.0], [13, 23900.0], [14, 52200.0], [15, 123000.0], [16, 295000.0], [17, 661000.0], [18, 1430000.0], [19, 3120000.0], [20, 7270000.0], [21, 17200000.0], [22, 37800000.0], [23, 82400000.0], [24, 183000000.0], [25, 393000000.0], [26, 940000000.0], [27, 1970000000.0], [28, 4490000000.0], [29, 10900000000.0], [30, 25400000000.0]] },
+  ]}
+>
+  <Fragment slot="caption">每层的放大倍数是 $\sqrt{n_{\text{in}}\sigma_W^2/2}$：$\sigma = 0.01$ 时约 0.11，激活每层缩小一个数量级；$\sigma = 0.2$ 时约 2.26，指数爆炸；Xavier 对 ReLU 网络每层约 $1/\sqrt2$；只有 Kaiming 大致保持在 1 附近（有限宽度带来的随机波动使它缓慢漂移）。</Fragment>
+</Plot>
+
+$\sigma = 0.01$ 的曲线很快跌出了图的范围。实测中它到第 23 层后就再也算不出非零值：此时激活的 RMS 约 $10^{-22}$，平方后约 $10^{-44}$，小于 FP32 的最小正规数，计算均方根时直接下溢为 0——梯度消失与数值下溢在这里合二为一。
+
+现代 Transformer 的初始化在此基础上还要考虑残差连接：每个残差分支的输出被加到主干上，$L$ 层之后方差会累加 $L$ 次，因此 GPT-2 等模型把残差分支输出层的初始化标准差再乘以 $1/\sqrt{2L}$。归一化层（LayerNorm、RMSNorm）则在前向时直接把激活拉回单位尺度，大大降低了对初始化的敏感程度。这些内容在 [nn.Module、参数与初始化](/pytorch/modules/)与[训练稳定性](/pretraining/stability/)中展开。
+
+## 小结
+
+- 浮点数 $= (-1)^s\times1.m\times2^{e-\text{bias}}$。指数位决定范围，尾数位决定精度：BF16 与 FP32 同范围、精度低；FP16 精度略高、最大值仅 65504；FP8 E4M3/E5M2 分别偏向精度与范围。
+- 就近舍入的相对误差不超过 $u = 2^{-p-1}$。累加时小数被大数吞掉：BF16 逐个累加 0.01 停在 4。矩阵乘使用 FP32 累加器，求和可用成对求和或 Kahan 补偿。
+- 溢出产生 inf/NaN，下溢悄悄变成 0；FP16 训练需要损失缩放，BF16 通常不需要。
+- softmax 平移不变，减去最大值后计算；交叉熵用 $\operatorname{LSE}(z) - z_y$ 在对数域计算，永不构造概率。
+- 方差保持初始化：线性层 $\sigma_W^2 = 1/n_{\text{in}}$，ReLU 网络 $2/n_{\text{in}}$（Kaiming），Xavier 取 $2/(n_{\text{in}} + n_{\text{out}})$。
+
+## 练习
+
+1. 写出 $-2.5$ 在 BF16 中的位模式。BF16 能精确表示的最大连续整数是多少？
+
+<details>
+<summary>答案</summary>
+
+$-2.5 = -1.01_2\times2^1$：$s = 1$，$e = 1 + 127 = 128 = 10000000_2$，尾数 $0100000$，即 `1 10000000 0100000`。BF16 有 $p = 7$ 位尾数，加上隐含位共 8 位有效位，$[2^8, 2^9)$ 区间的 ulp 为 2，所以能连续表示的最大整数是 $2^8 = 256$，257 会被舍入为 256 或 258。
+
+</details>
+
+2. 在 FP16 中逐个累加 $0.001$，部分和会停在哪里？
+
+<details>
+<summary>答案</summary>
+
+FP16 中 $0.001$ 实际存为 $0.0010004$。加法被吞掉的条件是它小于部分和的半个 ulp，即 $0.0010004 < \tfrac12\cdot2^{\lfloor\log_2s\rfloor - 10}$。在 $[2, 4)$ 区间半个 ulp 是 $2^{-10}\approx0.000977$，略小于 $0.0010004$，加法仍然生效（而且每次被向上舍入成一个完整的 ulp $0.00195$，部分和反而涨得更快）；到了 $[4, 8)$ 区间半个 ulp 变成 $0.00195$，加法全部失效。所以部分和停在 4，实测在第 3071 步停住。
+
+</details>
+
+3. 证明 $\max_jz_j\le\operatorname{LSE}(z)\le\max_jz_j + \log V$，并说明温度 $\tau\to0$ 时 $\tau\operatorname{LSE}(z/\tau)$ 的极限。
+
+<details>
+<summary>答案</summary>
+
+$\sum_je^{z_j - m}$ 至少包含一项 $e^0 = 1$，且每项不超过 1，所以它在 $[1, V]$ 中，取对数加 $m$ 即得。对 $\tau\operatorname{LSE}(z/\tau)$，由上式 $\tau\cdot\frac m\tau\le\tau\operatorname{LSE}(z/\tau)\le m + \tau\log V$，令 $\tau\to0$ 得极限为 $m = \max_jz_j$：log-sum-exp 是 max 的光滑近似。
+
+</details>
+
+4. 一个线性层 $n_{\text{in}} = 4096$，下接 GELU。若用标准正态（$\sigma_W = 1$）初始化，第一层输出的标准差约为多少？Kaiming 初始化的 $\sigma_W$ 应取多少？
+
+<details>
+<summary>答案</summary>
+
+输入方差为 1 时，$\operatorname{Var}(y) = 4096\times1\times1$，标准差 64，下一层还会再放大，很快溢出 FP16。GELU 在 0 附近近似“一半的 ReLU”，通常沿用 ReLU 的增益，$\sigma_W = \sqrt{2/4096}\approx0.022$。
+
+</details>
+
+5. 为什么 FP8 训练中常用 E4M3 存储前向的权重与激活、用 E5M2 存储反向的梯度？
+
+<details>
+<summary>答案</summary>
+
+权重和激活经过归一化后数值范围相对集中，更需要精度，E4M3 多一位尾数。梯度的数值跨度大（不同层、不同 token 可差多个数量级），更需要范围，E5M2 多一位指数，最大值 57344、最小正规数 $6.1\times10^{-5}$。两者都还需要按张量或按块缩放（scaling factor），把数据移到格式的有效范围中。
+
+</details>
+
+## 参考文献
+
+- IEEE Standard for Floating-Point Arithmetic, IEEE Std 754-2019. [doi.org/10.1109/IEEESTD.2019.8766229](https://doi.org/10.1109/IEEESTD.2019.8766229)
+- David Goldberg. What Every Computer Scientist Should Know About Floating-Point Arithmetic. *ACM Computing Surveys* 23(1), 1991. [doi.org/10.1145/103162.103163](https://doi.org/10.1145/103162.103163)
+- Nicholas J. Higham. *Accuracy and Stability of Numerical Algorithms*, 2nd ed., Chapters 2–4（舍入误差模型、求和算法）。SIAM, 2002.
+- Pierre Blanchard, Desmond J. Higham, Nicholas J. Higham. Accurately computing the log-sum-exp and softmax functions. *IMA Journal of Numerical Analysis* 41(4), 2021. [doi.org/10.1093/imanum/draa038](https://doi.org/10.1093/imanum/draa038)
+- Paulius Micikevicius et al. Mixed Precision Training. ICLR 2018. [arXiv:1710.03740](https://arxiv.org/abs/1710.03740)
+- Dhiraj Kalamkar et al. A Study of BFLOAT16 for Deep Learning Training, 2019. [arXiv:1905.12322](https://arxiv.org/abs/1905.12322)
+- Paulius Micikevicius et al. FP8 Formats for Deep Learning, 2022. [arXiv:2209.05433](https://arxiv.org/abs/2209.05433)
+- Xavier Glorot, Yoshua Bengio. Understanding the difficulty of training deep feedforward neural networks. AISTATS 2010. [proceedings.mlr.press/v9/glorot10a.html](https://proceedings.mlr.press/v9/glorot10a.html)
+- Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun. Delving Deep into Rectifiers. ICCV 2015. [arXiv:1502.01852](https://arxiv.org/abs/1502.01852)
+- Stanford CS336 Spring 2025, Lecture 2: PyTorch, resource accounting（FP32/FP16/BF16/FP8 与混合精度）。[github.com/stanford-cs336/spring2025-lectures](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py)
