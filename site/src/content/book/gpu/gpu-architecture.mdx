@@ -21,13 +21,13 @@ CPU 的目标是让 **一个** 指令流尽快结束。为此它把芯片面积�
 
 GPU 的目标是让 **一大批** 相似的计算尽快全部结束，单个计算花多久并不重要。它把芯片面积花在计算单元上：一张 H100 有 132 个流式多处理器（Streaming Multiprocessor，SM），每个 SM 有 128 个 FP32 单元和 4 个 Tensor Core，合计近 1.7 万个 FP32 单元。缓存小、没有复杂的乱序执行，等待内存时怎么办？答案是 **换一批线程来跑**：每个 SM 同时驻留多达 2048 个线程，一批线程在等数据时，调度器在下一个时钟周期切到另一批已经就绪的线程。只要就绪的线程足够多，计算单元就永远不闲。
 
-<Diagram width={720} height={250} label="CPU 与 GPU 芯片面积分配示意">
+<Diagram width={700} height={250} label="CPU 与 GPU 芯片面积分配示意">
   <Region x={20} y={20} w={320} h={210} title="CPU：少数复杂核心" />
   <Box x={40} y={50} w={130} h={70} label="核心" sub="乱序 · 分支预测" tone="accent" />
   <Box x={190} y={50} w={130} h={70} label="核心" sub="乱序 · 分支预测" tone="accent" />
   <Box x={40} y={130} w={280} h={44} label="大容量多级缓存" tone="info" />
   <Box x={40} y={182} w={280} h={34} label="DRAM 控制器" tone="muted" size="sm" />
-  <Region x={380} y={20} w={320} h={210} title="GPU：大量简单计算单元" />
+  <Region x={375} y={20} w={315} h={210} title="GPU：大量简单计算单元" />
   <Matrix x={400} y={50} rows={5} cols={14} cell={18} gap={2} tone="accent" />
   <Box x={400} y={158} w={278} h={26} label="L2 缓存" tone="info" size="sm" />
   <Box x={400} y={190} w={278} h={26} label="HBM 控制器（高带宽）" tone="muted" size="sm" />
@@ -117,12 +117,12 @@ GPU 的内存是一个层次结构，越靠近计算单元越快、越小。下�
 
 共享内存的估算：132 个 SM × 128 B/周期 × 约 1.7 GHz ≈ 29 TB/s，约为 HBM 的 9 倍。寄存器的带宽更高——一条 FMA 指令每周期为 32 个线程各读 3 个操作数，所有处理块同时进行。值得注意的是，**全卡寄存器的总容量（约 33 MB）与 L2（50 MB）在同一量级**，远大于 CPU 的寄存器；高性能 kernel 正是把大量数据放在寄存器里反复使用。
 
-<Diagram width={720} height={270} label="GPU 内存层次：容量与速度">
+<Diagram width={700} height={270} label="GPU 内存层次：容量与速度">
   <Box x={250} y={20} w={220} h={40} label="寄存器" sub="每线程私有 · 最快" tone="strong" />
   <Box x={190} y={74} w={340} h={40} label="共享内存 / L1" sub="每 SM 256 KB · 块内共享" tone="accent" />
   <Box x={130} y={128} w={460} h={40} label="L2 缓存" sub="全卡 50 MB · 所有 SM 共享" tone="info" />
   <Box x={70} y={182} w={580} h={40} label="HBM（全局内存）" sub="80 GB · 3.35 TB/s" tone="neutral" />
-  <Arrow from={[680, 222]} to={[680, 24]} tone="accent" label="更快" labelSide="right" />
+  <Arrow from={[675, 222]} to={[675, 24]} tone="accent" label="更快" labelSide="left" />
   <Arrow from={[40, 24]} to={[40, 222]} tone="info" label="更大" labelSide="left" />
   <Text x={360} y={246} label="主机内存经 PCIe / NVLink-C2C 连接，不在此图中" size="sm" tone="muted" />
   <Fragment slot="caption">越往上越快、越小、作用域越窄。kernel 优化的大部分工作，是让数据尽量待在上层：从 HBM 读一次进共享内存或寄存器，然后被多次使用。H100 的数字取自白皮书与数据手册。</Fragment>

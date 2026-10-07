@@ -12,16 +12,16 @@ order: 0
 
 ## 知识脉络
 
-<Diagram width={720} height={330} label="第八部分各章的依赖关系">
-  <Region x={10} y={10} w={700} h={96} title="硬件与编程模型" />
+<Diagram width={700} height={330} label="第八部分各章的依赖关系">
+  <Region x={10} y={10} w={685} h={96} title="硬件与编程模型" />
   <Box x={40} y={42} w={190} h={50} label="GPU 硬件" sub="SM · warp · 内存层次" tone="info" />
   <Box x={270} y={42} w={190} h={50} label="CUDA 编程模型" sub="grid · block · thread" tone="info" />
   <Box x={500} y={42} w={190} h={50} label="性能分析" sub="roofline · profiler" tone="info" />
-  <Region x={10} y={120} w={700} h={96} title="手写 CUDA kernel：从带宽受限到计算受限" />
+  <Region x={10} y={120} w={685} h={96} title="手写 CUDA kernel：从带宽受限到计算受限" />
   <Box x={40} y={152} w={190} h={50} label="访存优化" sub="合并 · 共享内存 · bank" tone="accent" />
   <Box x={270} y={152} w={190} h={50} label="归约与 softmax" sub="shuffle · 在线 softmax" tone="accent" />
   <Box x={500} y={152} w={190} h={50} label="GEMM" sub="分块 · Tensor Core" tone="accent" />
-  <Region x={10} y={230} w={700} h={90} title="更高的抽象与综合应用" />
+  <Region x={10} y={230} w={685} h={90} title="更高的抽象与综合应用" />
   <Box x={40} y={258} w={190} h={50} label="Triton" sub="以块为单位编程" />
   <Box x={270} y={258} w={190} h={50} label="算子融合" sub="torch.compile" />
   <Box x={500} y={258} w={190} h={50} label="FlashAttention" sub="分块 + 在线 softmax" tone="strong" />
@@ -29,12 +29,12 @@ order: 0
   <Arrow from={[460, 67]} to={[500, 67]} />
   <Arrow from={[230, 177]} to={[270, 177]} />
   <Arrow from={[460, 177]} to={[500, 177]} />
-  <Arrow from={[365, 92]} to={[135, 152]} />
-  <Arrow from={[595, 202]} to={[135, 258]} />
+  <Arrow from={[135, 92]} to={[135, 152]} />
+  <Arrow from={[135, 202]} to={[135, 258]} />
   <Arrow from={[230, 283]} to={[270, 283]} />
   <Arrow from={[460, 283]} to={[500, 283]} />
-  <Arrow from={[365, 202]} via={[[480, 230]]} to={[560, 258]} tone="accent" dashed />
-  <Fragment slot="caption">上层是理解性能所需的硬件模型与工具；中层按“带宽受限 → 计算受限”的顺序手写 CUDA kernel；下层用 Triton 与编译器把同样的思想自动化，并在 FlashAttention 中汇合——虚线表示在线 softmax 直接成为 FlashAttention 的核心。</Fragment>
+  <Arrow from={[365, 202]} via={[[365, 242], [595, 242]]} to={[595, 258]} tone="accent" dashed />
+  <Fragment slot="caption">上层是理解性能所需的硬件模型与工具；中层按“带宽受限 → 计算受限”的顺序手写 CUDA kernel；下层用 Triton 与编译器把同样的思想自动化，并在 FlashAttention 中汇合——竖直箭头表示层与层之间的递进，虚线表示在线 softmax 直接成为 FlashAttention 的核心。</Fragment>
 </Diagram>
 
 前两章建立硬件与编程模型：[GPU 硬件：SM、warp 与内存层次](/gpu/gpu-architecture/)解释吞吐导向的设计和“内存墙”，[CUDA 编程模型：第一个 kernel](/gpu/cuda-basics/)教会读者写、编译、调用一个 kernel。接下来三章是手写 CUDA 的主体：[访存优化：合并访问与共享内存](/gpu/memory-optimization/)处理纯搬运的算子；[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)处理需要线程协作的算子，并推导出在线 softmax；[矩阵乘法优化：从朴素到 Tensor Core](/gpu/gemm/)把一个计算受限的算子一步步推向峰值。之后的[Triton 编程](/gpu/triton/)与[算子融合与 torch.compile](/gpu/kernel-fusion/)把同样的分块思想交给编译器；[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)把分块、在线 softmax、融合与重计算组合起来；[性能分析：Roofline 与 Profiler](/gpu/profiling/)给出贯穿全部分的度量方法。

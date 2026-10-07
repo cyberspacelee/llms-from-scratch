@@ -2,7 +2,270 @@
 title: 性能分析：Roofline 与 Profiler
 description: Roofline 模型判断计算受限还是带宽受限，CUDA Event 计时的正确姿势，PyTorch Profiler 与 Nsight Systems/Compute 的使用。
 order: 9
-draft: true
+code:
+  - src/llms_from_scratch/gpu/profiling.py
+  - src/llms_from_scratch/gpu/hardware.py
+  - tests/gpu/test_profiling.py
 ---
 
-本章正在撰写。
+本部分的每一章都在用同一种语言说话：算术强度、脊点、“带宽受限”与“计算受限”。本章把这种语言整理成 **roofline 模型**，它能在写代码之前回答“这个 kernel 最快能多快”，在写完之后回答“它离上限还有多远、卡在哪里”。然后讨论两件实践中最容易出错的事：怎样正确地给 GPU 代码计时，以及怎样使用 profiler——PyTorch Profiler（在 CPU 上就能演示）、Nsight Systems 与 Nsight Compute。最后，我们用本部分的全部知识为一个 Transformer 层做一份“纸面 profile”：逐算子估算时间下界，找出哪些算子值得优化，并与训练（大批量）和推理 decode（单 token）两种场景对照。
+
+## Roofline 模型
+
+### 两条屋顶
+
+一个 kernel 做 $F$ 次浮点运算，从 HBM 读写 $Q$ 字节，算术强度 $I = F/Q$。它的执行时间至少是计算时间与访存时间中较大的一个（假设二者可以完美重叠）：
+
+$$
+t \ge \max\left(\frac{F}{P_{\text{peak}}},\ \frac{Q}{B}\right),
+$$
+
+其中 $P_{\text{peak}}$ 是峰值算力，$B$ 是内存带宽。换成吞吐（FLOP/s）：
+
+<KeyEq label="Roofline">
+
+$$
+P_{\text{attainable}} = \frac{F}{t} \le \min\bigl(P_{\text{peak}},\ I\cdot B\bigr)
+$$
+
+</KeyEq>
+
+在对数坐标中，这是两条直线：斜率为 1 的“带宽屋顶” $I\cdot B$，和水平的“算力屋顶” $P_{\text{peak}}$。二者在 **脊点** $I^\ast = P_{\text{peak}}/B$ 相交。强度低于 $I^\ast$ 的 kernel 无论怎样优化计算都不会更快，只能减少字节数（融合、低精度、更好的复用）；强度高于 $I^\ast$ 的 kernel，带宽已不是限制，要提高的是计算单元的利用率（Tensor Core、流水、占用率）。
+
+<CodeFile path="src/llms_from_scratch/gpu/profiling.py" region="roofline" />
+
+<Plot
+  label="H100 SXM5 的 BF16 roofline 与几类算子的位置"
+  x={[0.05, 10000]}
+  y={[0.1, 3000]}
+  logX
+  logY
+  xLabel="算术强度（FLOP/byte）"
+  yLabel="可达 TFLOPS"
+  series={[
+    { fn: (t) => Math.min(989.4, t * 3.35), label: 'BF16 屋顶', tone: 'accent' },
+    { fn: (t) => Math.min(67, t * 3.35), label: 'FP32 屋顶', tone: 'muted', dashed: true },
+  ]}
+  markers={[
+    { at: [0.17, 0.56], label: '逐元素加法', tone: 'accent2' },
+    { at: [1.2, 4.0], label: 'RMSNorm', tone: 'accent2' },
+    { at: [64, 214], label: '标准注意力', tone: 'info' },
+    { at: [295, 989.4], label: '脊点 295', tone: 'neutral' },
+    { at: [1365, 989.4], label: 'GEMM 4096³', tone: 'accent' },
+  ]}
+>
+  <Fragment slot="caption">峰值与带宽取自 H100 数据手册；各点的强度按本部分的公式推导（BF16）：逐元素加法 1 FLOP / 6 字节，RMSNorm 约 1.2，标准注意力约 d/2 = 64（d = 128），4096³ 的 GEMM 约 1365。图中的纵坐标是屋顶给出的上限，不是实测值。虚线是不使用 Tensor Core 时的 FP32 屋顶，脊点只有 20 FLOP/byte。</Fragment>
+</Plot>
+
+### 多层屋顶与实际的位置
+
+真实的 GPU 有不止一条屋顶。内存层次的每一级都有自己的带宽：L2、共享内存的带宽远高于 HBM，它们各自给出一条更高的斜线；计算单元也不止一种：FP32 标量单元的屋顶比 Tensor Core 低一个数量级以上（图中虚线）。一个 kernel 的上限由它 **实际使用** 的那一级存储与那一种计算单元决定：不使用 Tensor Core 的 GEMM 永远碰不到 989 TFLOPS；数据完全在 L2 中命中的小算子可以超过 HBM 屋顶。
+
+Nsight Compute 会为每个 kernel 画出这样的分层 roofline，并标出它实际达到的位置。离屋顶的距离就是优化空间；而“离哪条屋顶最近”告诉我们瓶颈在哪里。
+
+### 估算的用途与局限
+
+roofline 给出的是 **上限**。实际 kernel 达不到它的原因有很多：访存与计算没有完全重叠；启动开销与尾部效应（最后一轮只有少数线程块在运行，称为 wave quantization）；功耗墙下的降频；以及 roofline 根本不描述的瓶颈，例如指令发射、同步、bank conflict。但它仍是第一步该做的事：先算出上限，才知道实测的结果是“已经很好”还是“差得很远”。
+
+## 正确地计时
+
+### 常见的错误
+
+GPU 计时出错的方式比想象的多：
+
+1. **没有同步**。kernel 是异步启动的（[CUDA 编程模型：第一个 kernel](/gpu/cuda-basics/)），在主机上读两次时钟只量到了入队时间。
+2. **没有预热**。第一次调用包含各种一次性成本：CUDA 上下文初始化、Triton/`torch.compile` 的编译、cuBLAS 选择算法、缓存分配器向驱动申请显存、GPU 从空闲状态升频。
+3. **只量一次**。单次测量受系统噪声影响大，应当重复多次，报告中位数（对偶发的长尾不敏感），必要时同时报告最小值与分位数。
+4. **缓存过热**。反复对同一份小数据计时，数据一直在 L2 中，测出的是 L2 带宽而不是 HBM 带宽。`triton.testing.do_bench` 在每次测量之间写一块大缓冲区来清空 L2。
+5. **把同步本身算进去**。在被测代码中调用 `.item()` 或 `print` 会引入额外的同步与传输。
+
+### CUDA Event
+
+正确的做法是在 GPU 的时间线上打点。CUDA Event 是插入 stream 中的标记，GPU 执行到它时记录时间戳；两个事件之间的时间差就是它们之间所有 GPU 工作的耗时，与 CPU 何时提交无关。
+
+<CodeFile path="src/llms_from_scratch/gpu/profiling.py" region="benchmark" />
+
+`end.synchronize()` 让 CPU 等待 `end` 事件真正发生，然后才能读取时间差。CPU 上 `benchmark` 退化为 `perf_counter` 计时，测试中用它对一个小矩阵乘法计时，只检查结构（样本数、中位数位于最小值与最大值之间），不对数值做任何断言——计时结果依赖机器，不应当写进测试。
+
+<Lanes
+  label="主机计时与 CUDA Event 计时"
+  width={660}
+  lanes={['CPU', 'GPU stream']}
+  unit="时间（示意）"
+  tick={0}
+  span={20}
+  items={[
+    { lane: 0, start: 0, end: 1, label: 't0', tone: 'accent2' },
+    { lane: 0, start: 1, end: 3, label: '启动', tone: 'muted' },
+    { lane: 0, start: 3, end: 4, label: 't1', tone: 'accent2' },
+    { lane: 1, start: 2, end: 3, label: 'start', tone: 'info' },
+    { lane: 1, start: 3, end: 15, label: 'kernel 执行' },
+    { lane: 1, start: 15, end: 16, label: 'end', tone: 'info' },
+    { lane: 0, start: 4, end: 16, label: 'end.synchronize() 等待', tone: 'muted' },
+  ]}
+>
+  <Fragment slot="caption">示意图。主机在 t0、t1 读时钟，量到的只是“启动”这一小段；CUDA Event 的 start 与 end 记录在 GPU stream 上，二者之差才是 kernel 的执行时间。读取前需要等待 end 事件完成。</Fragment>
+</Lanes>
+
+## Profiler
+
+### PyTorch Profiler
+
+`torch.profiler` 记录 PyTorch 算子（CPU 侧）与它们启动的 GPU kernel（通过 NVIDIA 的 CUPTI 接口），给出按算子汇总的表格和可视化的时间线。`profile_block` 对共享 GPT 的一个 `Block` 做一次前向和反向：
+
+<CodeFile path="src/llms_from_scratch/gpu/profiling.py" region="profile_block" />
+
+```python
+prof = profile_block(batch=4, seq=128, d_model=256, n_heads=4)
+print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=10))
+prof.export_chrome_trace("block_trace.json")       # 在 https://ui.perfetto.dev 中打开
+```
+
+表格中每一行是一个算子（如 `aten::mm`、`aten::mul`、`aten::_scaled_dot_product_flash_attention_for_cpu`），常用的列有：
+
+- **Self CPU / Self CUDA**：算子自身（不含它调用的子算子）的耗时。找热点时按 self 时间排序，否则外层的 `aten::linear` 会把内部 `aten::mm` 的时间重复计算。
+- **CPU total**：包含子算子的总耗时。
+- **# of Calls**：调用次数。次数很多、每次很短的算子提示可能存在启动开销问题。
+- 开启 `record_shapes=True` 后可以按输入形状分组（`group_by_input_shape=True`），开启 `profile_memory=True` 后可以看到显存分配。
+
+`record_function("block_forward")` 定义了自定义的区间，它们出现在表格与时间线中，方便把 kernel 对应到模型代码。在 CPU 上，本书的测试只检查 `block_forward` 与 `aten::mm` 出现在结果中；在 GPU 上，同一段代码还会记录每个 CUDA kernel 的名字与耗时，例如 cuBLAS 的 GEMM kernel 与 FlashAttention kernel。对长时间的训练，应使用 `schedule(wait, warmup, active)` 只记录少数几步，并用 `on_trace_ready` 导出到 TensorBoard 或文件。
+
+### Nsight Systems：看全局时间线
+
+Nsight Systems（`nsys`）是系统级的时间线 profiler：CPU 线程、CUDA API 调用、每个 stream 上的 kernel 与拷贝、NCCL 通信、NVTX 标注，全部画在同一条时间轴上。它回答的问题是“时间都花在哪里、GPU 有没有闲着”。
+
+```sh
+nsys profile -t cuda,nvtx,osrt --capture-range=cudaProfilerApi -o train python train.py
+```
+
+在 Python 中用 `torch.cuda.nvtx.range_push("forward")` / `range_pop()` 标注区间，并用 `torch.cuda.profiler.start()` / `stop()` 限定采集范围（对应 `--capture-range=cudaProfilerApi`）。时间线上最值得找的几种模式：
+
+- **kernel 之间有空隙**：GPU 在等 CPU 提交工作，说明 CPU 侧（Python、分发、数据加载）成了瓶颈。对策是增大每个 kernel 的工作量、融合、`torch.compile` 或 CUDA Graph。
+- **周期性的长时间同步**：例如每步的 `.item()` 或 `cudaMemcpy`，CPU 停下来等 GPU，下一步的提交被推迟。
+- **计算与通信没有重叠**：分布式训练中 NCCL kernel 与计算 kernel 在时间线上串行，见[组合并行：显存规划与训练配置](/distributed/parallelism-in-practice/)。
+- **大量很短的 kernel**：逐元素算子没有融合。
+
+### Nsight Compute：看单个 kernel
+
+找到耗时最多的 kernel 之后，用 Nsight Compute（`ncu`）深入分析它：
+
+```sh
+ncu --set full -k regex:flash_fwd --launch-skip 10 --launch-count 1 -o fa python bench.py
+```
+
+`ncu` 会多次重放这个 kernel 以采集上百个硬件计数器（因此被测 kernel 会变慢很多，不能用它来计时），报告中最重要的几部分：
+
+- **Speed of Light**（SOL）：计算与内存吞吐分别达到峰值的百分比。两者都低说明是延迟受限（并行度不够或停顿太多）；内存 SOL 高说明带宽受限；计算 SOL 高说明计算受限。
+- **Roofline 图**：上一节的分层 roofline，以及该 kernel 实际的位置。
+- **Memory Workload Analysis**：各级缓存的命中率、全局内存访问的扇区/请求比（第三章的合并分析）、共享内存 bank conflict 次数。
+- **Occupancy**：理论占用率与实际达到的占用率，以及限制它的资源（第一章的计算）。
+- **Warp State Statistics**：warp 在各种原因上停顿（stall）的周期，例如等待全局内存（`Long Scoreboard`）、等待屏障（`Barrier`）、等待 Tensor Core（`Math Pipe Throttle`）。
+
+推荐的工作流是自顶向下：先用 PyTorch Profiler 或 Nsight Systems 找到占时间最多的部分与 GPU 的空闲，再对少数几个热点 kernel 用 Nsight Compute，对照 roofline 判断它属于哪一类瓶颈，最后回到本部分对应的章节找优化手段。
+
+## 读一个 Transformer 层
+
+### 纸面 profile
+
+在拿到真实的 profile 之前，可以先用 roofline 为一个 Transformer 层逐算子估算时间下界。`transformer_layer_ops` 列出共享 GPT 的一个 Pre-Norm + SwiGLU 层前向中每个算子的 FLOPs 与 HBM 字节（BF16，多头注意力使用 FlashAttention）：
+
+<CodeFile path="src/llms_from_scratch/gpu/profiling.py" region="layer_estimate" />
+
+取一个 7B 量级的配置：$d = 4096$、32 个头、$d_{ff} = 10944$，训练时 batch 8、序列 2048（共 16384 个 token），在 H100 上估算：
+
+| 算子 | 算术强度 | 受限类型 | 时间下界（μs） |
+| --- | --- | --- | --- |
+| rmsnorm (attn) | 1.2 | 带宽 | 80 |
+| qkv proj | 2587 | 计算 | 1667 |
+| rope (q,k) | 1.2 | 带宽 | 160 |
+| flash attention（因果） | 512 | 计算 | 278 |
+| out proj | 1820 | 计算 | 556 |
+| residual add | 0.2 | 带宽 | 120 |
+| rmsnorm (ffn) | 1.2 | 带宽 | 80 |
+| w1, w3 (up) | 2850 | 计算 | 2969 |
+| silu * mul | 0.8 | 带宽 | 321 |
+| w2 (down) | 2522 | 计算 | 1485 |
+| residual add | 0.2 | 带宽 | 120 |
+
+<Bars
+  label="一个 Transformer 层前向的时间下界构成（H100，BF16，16384 个 token）"
+  unit="μs"
+  items={[
+    { label: '矩阵乘法', value: 6676, tone: 'accent' },
+    { label: 'FlashAttention', value: 278, tone: 'info' },
+    { label: '逐元素与归一化', value: 882, tone: 'accent2' },
+  ]}
+>
+  <Fragment slot="caption">由 h100_layer_report() 按 roofline 推导，非实测。矩阵乘法占约 85%；七个带宽受限的小算子合计约 11%——它们的 FLOPs 不到总量的千分之一，时间却与注意力的三倍相当。</Fragment>
+</Bars>
+
+这份估算给出了几个直接的结论：
+
+1. **矩阵乘法是主体**，它们的强度远高于脊点。实测中若某个 GEMM 远低于估算的下界所对应的吞吐，应检查形状是否对齐（维度是 64 或 128 的倍数）、是否用上了 Tensor Core（dtype 是否为 BF16/FP16）、是否有不必要的转置拷贝。
+2. **带宽受限的小算子不可忽略**。RMSNorm、RoPE、残差相加、SwiGLU 的逐元素部分合计约 0.9 ms，约为 GEMM 时间的 13%。把它们融合进相邻的 kernel（RMSNorm 与残差相加融合、SiLU 与乘法融合进 up-projection 的 epilogue、RoPE 融合进注意力 kernel）可以省下其中大部分——这正是[算子融合与 torch.compile](/gpu/kernel-fusion/)的用武之地。
+3. **注意力本身不是瓶颈**——在使用 FlashAttention、序列长度 2048 时。序列变长时注意力的 $T^2$ 项会逐渐占主导；若不用 FlashAttention，标准注意力还会额外读写 $T\times T$ 的矩阵，它的那一行会变成带宽受限并大幅变慢。
+
+把这些下界加起来（约 7.8 ms）与实测的层时间对比，就得到这一层的“效率”；乘以层数与 3（前向加反向约为前向的 3 倍），可以与[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中的 MFU 联系起来。
+
+### 推理 decode：一切都受带宽限制
+
+同一个函数用 `batch=1, seq=1` 调用，模拟推理时逐 token 生成（decode）的单步（不含 KV Cache 的读取）：
+
+```python
+for name, intensity, bound, t in h100_layer_report(batch=1, seq=1):
+    print(f"{name:16s} I={intensity:6.1f} {bound:7s} {t:6.2f} us")
+```
+
+所有矩阵乘法的强度都降到约 1 FLOP/byte：每个权重元素读进来只和一个 token 相乘一次。全部算子都受带宽限制，一层的时间下界约 120 μs，几乎全部用于读取权重（$\approx 12d^2\cdot 2$ 字节的线性层权重）。32 层的模型每生成一个 token 至少约 3.9 ms，单请求的生成速度上限约 260 token/s——而此时 Tensor Core 的利用率不到 1%。这一结论是第九部分的起点：[推理的成本模型：prefill 与 decode](/inference/inference-cost/)会说明，为什么推理系统要千方百计地把多个请求合成一批（提高强度），为什么量化权重能直接提速（减少字节），以及为什么 KV Cache 的读取会随上下文变长成为新的瓶颈。
+
+### 一份检查清单
+
+面对一份真实的 profile，按以下顺序检查，大多数性能问题都能被定位：
+
+1. GPU 是否一直在忙？时间线上的空隙指向 CPU 瓶颈、同步点或数据加载。
+2. 时间最多的 kernel 是哪些？它们是计算受限还是带宽受限（对照 roofline 估算）？
+3. 计算受限的 kernel 是否用上了 Tensor Core，形状是否对齐，离屋顶多远？
+4. 带宽受限的 kernel 能否融合、能否减少精度、能否消除多余的拷贝（`.contiguous()`、转置）？
+5. 分布式训练中，通信是否与计算重叠？
+
+## 小结
+
+- Roofline：可达算力 $\le \min(P_{\text{peak}}, I\cdot B)$，脊点 $I^\ast = P_{\text{peak}}/B$；强度低于脊点只能减少字节，高于脊点要提高计算利用率。真实硬件有多层屋顶。
+- 计时要同步、预热、重复多次取中位数，并注意 L2 缓存的影响；CUDA Event 在 GPU 时间线上打点。
+- PyTorch Profiler 按算子汇总并导出时间线；Nsight Systems 看全局时间线与 GPU 空闲；Nsight Compute 深入单个 kernel 的 SOL、roofline、访存、占用率与停顿原因。
+- 一个 7B 量级的 Transformer 层在训练时约 85% 的时间下界属于矩阵乘法，带宽受限的小算子约占一成，是融合的目标；decode 时所有算子都受带宽限制，时间由读取权重决定。
+
+本部分到此结束。我们从“GPU 为什么快”出发，经过 CUDA 的线程层次、访存与归约、GEMM 的分块、Triton 与编译器，最终在 FlashAttention 中看到了这些思想的组合。[推理系统](/inference/)将在此基础上讨论：当工作负载从“一次大批量训练”变成“成千上万个长度各异、陆续到达的请求”时，GPU 应当怎样被调度。
+
+## 练习
+
+1. 用 roofline 估算：H100 上对一个 $16384\times 4096$ 的 BF16 张量做 RMSNorm（读写各一次），时间下界是多少？如果实测是 120 μs，带宽利用率是多少？
+2. 一个 FP32 的逐元素 kernel 在 A100 上实测达到 1.8 TB/s。它离屋顶还有多远？还值得优化吗？
+3. 解释为什么用 Nsight Compute 测出的 kernel 耗时不能作为性能数据报告。
+4. 在“纸面 profile”中，把序列长度从 2048 增加到 32768（batch 相应减为 1，token 数不变），FlashAttention 一行的时间下界变为多少？它还是次要项吗？
+5. decode 场景下，若把权重量化为 INT4（每元素 0.5 字节），一层线性层的时间下界变为多少？此时还有哪些因素会限制生成速度？
+
+<details>
+<summary>答案</summary>
+
+1. 字节 $= 2\times 16384\times 4096\times 2 \approx 268$ MB，下界 $268/3350\approx 80$ μs（与表中一致）。实测 120 μs 对应约 2.24 TB/s，带宽利用率约 67%。
+
+2. A100 80GB 的 HBM 带宽为 2.039 TB/s，1.8 TB/s 已达约 88%。带宽受限的 kernel 很难超过 90% 左右，单独优化它的收益很小；更值得考虑的是把它与相邻算子融合以减少字节数，或改用更低的精度。
+
+3. `ncu` 为了采集大量计数器，会多次重放（replay）同一个 kernel，并在重放之间保存与恢复显存状态、可能锁定时钟频率；采集本身也会干扰执行。它报告的耗时反映的是在这种测量条件下的执行，只适合用于相对分析与各项指标，不代表正常运行时的耗时。计时应使用 CUDA Event 或 Nsight Systems。
+
+4. 因果注意力 FLOPs $\approx 2\cdot 2\cdot B\cdot h\cdot T^2\cdot d_h/2$：$B=1$、$T=32768$ 时为 $2\cdot 32\cdot 32768^2\cdot 128\approx 8.8\times 10^{12}$，时间下界约 8.9 ms，是原来的 32 倍（$T^2/T$ 随 $T$ 线性增长，token 数不变），超过了全部矩阵乘法的约 6.7 ms，成为最大的一项。这就是长上下文训练中注意力成为瓶颈的原因。
+
+5. 权重字节降为原来的 1/4，线性层的下界约从 120 μs 降到 30 μs。此时其他因素变得重要：KV Cache 的读取（随上下文增长）、反量化的计算开销、kernel 启动与 CPU 调度的开销（每个 token 有数百个 kernel，CUDA Graph 变得必要），以及采样等小算子。
+
+</details>
+
+## 参考文献
+
+- S. Williams, A. Waterman, D. Patterson. [Roofline: An Insightful Visual Performance Model for Multicore Architectures](https://doi.org/10.1145/1498765.1498785), CACM 2009.
+- H. He. [Making Deep Learning Go Brrrr From First Principles](https://horace.io/brrr_intro.html), 2022.
+- PyTorch. [torch.profiler](https://pytorch.org/docs/stable/profiler.html)；[PyTorch Profiler 教程](https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html)。
+- NVIDIA. [Nsight Systems User Guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html)；[Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)。
+- NVIDIA. [How to Implement Performance Metrics in CUDA C/C++](https://developer.nvidia.com/blog/how-implement-performance-metrics-cuda-cc/), NVIDIA Technical Blog（CUDA Event 计时）。
+- Triton. [`triton.testing.do_bench`](https://triton-lang.org/main/python-api/generated/triton.testing.do_bench.html).
+- Stanford CS336, Spring 2025. [Assignment 2: Systems](https://github.com/stanford-cs336/assignment2-systems)（基准测试与 profiling 部分）。
