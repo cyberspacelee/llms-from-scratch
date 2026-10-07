@@ -1,8 +1,286 @@
 ---
 title: LoRA 与参数高效微调
-description: 低秩更新的假设与推导，LoRA 的初始化与缩放，合并权重，QLoRA 与 4-bit 基座，以及与全参数微调的对比。
+description: 低秩更新的假设与推导，LoRA 的初始化与缩放，合并权重，QLoRA 的 NF4 量化、双重量化与分页优化器，以及 LoRA 与全参数微调的对比。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/post_training/lora.py
+  - src/llms_from_scratch/post_training/nf4.py
+  - tests/post_training/test_lora.py
+  - tests/post_training/test_nf4.py
 ---
 
-本章正在撰写。
+上一章的 SFT 更新了模型的全部参数。对一个 70 亿参数的模型，这意味着什么？按[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)中的核算，BF16 权重与梯度各占 2 字节，FP32 主权重占 4 字节，Adam 的一阶、二阶矩又占 8 字节，每个参数合计 16 字节，仅这些状态就超过 100 GB，还没算激活值。更麻烦的是存储与部署：每微调一个任务就要保存一份完整的模型副本。
+
+参数高效微调（Parameter-Efficient Fine-Tuning，PEFT）的思路是冻结预训练权重，只训练一小组新增参数。在众多方法（Adapter、Prefix Tuning、Prompt Tuning……）中，LoRA（Low-Rank Adaptation，Hu 等，2021）凭借简单、推理时零额外开销、效果接近全参数微调而成为事实标准。本章从“权重更新是低秩的”这一假设出发推导 LoRA，实现它并验证合并前后的等价性；然后实现 QLoRA 的 NF4 量化，看它如何把基座模型压到每个参数约 4.1 比特；最后讨论 LoRA 到底比全参数微调少学了什么。
+
+## 内在维度：微调真的需要那么多自由度吗
+
+Li 等（2018）提出用“内在维度”（intrinsic dimension）衡量一个优化问题真正需要的自由度：把参数限制在一个随机的 $d$ 维子空间中 $\theta = \theta_0 + P z$（$P$ 是固定的随机投影，只训练 $z\in\mathbb R^d$），找出能达到完整训练 90% 效果的最小 $d$。Aghajanyan 等（2020）把这个方法用于预训练语言模型的微调，发现结论令人吃惊：RoBERTa-large 在 MRPC 等任务上只需约 200 个自由参数就能达到全参数微调 90% 的效果；而且预训练越充分、模型越大，内在维度反而越低。
+
+这说明预训练已经把模型带到了一个“稍加调整就能完成新任务”的位置，微调所需的变化位于一个很小的子空间里。LoRA 把这个观察具体化为一个关于**权重更新矩阵**的假设：
+
+<Definition term="低秩更新假设" kind="假设" source="https://arxiv.org/abs/2106.09685">
+
+对预训练权重 $W_0\in\mathbb R^{d_{\text{out}}\times d_{\text{in}}}$，微调得到的更新 $\Delta W = W - W_0$ 具有很低的“内在秩”：它可以用秩 $r \ll \min(d_{\text{in}}, d_{\text{out}})$ 的矩阵很好地近似。
+
+</Definition>
+
+在[特征分解、SVD 与低秩近似](/math/linear-algebra-advanced/)中我们知道，秩为 $r$ 的矩阵总能写成两个瘦矩阵的乘积。LoRA 直接用这种分解参数化 $\Delta W$，而不是先算出 $\Delta W$ 再做 SVD。
+
+## LoRA 的推导
+
+### 前向：一条低秩旁路
+
+对一个线性层 $h = W_0 x$，LoRA 把它改为
+
+<KeyEq label="LoRA 的前向">
+
+$$
+h = W_0 x + \Delta W x = W_0 x + \frac{\alpha}{r}\,B A x,\qquad B\in\mathbb R^{d_{\text{out}}\times r},\; A\in\mathbb R^{r\times d_{\text{in}}}
+$$
+
+</KeyEq>
+
+$W_0$ 冻结，只训练 $A$ 与 $B$。计算时先算 $Ax$（降到 $r$ 维），再乘 $B$（升回 $d_{\text{out}}$ 维），不必物化 $d_{\text{out}}\times d_{\text{in}}$ 的 $\Delta W$。批量写法与 `nn.Linear` 一致：$Y = XW_0^\top + \frac{\alpha}{r}(XA^\top)B^\top$。
+
+<Diagram width={720} height={250} label="LoRA 的低秩旁路结构">
+  <Box x={20} y={100} w={80} h={50} label="x" sub="d_in" />
+  <Box x={200} y={30} w={220} h={56} label="W₀（冻结）" sub="d_out × d_in" tone="muted" />
+  <Box x={180} y={160} w={90} h={56} label="A" sub="r × d_in" tone="accent" />
+  <Box x={330} y={160} w={90} h={56} label="B" sub="d_out × r" tone="accent" />
+  <Box x={470} y={160} w={70} h={56} label="× α/r" tone="neutral" />
+  <Box x={590} y={95} w={50} h={60} label="+" tone="neutral" />
+  <Box x={670} y={100} w={40} h={50} label="h" tone="strong" />
+  <Arrow from={[100, 125]} via={[[140, 125], [140, 58]]} to={[200, 58]} />
+  <Arrow from={[140, 125]} via={[[140, 188]]} to={[180, 188]} tone="accent" />
+  <Arrow from={[270, 188]} to={[330, 188]} tone="accent" label="r 维" />
+  <Arrow from={[420, 188]} to={[470, 188]} tone="accent" />
+  <Arrow from={[540, 188]} via={[[615, 188]]} to={[615, 155]} tone="accent" />
+  <Arrow from={[420, 58]} via={[[615, 58]]} to={[615, 95]} />
+  <Arrow from={[640, 125]} to={[670, 125]} />
+  <Text x={225} y={235} label="初始化：A ~ 随机，B = 0" size="sm" tone="accent" />
+  <Fragment slot="caption">冻结的 W₀ 与可训练的低秩旁路并联。输入先被 A 压到 r 维，再由 B 投回输出维度并乘以 α/r。因为 B 初始化为零，训练开始时旁路输出为零，模型与基座完全相同。</Fragment>
+</Diagram>
+
+### 初始化：为什么 B = 0、A 随机
+
+LoRA 把 $A$ 用随机分布初始化（原论文用高斯，PEFT 库默认用与 `nn.Linear` 相同的 Kaiming 均匀分布），$B$ 初始化为零。这样做同时满足了两个要求。
+
+**起点等价。** $B=0$ 意味着 $\Delta W = 0$，第一步之前的模型与预训练模型逐位相同。微调从一个已知良好的点出发，而不是先被一个随机扰动破坏。
+
+**梯度不为零。** 设上游梯度 $G=\partial \mathcal L/\partial Y\in\mathbb R^{N\times d_{\text{out}}}$，记 $s=\alpha/r$。对旁路 $Y_{\text{lora}} = s\,(XA^\top)B^\top$ 求导：
+
+$$
+\frac{\partial\mathcal L}{\partial B} = s\,G^\top (XA^\top)\in\mathbb R^{d_{\text{out}}\times r},\qquad
+\frac{\partial\mathcal L}{\partial A} = s\,(GB)^\top X\in\mathbb R^{r\times d_{\text{in}}}.
+$$
+
+在 $B=0$ 处，$\partial\mathcal L/\partial A = 0$，但 $\partial\mathcal L/\partial B$ 一般不为零，因为 $XA^\top$ 是随机投影后的输入。第一步更新后 $B\neq 0$，$A$ 也开始得到梯度。反过来，如果两者都初始化为零，梯度永远为零，训练无法启动；如果两者都随机，起点就不再等价于基座。测试 `test_gradients_flow_only_to_adapters` 验证了这三点：$W_0$ 没有梯度，$B$ 有梯度，$A$ 的初始梯度恰为零。
+
+### 缩放 α/r：让学习率与秩解耦
+
+为什么要乘 $\alpha/r$，而不是直接用 $BA$？考虑 $A$ 的元素方差固定、$r$ 变大时：$BAx$ 是 $r$ 项之和，在训练初期 $B$ 的每一列都朝着相近的方向被更新，$\Delta W x$ 的大小大致随 $r$ 线性增长。除以 $r$ 抵消了这种增长，使同一个学习率在不同的 $r$ 下产生量级相近的更新。原论文的做法是把 $\alpha$ 固定为第一次尝试的 $r$ 值，此后改变 $r$ 时不再调整学习率。
+
+这个论证只在训练初期成立。Kalajdzievski（2023）分析了训练充分时的情形，指出 $\alpha/r$ 在大秩下会让更新过小、学习停滞，主张改用 $\alpha/\sqrt r$（rsLoRA）。实践中常见的配置是 $r\in\{8,16,32,64\}$、$\alpha = r$ 或 $2r$。
+
+### 实现
+
+<CodeFile path="src/llms_from_scratch/post_training/lora.py" region="lora_linear" />
+
+把模型中的线性层替换成 `LoRALinear` 只需遍历子模块。全书的 GPT 中，注意力的四个投影叫 `q_proj`、`k_proj`、`v_proj`、`o_proj`，SwiGLU 的三个矩阵叫 `w1`、`w2`、`w3`：
+
+<CodeFile path="src/llms_from_scratch/post_training/lora.py" symbol="apply_lora" />
+
+## 参数量与显存：手算一个 7B 模型
+
+单个 $d_{\text{out}}\times d_{\text{in}}$ 矩阵的 LoRA 参数量是 $r(d_{\text{in}}+d_{\text{out}})$。对 $d_{\text{in}}=d_{\text{out}}=4096$、$r=8$，这是 $8\times 8192 = 65{,}536$ 个参数，只有原矩阵 $16{,}777{,}216$ 个参数的 $0.39\%$。
+
+以 LLaMA-2-7B 的结构为例（32 层，$d=4096$，前馈宽度 11008，标准多头注意力，共约 67.4 亿参数）。每层注意力有 4 个 $4096\times4096$ 矩阵，MLP 有 3 个 $4096\times 11008$ 矩阵。取 $r=16$、对所有线性层加 LoRA：
+
+$$
+\underbrace{4\times 16\times(4096+4096)}_{524{,}288} + \underbrace{3\times 16\times(4096+11008)}_{724{,}992} = 1{,}249{,}280 \;\text{/层},
+$$
+
+32 层合计约 4000 万个可训练参数，占总参数的 0.59%。
+
+显存的对比更直观。设全参数微调每个参数 16 字节；LoRA 的冻结权重用 BF16（2 字节），只有 4000 万个可训练参数需要梯度与优化器状态（按 16 字节计）；QLoRA 进一步把冻结权重压到每个参数约 4.127 比特（推导见下一节）：
+
+<Bars label="7B 模型微调的权重与优化器状态显存（不含激活）" unit="GB"
+  items={[
+    { label: '全参数微调', segments: [{ value: 13.5, label: '冻结/基座权重' }, { value: 94.3, label: '梯度、主权重与 Adam 状态', tone: 'accent2' }] },
+    { label: 'LoRA (BF16 基座)', segments: [{ value: 13.5, label: '冻结/基座权重' }, { value: 0.64, label: '梯度、主权重与 Adam 状态', tone: 'accent2' }] },
+    { label: 'QLoRA (NF4 基座)', segments: [{ value: 3.48, label: '冻结/基座权重' }, { value: 0.64, label: '梯度、主权重与 Adam 状态', tone: 'accent2' }] },
+  ]}>
+  <Fragment slot="caption">全参数微调：6.74×10⁹ 参数 × 16 字节 ≈ 108 GB，其中 BF16 权重 13.5 GB。LoRA：BF16 基座 13.5 GB 加上 4000 万个可训练参数 × 16 字节 ≈ 0.64 GB。QLoRA：基座 6.74×10⁹ × 4.127 / 8 字节 ≈ 3.48 GB。激活值不在图中，它们与是否使用 LoRA 关系不大，长序列时可能是显存的主要部分。</Fragment>
+</Bars>
+
+图中没有画出的是激活值：前向时每层的输入仍然要保存，以便反向时计算对 $A$、$B$ 的梯度以及向更低层传播梯度。LoRA 省下的是参数相关的状态，不是激活。计算量方面，前向与全参数微调相同（外加很小的旁路），反向省去了对 $W_0$ 的权重梯度计算（每个矩阵乘法的反向本来要算输入梯度与权重梯度两个乘法），所以每步的 FLOPs 约为全参数微调的三分之二多一点。
+
+## 合并与拆分：推理时零开销
+
+训练结束后，可以把旁路“折叠”回主权重：
+
+$$
+W' = W_0 + \frac{\alpha}{r}BA,\qquad W'x = W_0x + \frac{\alpha}{r}BAx.
+$$
+
+两者在数学上完全相等，所以合并后的模型推理时与原模型的结构、速度完全相同。这是 LoRA 相比 Adapter（在层间插入新的小网络，推理时增加串行计算）的主要优势。反过来，从 $W'$ 中减去 $\frac{\alpha}{r}BA$ 就能恢复 $W_0$，切换到另一个适配器。
+
+测试先给所有 $B$ 一个随机值（模拟训练后的适配器），记录未合并时的输出；合并后输出应在浮点误差内一致；拆分并清零 $B$ 后应回到基座的输出：
+
+<CodeFile path="tests/post_training/test_lora.py" symbol="test_merge_and_unmerge_round_trip" />
+
+不合并也有用武之地。一个基座加上成百上千个 LoRA 适配器（每个用户或每个任务一个）时，服务系统可以在同一个批次里让不同请求使用不同的适配器：基座的矩阵乘法共享，各请求的旁路 $BAx$ 用专门的分组 kernel 计算（S-LoRA、Punica 的做法）。存储一个 $r=16$ 的 7B 适配器只需约 80 MB（BF16）。
+
+## 加在哪些层上
+
+原论文在 GPT-3 上做了一个固定参数预算的实验：在相同的可训练参数数下，同时加在 $W_q$ 和 $W_v$ 上优于只加在一个矩阵上用更大的秩，因此早期许多实现只给注意力的 Q、V 加 LoRA。后来的证据倾向于**所有线性层**都加。QLoRA（Dettmers 等，2023）发现只有对所有线性层使用 LoRA，才能匹配全参数微调的效果，秩本身反而不太重要。Thinking Machines 的“LoRA Without Regret”（2025）进一步发现，只加在注意力上的 LoRA 明显不如只加在 MLP 上的，而在 MLP 已有 LoRA 时再给注意力加，几乎没有额外收益。一种解释是 MLP 的参数占模型的大头，那里存储了更多与任务相关的“知识”。
+
+## QLoRA：在 4-bit 基座上训练 LoRA
+
+LoRA 把可训练状态压到了很小，冻结的基座权重成了显存的主体。QLoRA（Dettmers 等，2023）把基座量化到 4 比特，在其上训练 BF16 的 LoRA，使 65B 模型可以在单张 48 GB 的 GPU 上微调。它有三个组成部分：NF4 数据类型、双重量化与分页优化器。前向时，每个被量化的矩阵在参与乘法前即时反量化为 BF16；梯度穿过反量化后的权重传给 LoRA 参数与更低的层，基座本身从不更新。
+
+### NF4：按正态分布的分位数放置码值
+
+4 比特只有 16 个码值。把它们放在哪里，才能让量化误差最小？在[量化：权重、激活与 KV Cache](/inference/quantization/)中会讨论通用的均匀（整数）量化，它在 $[-1,1]$ 上等距地放置码值。但预训练权重近似服从零均值正态分布，大部分权重集中在 0 附近，均匀码值在尾部浪费了很多级。
+
+**分位数量化**（quantile quantization）的思想是：让每个码值“负责”的概率质量相同。若数据分布的累积分布函数为 $F$，取 $2^k$ 个等概率区间，码值放在区间的代表点上，每个码值被使用的频率相同，在信息论意义上没有浪费任何一个比特。对正态分布，这些点就是 $\Phi^{-1}$ 在等距概率处的取值。
+
+QLoRA 做了两处调整。第一，由于先做了分块 absmax 归一化（见下文），把码表也缩放到 $[-1, 1]$。第二，希望 0 能被精确表示（填充值、恰好为零的权重不应引入误差），而 16 个对称点不包含 0。解决办法是**非对称**地构造：正半轴取 8 个分位数，负半轴取 7 个，再加上 0：
+
+$$
+q^{+}_i = \Phi^{-1}\!\Big(\tfrac12 + \tfrac{i}{8}\big(\delta-\tfrac12\big)\Big)\;(i=1,\dots,8),\qquad
+q^{-}_j = -\Phi^{-1}\!\Big(\tfrac12 + \tfrac{j}{7}\big(\delta-\tfrac12\big)\Big)\;(j=1,\dots,7),
+$$
+
+最外侧的概率位置 $\delta \approx 0.9677$ 取 $1-\frac{1}{2\cdot 15}$ 与 $1-\frac{1}{2\cdot16}$ 的平均，使最外侧码值落在尾部区间的中点附近，同时避开 $\Phi^{-1}(1)=\infty$。最后整个码表除以最大值 $\Phi^{-1}(\delta)\approx 1.848$。下面的实现与 bitsandbytes 中的 `create_normal_map` 等价，测试检查它与 QLoRA 论文附录公布的码表逐项相差不超过 $10^{-6}$：
+
+<CodeFile path="src/llms_from_scratch/post_training/nf4.py" region="nf4_code" />
+
+<Plot label="NF4 码值与归一化后的权重分布" x={[-1.1, 1.1]} y={[0, 0.8]} xLabel="归一化权重 w / absmax" yLabel="密度"
+  series={[{ fn: (t) => 1.848 * Math.exp(-0.5 * (1.848 * t) ** 2) / Math.sqrt(2 * Math.PI), label: '缩放后的标准正态密度' }]}
+  markers={[-1.0, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0, 0.0796, 0.1609, 0.2461, 0.3379, 0.4407, 0.5626, 0.7230, 1.0].map((c) => ({ at: [c, 1.848 * Math.exp(-0.5 * (1.848 * c) ** 2) / Math.sqrt(2 * Math.PI)], tone: 'accent2' }))}>
+  <Fragment slot="caption">曲线是“权重除以块内最大绝对值”之后的近似分布，圆点是 16 个 NF4 码值。码值在密度高的中心区域密、在尾部稀，每个码值覆盖的概率质量大致相同；0 恰好是一个码值。均匀的 4-bit 整数码会在 [−1, 1] 上等距排列，尾部的码值很少被用到。</Fragment>
+</Plot>
+
+### 分块 absmax 量化
+
+把整个矩阵除以一个全局最大值再量化，一个离群值就会把所有其他权重挤到 0 附近的少数几个码值上。QLoRA 把权重展平后按 64 个一块，每块除以块内绝对值最大值 $m_b$，再把每个元素映射到最近的 NF4 码值：
+
+$$
+c_i = \arg\min_{j}\Big|\frac{w_i}{m_b} - q_j\Big|,\qquad \hat w_i = q_{c_i}\, m_b .
+$$
+
+<CodeFile path="src/llms_from_scratch/post_training/nf4.py" region="quantize" />
+
+测试在 $\mathcal N(0, 0.02^2)$ 的随机权重上验证了几件事：每块绝对值最大的元素被精确重建（它映射到码值 $\pm1$）；每个元素的误差不超过“相邻码值最大间距的一半乘以 $m_b$”；NF4 的均方误差低于同样分块的均匀 4-bit 整数量化。在一万多个元素上，NF4 的均方根误差约为权重标准差的 9%，同样分块的均匀量化（$-7\ldots7$ 共 15 级）约为 11%。
+
+### 双重量化与存储开销
+
+每块一个 FP32 的 $m_b$，摊到每个权重上是 $32/64 = 0.5$ 比特，相当于 4 比特的八分之一。**双重量化**（double quantization）把这些缩放因子本身再量化一次：每 256 个 $m_b$ 为一组，量化为 8 比特，每组再保存一个 FP32 的二级缩放因子。由于 $m_b$ 全为正，先减去它们的均值，再做对称量化。每个权重的平均开销变为
+
+$$
+\frac{8}{64} + \frac{32}{64\times 256} \approx 0.127\ \text{比特},
+$$
+
+比原来的 0.5 比特节省了约 0.373 比特，对 65B 模型约为 3 GB。QLoRA 用 8 比特浮点数量化二级常数，我们的实现用对称 int8，结构相同：
+
+<CodeFile path="src/llms_from_scratch/post_training/nf4.py" region="double_quant" />
+
+测试显示，用双重量化重建的 $m_b$ 相对误差小于 1%，它给权重带来的额外误差与 4-bit 量化本身相比可以忽略。
+
+### 分页优化器
+
+最后一个组件解决的是显存**峰值**。处理一个特别长的序列时，激活值会突然增大，可能导致显存不足而中断训练。QLoRA 利用 NVIDIA 统一内存（unified memory）分配优化器状态：GPU 显存不足时，驱动自动把这些页面换出到 CPU 内存，需要时再换回，就像操作系统的虚拟内存分页。由于 LoRA 的优化器状态本来就很小，换页的开销通常可以接受。
+
+QLoRA 的实验表明，NF4 加双重量化的 LoRA 在多个基准上能复现 16 位全参数微调的效果。用它训练的 Guanaco 65B 在 Vicuna 基准（以 GPT-4 为评委）上达到 ChatGPT 水平的 99.3%，训练在单张 GPU 上用了 24 小时。
+
+## LoRA 与全参数微调：少学了什么
+
+LoRA 是否“免费”？两项系统性研究给出了细致的回答。
+
+**LoRA 学得少、忘得也少。** Biderman 等（2024）在代码与数学两个领域，比较了持续预训练（数十亿 token 的无标注数据）与指令微调两种设置。在持续预训练中，LoRA 明显落后于全参数微调；在指令微调中差距缩小。另一方面，LoRA 对源领域能力（如通用语言理解）的遗忘更少，表现得像一种正则化。他们还分析了全参数微调得到的 $\Delta W$ 的谱，发现它的秩比典型 LoRA 配置高 10 到 100 倍。也就是说，在需要大量新知识的任务上，低秩假设并不成立。
+
+**在容量足够时没有遗憾。** Thinking Machines 的“LoRA Without Regret”（Schulman 等，2025）在多种规模的 SFT 与强化学习任务上系统地扫描了学习率与秩，结论是：当 LoRA 加在所有层（尤其是 MLP）上、且适配器的容量不小于数据中需要学习的信息量时，LoRA 与全参数微调的样本效率和最终效果相同。几条实用的经验是：
+
+- LoRA 的最优学习率约为全参数微调的 10 倍（短训练时更高）；在 $\alpha/r$ 缩放下，训练初期的最优学习率几乎与秩无关。
+- 数据量超过适配器容量时（例如大规模持续预训练），LoRA 开始落后，表现为损失曲线在某一点后下降变慢。
+- LoRA 对大批量比全参数微调更敏感，这源于 $BA$ 乘积参数化本身的优化动力学，增大秩并不能消除。
+- 强化学习对容量的要求极低，**秩为 1** 的 LoRA 就能匹配全参数训练。直观原因是每个回合（episode）的优势信号只提供约 $O(1)$ 比特的信息，远少于 SFT 中每个 token 的监督。
+
+第二条和第四条结论放在一起，给出了一个清晰的图景：LoRA 的瓶颈是**信息容量**。SFT 与 RL 中需要学习的信息量往往不大，LoRA 足够；持续预训练要灌输大量新知识，需要全参数更新。
+
+### LoRA 的变体
+
+LoRA 的简单结构催生了许多变体，它们改动的都是参数化或初始化的某一处：rsLoRA 把缩放改为 $\alpha/\sqrt r$；LoRA+ 给 $B$ 比 $A$ 更大的学习率；DoRA 把权重分解为方向与模长，对方向做低秩更新；PiSSA 用 $W_0$ 的前 $r$ 个奇异向量初始化 $A$、$B$，并从 $W_0$ 中减去这一部分。这些方法各有报告的改进，但收益通常小于“加在所有层上”与“调好学习率”这两件事。
+
+## 小结
+
+- 预训练模型微调的内在维度很低；LoRA 假设权重更新是低秩的，用 $\Delta W = \frac{\alpha}{r}BA$ 参数化，只训练 $A$、$B$。
+- $B=0$、$A$ 随机的初始化保证起点与基座等价，同时 $B$ 的梯度不为零；$\alpha/r$ 让学习率在训练初期与秩解耦。
+- LoRA 节省的是梯度与优化器状态：7B 模型从约 108 GB 降到约 14 GB；合并 $W_0+\frac{\alpha}{r}BA$ 后推理零开销，不合并则可多适配器共享基座。
+- QLoRA 用 NF4（按正态分位数放置、能精确表示 0 的 4-bit 码表）分块量化基座，双重量化把缩放因子的开销从 0.5 比特降到约 0.127 比特，分页优化器应对显存峰值。
+- LoRA 的瓶颈是信息容量：加在所有层（尤其 MLP）、学习率约为全参数的 10 倍时，SFT 与 RL 中可以匹配全参数微调；大规模灌输新知识时会落后，但遗忘也更少。
+
+## 练习
+
+1. 对一个 $4096\times 11008$ 的矩阵，秩为多少时 LoRA 的参数量等于原矩阵的 1%？
+
+<details>
+<summary>答案</summary>
+
+LoRA 参数量为 $r(4096+11008) = 15104\,r$，原矩阵为 $4096\times11008 = 45{,}088{,}768$。令 $15104\,r = 450{,}888$，得 $r\approx 29.9$，即秩约为 30。
+
+</details>
+
+2. 如果把 $A$ 初始化为 0、$B$ 随机，训练能否启动？与标准做法相比有什么区别？
+
+<details>
+<summary>答案</summary>
+
+能启动。此时 $\Delta W = BA = 0$，起点仍与基座等价；$\partial\mathcal L/\partial A = s(GB)^\top X$ 不为零，$\partial\mathcal L/\partial B = sG^\top(XA^\top) = 0$。也就是说，先更新的是 $A$ 而不是 $B$。两种做法是对称的，原论文选择 $B=0$。Hayou 等（2024）的分析指出，配合不同的学习率时这两种初始化的训练动力学并不完全相同，但在常规设置下差别不大。
+
+</details>
+
+3. NF4 的码表为什么正半轴有 8 个码值、负半轴只有 7 个？如果改成两边各 8 个对称的分位数会怎样？
+
+<details>
+<summary>答案</summary>
+
+16 个码值要包含精确的 0，同时尽量对称，只能一边 8 个、另一边 7 个（$8+7+1=16$）。若两边各取 8 个对称的分位数，16 个码值中没有 0：恰好为零的权重（以及填充值）会被量化到 $\pm q_{\min}$，引入不必要的误差，并且失去“零映射到零”这一性质。
+
+</details>
+
+4. QLoRA 训练完成后，能否把 LoRA 直接合并进 NF4 基座？应该怎样部署？
+
+<details>
+<summary>答案</summary>
+
+不能直接合并：$W_0 + \frac{\alpha}{r}BA$ 中的 $W_0$ 是量化后的近似值，加上一个连续的 $\Delta W$ 之后不再落在 NF4 码表上，重新量化会引入新的误差，而且这个误差不是训练时见过的。常见做法有两种：一是保持不合并，推理时仍用“反量化基座 + LoRA 旁路”的结构，与训练时完全一致；二是把 NF4 基座反量化为 BF16，加上 $\Delta W$ 得到 BF16 模型，再按需要用其他量化方法重新量化并评估精度。
+
+</details>
+
+5. 为什么强化学习中秩为 1 的 LoRA 就可能足够？用信息量的角度解释。
+
+<details>
+<summary>答案</summary>
+
+在基于结果奖励的强化学习中，每个回合（一次完整的采样回复）只得到一个标量奖励，通常还是 0/1 的，经过组内归一化后相当于告诉模型“这条比平均好还是差”，信息量约为 1 比特量级。一次训练的总信息量大约是回合数乘以每回合的比特数，远小于 SFT 中每个 token 都有一个完整的目标分布。秩为 1 的 LoRA 在一个 7B 模型上仍有数百万个参数，足以容纳这些信息。
+
+</details>
+
+## 参考文献
+
+- Hu et al. *LoRA: Low-Rank Adaptation of Large Language Models*. ICLR 2022. https://arxiv.org/abs/2106.09685
+- Li et al. *Measuring the Intrinsic Dimension of Objective Landscapes*. ICLR 2018. https://arxiv.org/abs/1804.08838
+- Aghajanyan et al. *Intrinsic Dimensionality Explains the Effectiveness of Language Model Fine-Tuning*. ACL 2021. https://arxiv.org/abs/2012.13255
+- Dettmers et al. *QLoRA: Efficient Finetuning of Quantized LLMs*. NeurIPS 2023. https://arxiv.org/abs/2305.14314
+- bitsandbytes 源码 `create_normal_map`. https://github.com/bitsandbytes-foundation/bitsandbytes/blob/main/bitsandbytes/functional.py
+- Kalajdzievski. *A Rank Stabilization Scaling Factor for Fine-Tuning with LoRA* (rsLoRA). 2023. https://arxiv.org/abs/2312.03732
+- Biderman et al. *LoRA Learns Less and Forgets Less*. TMLR 2024. https://arxiv.org/abs/2405.09673
+- Schulman and Thinking Machines Lab. *LoRA Without Regret*. 2025. https://thinkingmachines.ai/blog/lora/
+- Sheng et al. *S-LoRA: Serving Thousands of Concurrent LoRA Adapters*. MLSys 2024. https://arxiv.org/abs/2311.03285
+- Liu et al. *DoRA: Weight-Decomposed Low-Rank Adaptation*. ICML 2024. https://arxiv.org/abs/2402.09353
+- Hayou et al. *LoRA+: Efficient Low Rank Adaptation of Large Models*. ICML 2024. https://arxiv.org/abs/2402.12354
+- Hayou et al. *The Impact of Initialization on LoRA Finetuning Dynamics*. NeurIPS 2024. https://arxiv.org/abs/2406.08447
+- Meng et al. *PiSSA: Principal Singular Values and Singular Vectors Adaptation of Large Language Models*. NeurIPS 2024. https://arxiv.org/abs/2404.02948

@@ -1,8 +1,287 @@
 ---
 title: GRPO 与推理模型
-description: 可验证奖励的强化学习（RLVR），GRPO 用组内相对优势取代价值函数，DeepSeek-R1 与 R1-Zero 的训练流程。
+description: 可验证奖励的强化学习（RLVR），GRPO 用组内相对优势取代价值函数，k3 KL 估计器的无偏性与它作为损失时的梯度，在玩具任务上从零跑通 GRPO，以及 DeepSeek-R1-Zero 与 R1 的训练流程。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/post_training/grpo.py
+  - src/llms_from_scratch/post_training/tasks.py
+  - src/llms_from_scratch/post_training/common.py
+  - tests/post_training/test_grpo.py
 ---
 
-本章正在撰写。
+前两章的奖励都来自人类偏好：要么学一个奖励模型，要么把偏好直接写进损失。对数学、代码这类任务，还有一种更直接的奖励来源：**答案可以被程序自动检查**。数学题有标准答案，代码有单元测试。用这种规则奖励做强化学习，称为基于可验证奖励的强化学习（Reinforcement Learning with Verifiable Rewards，RLVR，这个名字来自 Tülu 3）。2024 年以来，OpenAI o1、DeepSeek-R1 等推理模型证明，在可验证奖励上做大规模 RL，能让模型学会写出很长的思维链，在推理基准上大幅超越 SFT 能达到的水平。
+
+DeepSeek 在这些工作中使用的算法是 GRPO（Group Relative Policy Optimization，组相对策略优化），首次提出于 DeepSeekMath（Shao 等，2024）。它在 PPO 的基础上做了一个关键简化：去掉价值网络，用**同一问题的一组采样**的平均奖励作为基线。本章推导 GRPO 的目标，包括它使用的 k3 KL 估计器为什么无偏、作为损失求导时又得到了什么；然后在全书的小 GPT 上实现完整的训练循环，从随机初始化出发、只靠 0/1 奖励学会个位数加法；最后梳理 DeepSeek-R1-Zero 与 DeepSeek-R1 的训练流程。
+
+## 可验证奖励
+
+### 规则奖励长什么样
+
+一个典型的数学 RLVR 设置是：提示要求模型先在 `<think>…</think>` 中推理，再在 `<answer>…</answer>` 或 `\boxed{}` 中给出最终答案。奖励函数从回复中抽取答案，与标准答案比较：
+
+- **准确性奖励**：抽取出的答案与标准答案等价得 1，否则得 0。“等价”需要一些规范化，例如 `0.5`、`1/2`、`\frac{1}{2}` 应视为相同，实践中常用符号计算库（如 SymPy，或 Hugging Face 的 Math-Verify）判断；
+- **格式奖励**：回复是否符合要求的格式（思考与答案标签是否成对出现等）。DeepSeek-R1-Zero 同时使用了这两种奖励；
+- **代码奖励**：在沙箱中运行模型写出的程序，按通过的测试用例比例或是否全部通过给分。
+
+我们的玩具任务是个位数加法 `a+b=`（$0\le a,b\le 4$，和是一位数）。词表只有 15 个 token：10 个数字、`+`、`=` 与三个特殊 token。奖励函数抽取回复开头的连续数字，与答案完全相同得 1：
+
+<CodeFile path="src/llms_from_scratch/post_training/tasks.py" symbol={["parse_answer", "addition_reward"]} />
+
+### 为什么推理 RL 偏爱规则奖励
+
+[RLHF：奖励模型与 PPO](/post-training/rlhf/)的末尾讨论了奖励黑客：策略会找到神经网络奖励模型的漏洞。DeepSeek-R1 的论文明确说，他们没有在推理任务上使用神经网络奖励模型，因为观察到它在大规模 RL 中容易被“黑”，而重新训练奖励模型又需要额外的资源、让流程复杂化。规则奖励几乎无法被这样利用：答案对就是对，错就是错。
+
+规则奖励并非没有问题。答案匹配可能误判（假阴性：正确答案的写法没被识别；假阳性：抽取到了回复中某个碰巧正确的数字），模型有时会利用抽取规则的漏洞（例如输出多个候选答案）；代码任务中，模型可能学会针对测试用例写特判。更根本的限制是，只有答案可验证的任务才能这样做。开放式写作、对话质量仍然需要奖励模型或 LLM 评委。
+
+## GRPO 的目标
+
+### 用组内均值代替价值函数
+
+对每个问题 $q$，GRPO 从旧策略 $\pi_{\theta_{\text{old}}}$ 采样一组 $G$ 个回复 $o_1,\dots,o_G$，得到奖励 $r_1,\dots,r_G$。每个回复的优势是它的奖励在组内的标准化值，并被回复中的**所有 token 共享**：
+
+$$
+\hat A_{i,t} = \hat A_i = \frac{r_i - \mathrm{mean}(r_1,\dots,r_G)}{\mathrm{std}(r_1,\dots,r_G)}.
+$$
+
+GRPO 的目标在 PPO 的裁剪目标上做了三处修改：优势换成组内相对优势；每个回复先在自己的 token 上平均，再在组内平均；KL 惩罚不再放进奖励里，而是直接作为损失的一项：
+
+<KeyEq label="GRPO 目标（DeepSeekMath）">
+
+$$
+\mathcal J_{\text{GRPO}}(\theta) = \mathbb E\Bigg[\frac1G\sum_{i=1}^G\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\Big(\min\big(\rho_{i,t}\hat A_i,\;\mathrm{clip}(\rho_{i,t},1-\epsilon,1+\epsilon)\hat A_i\big) - \beta\,\mathbb D_{\text{KL}}^{(i,t)}\Big)\Bigg],\quad \rho_{i,t} = \frac{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}{\pi_{\theta_{\text{old}}}(o_{i,t}\mid q,o_{i,\lt t})}
+$$
+
+</KeyEq>
+
+其中 $\mathbb D_{\text{KL}}^{(i,t)}$ 是下一节要推导的逐 token KL 估计。
+
+<Diagram width={720} height={290} label="PPO 与 GRPO 的结构对比">
+  <Region x={10} y={10} w={340} h={270} title="PPO" />
+  <Region x={370} y={10} w={340} h={270} title="GRPO" />
+  <Box x={30} y={50} w={80} h={44} label="q" tone="info" />
+  <Box x={140} y={50} w={110} h={44} label="策略 π_θ" tone="accent" />
+  <Box x={270} y={50} w={60} h={44} label="o" />
+  <Box x={140} y={120} w={190} h={40} label="奖励模型 + KL → r_t" size="sm" />
+  <Box x={140} y={175} w={190} h={40} label="价值模型 V_ψ（同规模）" size="sm" tone="accent2" />
+  <Box x={140} y={230} w={190} h={40} label="GAE → 逐 token Â_t" size="sm" tone="strong" />
+  <Arrow from={[110, 72]} to={[140, 72]} />
+  <Arrow from={[250, 72]} to={[270, 72]} />
+  <Arrow from={[300, 94]} to={[300, 120]} />
+  <Arrow from={[235, 160]} to={[235, 175]} />
+  <Arrow from={[235, 215]} to={[235, 230]} />
+  <Box x={390} y={50} w={60} h={44} label="q" tone="info" />
+  <Box x={470} y={50} w={110} h={44} label="策略 π_θ" tone="accent" />
+  <Box x={610} y={40} w={80} h={22} label="o₁" size="sm" />
+  <Box x={610} y={66} w={80} h={22} label="o₂" size="sm" />
+  <Box x={610} y={92} w={80} h={22} label="… o_G" size="sm" />
+  <Box x={470} y={130} w={220} h={40} label="规则奖励 r₁ … r_G" size="sm" />
+  <Box x={470} y={185} w={220} h={40} label="组内标准化 (r − mean) / std" size="sm" tone="strong" />
+  <Box x={470} y={235} w={220} h={36} label="KL(π_θ ‖ π_ref) 直接进损失" size="sm" tone="muted" />
+  <Arrow from={[450, 72]} to={[470, 72]} />
+  <Arrow from={[580, 72]} to={[610, 72]} />
+  <Arrow from={[650, 114]} to={[650, 130]} />
+  <Arrow from={[580, 170]} to={[580, 185]} />
+  <Fragment slot="caption">PPO 为每个回复训练一个与策略同规模的价值模型，用 GAE 得到逐 token 优势；GRPO 对同一问题采样一组回复，用组内标准化的奖励作为该回复所有 token 的优势，不需要价值模型。</Fragment>
+</Diagram>
+
+### 为什么可以去掉价值网络
+
+DeepSeekMath 给出的理由有两点。第一是成本：PPO 的价值模型通常与策略同规模，额外占用一份权重、梯度与优化器状态，以及一次前向与反向。第二是价值模型在 LLM 场景下很难学好：奖励只在最后一个 token 给出，却要求价值模型对每个前缀都给出准确的估计。
+
+组内均值是什么？它是在同一问题下、按当前策略采样回复所得奖励的蒙特卡洛估计，正是 $V(q) = \mathbb E_{o\sim\pi}[r(q,o)]$ 的估计。[RLHF：奖励模型与 PPO](/post-training/rlhf/)中证明过，减去任何不依赖于所评估动作的基线都不改变策略梯度的期望。严格地说，组内均值也包含了样本 $i$ 自己的奖励。把它拆开：
+
+$$
+r_i - \frac1G\sum_{j}r_j = \frac{G-1}{G}\Big(r_i - \frac{1}{G-1}\sum_{j\neq i}r_j\Big),
+$$
+
+括号里是“留一法”（leave-one-out）基线，它与 $r_i$ 独立，因此无偏（这正是 RLOO 方法的基线，Ahmadian 等，2024）。所以只减均值的组内优势等于一个无偏估计乘以常数 $\frac{G-1}{G}$，方向不受影响。除以标准差则不同，它让每个问题的梯度尺度依赖于该问题的难度，[大规模强化学习的工程与改进](/post-training/rl-at-scale/)会分析它带来的偏置。
+
+组内优势有一个重要性质：**如果一组回复的奖励全部相同（全对或全错），所有优势都为零，这个问题不提供任何梯度。** 太简单或太难的题目都是浪费。我们的实现在分母上加了一个小 $\epsilon$，使这种情形输出 0 而不是 NaN：
+
+<CodeFile path="src/llms_from_scratch/post_training/grpo.py" region="advantages" />
+
+测试 `test_group_advantages` 检查了三种组：一半对一半错（优势为 $\pm 0.5/\mathrm{std}$）、全对（优势全为 0）、只减均值不除标准差（Dr. GRPO 的做法）。注意 `torch.std` 默认使用无偏估计（除以 $G-1$），这与 TRL 等常见实现一致；不同框架在这里的选择并不统一。
+
+## KL 估计器 k3
+
+### 三种单样本估计
+
+GRPO 要在采样到的 token 上估计 $\mathrm{KL}(\pi_\theta\,\|\,\pi_{\text{ref}}) = \mathbb E_{y\sim\pi_\theta}\big[\log\frac{\pi_\theta(y)}{\pi_{\text{ref}}(y)}\big]$。记 $\rho = \pi_{\text{ref}}(y)/\pi_\theta(y)$，John Schulman 的笔记“Approximating KL Divergence”比较了三种单样本估计：
+
+- $k_1 = -\log\rho$：直接按定义，无偏，但单个样本可以为负，方差大；
+- $k_2 = \frac12(\log\rho)^2$：恒为非负，方差小，但有偏（两个分布接近时偏差很小）；
+- $k_3 = (\rho - 1) - \log\rho$：GRPO 采用的估计，**无偏且恒非负**。
+
+无偏性的证明只需一行。在 $y\sim\pi_\theta$ 下，
+
+$$
+\mathbb E_{y\sim\pi_\theta}[\rho] = \sum_y\pi_\theta(y)\frac{\pi_{\text{ref}}(y)}{\pi_\theta(y)} = \sum_y\pi_{\text{ref}}(y) = 1,
+$$
+
+所以 $\mathbb E[k_3] = \mathbb E[\rho] - 1 + \mathbb E[-\log\rho] = 0 + \mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$。非负性来自不等式 $\log\rho\le\rho-1$（对数函数在 $\rho=1$ 处的切线在曲线上方）。也可以这样理解：$k_3$ 是在无偏的 $k_1$ 上加了一个期望为零的控制变量 $\rho - 1$，它与 $-\log\rho$ 负相关，于是降低了方差。
+
+<Plot label="三种 KL 单样本估计随 ρ = π_ref/π_θ 的变化" x={[0.05, 4]} y={[-1.5, 3]} xLabel="ρ = π_ref(y) / π_θ(y)" yLabel="估计值"
+  series={[{ fn: (t) => -Math.log(t), label: 'k1 = −log ρ', tone: 'muted' }, { fn: (t) => 0.5 * Math.log(t) ** 2, label: 'k2', tone: 'info', dashed: true }, { fn: (t) => t - 1 - Math.log(t), label: 'k3 = ρ − 1 − log ρ', tone: 'accent' }]}
+  markers={[{ at: [1, 0], label: 'ρ = 1：三者都为 0' }]}>
+  <Fragment slot="caption">k1 在 ρ 大于 1 时为负，单个样本可能“奖励”偏离；k2 与 k3 恒非负。k3 在 ρ = 1 附近与 k2 一样平缓（都是二阶小量），但它在 π_θ 的采样下是无偏的。</Fragment>
+</Plot>
+
+<CodeFile path="src/llms_from_scratch/post_training/grpo.py" region="k3" />
+
+### 作为损失时，k3 的梯度是什么
+
+上面的无偏性说的是 k3 的**值**。但 GRPO 把 $\beta\,k_3$ 直接放进损失、对 $\theta$ 求导，而采样分布本身也依赖于 $\theta$，求导时样本却被当作固定的。这样得到的梯度是否就是 $\nabla_\theta\,\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$？答案是否定的。
+
+对固定的 $y$，$\nabla_\theta k_3 = \nabla\rho - \nabla\log\rho$。由于 $\rho = \pi_{\text{ref}}/\pi_\theta$，$\nabla\rho = -\rho\nabla\log\pi_\theta$，$\nabla\log\rho = -\nabla\log\pi_\theta$，所以
+
+$$
+\nabla_\theta k_3 = (1-\rho)\,\nabla_\theta\log\pi_\theta(y).
+$$
+
+在 $y\sim\pi_\theta$ 下取期望：
+
+$$
+\mathbb E_{\pi_\theta}\big[(1-\rho)\nabla\log\pi_\theta\big] = \underbrace{\sum_y\pi_\theta\nabla\log\pi_\theta}_{=\,0} - \sum_y\pi_{\text{ref}}(y)\nabla_\theta\log\pi_\theta(y) = \nabla_\theta\,\mathrm{KL}\big(\pi_{\text{ref}}\,\|\,\pi_\theta\big).
+$$
+
+最后一步是因为 $\mathrm{KL}(\pi_{\text{ref}}\|\pi_\theta) = \sum_y\pi_{\text{ref}}\log\pi_{\text{ref}} - \sum_y\pi_{\text{ref}}\log\pi_\theta$，只有第二项依赖 $\theta$。也就是说，**把 k3 当作损失，优化的实际上是反方向的 KL**，$\mathrm{KL}(\pi_{\text{ref}}\|\pi_\theta)$。两者在 $\pi_\theta$ 接近 $\pi_{\text{ref}}$ 时一阶相同，所以在 KL 系数很小、策略变化不大时影响有限；但概念上它们是不同的正则化。测试 `test_k3_is_unbiased_nonnegative_and_its_gradient_is_forward_kl` 在一个 6 类分布上精确地验证了这一点：k3 的期望值等于 $\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$，而它的期望梯度等于 $\nabla\mathrm{KL}(\pi_{\text{ref}}\|\pi_\theta)$，与 $\nabla\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$ 明显不同。
+
+Tang 与 Munos（2025）、Zhang 等（2025）系统地讨论了这类“把估计量当损失”的陷阱。一个有趣的结论是：$k_2$ 的值有偏，但 $\nabla k_2 = (\log\pi_\theta - \log\pi_{\text{ref}})\nabla\log\pi_\theta$ 的期望恰好是 $\nabla\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$；$k_1$ 与 $k_3$ 则相反。许多后来的推理 RL 工作（如 DAPO、Dr. GRPO）干脆把 KL 项去掉，理由是长思维链训练中策略本来就需要远离初始模型。
+
+## 实现 GRPO 的损失
+
+把裁剪目标、KL 项与“先 token 内平均、再样本间平均”的聚合组合起来：
+
+<CodeFile path="src/llms_from_scratch/post_training/grpo.py" region="grpo_loss" />
+
+三个测试检查它的行为。`test_grpo_loss_gradient_direction` 在小 GPT 上取两条回复，优势分别为 $+1$ 与 $-1$；在 $\theta = \theta_{\text{old}}$ 处损失恰为 0（$\rho=1$、KL 为 0、优势均值为 0），一步 SGD 之后，正优势回复的对数概率上升、负优势回复的下降。`test_clipping_stops_gradient_after_large_ratio` 检查 $\rho\approx1.65$ 的 token 在正优势下梯度为零。
+
+## 在玩具任务上跑通 GRPO
+
+### 训练循环
+
+完整的循环有四步：采样、打分、计算优势、更新。我们用 `common.py` 中的 `sample_responses` 采样，它调用全书 GPT 的带 KV Cache 的 `generate`，并为每条回复生成一个掩码：EOS 之后的 token 不参与损失。
+
+<CodeFile path="src/llms_from_scratch/post_training/grpo.py" region="train_loop" />
+
+有几个细节值得注意。`old_logp` 与 `ref_logp` 都在 `no_grad` 下计算一次并冻结，前者在内层的 $\mu$ 次更新中保持不变，所以第一次更新时 $\rho\equiv 1$，从第二次开始裁剪才起作用。同一个问题的 $G$ 条采样在批次中相邻，优势计算时把奖励重排成 $[P, G]$。梯度裁剪（`clip_grad_norm_`）在 RL 中几乎是必需的，奖励信号的噪声会产生偶发的大梯度。
+
+### 结果
+
+在 25 道加法题上，每题采样 $G=8$ 条长度不超过 2 的回复，学习率 $3\times10^{-3}$，每批数据更新 $\mu = 2$ 次，不加 KL 惩罚。模型从**随机初始化**出发，没有任何 SFT：
+
+<Plot label="GRPO 在个位数加法上的采样奖励" x={[0, 40]} y={[0, 0.7]} xLabel="训练步" yLabel="平均采样奖励"
+  series={[{ points: [[1, 0.05], [2, 0.03], [3, 0.03], [4, 0.03], [5, 0.04], [6, 0.04], [7, 0.05], [8, 0.03], [9, 0.03], [10, 0.03], [11, 0.04], [12, 0.03], [13, 0.05], [14, 0.05], [15, 0.07], [16, 0.04], [17, 0.06], [18, 0.06], [19, 0.07], [20, 0.05], [21, 0.10], [22, 0.11], [23, 0.14], [24, 0.13], [25, 0.19], [26, 0.14], [27, 0.23], [28, 0.28], [29, 0.34], [30, 0.32], [31, 0.39], [32, 0.38], [33, 0.41], [34, 0.38], [35, 0.44], [36, 0.48], [37, 0.49], [38, 0.55], [39, 0.58], [40, 0.54]], label: '每步 200 条采样的平均奖励' }]}
+  markers={[{ at: [20, 0.05], label: '约 1/15 的随机水平' }]}>
+  <Fragment slot="caption">运行 <code>python -m llms_from_scratch.post_training.grpo</code> 得到的结果（CPU 单线程，固定随机种子）。前 20 步奖励停留在随机猜中的水平附近，之后迅速上升；40 步后贪心解码的准确率从 0 提高到 0.68。</Fragment>
+</Plot>
+
+曲线的形状很有代表性。最初，模型输出正确数字的概率约为 $1/15$，8 条采样中常常一条都不对，这些组的优势全为零，不提供梯度；少数“碰巧对了”的组提供了全部的学习信号。一旦正确答案的概率上升，有信号的组越来越多，学习就加速了。这说明了 RLVR 的一个基本前提：**策略必须能以不可忽略的概率采到正确答案**。如果正确率是 $10^{-6}$，组内优势几乎永远为零，RL 寸步难行。真实的 R1-Zero 能够成功，是因为 DeepSeek-V3-Base 这样的基座模型在许多数学题上已经有一定的正确率；对于小模型或太难的题，就需要先 SFT（冷启动）、或者用课程学习从易到难。
+
+测试 `test_train_grpo_improves_policy` 运行 8 步（带一个小的 KL 系数），检查“第一个回复 token 就是正确答案”的平均概率至少提高到原来的 1.5 倍。用这个平滑的指标而不是采样奖励做断言，测试不会因为采样噪声而偶然失败。
+
+## DeepSeek-R1-Zero：纯 RL 中涌现的长思维链
+
+DeepSeek-R1-Zero 直接在 DeepSeek-V3-Base（671B 总参数、37B 激活的 MoE）上做 GRPO，不经过任何 SFT。提示模板只要求模型先在 `<think>` 标签中推理、再在 `<answer>` 标签中作答，不规定任何推理方式。奖励只有规则化的准确性奖励与格式奖励。按 2025 年 9 月在 Nature 发表的版本，主要设置是：学习率 $3\times10^{-6}$，KL 系数 0.001，每个问题采样 16 条回复，最大长度 32768 个 token（在第 8200 步后提高到 65536），批大小 512，共训练 10400 步。
+
+结果是：AIME 2024 的 pass@1 从训练开始时的 15.6% 提高到 77.9%，用自洽性（多数投票）解码可达 86.7%。更引人注目的是训练中的现象：
+
+- **回复长度自发增长**：平均回复长度随训练步数稳定上升，模型学会了用更多的思考 token 解决更难的问题，没有任何人告诉它这样做；
+- **反思行为的涌现**：模型开始在推理中检查和修正自己（论文中著名的“aha moment”），回复中 “wait” 这类反思词的频率在训练的某个阶段突然增加；
+- **可读性问题**：思维链中常常混用中英文，格式也不适合人阅读。
+
+训练成本方面，Nature 版本的补充材料报告 R1-Zero 用 64×8 张 H800 训练了约 198 小时，整个 DeepSeek-R1 的训练成本约为 29.4 万美元（不含基座模型的预训练）。
+
+## DeepSeek-R1 的四阶段流程
+
+R1-Zero 证明了纯 RL 的潜力，但不适合直接给用户使用。DeepSeek-R1 用一个多阶段流程解决可读性与通用能力的问题：
+
+<Diagram width={720} height={230} label="DeepSeek-R1 的多阶段训练流程">
+  <Box x={10} y={30} w={120} h={56} label="V3-Base" tone="info" />
+  <Box x={150} y={30} w={150} h={56} label="① 冷启动 SFT" sub="数千条可读长思维链" tone="accent" />
+  <Box x={330} y={30} w={150} h={56} label="② 推理 RL" sub="GRPO + 语言一致性" tone="strong" />
+  <Box x={510} y={30} w={150} h={56} label="拒绝采样" sub="保留正确、可读的轨迹" />
+  <Box x={330} y={150} w={150} h={56} label="③ SFT" sub="约 80 万条推理与非推理" tone="accent" />
+  <Box x={510} y={150} w={150} h={56} label="④ 全场景 RL" sub="规则奖励 + 偏好 RM" tone="strong" />
+  <Box x={150} y={150} w={150} h={56} label="蒸馏小模型" sub="Qwen2.5、Llama 3" tone="ghost" />
+  <Arrow from={[130, 58]} to={[150, 58]} />
+  <Arrow from={[300, 58]} to={[330, 58]} />
+  <Arrow from={[480, 58]} to={[510, 58]} />
+  <Arrow from={[585, 86]} via={[[585, 118], [405, 118]]} to={[405, 150]} />
+  <Arrow from={[480, 178]} to={[510, 178]} />
+  <Arrow from={[330, 178]} to={[300, 178]} tone="muted" dashed />
+  <Fragment slot="caption">冷启动数据让 RL 从可读的推理格式出发；推理 RL 之后的检查点用于拒绝采样，生成第三阶段的 SFT 数据；最后一轮 RL 同时覆盖推理与通用场景。第三阶段的数据也直接用于蒸馏较小的开源模型（虚线框）。</Fragment>
+</Diagram>
+
+1. **冷启动 SFT**：收集数千条长思维链数据（人工整理与改写、用少样本提示生成等），格式对人友好，例如推理后附带总结。在它上面微调基座模型，作为 RL 的起点。这一步解决了 R1-Zero 的可读性问题，并让 RL 起步更快。
+2. **面向推理的 RL**：与 R1-Zero 相同的 GRPO 与规则奖励，额外加入**语言一致性奖励**（思维链中目标语言词汇的比例），抑制中英混用。论文报告这会使基准分数略有下降，但更符合人的偏好。
+3. **拒绝采样与 SFT**：用上一阶段的检查点对大量提示采样，只保留答案正确、语言与格式合格的推理轨迹；再加上写作、事实问答、自我认知、翻译等非推理数据（部分复用 DeepSeek-V3 的 SFT 数据），共约 80 万条。在这批数据上从 DeepSeek-V3-Base 重新微调。
+4. **全场景 RL**：第二轮 RL 同时优化推理（规则奖励）与有用性、无害性（基于偏好的奖励模型），使模型既会推理、也是一个合格的通用助手。
+
+### 蒸馏胜过小模型上的 RL
+
+第三阶段的 80 万条数据还被直接用来对 Qwen2.5 与 Llama 3 系列的 1.5B 到 70B 模型做 SFT，**只做 SFT，不做 RL**。结果非常强：例如 DeepSeek-R1-Distill-Qwen-32B 在 AIME 2024 上的 pass@1 为 72.6%。作为对照，DeepSeek 在 Qwen2.5-32B 基座上直接做 R1-Zero 式的大规模 RL，只达到 47.0%。论文的结论是：对较小的模型，从强大的推理模型蒸馏比自己做 RL 更有效、也更便宜；但要突破现有能力的边界，仍然需要更强的基座与更大规模的 RL。这一点在[知识蒸馏](/post-training/distillation/)中会进一步讨论。
+
+### RL 到底教会了模型什么
+
+一个持续的争论是：RLVR 是让模型获得了新的推理能力，还是只是把基座模型已有的能力“挑选”出来、提高了它们被采样到的概率？Yue 等（2025）比较了基座模型与 RL 后模型的 pass@$k$，发现在 $k$ 很小时 RL 模型明显更好，但当 $k$ 增大到数百时，基座模型能解出的题目覆盖面反而更大。这支持“RL 主要提高采样效率”的观点。另一方面，R1-Zero 回复长度与反思行为的系统性变化，以及更长时间、更大规模的 RL 带来的持续提升，表明情况并不简单。这仍是一个活跃的研究问题。我们的玩具实验与此一致：模型必须先能偶尔采到正确答案，RL 才能放大它。
+
+## 小结
+
+- RLVR 用程序可检查的规则奖励（答案匹配、单元测试、格式）代替神经网络奖励模型，几乎不会被奖励黑客利用，但只适用于可验证的任务。
+- GRPO 对每个问题采样一组回复，以组内标准化的奖励作为所有 token 共享的优势，去掉了价值模型；组内均值是 $V(q)$ 的蒙特卡洛估计，只减均值时等于留一法无偏估计乘以 $\frac{G-1}{G}$。
+- 组内奖励全相同时优势为零，太难或太简单的问题不提供梯度；策略必须能以可观的概率采到正确答案，RL 才能起步。
+- k3 $= \rho-1-\log\rho$ 是 $\mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$ 的无偏、非负估计；但把它当损失求导，期望梯度是 $\nabla\mathrm{KL}(\pi_{\text{ref}}\|\pi_\theta)$。
+- DeepSeek-R1-Zero 在 V3-Base 上做纯 GRPO，AIME 从 15.6% 升到 77.9%，长思维链与反思自发涌现；R1 的流程是冷启动 SFT → 推理 RL → 拒绝采样 SFT → 全场景 RL，其 SFT 数据直接蒸馏出的小模型胜过在小模型上做 RL。
+
+## 练习
+
+1. 一组 $G=4$ 的奖励为 $(1, 0, 0, 0)$。分别计算只减均值、以及除以无偏标准差后的优势。如果组变成 $(1,1,1,0)$ 呢？比较两组中“少数派”回复的优势大小。
+
+<details>
+<summary>答案</summary>
+
+$(1,0,0,0)$：均值 0.25，减均值后为 $(0.75, -0.25, -0.25, -0.25)$；无偏标准差为 $\sqrt{(0.75^2 + 3\times0.25^2)/3} = \sqrt{0.25} = 0.5$，标准化后为 $(1.5, -0.5, -0.5, -0.5)$。$(1,1,1,0)$：均值 0.75，减均值后为 $(0.25,0.25,0.25,-0.75)$，标准差同样是 0.5，标准化后为 $(0.5,0.5,0.5,-1.5)$。两种情形下“少数派”的优势绝对值都是 1.5，是多数派的 3 倍：唯一做对的回复得到很大的正优势，唯一做错的回复得到很大的负优势。
+
+</details>
+
+2. 证明：若 $\pi_\theta = \pi_{\text{ref}}$，则对任意采样到的 token，$k_3 = 0$ 且 $\nabla_\theta k_3 = 0$。这对 GRPO 训练的第一步意味着什么？
+
+<details>
+<summary>答案</summary>
+
+$\pi_\theta = \pi_{\text{ref}}$ 时 $\rho = 1$，$k_3 = 1 - 1 - \log 1 = 0$；$\nabla k_3 = (1-\rho)\nabla\log\pi_\theta = 0$。所以训练的第一步（策略从参考模型初始化）KL 项既不贡献损失也不贡献梯度，只有在策略偏离参考模型之后它才开始起作用。这也说明 KL 惩罚是一种“二阶”约束：在参考点附近，k3 与 KL 都是 $\log\rho$ 的二次小量。
+
+</details>
+
+3. 在我们的玩具实验中，如果把词表扩大到 1000 个 token（其余设置不变），预计前若干步的学习会怎样？有什么办法改善？
+
+<details>
+<summary>答案</summary>
+
+随机初始化的模型输出正确数字的概率降到约 $1/1000$，每组 8 条采样中至少一条正确的概率约为 $1-(1-0.001)^8\approx0.8\%$，几乎所有组的优势都为零，训练长时间停滞。改善办法有：增大组大小 $G$；先用少量示范做 SFT（冷启动），让正确答案的概率达到可观的水平；使用课程学习，从更容易的子任务开始；或者给部分正确的回复（如输出了一个数字）一些格式奖励，提供更密集的信号。
+
+</details>
+
+4. 为什么 GRPO 中每个问题的 $G$ 条采样必须来自**同一个**提示？如果把不同问题的回复混在一起做标准化，会发生什么？
+
+<details>
+<summary>答案</summary>
+
+组内均值是该问题价值 $V(q)$ 的估计，用它做基线才能消去问题难度带来的差异，只留下“这条回复比同一问题的平均水平好多少”的信号。若把不同问题混在一起，简单问题的回复会因为问题简单而得到正优势，难问题的回复因为问题难而得到负优势，梯度会鼓励模型在简单问题上做它本来就在做的事、在难问题上被全面惩罚，这与回复本身的好坏无关，方差大大增加。
+
+</details>
+
+## 参考文献
+
+- Shao et al. *DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models* (GRPO). 2024. https://arxiv.org/abs/2402.03300
+- DeepSeek-AI. *DeepSeek-R1 incentivizes reasoning in LLMs through reinforcement learning*. Nature 645, 2025. https://www.nature.com/articles/s41586-025-09422-z
+- DeepSeek-AI. *DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning*. 2025. https://arxiv.org/abs/2501.12948
+- Lambert et al. *Tülu 3: Pushing Frontiers in Open Language Model Post-Training* (RLVR). 2024. https://arxiv.org/abs/2411.15124
+- Schulman. *Approximating KL Divergence*. 2020. http://joschu.net/blog/kl-approx.html
+- Tang and Munos. *On a few pitfalls in KL divergence gradient estimation for RL*. 2025. https://arxiv.org/abs/2506.09477
+- Zhang et al. *On the Design of KL-Regularized Policy Gradient Algorithms for LLM Reasoning*. 2025. https://arxiv.org/abs/2505.17508
+- Ahmadian et al. *Back to Basics: Revisiting REINFORCE Style Optimization for Learning from Human Feedback in LLMs* (RLOO). ACL 2024. https://arxiv.org/abs/2402.14740
+- Yue et al. *Does Reinforcement Learning Really Incentivize Reasoning Capacity in LLMs Beyond the Base Model?* 2025. https://arxiv.org/abs/2504.13837
+- Hugging Face. *Math-Verify*. https://github.com/huggingface/Math-Verify
+- Stanford CS336 Spring 2025, Lecture 16–17 与 Assignment 5（SFT 与 GRPO 用于数学推理）. https://github.com/stanford-cs336/assignment5-alignment

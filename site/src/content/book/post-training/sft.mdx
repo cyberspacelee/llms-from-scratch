@@ -1,8 +1,264 @@
 ---
 title: 监督微调与对话模板
-description: 指令数据、对话模板与特殊 token，只在回复上计算损失的掩码，样本打包，以及 SFT 能教会什么、不能教会什么。
+description: 指令数据、对话模板与特殊 token，只在回复上计算损失的掩码，样本打包与跨样本注意力隔离，以及 SFT 能教会什么、不能教会什么。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/post_training/chat_template.py
+  - src/llms_from_scratch/post_training/sft.py
+  - src/llms_from_scratch/post_training/tasks.py
+  - tests/post_training/test_chat_template.py
+  - tests/post_training/test_sft.py
 ---
 
-本章正在撰写。
+预训练结束时，我们手里是一个很会“续写”的模型：给它一段文字，它按照互联网文本的统计规律接着往下写。问它“法国的首都是哪里？”，它可能接着列出五道地理选择题，因为网页上的问题常常成串出现。这样的模型知道很多，却不知道自己应该扮演什么角色、什么时候该停下。后训练（post-training）要做的，就是在不破坏这些知识的前提下，把续写器变成一个按指令行事的助手。
+
+第一步也是最朴素的一步，是监督微调（Supervised Fine-Tuning，SFT）：收集一批“提示—理想回复”的示范，让模型在这些示范上继续做下一个 token 预测。损失函数与[训练 GPT：从零训练一个小模型](/transformer/training-gpt/)完全相同，变化全在数据的组织方式上：对话要怎样变成 token 序列，哪些 token 计算损失，长短不一的样本怎样高效地装进一个批次。本章逐一回答这些问题，并在全书共用的小 GPT 上实现它们；最后讨论 SFT 的边界，它解释了为什么后面还需要偏好优化与强化学习。
+
+## SFT 的目标：条件化的最大似然
+
+设示范数据集 $\mathcal D$ 由提示 $x$ 与回复 $y=(y_1,\dots,y_{|y|})$ 组成。SFT 最大化回复在提示条件下的对数似然：
+
+<KeyEq label="SFT 目标">
+
+$$
+\mathcal L_{\text{SFT}}(\theta) = -\,\mathbb E_{(x,y)\sim\mathcal D}\Big[\sum_{t=1}^{|y|}\log \pi_\theta(y_t \mid x, y_{\lt t})\Big]
+$$
+
+</KeyEq>
+
+这里 $\pi_\theta$ 就是语言模型本身。从强化学习的视角称它为“策略”（policy），这个叫法会贯穿后面几章。与预训练相比只有一处不同：求和只覆盖回复 $y$ 的 token，提示 $x$ 的 token 只作为条件出现，不被预测。
+
+这个目标还有一种等价的读法。若把示范数据看作某个“理想助手”的分布 $\pi^\star(y\mid x)$ 的样本，则最小化上式等价于最小化前向 KL 散度 $\mathrm{KL}(\pi^\star\,\|\,\pi_\theta)$，因为两者只差一个与 $\theta$ 无关的熵项。前向 KL 惩罚的是“示范里有、模型却给低概率”的情形，所以 SFT 倾向于让模型覆盖示范中出现过的所有行为，哪怕其中有些行为模型自己并不擅长。这一点在本章末尾讨论 SFT 的局限时还会用到，在[知识蒸馏](/post-training/distillation/)中我们会把它与反向 KL 正式对比。
+
+## 指令数据从哪里来
+
+SFT 的效果几乎完全由数据决定。几条有代表性的路线是：
+
+**人工撰写。** InstructGPT（Ouyang 等，2022）请标注员为约 1.3 万条提示写示范回复，这些提示一部分来自 OpenAI API 的真实用户请求，一部分由标注员自己构造。LIMA（Zhou 等，2023）只用了 1000 条精心挑选和改写的示范，就让 65B 的 LLaMA 在人工评测中与当时的商用助手互有胜负。
+
+**把已有任务改写成指令。** FLAN 等工作把上千个 NLP 数据集（翻译、问答、分类）套上自然语言指令模板。这类数据数量大、答案可靠，但回复往往很短，风格也不像对话。
+
+**由更强的模型生成。** Self-Instruct 和 Alpaca 用 GPT-3 系列模型从少量种子任务出发生成 5.2 万条指令与回复；UltraChat、ShareGPT 收集模型之间或用户与模型的多轮对话。今天开源模型的 SFT 数据大多是这样的“合成数据”，本质上是一种[知识蒸馏](/post-training/distillation/)。Tülu 3（Lambert 等，2024）把公开数据与针对数学、代码、指令遵循、安全等技能合成的数据混合，并系统地做了去污染与配比实验。
+
+**推理轨迹。** 对推理模型而言，SFT 数据是带有长思维链的解题过程，常常通过拒绝采样（rejection sampling）得到：让模型对同一道题采样多次，只保留答案正确的轨迹。DeepSeek-R1 的流水线中就有一个约 80 万条样本的 SFT 阶段，我们在[GRPO 与推理模型](/post-training/grpo/)中再详细讨论。
+
+这些路线的共同经验是：**质量与多样性比数量更重要**。LIMA 把这种现象概括为“表层对齐假设”（superficial alignment hypothesis）：模型的知识与能力几乎全部在预训练中获得，SFT 主要教会它用什么格式、什么风格与用户交互。这个假设并不完全成立，但它很好地提示了 SFT 擅长什么。
+
+## 对话模板：把多轮对话变成一条 token 序列
+
+Transformer 只认识一维的 token 序列，而对话是带有角色（系统、用户、助手）的消息列表。对话模板（chat template）规定了两者之间的映射。最常见的格式之一是 ChatML，Qwen 系列等模型都在使用：
+
+```text
+<|im_start|>system
+You are a helpful assistant.<|im_end|>
+<|im_start|>user
+3+4=?<|im_end|>
+<|im_start|>assistant
+7<|im_end|>
+```
+
+`<|im_start|>` 与 `<|im_end|>` 是**特殊 token**：它们在词表中各占一个 id，分词器整体匹配它们，绝不会把它们拆成 `<`、`|`、`i`…… 这些字符。这有两个原因。第一，模型需要一个不会与普通文本混淆的边界信号；第二，出于安全考虑，用户输入的文本即使包含字面上的 `<|im_end|>`，也不应被编码成真正的特殊 token，否则用户就能伪造一个“助手轮次”（这是一类提示注入攻击）。生产级分词器在编码用户内容时会关闭特殊 token 解析；我们的字符级分词器为了简单没有区分这两种模式。
+
+模板里还有一个容易被忽视的细节：**生成提示（generation prompt）**。推理时我们把对话渲染到最后一条用户消息为止，再追加 `<|im_start|>assistant\n`，模型从这里开始续写；它应当在回答结束时输出 `<|im_end|>`，推理引擎把它当作停止符。因此训练时必须让模型学会输出这个结束标记，否则它会在回答后继续“扮演”用户，把对话无限地编下去。
+
+不同模型家族的模板并不相同：Llama 3 用 `<|start_header_id|>user<|end_header_id|>` 标记角色、以 `<|eot_id|>` 结束一轮，Gemma 用 `<start_of_turn>` 与 `<end_of_turn>`。具体格式无关紧要，重要的是**训练与推理必须使用逐字节相同的模板**。模板不一致（多一个换行、少一个空格）是微调后模型表现莫名下降的常见原因。
+
+下面是我们的实现。为了保证每个 token 的归属是确定的，它不先渲染整段文本再分词，而是按“角色头、内容加结束标记、换行”逐段编码再拼接，同时生成标签：
+
+<CodeFile path="src/llms_from_scratch/post_training/chat_template.py" region="encode_chat" />
+
+在真实的 BPE 分词器上，“逐段编码再拼接”与“整段编码”的结果可能不同：BPE 的合并可能跨过段的边界。用字符偏移量回推每个 token 属于哪条消息的做法也因此容易出错。特殊 token 的好处之一是它们天然切断了合并，角色边界上的 token 总是确定的。
+
+<Diagram width={720} height={200} label="一轮 ChatML 对话的 token 段与监督范围">
+  <Box x={10} y={50} w={140} h={50} label="<|im_start|>user\n" size="sm" mono tone="muted" />
+  <Box x={158} y={50} w={60} h={50} label="3+4=?" size="sm" mono tone="muted" />
+  <Box x={226} y={50} w={100} h={50} label="<|im_end|>\n" size="sm" mono tone="muted" />
+  <Box x={334} y={50} w={180} h={50} label="<|im_start|>assistant\n" size="sm" mono tone="muted" />
+  <Box x={522} y={50} w={36} h={50} label="7" mono tone="accent" />
+  <Box x={566} y={50} w={90} h={50} label="<|im_end|>" size="sm" mono tone="accent" />
+  <Box x={664} y={50} w={30} h={50} label="\n" size="sm" mono tone="muted" />
+  <Text x={80} y={30} label="用户轮次" size="sm" tone="muted" />
+  <Text x={424} y={30} label="生成提示（推理时由模板给出）" size="sm" tone="muted" />
+  <Text x={590} y={30} label="被监督" size="sm" tone="accent" />
+  <Text x={170} y={125} label="labels = −100：只作为条件，不计算损失" size="sm" tone="muted" />
+  <Text x={590} y={125} label="labels = token id" size="sm" tone="accent" />
+  <Arrow from={[518, 108]} to={[518, 165]} tone="muted" head="none" dashed />
+  <Text x={510} y={182} label="推理时渲染到虚线为止，模型从这里开始续写" size="sm" anchor="end" />
+  <Fragment slot="caption">灰色段的标签为 −100，不参与损失；只有助手回复的内容与结束标记 <code>&lt;|im_end|&gt;</code> 被监督。角色头由模板在推理时给出，模型不需要学会生成它；结束标记必须学会，否则模型不知道何时停下。</Fragment>
+</Diagram>
+
+## 只在回复上计算损失
+
+### 标签、错位与 −100
+
+在因果语言模型中，位置 $t$ 的输出 logits 预测的是位置 $t+1$ 的 token。按照 Hugging Face 的惯例，我们让标签序列 `labels` 与 `input_ids` 逐位置对齐、取值相同，再在损失函数内部错开一位：用 `logits[:, :-1]` 去预测 `labels[:, 1:]`。不需要监督的位置把标签设为 −100，这是 `torch.nn.functional.cross_entropy` 的 `ignore_index` 默认值，这些位置既不贡献损失，也不计入平均的分母。
+
+设被监督的位置集合为 $S$，批量 SFT 损失就是
+
+$$
+\mathcal L = -\frac{1}{|S|}\sum_{(b,t)\in S}\log \pi_\theta\big(x_{b,t}\mid x_{b,\lt t}\big),
+$$
+
+其中 $(b,t)$ 遍历批次中每条序列的每个被监督位置。注意分母是**整个批次**里被监督 token 的总数，而不是先在每条样本内平均、再对样本平均。两种平均方式给每个 token 的权重不同：前者让所有 token 等权，后者让短回复中的 token 权重更大。这个看似琐碎的选择在强化学习中会再次出现，并且导致可观测的长度偏置，见[大规模强化学习的工程与改进](/post-training/rl-at-scale/)。
+
+<Diagram width={720} height={190} label="错位对齐：输入、标签与被预测的目标">
+  <Text x={140} y={57} label="input_ids" size="sm" mono anchor="end" />
+  <Text x={140} y={94} label="labels" size="sm" mono anchor="end" />
+  <Text x={140} y={131} label="logits[t] 的目标" size="sm" anchor="end" />
+  <Matrix x={150} y={40} rows={3} cols={9} cell={[56, 34]} gap={3}
+    values={[["user", "3", "+", "4", "END", "asst", "7", "END", "\\n"], ["−100", "−100", "−100", "−100", "−100", "−100", "7", "END", "−100"], ["−100", "−100", "−100", "−100", "−100", "7", "END", "−100", "—"]]}
+    highlight={[{ cells: [[1, 6], [1, 7]], tone: "accent" }, { cells: [[2, 5], [2, 6]], tone: "accent" }, { cells: [[2, 8]], tone: "muted" }]} />
+  <Text x={415} y={172} label="位置 t 的 logits 对应 labels[t+1]；最后一个位置没有目标" size="sm" tone="muted" />
+  <Fragment slot="caption">为了排版，角色头被简写成一个格子，END 表示 <code>&lt;|im_end|&gt;</code>。第二行是与输入对齐的标签；第三行是错位一位之后、每个位置的 logits 真正要预测的目标。只有“asst”和“7”两个位置的输出参与损失，它们分别要预测回复内容与结束标记。</Fragment>
+</Diagram>
+
+实现只有三行，关键在于先错位、再展平，并让 `cross_entropy` 处理 −100：
+
+<CodeFile path="src/llms_from_scratch/post_training/sft.py" region="sft_loss" />
+
+测试 `test_sft_loss_matches_manual_masked_mean` 对一个随机的小批次逐个位置手算交叉熵，验证它与上式完全一致；`test_masked_positions_receive_no_gradient` 则检查被掩码位置的 logits 梯度严格为零。
+
+### 为什么不在提示上算损失
+
+在提示 token 上也计算损失并不会让训练崩溃，但它把模型的一部分容量花在“学会生成用户会说的话”上。这既没有用处，在多轮对话中还会让模型学会模仿用户的口吻。另一个更实际的理由是：许多 SFT 数据的提示很长（文档问答、代码库上下文），回复很短；在提示上算损失会让梯度几乎全部来自提示。OpenAI 早期的微调接口曾提供一个 `prompt_loss_weight` 参数（默认 0.01），给提示 token 一个很小的损失权重；今天的主流做法是直接把权重设为 0。多轮对话中，每个助手轮次都被监督，用户与系统轮次都不被监督。
+
+### 损失的求和与平均：一个真实的坑
+
+当显存放不下一个大批次、需要梯度累积（gradient accumulation）时，“对被监督 token 取平均”会悄悄出错：每个微批次各自除以本微批次的 token 数再相加，不等于整个大批次除以总 token 数。微批次之间回复长度差异越大，偏差越大。Tülu 3 的报告记录了他们在 Hugging Face Transformers 中遇到的这个问题，最终改为对 token **求和**（并相应调整学习率）。正确的做法是先统计整个大批次的被监督 token 总数，再用它去除每个微批次的损失和。
+
+## 样本打包与跨样本注意力隔离
+
+### 填充的浪费
+
+SFT 样本长短悬殊：一句寒暄只有十几个 token，一段代码解释可能有几千个。把它们右侧填充到同一长度再组成批次，填充位置上的计算全部浪费。若长度分布有长尾，浪费的比例可能超过一半。
+
+**打包**（packing）把多条样本首尾相接地装进固定长度的行，几乎消除填充。但直接用普通因果掩码会带来**跨样本污染**：第二条样本的 token 能注意到第一条样本，它的预测就以一段毫不相关的对话为条件。预训练里文档之间通常只用 EOS 分隔，污染的影响有限；SFT 的样本都是完整的对话，模型会因此学到“前面可能有别人的对话”这种错误的上下文分布。
+
+### 文档掩码与位置重置
+
+解决办法是两件事一起做：
+
+1. **文档掩码**：注意力掩码改为块对角的因果掩码，query 与 key 必须属于同一文档，且 key 不在 query 之后；
+2. **位置重置**：每个文档的位置编号从 0 重新开始，使 RoPE 看到的相对位置与单独处理时一致。
+
+做到这两点后，打包后的前向在数学上**严格等价**于把每条样本单独送进模型。此外，每个文档的第一个标签也要设为 −100：它在错位之后会被上一个文档的最后一个 token“预测”，这种跨文档的预测没有意义。
+
+<Diagram width={720} height={330} label="普通因果掩码与文档掩码的对比">
+  <Matrix x={80} y={60} rows={8} cols={8} cell={26} gap={2}
+    title="普通因果掩码"
+    colLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    rowLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    highlight={[{ upper: true, tone: "muted" }, { lower: true, tone: "accent" }, { cells: [[3, 0], [3, 1], [3, 2], [4, 0], [4, 1], [4, 2], [5, 0], [5, 1], [5, 2], [6, 0], [6, 1], [6, 2], [7, 0], [7, 1], [7, 2]], tone: "accent2" }]} />
+  <Matrix x={430} y={60} rows={8} cols={8} cell={26} gap={2}
+    title="文档掩码（块对角 + 因果）"
+    colLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    rowLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    highlight={[{ upper: true, tone: "muted" }, { lower: true, tone: "accent" }, { cells: [[3, 0], [3, 1], [3, 2], [4, 0], [4, 1], [4, 2], [5, 0], [5, 1], [5, 2], [6, 0], [6, 1], [6, 2], [7, 0], [7, 1], [7, 2]], tone: "muted" }]} />
+  <Text x={190} y={300} label="position_ids：0 1 2 3 4 5 6 7" size="sm" mono />
+  <Text x={540} y={300} label="position_ids：0 1 2 0 1 2 3 4" size="sm" mono />
+  <Legend x={240} y={322} items={[{ label: "允许注意", tone: "accent" }, { label: "跨样本泄漏", tone: "accent2" }, { label: "屏蔽", tone: "muted" }]} gap={130} />
+  <Fragment slot="caption">一行里装了样本 A（3 个 token）和样本 B（5 个 token）。左图中 B 的每个 token 都能看到 A（红色区域）；右图只保留对角线上的两个因果块，并让 B 的位置编号从 0 重新开始，于是 B 的计算与单独处理时完全相同。</Fragment>
+</Diagram>
+
+装箱与掩码的实现如下。装箱用最简单的“按顺序贪心”：当前行放不下就开新的一行。更好的装箱算法（如先排序再首次适应）能进一步减少填充，但与正确性无关。
+
+<CodeFile path="src/llms_from_scratch/post_training/sft.py" region="pack" />
+
+我们没有修改全书共用的 `GPT`，而是在 `common.py` 中写了一个 `gpt_hidden`：它逐层复用模型的子模块（嵌入、归一化、Q/K/V 投影、SwiGLU），只把因果掩码与 RoPE 的位置换成调用方给定的版本。打包前向就是它的一个直接应用：
+
+<CodeFile path="src/llms_from_scratch/post_training/sft.py" symbol="packed_logits" />
+
+“与单独处理严格等价”是一个可以直接测试的命题。测试把 5 条对话打包成 3 行，逐个文档地与单独前向比较 logits；另一个测试 `test_without_document_mask_packing_leaks_context` 则表明，若只用普通因果掩码，第二个文档的输出会明显偏离。
+
+<CodeFile path="tests/post_training/test_sft.py" symbol="test_packed_forward_equals_separate_forward" />
+
+在真实系统中，没有人会像这里一样物化一个 $L\times L$ 的布尔掩码。FlashAttention 的变长接口（`flash_attn_varlen_func`）接收每个文档的起止偏移量 `cu_seqlens`，在 kernel 内部跳过跨文档的块；PyTorch 的 FlexAttention 则用 `document_id` 定义一个掩码函数，编译成同样跳过空块的 kernel。两者计算的都是右图。
+
+## 在小 GPT 上跑一次 SFT
+
+把这些部件组合起来，就得到一个完整的 SFT 循环：把每道加法题渲染成 `user: 3+4=?` / `assistant: 7` 的对话，编码出 `(input_ids, labels)`，随机取批、填充、计算带掩码的交叉熵、用 AdamW 更新。
+
+<CodeFile path="src/llms_from_scratch/post_training/sft.py" symbol="train_sft" />
+
+测试 `test_sft_learns_chat_format` 在约两万参数的随机初始化 GPT 上训练 60 步，要求最后 5 步的平均损失低于前 5 步的一半。由于损失只覆盖助手回复的两个 token（答案与 `<|im_end|>`），模型很快学会“在 `assistant\n` 之后输出一个数字再停下”，而算对加法需要更多步数。这正是格式与能力的区别：格式只需少量示范就能学会，能力则来自更多的数据与训练，或者来自预训练本身。
+
+## SFT 能教会什么、不能教会什么
+
+### 擅长：格式、风格与行为模式
+
+SFT 非常擅长改变模型**怎样说**：使用对话模板、在合适的时候停下、采用某种语气、按要求输出 JSON、在回答前先写出推理步骤、拒绝明显有害的请求。LIMA 用 1000 条示范就能做到这些，说明这类行为在预训练模型中已经有了“雏形”，SFT 只是把它们挑选出来、放大。
+
+### 不擅长：注入新知识
+
+SFT 并不是向模型灌输新事实的好办法。Gekhman 等（2024）构造了受控实验：把微调数据按“预训练模型是否已经知道答案”分成两组。他们发现，模型学习未知事实的速度远慢于已知事实；而一旦学会了这些未知事实，模型在其他问题上的幻觉反而增加。一种直观的解释是：示范在教模型“即使不知道也要自信地给出具体答案”。
+
+这与前面“SFT 最小化前向 KL”的读法一致：前向 KL 要求模型覆盖示范中的每一种行为，包括那些依赖模型并不具备的知识的行为。模型只能在表面上模仿。John Schulman 把这称作行为克隆（behavior cloning）的根本问题：示范者知道的东西与模型知道的东西不同，模仿示范者就会学会“编造”。
+
+### 曝光偏差与无法超越示范
+
+SFT 在训练时总以**示范**的前缀为条件（teacher forcing），推理时却以**模型自己生成**的前缀为条件。一旦生成偏离了示范的分布，模型就进入了训练中从未见过的状态，错误可能逐步累积，这称为曝光偏差（exposure bias）。此外，SFT 的上限是示范数据的质量：模型最多学会示范者的水平，没有任何信号告诉它“这个回答比那个更好”。
+
+这两点正是后面几章的动机。[RLHF：奖励模型与 PPO](/post-training/rlhf/)与[直接偏好优化 DPO](/post-training/dpo/)用**比较**代替示范，让模型从“哪个更好”中学习；[GRPO 与推理模型](/post-training/grpo/)让模型在**自己生成**的轨迹上学习，并用可验证的奖励告诉它哪些轨迹是对的。
+
+### 超参数的经验
+
+SFT 的学习率通常比预训练小一到两个数量级，训练只需一到几个轮次（epoch）。以 Tülu 3 为例，8B 模型的 SFT 学习率为 $5\times10^{-6}$、70B 模型为 $2\times10^{-6}$，都训练 2 轮，线性衰减，前 3% 的步数用于预热，有效批大小 128 条序列，最大长度 4096。轮数过多会让模型记住示范的措辞、损害多样性，并加剧对预训练能力的遗忘（灾难性遗忘）。另一方面，SFT 的验证损失并不是可靠的选模指标：LIMA 观察到验证困惑度上升时生成质量仍在提高。实践中应当用下游评测与人工检查来选择检查点。
+
+## 小结
+
+- SFT 用示范数据做条件化的最大似然，损失与预训练相同，只是**只在回复 token 上计算**；它等价于最小化示范分布到模型的前向 KL。
+- 对话模板用特殊 token 标记角色与轮次边界；训练与推理必须使用完全相同的模板，模型必须学会输出轮次结束标记。
+- 标签与输入对齐、在损失内部错位一位，不监督的位置标为 −100；批量平均的分母应是整个（累积后的）批次中被监督 token 的总数。
+- 打包消除填充浪费，但必须配合块对角的文档掩码与位置重置，才与逐条处理严格等价。
+- SFT 擅长教格式、风格与行为模式，不擅长注入新知识，也无法超越示范的质量；这些局限是偏好优化与强化学习的出发点。
+
+## 练习
+
+1. 在 `encode_chat` 中，如果忘记监督 `<|im_end|>`，训练出的模型在推理时会出现什么现象？设计一个测试来捕捉这个错误。
+
+<details>
+<summary>答案</summary>
+
+模型从未在“回答结束后”的位置上看到要输出 `<|im_end|>` 的监督信号，所以回答完不会停下：它会继续生成换行、`<|im_start|>user` 和一段虚构的用户发言，或者一直重复，直到达到最大长度。测试可以这样写：对 `encode_chat` 的输出取所有被监督的 token，断言其中 `<|im_end|>` 的个数等于助手轮次的个数（本章的 `test_only_assistant_content_and_end_marker_are_supervised` 直接比较了被监督 token 解码后的字符串 `7<|im_end|>4<|im_end|>`）。
+
+</details>
+
+2. 一个批次有两条样本，回复分别有 2 个和 98 个被监督 token。分别写出“对 token 平均”和“先样本内平均、再样本间平均”两种方式下，短回复中每个 token 的损失权重。
+
+<details>
+<summary>答案</summary>
+
+对 token 平均：总 token 数为 100，每个 token 的权重都是 $1/100$。先样本内平均再样本间平均：短回复的每个 token 权重为 $\frac{1}{2}\cdot\frac{1}{2}=\frac14$，长回复的每个 token 权重为 $\frac12\cdot\frac{1}{98}\approx 0.0051$，短回复的 token 权重约是长回复的 49 倍。后者使两条样本对梯度的总贡献相同，但单个 token 的权重随长度剧烈变化。
+
+</details>
+
+3. 打包时如果只做了文档掩码、没有重置位置编号，打包前向还与单独前向等价吗？对 RoPE 而言呢？
+
+<details>
+<summary>答案</summary>
+
+对 RoPE 而言**仍然等价**，只要同一文档内的位置是连续的。RoPE 的注意力分数只依赖 query 与 key 的位置差 $m-n$，把一个文档的所有位置整体平移一个常数不改变任何位置差。但这依赖于浮点运算足够精确（大位置下的旋转角计算会引入舍入误差），而且对学习式绝对位置嵌入完全不成立：那时模型会把文档 B 看作“从第 3 个位置开始”的文本。位置重置让等价性不依赖于位置编码的具体形式。
+
+</details>
+
+4. 把一个数学题数据集中的答案改写成“先写推理步骤、最后给答案”的格式后做 SFT，模型的正确率会提高吗？结合本章对 SFT 能力边界的讨论回答。
+
+<details>
+<summary>答案</summary>
+
+通常会提高，但原因不是 SFT 注入了新的数学知识。思维链把一次困难的预测拆成若干次容易的预测，每一步都更接近模型在预训练中见过的模式，模型可以利用已有的知识；同时生成更多 token 也意味着更多的计算。SFT 教会的是“先推理再回答”这种**行为模式**。如果题目所需的知识超出了基座模型的能力，改写格式的收益就很有限，而且模型可能学会写出看似合理但错误的推理（模仿示范的形式而非实质）。
+
+</details>
+
+## 参考文献
+
+- Ouyang et al. *Training language models to follow instructions with human feedback* (InstructGPT). NeurIPS 2022. https://arxiv.org/abs/2203.02155
+- Zhou et al. *LIMA: Less Is More for Alignment*. NeurIPS 2023. https://arxiv.org/abs/2305.11206
+- Wei et al. *Finetuned Language Models Are Zero-Shot Learners* (FLAN). ICLR 2022. https://arxiv.org/abs/2109.01652
+- Wang et al. *Self-Instruct: Aligning Language Models with Self-Generated Instructions*. ACL 2023. https://arxiv.org/abs/2212.10560
+- Lambert et al. *Tülu 3: Pushing Frontiers in Open Language Model Post-Training*. 2024. https://arxiv.org/abs/2411.15124
+- Gekhman et al. *Does Fine-Tuning LLMs on New Knowledge Encourage Hallucinations?* EMNLP 2024. https://arxiv.org/abs/2405.05904
+- Krell et al. *Efficient Sequence Packing without Cross-contamination*. 2021. https://arxiv.org/abs/2107.02027
+- Hugging Face. *Chat templates*. https://huggingface.co/docs/transformers/main/en/chat_templating
+- PyTorch. *FlexAttention: The Flexibility of PyTorch with the Performance of FlashAttention*. https://pytorch.org/blog/flexattention/
+- Stanford CS336 Spring 2025, Lecture 15 (Alignment: SFT/RLHF) 与 Assignment 5. https://github.com/stanford-cs336/assignment5-alignment
