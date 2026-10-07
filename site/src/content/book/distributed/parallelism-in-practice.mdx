@@ -2,7 +2,275 @@
 title: 组合并行：显存规划与训练配置
 description: 激活重计算、3D/4D 并行的组合原则，用前面的公式为一次真实规模的训练做显存和吞吐规划。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/distributed/planner.py
+  - tests/distributed/test_planner.py
 ---
 
-本章正在撰写。
+前五章各自解决了一个问题：数据并行与 ZeRO 切分批与模型状态，张量并行与序列并行切分层内计算与激活，流水线并行按层切分模型，专家并行切分 MoE 的专家。真实的大规模训练把它们**同时**用上：Llama 3 405B 在 16384 张 H100 上使用 8 路张量并行、16 路流水线并行、128 路数据并行，长上下文阶段再加上 16 路上下文并行；DeepSeek-V3 在 2048 张 H800 上使用 16 路流水线并行、64 路专家并行与 ZeRO-1 数据并行。
+
+怎样得到这样的配置？本章先补上显存账里还缺的一大项——激活，以及用计算换显存的重计算；然后总结各种并行维度在集群上的摆放原则；再用 `planner.py` 把前几章的公式组合起来，为一个 70B 稠密模型和一个 DeepSeek-V3 规模的 MoE 做完整的显存与吞吐规划；最后讨论大规模训练中不可回避的故障、检查点与弹性。
+
+## 激活：显存账里最大的变量
+
+模型状态（参数、梯度、优化器状态）与批大小无关，ZeRO 已经能把它切到很小；激活则与 $s\cdot b$ 成正比，在长序列下往往是显存的大头。Korthikanti 等（2022）对一个 GPT 式层（$h$ 维、$a$ 个头、4h 的 GeLU MLP、带 dropout、16 位激活）逐项统计了反向需要保存的字节数：
+
+- **注意力块**：QKV 投影的输入 $2sbh$；$QK^\top$ 需要的 $Q$、$K$ 共 $4sbh$；softmax 输出 $2as^2b$；softmax 后 dropout 的掩码 $as^2b$；与 $V$ 相乘需要的 dropout 输出 $2as^2b$ 与 $V$ 本身 $2sbh$；输出投影的输入 $2sbh$；输出 dropout 掩码 $sbh$。合计 $11sbh + 5as^2b$。
+- **MLP 块**：两个线性层的输入 $2sbh$ 与 $8sbh$，GeLU 的输入 $8sbh$，dropout 掩码 $sbh$，合计 $19sbh$。
+- **两个 LayerNorm** 的输入：$4sbh$。
+
+相加得到每层 $sbh(34 + 5as/h)$ 字节。上一章与[张量并行与序列并行](/distributed/tensor-parallel/)给出了它在各种切分下的变化：
+
+<KeyEq label="每层激活字节数（Korthikanti 等 2022，表 2）">
+
+$$
+\begin{aligned}
+\text{no parallelism:}\quad & sbh\Big(34 + \frac{5as}{h}\Big) \\
+\text{tensor parallel:}\quad & sbh\Big(10 + \frac{24}{t} + \frac{5as}{ht}\Big) \\
+\text{tensor + sequence parallel:}\quad & sbh\Big(\frac{34}{t} + \frac{5as}{ht}\Big) \\
+\text{TP + SP + selective recompute:}\quad & sbh\,\frac{34}{t} \\
+\text{full recompute:}\quad & 2sbh
+\end{aligned}
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="activations" />
+
+这些常数针对的是论文中的 GPT 结构。本书的 GPT（与 LLaMA 系列一样）没有 dropout、用 SwiGLU（中间维约 $\frac83 h$ 或 3.5h，三个矩阵）、用 GQA（$K$、$V$ 比 $Q$ 小）、用 FlashAttention（不保存 $s\times s$ 的矩阵），所以 34 这个系数会有出入，$5as/h$ 一项则基本消失。规划时可以把公式当作数量级，最终以实测为准——下面就给出一个测量方法。
+
+### 流水线下的第一个 stage
+
+[流水线并行：从 GPipe 到 DualPipe](/distributed/pipeline-parallel/) 中证明了 1F1B 下 stage 0 要同时保存 $p$ 个微批的激活，每个微批 $L/p$ 层，合计相当于 $L$ 层。所以流水线**不减少**最忙那张卡的激活显存（只要 $m\ge p$）；交错调度还要再乘 $1 + \frac{p-1}{pv}$。
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" symbol="pipeline_activation_factor" />
+
+## 重计算：用 FLOPs 换显存
+
+**激活重计算（activation recomputation，也叫 gradient checkpointing）**在前向时只保存每个块的输入，丢弃块内部的中间结果；反向到达这个块时，先用保存的输入重新跑一遍前向，得到中间结果后再做反向。显存从“每层全部中间激活”降到“每层一个输入”，即上表的 $2sbh$；代价是每个块多做一次前向，训练 FLOPs 从约 $6N$ 每 token 增加到约 $8N$（多出前向的 $2N$），即多出约 33% 的计算。
+
+**选择性重计算**只重算“显存多、FLOPs 少”的部分：注意力的 softmax、dropout 等逐元素操作产生 $5as^2b$ 字节激活，计算量却远小于矩阵乘。Korthikanti 等报告，对 GPT-3 175B 这一项的额外开销只有约 2.7% 的 FLOPs，却省下了一半以上的激活。DeepSeek-V3 的做法类似：反向时重算所有 RMSNorm 与 MLA 的上投影，它们的输出很大、计算很便宜。
+
+在 PyTorch 里重计算只需一行：`torch.utils.checkpoint.checkpoint(block, x, freqs, use_reentrant=False)`。要验证它真的少存了东西，可以用 `torch.autograd.graph.saved_tensors_hooks` 拦截 autograd 为反向保存的每一个张量，按底层存储去重后统计字节数：
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="measure" />
+
+<CodeFile path="tests/distributed/test_planner.py" symbol="test_checkpoint_saves_only_inputs" />
+
+对本书 GPT 的一个块（$d=64$、序列 128、批 2），不重计算时 autograd 保存的张量超过 2 MB；包上 `checkpoint` 之后只剩块的输入 $x$（64 KB）和 RoPE 旋转因子，相差二十多倍，而输入梯度完全一致。同样的工具可以用来实测任何模型的每层激活，替代上面公式中的常数。
+
+## 组合原则
+
+各种并行维度的通信特征不同，因此在集群上的摆放也有固定的规律。
+
+| 维度 | 切分什么 | 通信 | 每步通信频率 | 摆放 |
+| --- | --- | --- | --- | --- |
+| TP（+SP） | 层内矩阵 | 激活的 all-reduce / RS+AG | 每层 4 次，关键路径上 | 节点内（NVLink） |
+| CP | 序列（含注意力） | K/V 环形传递或 all-gather | 每个注意力层 | 节点内或相邻节点 |
+| EP | MoE 专家 | token 的 all-to-all | 每个 MoE 层 4 次 | 尽量节点内；跨节点需节点受限路由 |
+| PP | 层 | 相邻 stage 的点对点 | 每微批每边界 2 次 | 跨节点 |
+| DP（ZeRO/FSDP） | 批（与模型状态） | 梯度 all-reduce / RS+AG | 每步 1 次，可与反向重叠 | 最外层，跨节点 |
+
+由此得到的经验规则：
+
+1. **先让模型放下。** 如果 ZeRO-3/FSDP 加适度的重计算就能放下，而且批足够大，纯数据并行（FSDP）通常最简单、效率也最高。
+2. **TP 放在节点内，不超过 8。** 通信与计算之比约 $(t-1)F/(3hB)$，跨节点几乎总是不划算。序列并行几乎没有额外代价，应当总是与 TP 一起打开。
+3. **模型仍放不下、或 TP 已到上限时，加 PP 跨节点。** 保证每个副本的微批数 $m$ 至少是 $p$ 的几倍，必要时用交错或零气泡调度。
+4. **序列很长时加 CP**，把注意力与激活沿序列切开。
+5. **MoE 用 EP 切专家，EP 嵌在 DP 维度里**：非专家参数按 DP 复制，专家按 EP 切分。
+6. **剩下的卡全部给 DP**，用来扩大全局批、缩短训练时间；DP 的梯度同步与反向重叠。
+
+Llama 3 把这些维度从内到外排成 [TP, CP, PP, DP]：越靠内的维度要求越高的带宽，放在 NVLink 或同一机架内；越靠外的维度可以容忍多跳网络的延迟。PyTorch 用 `init_device_mesh` 描述这样的多维网格，例如 `init_device_mesh("cuda", (128, 16, 8), mesh_dim_names=("dp", "pp", "tp"))`（最后一维编号连续，是最内层），每个维度自动建立对应的进程组。
+
+<Diagram width={720} height={260} label="两个节点、16 张卡上 TP=4、DP=2、PP=2 的设备网格">
+  <Region x={20} y={20} w={330} h={220} title="节点 0：流水线 stage 0" />
+  <Region x={370} y={20} w={330} h={220} title="节点 1：流水线 stage 1" />
+  <Box x={40} y={60} w={68} h={50} label={"GPU 0\nTP 0"} size="sm" tone="accent" />
+  <Box x={116} y={60} w={68} h={50} label={"GPU 1\nTP 1"} size="sm" tone="accent" />
+  <Box x={192} y={60} w={68} h={50} label={"GPU 2\nTP 2"} size="sm" tone="accent" />
+  <Box x={268} y={60} w={68} h={50} label={"GPU 3\nTP 3"} size="sm" tone="accent" />
+  <Box x={40} y={160} w={68} h={50} label={"GPU 4\nTP 0"} size="sm" tone="info" />
+  <Box x={116} y={160} w={68} h={50} label={"GPU 5\nTP 1"} size="sm" tone="info" />
+  <Box x={192} y={160} w={68} h={50} label={"GPU 6\nTP 2"} size="sm" tone="info" />
+  <Box x={268} y={160} w={68} h={50} label={"GPU 7\nTP 3"} size="sm" tone="info" />
+  <Box x={390} y={60} w={68} h={50} label={"GPU 8\nTP 0"} size="sm" tone="accent" />
+  <Box x={466} y={60} w={68} h={50} label={"GPU 9\nTP 1"} size="sm" tone="accent" />
+  <Box x={542} y={60} w={68} h={50} label={"GPU 10\nTP 2"} size="sm" tone="accent" />
+  <Box x={618} y={60} w={68} h={50} label={"GPU 11\nTP 3"} size="sm" tone="accent" />
+  <Box x={390} y={160} w={68} h={50} label={"GPU 12\nTP 0"} size="sm" tone="info" />
+  <Box x={466} y={160} w={68} h={50} label={"GPU 13\nTP 1"} size="sm" tone="info" />
+  <Box x={542} y={160} w={68} h={50} label={"GPU 14\nTP 2"} size="sm" tone="info" />
+  <Box x={618} y={160} w={68} h={50} label={"GPU 15\nTP 3"} size="sm" tone="info" />
+  <Arrow from={[74, 110]} to={[74, 160]} head="both" tone="muted" label="DP" labelSide="right" />
+  <Arrow from={[336, 85]} to={[390, 85]} head="both" tone="accent2" label="PP" />
+  <Arrow from={[336, 185]} to={[390, 185]} head="both" tone="accent2" label="PP" />
+  <Text x={188} y={135} label="同色的一行 = 一个 TP 组（NVLink）" size="sm" tone="muted" />
+  <Text x={538} y={135} label="两种颜色 = 两个数据并行副本" size="sm" tone="muted" />
+  <Fragment slot="caption">rank 编号按 [TP, DP, PP] 从内到外排列：相邻的 4 个 rank 组成一个 TP 组，位于同一节点内；GPU 0 与 GPU 4 持有同一片参数，属于同一个 DP 组；GPU 0 与 GPU 8 是同一个副本的相邻流水线 stage，跨节点点对点通信。</Fragment>
+</Diagram>
+
+## 算例一：70B 稠密模型
+
+以 Llama 3 70B 的结构为例：80 层、$h=8192$、64 个查询头与 8 个 KV 头、SwiGLU 中间维 28672、词表 128256、嵌入与输出层不共享。`DenseConfig.params()` 算出约 70.55B 参数。训练目标是 15T token，序列长度 8192，全局批 16M token（2048 条序列），集群是 4096 张 80 GB 的 H100。
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="dense_plan" />
+
+`DensePlan` 先按 $t\times p$ 切模型，再按 ZeRO 阶段在数据并行维度上切模型状态；激活按序列并行加选择性重计算的 $34sbh/t$ 每层，乘以流水线第一个 stage 的因子。下面是几个候选配置（微批大小 1，BF16 参数与梯度，$K=12$ 的 Adam 状态）：
+
+| 配置 | DP | 每副本微批数 | 模型状态 | 激活 | 合计 | 气泡 |
+| --- | --- | --- | --- | --- | --- | --- |
+| TP 8，PP 1，ZeRO-1 | 512 | 4 | 35.5 GB | 22.8 GB | 58.3 GB | 0 |
+| TP 8，PP 4，ZeRO-1 | 128 | 16 | 9.0 GB | 22.8 GB | 31.8 GB | 15.8% |
+| TP 8，PP 4，ZeRO-1，交错 $v=5$ | 128 | 16 | 9.0 GB | 26.2 GB | 35.3 GB | 3.6% |
+| TP 4，PP 8，ZeRO-1 | 128 | 16 | 9.0 GB | 45.6 GB | 54.7 GB | 30.4% |
+| TP 8，PP 4，全部重计算 | 128 | 16 | 9.0 GB | 1.3 GB | 10.4 GB | 15.8%（且多 33% FLOPs） |
+| TP 8，PP 1，ZeRO-3 | 512 | 4 | 0.3 GB | 22.8 GB | 23.1 GB + 临时参数 | 0 |
+
+<Bars label="70B 模型在 4096 张卡上的每卡显存估算" unit="GB"
+  items={[
+    { label: 'TP8 PP1 Z1', segments: [{ value: 35.5, label: '模型状态' }, { value: 22.8, label: '激活' }] },
+    { label: 'TP8 PP4 Z1', segments: [{ value: 9.0, label: '模型状态' }, { value: 22.8, label: '激活' }] },
+    { label: 'TP4 PP8 Z1', segments: [{ value: 9.0, label: '模型状态' }, { value: 45.6, label: '激活' }] },
+    { label: 'TP8 PP4 全重算', segments: [{ value: 9.0, label: '模型状态' }, { value: 1.3, label: '激活' }] },
+    { label: 'TP8 PP1 Z3', segments: [{ value: 0.3, label: '模型状态' }, { value: 22.8, label: '激活' }] },
+  ]}>
+  <Fragment slot="caption">由 DensePlan 计算（GPT 式激活公式，未计通信缓冲、临时 all-gather 的参数与碎片）。流水线切小了模型状态，但没有切小第一个 stage 的激活；把 TP 从 8 降到 4，激活翻倍。</Fragment>
+</Bars>
+
+从表中可以读出几条结论：
+
+- **不用流水线也放得下，但余量很小。** TP 8 加 ZeRO-1 时，每卡 8.8B 参数的 BF16 权重与梯度就要 35 GB；加上 23 GB 激活，再留出通信缓冲、CUDA 上下文与碎片，80 GB 的卡比较紧张。
+- **PP 4 把模型状态降到 9 GB，但激活不变**，于是“合计”只降到 32 GB。流水线的代价是 15.8% 的气泡；用交错调度（每卡 5 个块，每块 4 层）可以把气泡压到约 3.6%，激活多 15%。
+- **TP 的大小直接决定激活**：TP 4 时激活翻倍到 46 GB，气泡也因为 $p=8$ 而更大。
+- **全部重计算**把激活降到 1.3 GB，但多出约 33% 的计算，通常只在别无选择时使用。
+- **ZeRO-3** 让模型状态几乎消失，但每层都要临时 all-gather 完整参数（TP 8 下每层约 107 M 参数，约 0.2 GB），通信量是 ZeRO-1 的 1.5 倍；在 512 路数据并行、每副本只有 4 个微批时，这些通信能否被计算掩盖需要仔细评估。
+
+一个合理的选择是 TP 8、PP 4（交错）、DP 128、ZeRO-1：显存约 35 GB，留有充足余量，可以考虑增大微批或关闭选择性重计算以换取速度。
+
+**训练时间。** 每 token 的训练 FLOPs 用 $6N + 6Lsh$ 估算（后一项是注意力分数与加权求和，这里按非因果计，约多出 7.6%）：
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="throughput" />
+
+$15\times10^{12}$ token、$4.55\times10^{11}$ FLOPs/token、4096 张卡、989 TFLOP/s 的 BF16 峰值、40% 的 MFU，约 49 天。40% 的 MFU 与 Llama 3 405B 报告的 38%—43% 相当；如果流水线气泡、重计算或通信没有被掩盖，MFU 会直接下降，天数相应增加。这个数字也说明了为什么组合并行的每一个百分点都重要：MFU 从 40% 降到 35%，就要多一周。
+
+## 算例二：DeepSeek-V3 规模的 MoE
+
+`DeepSeekV3Config` 按技术报告的超参数逐项计算参数：61 层，前 3 层是稠密 FFN（中间维 18432），其余 58 层各有 256 个路由专家与 1 个共享专家（中间维 2048），MLA 注意力（查询压缩维 1536、KV 压缩维 512、128 个头、每头 128 维加 64 维 RoPE），词表 129280。
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" symbol="DeepSeekV3Config.params" />
+
+结果是 671.0B 总参数，其中路由专家 653.9B、注意力 11.4B、共享专家 2.6B、嵌入与输出层 1.9B、稠密 FFN 1.2B；每 token 激活约 37.6B（报告给出 671B 与 37B），说明这一参数核算与报告一致。
+
+**显存。** 报告的配置是 2048 张 H800，16 路 PP、64 路 EP（跨 8 个节点）、ZeRO-1 DP，没有 TP。于是 DP $= 2048/16 = 128$，每个专家在 $128/64 = 2$ 个 rank 上有副本。精度按报告：BF16 权重、FP32 梯度累积、FP32 主参数与 BF16 的 Adam 两个矩（每参数 8 字节优化器状态）。
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="moe_plan" />
+
+每卡约 0.64B 路由专家参数（每个 MoE 层 4 个专家 × 约 3.6 层）加 1.07B 其他参数，权重 3.4 GB、梯度 6.8 GB、优化器状态 2.6 GB，合计约 12.9 GB。专家参数的优化器状态只在 2 个副本间切分，所以它反而是优化器状态的主要部分；非专家参数的状态在 128 个 rank 间切分，几乎可以忽略。与 70B 稠密模型相比，一个 671B 的模型每卡模型状态反而更小——这就是 MoE 配合专家并行的威力，也是 DeepSeek-V3 不需要张量并行的原因：剩下的近 70 GB 都可以留给激活（报告还通过重算 RMSNorm 与 MLA 上投影、把 EMA 放到 CPU 上进一步节省）。
+
+**计算。** 只算 $6N_{\text{active}}$，14.8T token 共需约 $3.3\times10^{24}$ FLOPs。报告的预训练耗时是 266.4 万 H800 GPU 小时，反推每卡平均约 348 TFLOP/s。相对 H800 的 BF16 稠密峰值（约 989 TFLOP/s）约为 35%；DeepSeek-V3 的大部分 GEMM 用 FP8 计算，FP8 峰值是 BF16 的两倍，按 FP8 峰值算约 18%。这里没有计入注意力的 FLOPs，也无法区分气泡、通信与故障造成的损失，只能作为数量级参考。
+
+**通信。** 按上一章的公式，每个 MoE 层每个 rank 的 dispatch 约 231 MB（FP8）、combine 约 462 MB（BF16）。节点受限路由把每个 token 的跨节点副本从至多 8 份降到至多 4 份，`ib_dispatch_bytes` 显示跨节点 dispatch 流量减半。即便如此，跨节点 all-to-all 的时间仍与计算相当，这就是 DualPipe 必须把它们完全重叠的原因。
+
+<StatGrid items={[
+  { value: '671B / 37.6B', label: '总参数 / 每 token 激活（按超参数计算）' },
+  { value: '12.9 GB', label: '每卡模型状态（PP16 · EP64 · ZeRO-1）' },
+  { value: '≈348 TFLOP/s', label: '由公开 GPU 小时反推的每卡有效算力' },
+  { value: '≤4 节点', label: '每个 token 的跨节点目的地' },
+]} />
+
+## 故障、检查点与弹性
+
+规模越大，故障越频繁。Llama 3 405B 预训练的 54 天快照中共有 466 次作业中断，其中 419 次是意外中断；GPU 相关问题占意外中断的 58.7%，有故障的 GPU 本身就占 30.1%。平均下来，大约每 3 小时就有一次意外中断。
+
+假设各张卡独立、故障率恒定，整个作业的平均无故障时间（MTBF）与卡数成反比：每张卡平均 5 万小时才出一次故障，16384 张卡的作业就是约 3 小时一次。这对检查点提出了定量的要求。设写一次检查点让训练停顿 $\delta$，检查点间隔为 $\tau$，作业 MTBF 为 $M$。单位时间的损失是写检查点的开销 $\delta/\tau$，加上故障时平均丢失的进度 $\frac{\tau/2}{M}$。对 $\tau$ 求导并令其为零：
+
+<KeyEq label="最优检查点间隔（Young 1974 的一阶近似）">
+
+$$
+\frac{d}{d\tau}\Big(\frac{\delta}{\tau} + \frac{\tau}{2M}\Big) = 0
+\quad\Longrightarrow\quad
+\tau^* = \sqrt{2\,\delta\,M}.
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/distributed/planner.py" region="checkpoint" />
+
+取 $\delta = 1$ 分钟、$M = 3.1$ 小时，最优间隔约 19 分钟，总损失约 $2\sqrt{\delta/(2M)}\approx 10\%$。要进一步降低损失，就要缩短 $\delta$：**异步检查点**先把状态快速拷到 CPU 内存（训练只停顿这一步），再在后台写入存储；**分片检查点**（`torch.distributed.checkpoint`）让每个 rank 只写自己的分片，并行写入，加载时还可以重新分片到不同的并行配置。
+
+一个完整的分布式检查点需要包括：每个 rank 的模型与优化器分片（ZeRO/FSDP 下各不相同）、每个 rank 的随机数状态（dropout、数据增强）、数据加载器的位置（已消费到哪个样本，以及每个 DP rank 的游标）、学习率调度器与步数，以及并行配置本身。只保存 rank 0 的模型参数是不够的。
+
+其他常见的故障与对策：
+
+- **挂起（hang）**：某个 rank 因为故障或代码分支少调用了一次集合通信，其余 rank 永远等待。设置合理的通信超时，并用 PyTorch 的 NCCL flight recorder 记录每个 rank 最近的集合通信，定位是谁没有到达。
+- **慢节点（straggler）**：一张降频或网络拥塞的卡会拖慢所有同步的 rank。监控每个 rank 每步的耗时分布，及时替换。
+- **静默数据错误（silent data corruption）**：硬件偶尔算错而不报错，表现为难以解释的损失尖峰或 NaN。可以周期性地在不同的卡上重复计算同一步并比较结果。
+- **弹性**：故障后不必等坏卡修好，可以换上热备节点，或者用更少的 DP 副本继续训练（`torchrun` 的弹性模式、分片检查点的重分片能力都为此服务）。改变 DP 规模会改变全局批大小，需要相应地调整学习率或梯度累积步数。
+
+## 小结
+
+- 激活每层约 $sbh(34 + 5as/h)$ 字节（GPT 式结构），张量并行、序列并行、选择性重计算依次把它降到 $34sbh/t$；全部重计算只存每层输入 $2sbh$，代价约 33% 的额外 FLOPs。流水线不减少第一个 stage 的激活。
+- `saved_tensors_hooks` 可以实测 autograd 为反向保存的字节数，用来验证重计算并替代公式中的常数。
+- 组合原则：TP（+SP）在节点内，CP 处理长序列，PP 跨节点，EP 嵌在 DP 中，DP 在最外层；从内到外按带宽需求排列。
+- 70B 稠密模型在 4096 张 H100 上的一个合理配置是 TP 8、PP 4（交错）、DP 128、ZeRO-1，每卡约 35 GB，40% MFU 下约 49 天训完 15T token。
+- DeepSeek-V3 在 PP 16、EP 64、ZeRO-1 下每卡模型状态只有约 13 GB，不需要张量并行；由公开数据反推每卡约 348 TFLOP/s。
+- 大规模训练平均几小时就有一次故障；最优检查点间隔约 $\sqrt{2\delta M}$，异步与分片检查点缩短停顿 $\delta$。
+
+## 练习
+
+1. 用 `activation_bytes_per_layer` 计算 GPT-3 175B（$a=96$、$h=12288$、$s=2048$、$b=1$、96 层）在 $t=8$ 时，仅张量并行、加序列并行、再加选择性重计算三种情况下第一个 stage 的总激活（假设 $m\ge p$）。
+
+<details>
+<summary>答案</summary>
+
+$sbh = 2048\times12288 \approx 2.52\times10^7$，$5as/h = 80$。仅 TP：$sbh(10 + 3 + 10) = 23\,sbh \approx 579$ MB/层，96 层约 55.6 GB。TP+SP：$sbh(34+80)/8 = 14.25\,sbh\approx 359$ MB/层，约 34.4 GB。再加选择性重计算：$34sbh/8 = 4.25\,sbh \approx 107$ MB/层，约 10.3 GB。这与 Korthikanti 等论文中“激活降到约五分之一”的结论一致。
+
+</details>
+
+2. 一个 13B 模型在 64 张 80 GB 显卡上训练，序列 4096，全局批 2M token。比较两种方案：（a）FSDP（ZeRO-3）+ 全部重计算，DP = 64；（b）TP 4 + SP + 选择性重计算 + ZeRO-1，DP = 16。用 `DensePlan` 的思路估算每卡显存，讨论各自的瓶颈。
+
+<details>
+<summary>答案</summary>
+
+取 $L=40$、$h=5120$、$a=40$。（a）模型状态 $16\times13\text{B}/64 = 3.25$ GB；每卡每步 $2\text{M}/64 = 32768$ token，即 8 条序列。若微批为 1，全部重计算时每层只存输入 $2sbh = 2\times4096\times5120$ 字节，约 42 MB，40 层约 1.7 GB；外加临时 all-gather 的一层参数。显存很宽裕，瓶颈是 33% 的重计算开销与 1.5 倍的通信。（b）模型状态 $13\text{B}/4\times(4 + 12/16) \approx 15.4$ GB；激活 $34sbh/4\times40\approx 7.1$ GB，合计约 23 GB；没有重计算开销，但 TP 4 的通信在关键路径上。在节点内有 NVLink 时（b）通常更快；若只有 PCIe，（a）可能更好。
+
+</details>
+
+3. 在 DeepSeek-V3 的配置中，如果把 EP 从 64 改成 32（DP 仍为 128），每卡的模型状态如何变化？为什么报告选择让 EP 跨 8 个节点？
+
+<details>
+<summary>答案</summary>
+
+每卡专家参数翻倍到约 1.28B，每个专家有 4 个副本，专家的优化器状态在 4 个副本间切分。权重 $(1.28+1.07)\times2 \approx 4.7$ GB，梯度约 9.4 GB，优化器 $1.28\times8/4 + 1.07\times8/128 \approx 2.6$ GB，合计约 16.7 GB，仍可接受。但每张卡要算的专家变多，单卡的专家计算量与 all-to-all 接收量增加。EP 越大，每卡专家越少，专家参数分摊得越开，同时每个专家每步收到的 token 越多（专家 GEMM 越高效）；代价是更多的跨节点流量，这正是节点受限路由与 DeepEP 要解决的。
+
+</details>
+
+4. 某作业用 8192 张卡，每张卡的 MTBF 为 8 万小时，写一次同步检查点要 3 分钟。最优检查点间隔与总损失比例是多少？如果改用异步检查点，停顿降到 15 秒呢？
+
+<details>
+<summary>答案</summary>
+
+作业 MTBF $= 80000/8192 \approx 9.8$ 小时 $= 586$ 分钟。同步：$\tau^* = \sqrt{2\times3\times586}\approx 59$ 分钟，损失 $\delta/\tau + \tau/(2M) \approx 3/59 + 59/1172 \approx 10\%$。异步：$\tau^*=\sqrt{2\times0.25\times586}\approx 17$ 分钟，损失 $0.25/17 + 17/1172 \approx 2.9\%$。（这里忽略了故障后重启、重新加载与预热的固定时间，它们会让实际损失更大。）
+
+</details>
+
+5. 为什么说流水线并行“切不小”第一个 stage 的激活，却仍然常被用来节省显存？它节省的是哪部分？
+
+<details>
+<summary>答案</summary>
+
+1F1B 下 stage 0 同时保存 $p$ 个微批，每个 $L/p$ 层，合计等于 $L$ 层的激活，与不切分相同。流水线节省的是**模型状态**：每卡只持有 $1/p$ 的层，参数、梯度、优化器状态都除以 $p$（与 ZeRO 相比，它不需要每层 all-gather 参数，通信只是相邻 stage 的点对点）。此外，后面的 stage 激活更少（stage $s$ 只存 $p-s$ 个微批），可以用来放更大的模型块，或者把显存需求最高的嵌入层放在激活较少的位置。
+
+</details>
+
+## 参考文献
+
+- Korthikanti, V. et al. [Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198), 2022：激活公式（4 节、表 2）与选择性重计算。
+- Chen, T. et al. [Training Deep Nets with Sublinear Memory Cost](https://arxiv.org/abs/1604.06174), 2016：梯度检查点。
+- Narayanan, D. et al. [Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM](https://arxiv.org/abs/2104.04473). SC 2021：PTD-P 组合并行的经验规则。
+- Llama Team, AI @ Meta. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783), 2024：4D 并行配置（表 4）、并行维度顺序与故障统计（表 5）。
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437), 2024：模型超参数、并行配置、低精度优化器状态与训练成本。
+- Young, J. W. [A first order approximation to the optimum checkpoint interval](https://doi.org/10.1145/361147.361115). CACM, 1974.
+- PyTorch. [torch.utils.checkpoint](https://docs.pytorch.org/docs/stable/checkpoint.html)、[Autograd saved tensors hooks](https://docs.pytorch.org/docs/stable/notes/autograd.html#hooks-for-saved-tensors)、[Distributed Checkpoint](https://docs.pytorch.org/docs/stable/distributed.checkpoint.html) 与 [DeviceMesh](https://docs.pytorch.org/tutorials/recipes/distributed_device_mesh.html)。
+- Hugging Face. [The Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)：5D 并行的组合与基准。
+- Stanford CS336. [Lecture 8: Parallelism 2](https://github.com/stanford-cs336/spring2025-lectures).

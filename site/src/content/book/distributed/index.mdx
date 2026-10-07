@@ -2,9 +2,54 @@
 title: 分布式训练
 description: 当模型和数据都放不进一张卡：从集合通信原语出发，依次实现数据并行、ZeRO/FSDP、张量并行、流水线并行与专家并行。
 order: 0
-draft: true
 ---
 
-当模型和数据都放不进一张卡：从集合通信原语出发，依次实现数据并行、ZeRO/FSDP、张量并行、流水线并行与专家并行。
+[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)已经算清楚过一笔账：用 Adam 做混合精度训练，每个参数要占用约 16 字节的状态，一个 70B 参数的稠密模型光是权重、梯度和优化器状态就超过 1 TB，远远超出单张 80 GB 显卡的容量；而[缩放定律与计算最优](/pretraining/scaling-laws/)告诉我们，把它训练到合理的 token 数需要的 FLOPs 在 $10^{24}$ 量级，单卡要跑几十年。显存放不下、算力不够快，这两个事实把训练推向同一个结论：必须让几十、几千乃至上万张加速卡协同工作。
+
+这一部分回答的问题是：**怎样把一个训练任务切开，分给许多设备，同时让结果与单卡一致，并且让设备的大部分时间花在计算而不是等待上。** 可切的对象只有几种：切数据（数据并行）、切优化器状态与参数（ZeRO/FSDP）、切单个矩阵（张量并行）、切层（流水线并行）、切专家（专家并行）。每一种切法都以某种通信为代价，所以本部分的第一章不讲任何并行策略，而是先讲通信本身。
+
+## 知识脉络
+
+<Diagram width={700} height={330} label="第六部分各章的依赖关系">
+  <Region x={10} y={10} w={685} h={96} title="通信基础" />
+  <Box x={40} y={42} w={190} h={50} label="集合通信原语" sub="all-reduce · all-to-all" tone="info" />
+  <Box x={270} y={42} w={190} h={50} label="α-β 成本模型" sub="环形 · 树形" tone="info" />
+  <Box x={500} y={42} w={190} h={50} label="硬件拓扑" sub="NVLink · InfiniBand" tone="info" />
+  <Region x={10} y={120} w={685} h={96} title="沿三个轴切分：数据、层内、层间" />
+  <Box x={40} y={152} w={190} h={50} label="数据并行 / ZeRO" sub="切样本、状态" tone="accent" />
+  <Box x={270} y={152} w={190} h={50} label="张量并行" sub="切矩阵 · 序列并行" tone="accent" />
+  <Box x={500} y={152} w={190} h={50} label="流水线并行" sub="切层 · 微批" tone="accent" />
+  <Region x={10} y={230} w={685} h={90} title="MoE 与整体规划" />
+  <Box x={40} y={258} w={190} h={50} label="专家并行" sub="dispatch · combine" />
+  <Box x={270} y={258} w={190} h={50} label="显存与吞吐规划" sub="重计算 · 3D/4D" />
+  <Box x={500} y={258} w={190} h={50} label="一次真实训练" sub="70B 稠密 · V3 规模 MoE" tone="strong" />
+  <Arrow from={[135, 92]} to={[135, 152]} />
+  <Arrow from={[365, 92]} to={[365, 152]} />
+  <Arrow from={[595, 92]} to={[595, 152]} />
+  <Arrow from={[230, 177]} to={[270, 177]} />
+  <Arrow from={[460, 177]} to={[500, 177]} />
+  <Arrow from={[135, 202]} to={[135, 258]} />
+  <Arrow from={[230, 283]} to={[270, 283]} />
+  <Arrow from={[460, 283]} to={[500, 283]} />
+  <Fragment slot="caption">上层是所有并行策略共用的通信词汇与成本模型；中层是三个相互正交的切分轴；下层把专家并行并入，并用前面的公式做整体规划。竖直箭头表示每种策略都建立在通信原语之上，水平箭头表示阅读顺序。</Fragment>
+</Diagram>
+
+[集合通信：all-reduce 与它的伙伴](/distributed/collectives/)定义六种集合通信原语，推导环形 all-reduce 的代价，并给出后面所有章节使用的成本模型。[数据并行、ZeRO 与 FSDP](/distributed/data-parallel/)从最朴素的梯度同步讲起，说明为什么数据并行与单卡等价，再看 ZeRO 如何把冗余的优化器状态、梯度与参数逐级分片。[张量并行与序列并行](/distributed/tensor-parallel/)把单个矩阵乘拆到多张卡上，并在 MLP、注意力和词表上给出只需一两次 all-reduce 的方案，最后延伸到序列并行与 Ring Attention。[流水线并行：从 GPipe 到 DualPipe](/distributed/pipeline-parallel/)沿层的方向切分，用调度对抗“气泡”。[专家并行与 all-to-all](/distributed/expert-parallel/)处理 MoE 的 token 路由，讨论 all-to-all 为什么成为瓶颈。最后的[组合并行：显存规划与训练配置](/distributed/parallelism-in-practice/)把所有维度组合起来，在纸面上为两种真实规模的训练做显存与吞吐规划。
+
+## 与前后部分的关系
+
+本部分的前提来自前面几部分：[自动求导](/pytorch/autograd/)说明反向传播如何得到梯度，这里的每种并行本质上都是“在计算图的哪个位置插入通信”；[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)决定了每个参数占用多少字节，也就决定了 ZeRO 能省下多少显存；[MoE](/architecture/moe/)介绍了专家与路由的数学，本部分只讨论怎样把它们放到多张卡上。
+
+后面的部分会反复用到这里的结论。[后训练与对齐](/post-training/)中大规模强化学习的训练与采样系统，依赖同样的并行与权重同步机制；[GPU 与 CUDA 编程](/gpu/)解释单卡内部的性能，与本部分的跨卡性能共同构成完整的效率图景；[分布式推理：并行、PD 分离与大规模 MoE 服务](/inference/distributed-inference/)把张量并行与专家并行搬到推理场景，那里的约束从吞吐变成了延迟。
+
+## 阅读与动手建议
+
+本书的参考实现全部可以在没有 GPU 的机器上运行：通信用 `torch.distributed` 的 gloo 后端，在 CPU 上起 2–4 个进程，每个并行策略都有测试，核对它与单进程训练在数值上一致（数据并行的梯度、ZeRO 的参数更新、张量并行的输出与梯度、流水线的损失与梯度、专家并行的输出都是如此）。读者可以直接运行：
+
+```sh
+uv run pytest tests/distributed    # 多进程 gloo 测试，CPU 上即可完成
+```
+
+gloo 的速度与真实 NVLink 或 InfiniBand 无法比较，所以代码只验证**正确性**；性能数字来自 α-β 成本模型的推导与公开论文，书中均注明出处。建议按顺序阅读前三章，它们是后面所有内容的基础；流水线并行与专家并行两章彼此独立，可按兴趣选读；最后一章依赖前面全部章节的公式，适合作为回顾，也适合在读完每一章后回来对照。
 
 <ChapterList part="distributed" />

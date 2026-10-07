@@ -2,7 +2,327 @@
 title: 张量并行与序列并行
 description: Megatron 式的列切分与行切分，注意力与 MLP 的切分方案，序列并行与上下文并行（Ring Attention）。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/distributed/tensor_parallel.py
+  - tests/distributed/test_tensor_parallel.py
 ---
 
-本章正在撰写。
+[数据并行、ZeRO 与 FSDP](/distributed/data-parallel/) 把**批**切开，ZeRO-3 进一步把参数的**存储**切开，但每一层的计算仍然在一张卡上完整地进行：FSDP 计算某一层之前，要先把这一层的完整参数 all-gather 到本地。如果单层的权重本身就很大，或者单卡上一个微批的激活已经放不下，就需要把**一层的计算本身**分给多张卡。这就是**张量并行（tensor parallelism, TP）**，也叫层内模型并行。
+
+本章的主线来自 Megatron-LM（Shoeybi 等，2019）：一个矩阵乘可以按列切或按行切，两种切法前后配对，使得一个 MLP 或一个注意力子层只需要一次 all-reduce。我们会推导这两种切法及其反向传播中的“共轭”通信算子，实现 SwiGLU 与 GQA 注意力的张量并行版本，并与单卡逐元素比较；然后处理输出层的大词表（词表并行交叉熵），再把张量并行没有切开的那部分激活沿序列维切开（序列并行），最后讨论长序列下沿序列切分注意力本身的上下文并行与 Ring Attention。
+
+## 矩阵乘的两种切法
+
+为了与 Megatron 论文一致，本节把线性层写成 $Y = XA$，$X\in\mathbb R^{N\times d_\text{in}}$ 按行存放 $N$ 个 token，$A\in\mathbb R^{d_\text{in}\times d_\text{out}}$。PyTorch 的 `nn.Linear` 存的是 $W = A^\top$，形状 `[d_out, d_in]`，所以下文“对 $A$ 按列切”在代码里是“对 `weight` 按行（第 0 维）切”。设张量并行度为 $t$。
+
+**列切分（column parallel）**：$A = [A_1, A_2, \dots, A_t]$，每个 rank 持有 $A_i\in\mathbb R^{d_\text{in}\times d_\text{out}/t}$。每个 rank 需要完整的 $X$，算出 $Y_i = XA_i$，得到输出的第 $i$ 段列。完整的 $Y = [Y_1,\dots,Y_t]$ 是**拼接**。
+
+**行切分（row parallel）**：$A = \begin{bmatrix}A_1\\ \vdots\\ A_t\end{bmatrix}$，每个 rank 持有 $A_i\in\mathbb R^{d_\text{in}/t\times d_\text{out}}$，并且只需要输入的对应一段列 $X_i\in\mathbb R^{N\times d_\text{in}/t}$。每个 rank 算出 $X_iA_i$，它的形状已经是完整的 $N\times d_\text{out}$，但只是**部分和**：$Y = \sum_i X_iA_i$，需要一次 all-reduce。
+
+用一个具体的例子：$x = [1,2,3,4]$，$A$ 是 $0$ 到 $15$ 按行排成的 $4\times4$ 矩阵，$y = xA = [80, 90, 100, 110]$。两卡列切分时 rank 0 用前两列得到 $[80,90]$，rank 1 得到 $[100,110]$；行切分时 rank 0 用 $x_1=[1,2]$ 与前两行得到 $[8,11,14,17]$，rank 1 用 $x_2=[3,4]$ 与后两行得到 $[72,79,86,93]$，逐元素相加才是 $y$。
+
+<Diagram width={720} height={330} label="矩阵乘的列切分与行切分">
+  <Text x={20} y={20} label="列切分：每个 rank 持有 A 的若干列，得到 Y 的若干列（拼接）" anchor="start" size="sm" bold />
+  <Matrix x={60} y={98} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="x（完整）" />
+  <Text x={200} y={111} label="×" />
+  <Matrix x={220} y={46} rows={4} cols={4} cell={[28, 26]} title="A"
+    values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]}
+    highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
+  <Text x={360} y={111} label="=" />
+  <Matrix x={380} y={98} rows={1} cols={4} cell={[28, 26]} values={[[80, 90, 100, 110]]} title="y"
+    highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
+  <Text x={530} y={96} label="rank 0：[80, 90]" anchor="start" size="sm" />
+  <Text x={530} y={126} label="rank 1：[100, 110]" anchor="start" size="sm" />
+  <Text x={20} y={180} label="行切分：每个 rank 持有 A 的若干行与 x 的对应段，得到部分和（相加）" anchor="start" size="sm" bold />
+  <Matrix x={60} y={258} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="x（切分）"
+    highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
+  <Text x={200} y={271} label="×" />
+  <Matrix x={220} y={206} rows={4} cols={4} cell={[28, 26]} title="A"
+    values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]}
+    highlight={[{ rows: [0, 1], tone: 'accent' }, { rows: [2, 3], tone: 'info' }]} />
+  <Text x={360} y={271} label="=" />
+  <Matrix x={380} y={232} rows={1} cols={4} cell={[28, 26]} values={[[8, 11, 14, 17]]} tone="accent" />
+  <Matrix x={380} y={284} rows={1} cols={4} cell={[28, 26]} values={[[72, 79, 86, 93]]} tone="info" />
+  <Text x={514} y={245} label="rank 0" anchor="start" size="sm" tone="muted" />
+  <Text x={514} y={297} label="rank 1" anchor="start" size="sm" tone="muted" />
+  <Arrow from={[566, 271]} to={[592, 271]} label="Σ" />
+  <Matrix x={598} y={258} rows={1} cols={4} cell={[28, 26]} values={[[80, 90, 100, 110]]} tone="strong" />
+  <Fragment slot="caption">上：列切分不需要通信就能各自算出 y 的一段，但输入必须完整。下：行切分让每个 rank 只用输入的一段，但输出是同一形状的部分和，要 all-reduce 才得到 y。两种切法的输入、输出布局恰好互补。</Fragment>
+</Diagram>
+
+两种切法的输入输出布局正好互补：列切分的**输出**是按列切开的，而行切分需要的**输入**恰好是按列切开的。所以“先列切、后行切”可以直接首尾相接，中间不需要任何通信。
+
+## f 与 g：前向与反向的通信是共轭的
+
+张量并行要在反向传播中保持正确，必须写出每个通信步骤的反向。设损失为 $\mathcal L$。
+
+**列切分的输入梯度。** 每个 rank 都用完整的 $X$ 算出了 $Y_i = XA_i$，所以 $X$ 被“复制”给了 $t$ 个 rank，每个副本都对损失有贡献：
+
+$$
+\frac{\partial\mathcal L}{\partial X} = \sum_{i=1}^t \frac{\partial\mathcal L}{\partial Y_i}A_i^\top .
+$$
+
+rank $i$ 只能算出求和中的第 $i$ 项，所以**反向**需要一次 all-reduce。权重梯度 $\partial\mathcal L/\partial A_i = X^\top\,\partial\mathcal L/\partial Y_i$ 则完全在本地。
+
+**行切分的输出。** 前向的 all-reduce $Y=\sum_i Y^{(i)}$ 对每个部分和的导数都是 1，所以反向只需把 $\partial\mathcal L/\partial Y$ 原样交给每个 rank——它本来就在每个 rank 上（因为前向之后每个 rank 都有完整的 $Y$）。
+
+Megatron 把这两件事包装成一对算子：
+
+<KeyEq label="共轭的通信算子">
+
+$$
+f:\ \ \text{forward} = \text{identity},\ \ \text{backward} = \text{all-reduce};
+\qquad
+g:\ \ \text{forward} = \text{all-reduce},\ \ \text{backward} = \text{identity}.
+$$
+
+</KeyEq>
+
+$f$ 放在张量并行区的入口（列切分之前），$g$ 放在出口（行切分之后）。它们互为转置：$f$ 把一个张量“复制”到 $t$ 个 rank，转置就是把 $t$ 份梯度加起来；$g$ 把 $t$ 份部分和加起来，转置就是复制梯度。实现就是两个自定义 autograd 函数：
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="conjugate" />
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="linear" />
+
+## MLP：一次 all-reduce
+
+一个 GeLU 的 MLP 是 $Z = \mathrm{GeLU}(XA)B$。Megatron 的切法是 $A$ 列切、$B$ 行切：
+
+$$
+Z = \sum_{i=1}^t \mathrm{GeLU}(XA_i)\,B_i .
+$$
+
+关键在于非线性。$A$ 列切后，每个 rank 拿到的是 $XA$ 的**完整的一段列**，逐元素的 GeLU 可以直接在本地作用，$\mathrm{GeLU}(XA) = [\mathrm{GeLU}(XA_1),\dots]$。如果反过来先行切 $A$，每个 rank 拿到的是部分和，而 $\mathrm{GeLU}(\sum_i P_i)\ne\sum_i\mathrm{GeLU}(P_i)$，必须在非线性之前 all-reduce，就多了一次通信。
+
+本书模型用的是 SwiGLU：$\mathrm{FFN}(X) = \big(\mathrm{SiLU}(XW_1^\top)\odot XW_3^\top\big)W_2^\top$。门控是逐元素乘法，所以 $W_1$ 与 $W_3$ **用同样的方式列切**（第 $i$ 个 rank 拿到中间维的同一段），$W_2$ 行切，整个前馈层仍然只在出口处 all-reduce 一次。中间激活 $[N, d_\text{ff}/t]$ 自始至终留在本地，这也是张量并行节省激活显存的来源。
+
+<Diagram width={720} height={250} label="张量并行的 SwiGLU 前馈层">
+  <Box x={20} y={100} w={70} h={44} label="X" tone="neutral" />
+  <Box x={110} y={100} w={44} h={44} label="f" tone="strong" />
+  <Region x={176} y={14} w={420} h={100} title="rank 0" />
+  <Box x={190} y={46} w={110} h={50} label={"X W1,0ᵀ\nX W3,0ᵀ"} tone="accent" size="sm" mono />
+  <Box x={330} y={46} w={110} h={50} label={"SiLU(·) ⊙ ·"} tone="accent" size="sm" mono />
+  <Box x={470} y={46} w={110} h={50} label={"· W2,0ᵀ\n部分和"} tone="accent" size="sm" mono />
+  <Region x={176} y={130} w={420} h={100} title="rank 1" />
+  <Box x={190} y={162} w={110} h={50} label={"X W1,1ᵀ\nX W3,1ᵀ"} tone="info" size="sm" mono />
+  <Box x={330} y={162} w={110} h={50} label={"SiLU(·) ⊙ ·"} tone="info" size="sm" mono />
+  <Box x={470} y={162} w={110} h={50} label={"· W2,1ᵀ\n部分和"} tone="info" size="sm" mono />
+  <Box x={616} y={100} w={44} h={44} label="g" tone="strong" />
+  <Box x={676} y={100} w={34} h={44} label="Z" tone="neutral" />
+  <Arrow from={[90, 122]} to={[110, 122]} />
+  <Arrow from={[154, 122]} via={[[170, 122], [170, 71]]} to={[190, 71]} />
+  <Arrow from={[154, 122]} via={[[170, 122], [170, 187]]} to={[190, 187]} />
+  <Arrow from={[300, 71]} to={[330, 71]} />
+  <Arrow from={[440, 71]} to={[470, 71]} />
+  <Arrow from={[300, 187]} to={[330, 187]} />
+  <Arrow from={[440, 187]} to={[470, 187]} />
+  <Arrow from={[580, 71]} via={[[606, 71], [606, 112]]} to={[616, 112]} />
+  <Arrow from={[580, 187]} via={[[606, 187], [606, 132]]} to={[616, 132]} />
+  <Arrow from={[660, 122]} to={[676, 122]} />
+  <Fragment slot="caption">W1、W3 按中间维列切，W2 按中间维行切。f 在前向是恒等、在反向 all-reduce 输入梯度；g 在前向 all-reduce 部分和、在反向是恒等。两个 rank 之间只在 g（以及反向的 f）处通信。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="mlp" />
+
+`local` 方法返回本 rank 的部分和而不做 all-reduce，后面的序列并行会用到它。
+
+## 注意力：按头切分
+
+多头注意力天然可以切：各个头的计算彼此独立，只在最后的输出投影处汇合。把 $h$ 个查询头分给 $t$ 个 rank，每个 rank 负责 $h/t$ 个头：$W_Q, W_K, W_V$ 按头列切，每个 rank 在本地完成这些头的 RoPE、注意力分数、softmax 和加权求和，得到 $[N, (h/t)\,d_h]$ 的输出；输出投影 $W_O$ 按输入维（即按头）行切，产生部分和，经 $g$ all-reduce。与 MLP 一样，整个注意力子层只有一次 all-reduce。
+
+对 GQA（见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)），KV 头也要按同样的方式切：查询头 $i$ 使用 KV 头 $\lfloor i/(h/h_{kv})\rfloor$，连续地切查询头时，每个 rank 恰好需要连续的 $h_{kv}/t$ 个 KV 头。这要求 $h_{kv}$ 能被 $t$ 整除；当 $t > h_{kv}$ 时（例如 8 个 KV 头、16 路张量并行），实践中的做法是把 KV 头复制到多个 rank 上。
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="attention" />
+
+测试用两个进程，把同一个单卡 `SwiGLU` 和 `CausalSelfAttention`（4 个查询头、2 个 KV 头）切开，检查前向输出、输入梯度，以及每个权重分片的梯度都等于单卡模型对应梯度的那一片：
+
+<CodeFile path="tests/distributed/test_tensor_parallel.py" symbol="test_tensor_parallel_matches_single_device" />
+
+### 通信与计算之比
+
+一个 Transformer 层在前向有 2 次 all-reduce（注意力与 MLP 出口的 $g$），反向有 2 次（入口的 $f$），每次的数据是 $[b, s, h]$ 的 BF16 激活，$2bsh$ 字节。前向一层的矩阵乘约 $24bsh^2$ FLOPs（注意力投影 $8bsh^2$、$4h$ 中间维的 MLP $16bsh^2$），分到 $t$ 张卡上。设每卡算力 $F$、链路带宽 $B$，前向通信与计算的时间比约为
+
+$$
+\frac{2\cdot 2\frac{t-1}{t}\cdot 2bsh / B}{24bsh^2/(tF)} \approx \frac{(t-1)\,F}{3hB}.
+$$
+
+代入 $h = 8192$、$F = 989$ TFLOP/s（H100 BF16），节点内 NVLink $B = 450$ GB/s、$t = 8$ 时比值约 $0.63$：通信时间已经接近计算时间的三分之二；换成跨节点的 $50$ GB/s，比值变成约 $5.6$，通信远比计算慢。这就是张量并行几乎总是限制在一个 NVLink 域（8 卡）之内的原因。比值与批大小、序列长度无关，只随 $h$ 增大而下降——模型越宽，张量并行越划算。
+
+## 词表并行：嵌入与交叉熵
+
+语言模型的首尾两层与词表大小 $V$ 成正比，现代模型的词表在 10 万到 25 万之间，这两层不能留在单卡上。
+
+**输入嵌入**按词表（行）切：rank $i$ 持有 token id 在 $[iV/t, (i+1)V/t)$ 之间的嵌入行。每个 rank 只为落在自己区间的 token 查表，其余位置填 0，再 all-reduce——每个位置恰好有一个 rank 给出了非零值。
+
+**输出层**是列切分：rank $i$ 得到 logits 的第 $i$ 段 $[N, V/t]$。如果把 logits all-gather 成完整的 $[N, V]$ 再算交叉熵，代价很大：8192 个 token × 128K 词表 × 4 字节就是 4 GB。注意交叉熵
+
+$$
+\ell = \log\sum_{v} e^{z_v} - z_{y} = \log\sum_v e^{z_v - m} - (z_y - m),\qquad m = \max_v z_v
+$$
+
+只需要每个 token 的三个标量：全局最大值 $m$、指数和 $\sum_v e^{z_v-m}$、目标 logit $z_y$。它们都可以分段计算后归约：$m$ 是各段最大值的 all-reduce(MAX)；指数和是各段指数和的 all-reduce(SUM)；目标 logit 只落在一个 rank 的分片里，其他 rank 贡献 0，再 all-reduce(SUM)。每个 token 只通信 3 个数，而不是 $V$ 个。
+
+反向同样只需本地信息：$\partial\ell/\partial z_v = \mathrm{softmax}(z)_v - \mathbb 1[v = y]$，每个 rank 用已经归约好的 $m$ 与指数和就能算出自己那一段的 softmax，再在目标 token 所在的 rank 上减 1。
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="vocab_ce" />
+
+测试把一个 $d\to V$ 的输出层按词表列切，在两个 rank 上算词表并行交叉熵，损失、对输入隐藏状态的梯度、各分片的权重梯度都与单卡的 `F.cross_entropy` 一致。
+
+## 序列并行：切开剩下的激活
+
+张量并行切开了注意力和 MLP 内部的激活，但每个子层的**入口与出口**仍然是完整的 $[b, s, h]$：RMSNorm 的输入与输出、残差、dropout 的掩码在 $t$ 个 rank 上被重复保存。Korthikanti 等（2022）统计了 GPT 式层为反向保存的激活（16 位激活、1 字节 dropout 掩码）：
+
+$$
+\text{no parallelism: } sbh\Big(34 + \frac{5as}{h}\Big),\qquad
+\text{tensor parallel: } sbh\Big(10 + \frac{24}{t} + \frac{5as}{ht}\Big),
+$$
+
+其中 $a$ 是头数。张量并行只切开了 34 中的 24，剩下 $10sbh$（两个 LayerNorm 的输入 $4sbh$、两个 dropout 掩码 $2sbh$、注意力与 MLP 入口的输入 $4sbh$）在每个 rank 上原样保存。
+
+这些操作都是**逐 token** 的：LayerNorm/RMSNorm、dropout、残差相加对序列中的每个位置独立计算。所以可以在这些区域沿**序列维**切分：每个 rank 只持有 $[b, s/t, h]$。进入张量并行区时需要完整序列，用 all-gather 把序列拼起来；离开时，行切分产生的部分和不再 all-reduce，而是 **reduce-scatter**：既完成求和，又顺便把结果沿序列切开。
+
+<Diagram width={720} height={210} label="序列并行与张量并行交替的数据布局">
+  <Box x={20} y={70} w={120} h={60} label={"RMSNorm\n[b, s/t, h]"} tone="info" size="sm" />
+  <Box x={170} y={70} w={110} h={60} label={"all-gather\n沿序列"} tone="strong" size="sm" />
+  <Box x={310} y={70} w={150} h={60} label={"列并行 → 行并行\n[b, s, d_ff/t]"} tone="accent" size="sm" />
+  <Box x={490} y={70} w={110} h={60} label={"reduce-scatter\n沿序列"} tone="strong" size="sm" />
+  <Box x={630} y={70} w={80} h={60} label={"+ 残差\n[b, s/t, h]"} tone="info" size="sm" />
+  <Arrow from={[140, 100]} to={[170, 100]} />
+  <Arrow from={[280, 100]} to={[310, 100]} />
+  <Arrow from={[460, 100]} to={[490, 100]} />
+  <Arrow from={[600, 100]} to={[630, 100]} />
+  <Text x={80} y={40} label="序列并行区" size="sm" tone="info" bold />
+  <Text x={385} y={40} label="张量并行区" size="sm" tone="accent" bold />
+  <Text x={670} y={40} label="序列并行区" size="sm" tone="info" bold />
+  <Text x={225} y={160} label="反向：reduce-scatter" size="sm" tone="muted" />
+  <Text x={545} y={160} label="反向：all-gather" size="sm" tone="muted" />
+  <Fragment slot="caption">一个子层的数据布局。逐 token 的操作（归一化、残差、dropout）在序列并行区只处理 s/t 个位置；all-gather 与 reduce-scatter 取代了张量并行的 f 与 g，二者在反向互换。</Fragment>
+</Diagram>
+
+由第一章的恒等式 all-reduce = reduce-scatter + all-gather，序列并行把原来的一次 all-reduce 拆成了一次 reduce-scatter（子层出口）和一次 all-gather（下一个子层入口），**通信量完全不变**，而激活显存变成
+
+$$
+\text{tensor + sequence parallel: } sbh\Big(\frac{34}{t} + \frac{5as}{ht}\Big),
+$$
+
+全部被 $t$ 整除。
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="sequence_ops" />
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="sequence_parallel" />
+
+这里有一个容易漏掉的细节：RMSNorm 的权重 $\gamma$ 在每个 rank 上是**复制**的，但每个 rank 只用它处理了 $s/t$ 个位置，所以本地算出的 $\partial\mathcal L/\partial\gamma$ 只是部分和，必须在张量并行组内 all-reduce（Megatron 中这类参数被标记为 `sequence_parallel`，在梯度同步时额外处理）。测试 `SequenceParallelFFN` 时，输出与输入梯度沿序列切开后与单卡一致，归一化权重的梯度在 all-reduce 之后与单卡一致。
+
+### 选择性重计算
+
+序列并行之后，激活里剩下的大头是 $\frac{5as}{ht}$ 项：注意力分数矩阵 $QK^\top$ 的 softmax 输出与 dropout 掩码，它们的大小随 $s^2$ 增长。以 GPT-3 175B 为例（$a=96$、$s=2048$、$h=12288$），$5as/h = 80$，比其余的 34 还大。Korthikanti 等的**选择性重计算**只在反向时重算这一部分：它的 FLOPs 很少（只是逐元素的 softmax 与 dropout），激活却最多。此时每层激活降到 $34\,sbh/t$。今天的 FlashAttention 本身就不保存 $s\times s$ 的矩阵（见[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)），等价于自带了选择性重计算。激活与重计算的完整核算放在[组合并行：显存规划与训练配置](/distributed/parallelism-in-practice/)。
+
+## 上下文并行与 Ring Attention
+
+序列并行只切开了逐 token 的操作，注意力本身仍要在每个 rank 上处理完整序列。当序列长到 128K 甚至 1M 时，即使有 FlashAttention，单卡的注意力计算量（$\propto s^2$）和 KV 也成了瓶颈。**上下文并行（context parallelism, CP）**把整个层——包括注意力——沿序列切开：rank $i$ 只持有第 $i$ 段 token 的 $Q_i, K_i, V_i$。线性层、归一化本来就逐 token，无需通信；唯一的问题是注意力：$Q_i$ 需要和所有 $K_j, V_j$（因果时是 $j\le i$）交互。
+
+**Ring Attention**（Liu 等，2023）把 rank 排成环，让 K/V 块沿环流动。第 $s$ 步，rank $i$ 手里有第 $j = (i - s)\bmod t$ 段的 $K_j, V_j$，计算 $Q_i$ 对这一块的注意力，同时把这块 K/V 发给右邻居、从左邻居接收下一块。$t$ 步之后，$Q_i$ 见过了所有的 K/V。
+
+问题是怎样把各块的结果合并起来。每块得到的是只在这一块内部归一化的 softmax，而正确的结果要在所有块上一起归一化。这正是 FlashAttention 的**在线 softmax**：对每个查询行，维护到目前为止的输出 $o$ 与 log-sum-exp $\ell = \log\sum_j e^{s_j}$；新来一块，块内的结果是 $(o_b, \ell_b)$，合并为
+
+$$
+\ell' = \log\big(e^{\ell} + e^{\ell_b}\big),\qquad
+o' = e^{\ell - \ell'}\,o + e^{\ell_b - \ell'}\,o_b .
+$$
+
+两个系数恰好把旧的归一化分母换成新的。因为合并是满足结合律的，块的到达顺序无关紧要——这也是它能在环上工作的原因。
+
+<Diagram width={720} height={210} label="四个 rank 的因果 Ring Attention 中每个块在第几步计算">
+  <Text x={60} y={20} label="查询段 i（rank）× 键值段 j" anchor="start" size="sm" bold />
+  <Text x={46} y={72} label="Q0" size="sm" tone="muted" mono />
+  <Text x={46} y={104} label="Q1" size="sm" tone="muted" mono />
+  <Text x={46} y={136} label="Q2" size="sm" tone="muted" mono />
+  <Text x={46} y={168} label="Q3" size="sm" tone="muted" mono />
+  <Text x={88} y={44} label="KV0" size="sm" tone="muted" mono />
+  <Text x={134} y={44} label="KV1" size="sm" tone="muted" mono />
+  <Text x={180} y={44} label="KV2" size="sm" tone="muted" mono />
+  <Text x={226} y={44} label="KV3" size="sm" tone="muted" mono />
+  <Matrix x={66} y={56} rows={4} cols={4} cell={[44, 30]}
+    values={[['0', '跳过', '跳过', '跳过'], ['1', '0', '跳过', '跳过'], ['2', '1', '0', '跳过'], ['3', '2', '1', '0']]}
+    highlight={[{ upper: true, tone: 'muted' }, { cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent2' }, { cells: [[1, 0], [2, 1], [3, 2], [2, 0], [3, 1], [3, 0]], tone: 'accent' }]} />
+  <Text x={300} y={70} label="数字：rank i 在第 s = (i − j) mod 4 步拿到 KV_j" anchor="start" size="sm" />
+  <Text x={300} y={100} label="对角块：块内因果掩码" anchor="start" size="sm" />
+  <Text x={300} y={130} label="下三角块：整块可见" anchor="start" size="sm" />
+  <Text x={300} y={160} label="上三角块：整块被掩码，直接跳过（负载不均）" anchor="start" size="sm" />
+  <Fragment slot="caption">按顺序切分时，rank 3 要算 4 个块，rank 0 只算 1 个块，但每一步大家都要等最慢的 rank。Zigzag/striped 切分让每个 rank 同时持有序列靠前与靠后的段，使各 rank 的可见块数相等。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/distributed/tensor_parallel.py" region="ring_attention" />
+
+我们的实现只做前向（Ring Attention 的反向需要再沿环传递 K/V 与它们的梯度，结构相同），测试在 2 个和 4 个 rank 上把各 rank 的输出拼起来，与完整序列上的 `scaled_dot_product_attention(is_causal=True)` 比较。真实实现中，“发送下一块 K/V”与“计算当前块”同时进行；只要一块的计算时间长于传输时间（序列足够长时总是成立），通信就完全被掩盖。
+
+图中暴露了因果注意力下的**负载不均**：按顺序切分时，持有序列末尾的 rank 要和所有块交互，持有开头的 rank 几乎无事可做。常见的修正是 zigzag 切分：把序列切成 $2t$ 段，rank $i$ 持有第 $i$ 段和第 $2t-1-i$ 段，每个 rank 的计算量相等。Llama 3 的长上下文训练使用上下文并行，但它没有采用环形传递，而是先 all-gather 所有 K/V 再计算本地查询的注意力：在 GQA 下 K/V 比 Q 小得多，all-gather 的通信量可以接受，实现也更灵活（Llama 3 技术报告 3.3.2 节）。
+
+## 小结
+
+- 线性层可以按输出列切（输入完整、输出拼接）或按输入行切（输入切分、输出部分和需 all-reduce）；先列后行，中间无需通信。
+- 共轭算子 $f$（前向恒等、反向 all-reduce）与 $g$（前向 all-reduce、反向恒等）把通信放在张量并行区的出入口；MLP 与注意力各只需一次前向 all-reduce，一层共 4 次（前向 2、反向 2）。
+- 注意力按头切分；GQA 要求 KV 头数能被 $t$ 整除或复制 KV 头。通信与计算之比约 $(t-1)F/(3hB)$，决定了张量并行限于 NVLink 域内。
+- 词表并行交叉熵每个 token 只交换最大值、指数和、目标 logit 三个标量。
+- 序列并行把 all-reduce 拆成 reduce-scatter 与 all-gather，通信量不变，激活显存从 $sbh(10+24/t+\cdot)$ 降到全部除以 $t$；复制的归一化参数的梯度需要额外 all-reduce。
+- 上下文并行沿序列切开整个层，Ring Attention 让 K/V 沿环流动，用在线 softmax 合并各块；因果掩码下需要 zigzag 切分来平衡负载。
+
+## 练习
+
+1. 如果把 MLP 的第一个矩阵行切、第二个矩阵列切，前向需要几次通信？分别是什么原语？
+
+<details>
+<summary>答案</summary>
+
+行切第一个矩阵，每个 rank 得到 $XA$ 的部分和，而 GeLU 是非线性的，必须先 all-reduce 得到完整的 $XA$ 才能做 GeLU（第 1 次）。此时每个 rank 都有完整的 $\mathrm{GeLU}(XA)$，第二个矩阵列切，得到输出的一段列；下一个子层（残差相加、归一化）需要完整的输出，所以还要 all-gather（第 2 次）。两次通信，而且第一次 all-reduce 的数据是 $[N, 4h]$，是 Megatron 方案的 4 倍。
+
+</details>
+
+2. 证明词表并行交叉熵的梯度：设 rank $i$ 持有 logits 的第 $i$ 段 $z^{(i)}$，写出 $\partial\ell/\partial z^{(i)}_v$，并说明 rank $i$ 计算它需要哪些已归约的量。
+
+<details>
+<summary>答案</summary>
+
+$\ell = \log\sum_{u}e^{z_u} - z_y$，对任意 $v$ 有 $\partial\ell/\partial z_v = e^{z_v}/\sum_u e^{z_u} - \mathbb 1[v=y]$。对 rank $i$ 持有的 $v$，$e^{z_v}/\sum_u e^{z_u} = e^{z_v - m}/S$，其中 $m$ 是全局最大值、$S=\sum_u e^{z_u-m}$ 是全局指数和——这两个量在前向已经 all-reduce 过，保存下来即可。减 1 只在 $y$ 落在本 rank 区间时发生。所以反向不需要任何额外通信。
+
+</details>
+
+3. 一个 $h=4096$ 的模型用 $t=8$ 的张量并行，按本章的通信计算比公式，在 NVLink（450 GB/s）上比值是多少？如果 $t=4$ 呢？这对选择张量并行度有什么启示？
+
+<details>
+<summary>答案</summary>
+
+$t=8$：$(7\times989\times10^{12})/(3\times4096\times4.5\times10^{11}) \approx 1.25$，通信比计算还慢。$t=4$：$3/7$ 倍，约 $0.54$。较窄的模型应使用较小的张量并行度，把剩下的卡交给数据并行或流水线并行；只有在单卡放不下（或者需要切开激活）时才值得用更大的 $t$。实际系统还会把张量并行的通信与相邻的矩阵乘重叠（例如把 all-gather 与 GEMM 分块流水），可以部分缓解。
+
+</details>
+
+4. 在序列并行中，为什么 RMSNorm 的权重梯度需要 all-reduce，而 `TPSwiGLU` 中 $W_1$ 分片的梯度不需要？
+
+<details>
+<summary>答案</summary>
+
+$W_1$ 的第 $i$ 片只存在于 rank $i$，前向时它作用于**完整序列**（all-gather 之后），所以 rank $i$ 本地算出的梯度已经包含了所有 token 的贡献，是完整的。RMSNorm 的 $\gamma$ 在每个 rank 上都有一份，但每份只作用于 $s/t$ 个 token，本地梯度只包含这些 token 的贡献，真正的梯度是 $t$ 份之和。规律是：被复制的参数如果只看到了部分数据，就要像数据并行那样同步梯度。
+
+</details>
+
+5. 修改 `ring_attention` 支持 zigzag 切分：序列切成 $2t$ 段，rank $i$ 持有第 $i$ 段与第 $2t-1-i$ 段。在 $t=4$ 时，每个 rank 需要计算多少个“半块”（段对段）的注意力？与顺序切分时最忙的 rank 比较。
+
+<details>
+<summary>答案</summary>
+
+把序列看成 8 段，因果注意力中段 $a$ 对段 $b$ 可见当且仅当 $b\le a$。rank $i$ 的查询段是 $i$ 和 $7-i$：段 $i$ 可见 $i+1$ 个段，段 $7-i$ 可见 $8-i$ 个段，合计 $9$ 个段对，与 $i$ 无关，所以负载完全均衡（其中 2 个是对角块，需要块内掩码）。顺序切分时 rank 3 持有段 6、7，要算 $7 + 8 = 15$ 个段对，rank 0 只有 $1+2=3$ 个；总量 $36$ 在 zigzag 下被均分为每个 rank 9 个。
+
+</details>
+
+## 参考文献
+
+- Shoeybi, M. et al. [Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053), 2019：列/行切分、$f$/$g$ 算子与词表并行。
+- Narayanan, D. et al. [Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM](https://arxiv.org/abs/2104.04473). SC 2021：张量并行限于节点内的分析。
+- Korthikanti, V. et al. [Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198), 2022：序列并行、激活公式（表 2）与选择性重计算。
+- Liu, H., Zaharia, M., Abbeel, P. [Ring Attention with Blockwise Transformers for Near-Infinite Context](https://arxiv.org/abs/2310.01889), 2023.
+- Brandon, W. et al. [Striped Attention: Faster Ring Attention for Causal Transformers](https://arxiv.org/abs/2311.09431), 2023：因果注意力的负载均衡切分。
+- Llama Team, AI @ Meta. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783), 2024：基于 all-gather 的上下文并行（3.3.2 节）。
+- Milakov, M., Gimelshein, N. [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867), 2018.
+- NVIDIA. [Megatron Core: Context parallelism](https://docs.nvidia.com/megatron-core/developer-guide/latest/api-guide/context_parallel.html)。
+- Hugging Face. [The Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook)：张量、序列与上下文并行各节。
+- Stanford CS336. [Lecture 7–8: Parallelism](https://github.com/stanford-cs336/spring2025-lectures).

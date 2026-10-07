@@ -2,7 +2,371 @@
 title: 集合通信：all-reduce 与它的伙伴
 description: broadcast、reduce、all-gather、reduce-scatter 与 all-to-all 的语义与代价，环形 all-reduce 的推导，以及 torch.distributed 实践。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/distributed/comm.py
+  - tests/distributed/test_comm.py
 ---
 
-本章正在撰写。
+第五部分的训练循环始终只有一张卡：一个进程持有全部参数、梯度和优化器状态，读一批数据，做一次前向、反向和更新。[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/) 给出的两个数字说明了这条路走不远。一个 70B 参数的模型在 BF16 混合精度 + Adam 下，每个参数要 16 字节的模型状态（见[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)），合计约 1.1 TB，是一张 80 GB 显卡的十几倍；即使放得下，在 15T token 上训练需要约 $6ND\approx 6.4\times10^{24}$ 次浮点运算，一张峰值 989 TFLOP/s 的 H100 以 40% 的利用率要跑五百年。
+
+所以必须用很多张卡，而一旦用了很多张卡，就必须让它们交换数据：梯度要求和、参数要分发、激活要转交。这些交换几乎都可以写成少数几种**集合通信（collective communication）**原语的组合。本章把这套词汇讲清楚：每个原语把什么数据从哪里搬到哪里、要花多少时间，以及最重要的那个——all-reduce——怎样用环形算法做到带宽最优。后面五章的每一种并行策略，本质上都是在选择“切分什么”和“用哪个原语把切分的结果重新拼起来”。
+
+## 进程、rank 与进程组
+
+分布式训练几乎都采用 **SPMD**（single program, multiple data）模式：同一份 Python 脚本被启动成 $p$ 个进程，通常一张 GPU 一个进程。每个进程知道两个整数：`world_size`（进程总数 $p$）与 `rank`（自己的编号 $0,\dots,p-1$）。代码按 rank 决定读哪一份数据、持有哪一片参数，在需要交换数据的地方，所有进程同时调用同一个集合通信函数。
+
+进程之间的约定由**进程组（process group）**承载。建立进程组需要一个所有进程都能找到的汇合点（rendezvous），例如“rank 0 所在机器的某个 TCP 端口”，以及一个通信**后端（backend）**：GPU 上用 NVIDIA 的 NCCL，CPU 上用 Meta 的 gloo。生产环境通常由 `torchrun` 设置 `RANK`、`WORLD_SIZE`、`MASTER_ADDR` 等环境变量后启动；本书没有 GPU，所有并行实现都在 CPU 上用 gloo 后端、2—4 个进程验证。下面的 `launch` 是本部分全部测试共用的启动器：它找一个空闲端口，用 `torch.multiprocessing.spawn` 启动 $p$ 个进程，在每个进程里建立进程组、运行给定函数、保存结果，最后销毁进程组，并把各 rank 的返回值交回父进程，测试就在父进程里把它们与单进程参考实现逐项比较。
+
+<CodeFile path="src/llms_from_scratch/distributed/comm.py" region="launch" />
+
+两个细节值得留意。第一，子进程是用 spawn 方式重新启动的 Python 解释器，被执行的函数必须定义在模块顶层，子进程按名字重新导入它。第二，每个进程把 PyTorch 的线程数设成 1：多个 rank 挤在同一台机器的少数 CPU 核上时，每个进程再各开一组线程只会互相抢占。真实的 GPU 训练里也有对应的规则：一个进程只绑定一张卡，`torch.cuda.set_device(local_rank)`。
+
+## 六种集合通信原语
+
+设有 $p$ 个 rank，每个 rank 持有一个长度为 $n$ 的缓冲区。把缓冲区切成 $p$ 段，rank 0、1、2、3 的缓冲区分别记为 $a, b, c, d$，第 $j$ 段记为 $a_j$ 等，各 rank 第 $j$ 段之和记为 $\Sigma_j = a_j + b_j + c_j + d_j$。下面两幅图中，每个矩阵的一行是一个 rank 的缓冲区，一列是一段；左边是调用之前，右边是调用之后。
+
+<Diagram width={720} height={180} label="broadcast、reduce 与 all-reduce 的数据移动">
+  <Text x={120} y={16} label="broadcast（root = 0）" bold size="sm" />
+  <Text x={14} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={14} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={14} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={14} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={28} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "a1", "a2", "a3"], ["", "", "", ""], ["", "", "", ""], ["", "", "", ""]]}
+    highlight={[{ rows: [1, 2, 3], tone: 'muted' }, { rows: [0], tone: 'accent' }]} />
+  <Arrow from={[126, 107]} to={[144, 107]} />
+  <Matrix x={148} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"]]} tone="accent" />
+  <Text x={356} y={16} label="reduce（root = 0）" bold size="sm" />
+  <Text x={250} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={250} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={250} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={250} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={264} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+  <Arrow from={[362, 107]} to={[380, 107]} />
+  <Matrix x={384} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["Σ0", "Σ1", "Σ2", "Σ3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]}
+    highlight={[{ rows: [1, 2, 3], tone: 'muted' }, { rows: [0], tone: 'strong' }]} />
+  <Text x={592} y={16} label="all-reduce" bold size="sm" />
+  <Text x={486} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={486} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={486} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={486} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={500} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+  <Arrow from={[598, 107]} to={[616, 107]} />
+  <Matrix x={620} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"]]} tone="strong" />
+  <Fragment slot="caption">一行是一个 rank 的缓冲区，一列是一段。broadcast 把 root 的数据复制到所有 rank；reduce 把所有 rank 的数据逐元素相加，结果只留在 root（其他 rank 的缓冲区不变，画成灰色）；all-reduce 让每个 rank 都得到总和。</Fragment>
+</Diagram>
+
+<Diagram width={720} height={180} label="all-gather、reduce-scatter 与 all-to-all 的数据移动">
+  <Text x={120} y={16} label="all-gather" bold size="sm" />
+  <Text x={14} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={14} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={14} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={14} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={28} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "", "", ""], ["", "b1", "", ""], ["", "", "c2", ""], ["", "", "", "d3"]]} tone="muted"
+    highlight={[{ cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent' }]} />
+  <Arrow from={[126, 107]} to={[144, 107]} />
+  <Matrix x={148} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"]]} tone="accent" />
+  <Text x={356} y={16} label="reduce-scatter" bold size="sm" />
+  <Text x={250} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={250} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={250} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={250} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={264} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+  <Arrow from={[362, 107]} to={[380, 107]} />
+  <Matrix x={384} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["Σ0", "", "", ""], ["", "Σ1", "", ""], ["", "", "Σ2", ""], ["", "", "", "Σ3"]]} tone="muted"
+    highlight={[{ cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'strong' }]} />
+  <Text x={592} y={16} label="all-to-all" bold size="sm" />
+  <Text x={486} y={68} label="R0" size="sm" tone="muted" mono />
+  <Text x={486} y={94} label="R1" size="sm" tone="muted" mono />
+  <Text x={486} y={120} label="R2" size="sm" tone="muted" mono />
+  <Text x={486} y={146} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={500} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
+    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]}
+    highlight={[{ cols: [1], tone: 'info' }]} />
+  <Arrow from={[598, 107]} to={[616, 107]} />
+  <Matrix x={620} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
+    values={[["a0", "b0", "c0", "d0"], ["a1", "b1", "c1", "d1"], ["a2", "b2", "c2", "d2"], ["a3", "b3", "c3", "d3"]]}
+    highlight={[{ rows: [1], tone: 'info' }]} />
+  <Fragment slot="caption">all-gather 把每个 rank 的一段拼成完整缓冲区并发给所有人；reduce-scatter 求和之后只把第 j 段的和交给 rank j；all-to-all 是一次“转置”：rank i 的第 j 段送到 rank j 的第 i 个位置（蓝色标出了所有发往 rank 1 的段）。</Fragment>
+</Diagram>
+
+用一句话概括每个原语：
+
+- **broadcast**：一个 root 的数据复制给所有人。用于开训前把 rank 0 初始化的参数同步给所有副本。
+- **reduce**：所有人的数据逐元素归约（求和、取最大等），结果只给 root。
+- **all-reduce**：所有人的数据逐元素归约，结果给所有人。数据并行同步梯度用的就是它。
+- **all-gather**：每人一段，拼成完整的一份发给所有人。ZeRO-3/FSDP 在计算前取回完整参数用它。
+- **reduce-scatter**：先归约再切段，rank $j$ 只得到第 $j$ 段的归约结果。ZeRO-2/3 用它把梯度直接求和到负责该段的 rank 上。
+- **all-to-all**：每人给每人发不同的一段，等价于对“rank × 段”矩阵做转置。专家并行用它把 token 发到专家所在的卡。
+
+还有两个点对点原语 `send` / `recv`：一个 rank 发、指定的另一个 rank 收。流水线并行在相邻 stage 之间传激活和梯度，用的就是它们；本章稍后也会只用它们拼出一个环形 all-reduce。
+
+### 两条恒等式
+
+对照两幅图里的矩阵可以读出一个后面会反复使用的关系：
+
+<KeyEq label="all-reduce 的分解">
+
+$$
+\text{all-reduce} = \text{reduce-scatter} \;\circ\; \text{all-gather}
+$$
+
+</KeyEq>
+
+先 reduce-scatter，rank $j$ 拿到 $\Sigma_j$；再对这些 $\Sigma_j$ 做 all-gather，每个 rank 都拿到 $[\Sigma_0,\Sigma_1,\Sigma_2,\Sigma_3]$，正是 all-reduce 的结果。这个分解有两层意义：它是环形 all-reduce 的算法本身（下一节）；它也说明在两步之间可以“停一下”——ZeRO 正是让每个 rank 只拿着自己那段 $\Sigma_j$ 去更新自己那段参数，然后再 all-gather 参数，用同样的通信量换来了优化器状态的切分。
+
+第二个关系是**对偶**：reduce-scatter 的反向传播是 all-gather，all-gather 的反向传播是 reduce-scatter，all-reduce 的反向是 all-reduce，all-to-all 的反向是按相反方向的 all-to-all。原因是线性映射的反向是它的转置：all-gather 把 $p$ 份不同的数据复制到 $p$ 个地方，转置过来就是把 $p$ 个地方的梯度加起来再分回去。张量并行和专家并行的实现都要显式写出这些反向。
+
+### torch.distributed 中的接口
+
+上述原语都在 `torch.distributed` 里，测试文件中有一组与图逐一对应的调用：
+
+<CodeFile path="tests/distributed/test_comm.py" symbol="_collectives_worker" />
+
+几条使用规则：集合通信是**原地**的（`all_reduce(t)` 直接改写 `t`）；默认归约是求和，求平均要自己除以 $p$（NCCL 支持 `ReduceOp.AVG`，gloo 不支持）；**所有 rank 必须以相同的顺序调用相同的集合通信、并给出形状一致的张量**，否则轻则报“大小不匹配”，重则全部进程无限等待直到超时。这是分布式代码里最常见的 bug：某个 rank 因为一个 `if` 少调用了一次 `all_reduce`，其余 rank 就会卡在那里。
+
+## α-β 成本模型
+
+要比较算法，需要一个时间模型。最常用的是 **α-β 模型**（也叫 Hockney 模型）：一条 $n$ 字节的点对点消息耗时
+
+$$
+T(n) = \alpha + n\beta,
+$$
+
+其中 $\alpha$ 是与大小无关的启动延迟（软件开销、网卡与交换机的往返，微秒量级），$\beta = 1/B$ 是带宽的倒数。小消息由 $\alpha$ 主导，大消息由 $n\beta$ 主导。我们进一步假设每个 rank 可以同时以带宽 $B$ 发送、以带宽 $B$ 接收（全双工），且不同 rank 之间的传输互不干扰。
+
+在这个模型下先看最朴素的 all-reduce：所有人把 $n$ 字节发给 rank 0，rank 0 求和后再广播回去。rank 0 要接收 $(p-1)n$ 字节、再发出 $(p-1)n$ 字节，时间约 $2(p-1)n\beta$，随卡数线性增长——rank 0 的网卡成了瓶颈，其余 rank 的链路大部分时间闲着。好的算法要让**所有链路同时忙起来**。
+
+有没有下界？考虑任意一个 rank：它最终要得到 $n$ 个元素的总和，其中每个元素都依赖其他 $p-1$ 个 rank 的数据。可以证明（Patarasuk 与 Yuan，2009）任何 all-reduce 算法中每个 rank 至少要发送和接收 $2\frac{p-1}{p}n$ 字节。直观理解：结果的每一段都需要另外 $p-1$ 个贡献流进来（reduce 部分，$\frac{p-1}{p}n$），算好的每一段又要流到另外 $p-1$ 个 rank（broadcast 部分，再一个 $\frac{p-1}{p}n$）。环形算法恰好达到这个下界。
+
+## 环形 all-reduce
+
+### 推导
+
+把 $p$ 个 rank 排成一个环，rank $r$ 只向右邻居 $r+1$ 发送、只从左邻居 $r-1$ 接收（下标取模 $p$）。缓冲区切成 $p$ 段，每段 $n/p$ 字节。
+
+**第一阶段：reduce-scatter，共 $p-1$ 步。** 第 $k$ 步（$k=0,\dots,p-2$），rank $r$ 把自己的第 $(r-k-1) \bmod p$ 段发给右邻居，同时收到左邻居发来的第 $(r-k-2)\bmod p$ 段，加到自己的同一段上。每一段沿着环流动，每经过一个 rank 就多累加一份贡献；$p-1$ 步之后，第 $r$ 段恰好在 rank $r$ 处集齐了全部 $p$ 份贡献。
+
+**第二阶段：all-gather，共 $p-1$ 步。** 第 $k$ 步，rank $r$ 把第 $(r-k)\bmod p$ 段（第 0 步就是自己刚集齐的那段）发给右邻居，并用收到的段**覆盖**自己的同一段。每个完整的段沿环再走 $p-1$ 步，复制到所有 rank。
+
+下图画出 $p=4$ 时每一步之后各 rank 各段已经累加了几份贡献，填满 4 份的段高亮显示。
+
+<Diagram width={720} height={356} label="四个 rank 的环形 all-reduce 每一步的状态">
+  <Text x={14} y={20} label="reduce-scatter：每步每个 rank 发一段给右邻居，收到的段累加到自己的同一段" anchor="start" size="sm" tone="muted" />
+  <Text x={30} y={80} label="R0" size="sm" tone="muted" mono />
+  <Text x={30} y={106} label="R1" size="sm" tone="muted" mono />
+  <Text x={30} y={132} label="R2" size="sm" tone="muted" mono />
+  <Text x={30} y={158} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={50} y={68} rows={4} cols={4} cell={24} title="初始"
+    values={[[1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1], [1, 1, 1, 1]]} />
+  <Matrix x={220} y={68} rows={4} cols={4} cell={24} title="第 1 步后"
+    values={[[1, 1, 2, 1], [1, 1, 1, 2], [2, 1, 1, 1], [1, 2, 1, 1]]}
+    highlight={[{ cells: [[0, 2], [1, 3], [2, 0], [3, 1]], tone: 'info' }]} />
+  <Matrix x={390} y={68} rows={4} cols={4} cell={24} title="第 2 步后"
+    values={[[1, 3, 2, 1], [1, 1, 3, 2], [2, 1, 1, 3], [3, 2, 1, 1]]}
+    highlight={[{ cells: [[0, 1], [1, 2], [2, 3], [3, 0]], tone: 'info' }]} />
+  <Matrix x={560} y={68} rows={4} cols={4} cell={24} title="第 3 步后"
+    values={[[4, 3, 2, 1], [1, 4, 3, 2], [2, 1, 4, 3], [3, 2, 1, 4]]}
+    highlight={[{ cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent' }]} />
+  <Text x={14} y={196} label="all-gather：每步把一段完整的和发给右邻居，收到的段覆盖自己的同一段" anchor="start" size="sm" tone="muted" />
+  <Text x={200} y={256} label="R0" size="sm" tone="muted" mono />
+  <Text x={200} y={282} label="R1" size="sm" tone="muted" mono />
+  <Text x={200} y={308} label="R2" size="sm" tone="muted" mono />
+  <Text x={200} y={334} label="R3" size="sm" tone="muted" mono />
+  <Matrix x={220} y={244} rows={4} cols={4} cell={24} title="第 4 步后"
+    values={[[4, 3, 2, 4], [4, 4, 3, 2], [2, 4, 4, 3], [3, 2, 4, 4]]}
+    highlight={[{ cells: [[0, 0], [0, 3], [1, 0], [1, 1], [2, 1], [2, 2], [3, 2], [3, 3]], tone: 'accent' }]} />
+  <Matrix x={390} y={244} rows={4} cols={4} cell={24} title="第 5 步后"
+    values={[[4, 3, 4, 4], [4, 4, 3, 4], [4, 4, 4, 3], [3, 4, 4, 4]]}
+    highlight={[{ cells: [[0, 0], [0, 2], [0, 3], [1, 0], [1, 1], [1, 3], [2, 0], [2, 1], [2, 2], [3, 1], [3, 2], [3, 3]], tone: 'accent' }]} />
+  <Matrix x={560} y={244} rows={4} cols={4} cell={24} title="第 6 步后" tone="accent"
+    values={[[4, 4, 4, 4], [4, 4, 4, 4], [4, 4, 4, 4], [4, 4, 4, 4]]} />
+  <Fragment slot="caption">数字是该段已经累加了几个 rank 的贡献。前 3 步（reduce-scatter）中浅蓝色是本步刚被累加的段；第 3 步后 rank r 恰好集齐第 r 段（对角线）。后 3 步（all-gather）把完整的段沿环复制，高亮区域每步扩大一条对角线。每一步所有 rank 同时收发，所有链路都在工作。</Fragment>
+</Diagram>
+
+每一步中每个 rank 发送一段（$n/p$ 字节），两个阶段共 $2(p-1)$ 步，于是：
+
+<KeyEq label="环形 all-reduce：每个 rank 的发送量与耗时">
+
+$$
+V_{\text{ring}} = 2\,\frac{p-1}{p}\,n,
+\qquad
+T_{\text{ring}} = 2(p-1)\,\alpha + 2\,\frac{p-1}{p}\,n\beta .
+$$
+
+</KeyEq>
+
+发送量恰好等于上面的下界，所以环形算法是**带宽最优**的；更重要的是 $2\frac{p-1}{p}n\beta \to 2n\beta$，**带宽项几乎与卡数无关**：从 8 卡扩展到 1024 卡，同步同样大小的梯度，带宽部分的时间只从 $1.75\,n\beta$ 增长到 $1.998\,n\beta$。这是数据并行能扩展到上千张卡的根本原因。代价藏在延迟项里：$2(p-1)\alpha$ 随卡数线性增长。
+
+### 手算一个例子
+
+取 $p=3$，每个 rank 的缓冲区有 6 个元素：rank 0 是 $[1,1,1,1,1,1]$，rank 1 是 $[2,\dots,2]$，rank 2 是 $[3,\dots,3]$。切成 3 段，每段 2 个元素。
+
+- reduce-scatter 第 0 步：rank 0 发第 2 段、rank 1 发第 0 段、rank 2 发第 1 段。rank 1 收到 rank 0 的第 2 段，第 2 段变成 $2+1=3$；rank 2 的第 0 段变成 $3+2=5$；rank 0 的第 1 段变成 $1+3=4$。
+- 第 1 步：rank 0 发第 1 段（值 4）给 rank 1，rank 1 的第 1 段变成 $2+4=6$；同理 rank 2 的第 2 段变成 $3+3=6$，rank 0 的第 0 段变成 $1+5=6$。此时 rank $r$ 的第 $r$ 段都是 $1+2+3=6$。
+- all-gather 两步之后，三个 rank 的缓冲区都是 $[6,6,6,6,6,6]$。
+
+每个 rank 发了 4 段、共 8 个元素，等于 $2\cdot\frac{2}{3}\cdot 6 = 8$。
+
+### 只用 send 与 recv 实现
+
+实现直接翻译上面的推导。每一步“向右发、从左收”用一个非阻塞的 `isend` 加一个阻塞的 `recv`：如果大家都先用阻塞的 `send`，所有 rank 都在等别人接收，环上就会死锁。缓冲区长度不能被 $p$ 整除时，`chunk_bounds` 让前几段各多一个元素，所有 rank 用同样的切法，收发双方对每段的长度自然一致。
+
+<CodeFile path="src/llms_from_scratch/distributed/comm.py" region="ring" />
+
+测试在 3 个进程上用一个长度为 10（不能被 3 整除）的缓冲区运行它，检查结果与 `dist.all_reduce` 完全一致，并核对每个 rank 发出的元素个数等于两个阶段各 $p-1$ 段之和；`test_ring_volume_when_divisible` 则确认整除时恰为 $2\frac{p-1}{p}n$。
+
+<CodeFile path="tests/distributed/test_comm.py" symbol="test_collectives_and_ring_all_reduce" />
+
+真正的 NCCL 实现还会把每段再切成更小的块流水传输，并在 GPU 上用专门的 kernel 完成“收、加、发”，但数据的流向与这里完全相同。
+
+## 树形算法：延迟才是大规模的瓶颈
+
+环形算法的延迟项 $2(p-1)\alpha$ 在卡数多时不可忽视。取跨节点网络的典型量级 $\alpha = 5\,\mu\text{s}$、$B = 50\,\text{GB/s}$，在 $p=256$ 时延迟项是 $2.55$ ms；而 1 MB 的消息带宽项只有 $0.04$ ms。
+
+**树形 all-reduce** 把 rank 组织成二叉树：先自下而上逐层求和到根，再自上而下广播回叶子，只需 $2\lceil\log_2 p\rceil$ 轮。朴素的二叉树带宽很差（内部节点要接收两个孩子的全部数据），NCCL 用的是**双二叉树（double binary tree）**：构造两棵树，使每个 rank 在一棵树中是内部节点、在另一棵中是叶子，数据一半走一棵树；再把消息切块流水传输，带宽项接近 $2n\beta$。于是
+
+$$
+T_{\text{tree}} \approx 2\lceil\log_2 p\rceil\,\alpha + 2n\beta .
+$$
+
+<CodeFile path="src/llms_from_scratch/distributed/comm.py" region="cost" />
+
+<Plot label="环形与树形 all-reduce 的 α-β 模型耗时" x={[1e3, 1e10]} y={[1e-5, 1]} logX logY
+  xLabel="消息大小（字节）" yLabel="耗时（秒）"
+  series={[
+    { fn: (n) => 2 * 255 * 5e-6 + 2 * 255 / 256 * n / 50e9, label: '环 p=256' },
+    { fn: (n) => 2 * 8 * 5e-6 + 2 * n / 50e9, label: '树 p=256', tone: 'accent2', dashed: true },
+    { fn: (n) => 2 * 7 * 5e-6 + 2 * 7 / 8 * n / 50e9, label: '环 p=8', tone: 'info' },
+  ]}>
+  <Fragment slot="caption">α = 5 μs、B = 50 GB/s 时的模型曲线（不是实测）。256 卡时环形算法的 2(p−1)α ≈ 2.55 ms 平台一直延伸到约 100 MB，树形的延迟只有 16α；消息足够大以后三条线都趋于 2n/B。8 卡时环的延迟项很小，大消息上它比树略快（2(p−1)/p 小于 2）。</Fragment>
+</Plot>
+
+图中可以读出一个初看反直觉的结论：在 256 卡上，即使是 1 GB 的消息，树也比环快——环的带宽优势只有 $1/p$ 量级，而延迟劣势是 $(p-1)$ 倍对 $\log_2 p$ 倍。`test_cost_model_crossover` 检查了这几个关系。NCCL 会根据消息大小、卡数与拓扑在环、树以及更新的算法（例如利用 NVSwitch 内交换机归约的 NVLS）之间自动选择，也可以用环境变量 `NCCL_ALGO` 强制指定；它还有三种传输协议（LL、LL128、Simple），分别对应“极低延迟、小带宽”到“高带宽、较高延迟”的取舍。
+
+<Callout tone="note" title="algbw 与 busbw">
+`nccl-tests` 报告两种带宽。算法带宽 algbw $= n/T$ 只是“数据量除以时间”，对 all-reduce 而言会随卡数下降；总线带宽 busbw $=$ algbw $\times 2\frac{p-1}{p}$ 把它换算成每条链路实际承担的流量，可以直接与硬件峰值比较。reduce-scatter、all-gather、all-to-all 的换算因子是 $\frac{p-1}{p}$，broadcast 与 reduce 是 1。`comm.py` 中的 `bus_bandwidth` 实现了这个换算。看到别人报告“all-reduce 跑到 400 GB/s”时，先问清是哪一种。
+</Callout>
+
+## 硬件：节点内与节点间
+
+α 和 β 不是常数，而是取决于数据走哪条链路。一台典型的训练服务器（**节点**）有 8 张 GPU，节点内经 NVLink 与 NVSwitch 全互联；节点之间每张 GPU 配一块网卡，经 InfiniBand 或 RoCE 交换网络互联。
+
+<Diagram width={720} height={300} label="一个 8 卡节点的通信层次">
+  <Region x={20} y={20} w={500} h={260} title="节点 0（8 × H100）" />
+  <Box x={40} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={98} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={156} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={214} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={272} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={330} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={388} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={446} y={56} w={50} h={40} label="GPU" size="sm" tone="accent" />
+  <Box x={40} y={130} w={456} h={40} label="NVSwitch：每卡 NVLink 约 450 GB/s 单向" tone="strong" size="sm" />
+  <Arrow from={[65, 96]} to={[65, 130]} head="both" tone="accent" />
+  <Arrow from={[239, 96]} to={[239, 130]} head="both" tone="accent" />
+  <Arrow from={[471, 96]} to={[471, 130]} head="both" tone="accent" />
+  <Box x={40} y={210} w={456} h={40} label="8 块网卡（ConnectX-7）：每卡 400 Gb/s ≈ 50 GB/s 单向" tone="info" size="sm" />
+  <Arrow from={[268, 170]} to={[268, 210]} head="both" tone="info" label="PCIe" labelSide="right" />
+  <Box x={570} y={120} w={130} h={60} label={"IB / RoCE\n交换网络"} tone="info" />
+  <Arrow from={[496, 230]} via={[[635, 230]]} to={[635, 180]} head="both" tone="info" />
+  <Box x={570} y={30} w={130} h={50} label="其他节点" tone="ghost" />
+  <Arrow from={[635, 120]} to={[635, 80]} head="both" tone="info" />
+  <Fragment slot="caption">节点内 8 张 GPU 经 NVSwitch 全互联，每张卡的 NVLink 带宽约是它那块网卡的 9 倍。跨节点的数据要经过 PCIe 到网卡、再进交换网络，带宽低、延迟高。数字取自 NVIDIA H100 与 ConnectX-7 的官方规格（单向），实际可达带宽更低。</Fragment>
+</Diagram>
+
+几个需要记住的量级（均为官方规格，单向）：
+
+| 链路 | 每 GPU 带宽 | 说明 |
+| --- | --- | --- |
+| NVLink 4（H100 SXM） | 450 GB/s | 官方写作 900 GB/s，是双向合计 |
+| NVLink（H800 SXM） | 200 GB/s | 出口管制版本；DeepSeek-V3 报告实测约 160 GB/s |
+| NVLink 5（B200） | 900 GB/s | 官方 1.8 TB/s 双向 |
+| PCIe Gen5 x16 | 约 64 GB/s | 无 NVLink 的卡之间、GPU 到网卡 |
+| InfiniBand NDR（ConnectX-7） | 50 GB/s | 400 Gb/s；DeepSeek-V3 报告约 50 GB/s |
+
+节点内外约一个数量级的带宽差决定了后面所有并行策略的摆放：通信最频繁、数据量最大的张量并行放在节点内；通信量小或者容易与计算重叠的数据并行、流水线并行跨节点。对于跨节点的 all-reduce，NCCL 会使用**分层**的做法：先在节点内 reduce-scatter，再让每张卡与其他节点上“同位置”的卡做 all-reduce（8 张卡各管 1/8 的数据，同时用上 8 块网卡），最后在节点内 all-gather。跨节点的数据量因此只有 $1/8$。
+
+## 异步通信与重叠
+
+`dist.all_reduce(t, async_op=True)` 立即返回一个 `Work` 句柄，通信在后台进行，调用 `work.wait()` 才保证结果可用。在 GPU 上，NCCL 的通信 kernel 运行在独立的 CUDA stream 上，可以与计算 kernel 并行执行；只要后续计算不依赖通信结果，通信时间就能被“藏”起来。这是下一章分桶 DDP、FSDP 预取，以及 DeepSeek-V3 DualPipe 的共同思想：**通信的总量往往无法减少，但可以让它与计算同时发生**。
+
+重叠也有代价。通信 kernel 自己要占用 GPU 的 SM（流式多处理器）来搬运和归约数据，会与计算 kernel 争抢资源；DeepSeek-V3 为此专门把跨节点 all-to-all 限制在 20 个 SM 上（H800 共 132 个）。我们会在[专家并行与 all-to-all](/distributed/expert-parallel/) 中再回到这一点。
+
+## 小结
+
+- 分布式训练用 SPMD 模式：$p$ 个进程运行同一程序，靠 rank 区分各自的数据与参数分片，在同步点上集体调用通信原语。
+- 六个集合通信原语——broadcast、reduce、all-reduce、all-gather、reduce-scatter、all-to-all——加上 send/recv，足以表达本部分的全部并行策略。all-reduce = reduce-scatter + all-gather；all-gather 与 reduce-scatter 互为反向。
+- α-β 模型 $T = \alpha + n\beta$ 下，环形 all-reduce 每卡发送 $2\frac{p-1}{p}n$ 字节，达到下界，带宽项几乎与卡数无关；延迟项 $2(p-1)\alpha$ 随卡数线性增长，大规模时由树形算法补位。
+- 节点内 NVLink 比跨节点网络快约一个数量级，这决定了各种并行维度在集群上的摆放位置。
+- 通信量常常无法减少，但可以用异步通信与计算重叠来隐藏。
+
+## 练习
+
+1. 用 α-β 模型写出 broadcast 的两种实现的耗时：root 依次发给每个 rank；以及先 scatter 成 $p$ 段、再 all-gather。$p$ 很大、消息很大时哪种好？
+
+<details>
+<summary>答案</summary>
+
+依次发送：root 发出 $(p-1)n$ 字节，耗时 $(p-1)(\alpha + n\beta)$。scatter + all-gather：scatter 时 root 发出 $\frac{p-1}{p}n$（可以看作 $p-1$ 条 $n/p$ 字节的消息），环形 all-gather 再用 $p-1$ 步、每步 $n/p$，总耗时约 $2(p-1)\alpha + 2\frac{p-1}{p}n\beta$。大消息时后者的带宽项约 $2n\beta$，与 $p$ 无关，远好于前者的 $(p-1)n\beta$；代价是延迟项翻倍。这就是 NCCL 等库对大消息 broadcast 使用流水化环或树的原因。
+
+</details>
+
+2. 证明 reduce-scatter 与 all-gather 互为反向：设 all-gather 的输入是各 rank 的 $x_r\in\mathbb R^{n/p}$，输出是每个 rank 上的 $y = [x_0,\dots,x_{p-1}]$，损失 $\mathcal L$ 对 rank $s$ 上 $y$ 的梯度是 $g_s$。求 $\partial\mathcal L/\partial x_r$。
+
+<details>
+<summary>答案</summary>
+
+$x_r$ 被复制到了每个 rank 的 $y$ 的第 $r$ 段，每个副本都对损失有贡献，所以 $\partial\mathcal L/\partial x_r = \sum_s g_s[r]$，其中 $g_s[r]$ 是 $g_s$ 的第 $r$ 段。这正是对 $g_0,\dots,g_{p-1}$ 做 reduce-scatter 后 rank $r$ 得到的结果。反过来，reduce-scatter 的输出 $\Sigma_r = \sum_s x_s[r]$ 对每个 $x_s[r]$ 的导数都是 1，梯度 $h_r$ 要复制回每个 rank 的第 $r$ 段，即 all-gather。
+
+</details>
+
+3. 用 `comm.py` 的成本函数估算：在 1024 张卡上 all-reduce 一个 1 GB 的 BF16 梯度缓冲区（$\alpha=5\,\mu\text{s}$、$B=50$ GB/s），环与树各要多久？如果改成节点内（8 卡，$B=450$ GB/s，$\alpha=2\,\mu\text{s}$）先 reduce-scatter、128 个节点间 all-reduce $1/8$ 的数据、再节点内 all-gather，大约多久？
+
+<details>
+<summary>答案</summary>
+
+环：$2\cdot1023\cdot5\,\mu\text{s} + 2\cdot\frac{1023}{1024}\cdot\frac{10^9}{5\times10^{10}} \approx 10.2\text{ ms} + 40.0\text{ ms} = 50.2$ ms。树：$2\cdot10\cdot5\,\mu\text{s} + 40$ ms $\approx 40.1$ ms。分层：节点内 reduce-scatter 与 all-gather 各约 $7\cdot2\,\mu\text{s} + \frac78\cdot\frac{10^9}{4.5\times10^{11}} \approx 2$ ms；节点间每张卡负责 125 MB，128 个节点上用树约 $2\cdot7\cdot5\,\mu\text{s} + 2\cdot\frac{1.25\times10^8}{5\times10^{10}} \approx 5.1$ ms。合计约 9 ms，比直接在 1024 卡上做环快五倍多——因为 8 块网卡同时在用。
+
+</details>
+
+4. 在 `ring_all_reduce` 中，如果把 `_ring_step` 改成先 `dist.send` 再 `dist.recv`（都是阻塞的），会发生什么？为什么 `isend` 之后必须 `wait()`？
+
+<details>
+<summary>答案</summary>
+
+阻塞的 `send` 可能要等到对方开始接收才返回（取决于后端和消息大小，大消息几乎必然如此）。环上所有 rank 同时阻塞在 `send` 上，没有人走到 `recv`，形成循环等待，即死锁。`isend` 只是提交发送请求；在 `wait()` 之前，被发送的张量可能还没被读完，此时修改它（下一步会改写缓冲区）会发送错误的数据，所以一步结束前必须等待发送完成。
+
+</details>
+
+5. all-to-all 中每个 rank 发出多少数据？为什么 nccl-tests 给它的 busbw 换算因子是 $\frac{p-1}{p}$ 而不是 2？
+
+<details>
+<summary>答案</summary>
+
+每个 rank 把 $n$ 字节分成 $p$ 段，留下自己的一段，其余 $p-1$ 段发给不同的 rank，共 $\frac{p-1}{p}n$ 字节，同时也接收这么多。没有归约，也没有“先汇总再分发”的第二阶段，每个字节只需要过一次链路，所以因子是 $\frac{p-1}{p}$。all-to-all 的难点不在数据量，而在于它是 $p(p-1)$ 对点对点流量同时发生，对网络拓扑（尤其跨节点）的压力远大于环。
+
+</details>
+
+## 参考文献
+
+- PyTorch. [Distributed communication package — torch.distributed](https://docs.pytorch.org/docs/stable/distributed.html)：集合通信接口与后端支持表。
+- NVIDIA. [NCCL User Guide: Collective Operations](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/usage/collectives.html)：各原语的语义图。
+- NVIDIA. [nccl-tests: Performance reported by NCCL tests](https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md)：algbw 与 busbw 的定义与推导。
+- Patarasuk, P., Yuan, X. [Bandwidth optimal all-reduce algorithms for clusters of workstations](https://doi.org/10.1016/j.jpdc.2008.09.002). JPDC, 2009.
+- Thakur, R., Rabenseifner, R., Gropp, W. [Optimization of Collective Communication Operations in MPICH](https://doi.org/10.1177/1094342005051521). IJHPCA, 2005：α-β 模型下各集合通信算法的代价分析。
+- Sanders, P., Speck, J., Träff, J. L. [Two-tree algorithms for full bandwidth broadcast, reduction and scan](https://doi.org/10.1016/j.parco.2009.09.001). Parallel Computing, 2009：双二叉树。
+- NVIDIA. [Massively Scale Your Deep Learning Training with NCCL 2.4](https://developer.nvidia.com/blog/massively-scale-deep-learning-training-nccl-2-4/)：NCCL 引入双二叉树。
+- NVIDIA. [H100 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/h100/) 与 [DGX B200](https://www.nvidia.com/en-us/data-center/dgx-b200/) 产品规格：NVLink 带宽。
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437), 2024：H800 集群的 NVLink 160 GB/s 与 IB 50 GB/s 实测带宽。
+- Stanford CS336. [Lecture 7: Parallelism](https://github.com/stanford-cs336/spring2025-lectures)：集合通信与硬件层次。
+- Hugging Face. [The Ultra-Scale Playbook: Training LLMs on GPU Clusters](https://huggingface.co/spaces/nanotron/ultrascale-playbook), 2025.
