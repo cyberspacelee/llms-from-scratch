@@ -2,7 +2,307 @@
 title: 训练稳定性
 description: loss spike 从何而来：初始化与残差缩放、梯度裁剪、z-loss、QK-Norm、logit 软截断与 MuonClip，以及排查方法。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/stability.py
+  - tests/pretraining/test_stability.py
 ---
 
-本章正在撰写。
+在小模型上，训练要么正常收敛，要么因为学习率太大一开始就发散，问题很容易发现。大模型的训练却会在运行了几天、几周之后突然出问题：损失曲线上出现一个尖峰（loss spike），有时几百步后自己恢复，有时再也回不去，只能从几千步之前的检查点重新开始。Meta 公开的 OPT-175B 训练日志记录了数十次因发散而进行的回滚与重启；PaLM 的报告提到训练中出现了约 20 次损失尖峰，每次都从尖峰前约 100 步的检查点重启并跳过约 200～500 个批次的数据。在数千张 GPU 上，每一次重启都意味着可观的时间和成本。
+
+本章讨论这些不稳定从何而来、怎样监控、怎样预防。我们先建立监控指标，然后逐一分析三类最常见的来源——注意力 logit 的增长、输出 logit 的漂移、Adam 在稀疏梯度下的过大更新——并推导针对它们的对策：残差缩放、梯度裁剪、z-loss、QK-Norm、logit 软截断，以及 Kimi K2 用来配合 Muon 的 QK-Clip。最后用全书共用的 GPT 做一个可以在 CPU 上几十秒内跑完的实验：调高学习率让注意力 logit 失控，再逐个施加对策，比较它们的效果。读者应已熟悉[注意力机制](/transformer/attention/)与上一章的[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)。
+
+## 监控：在崩溃之前看到它
+
+只看损失曲线是不够的：损失是所有问题的最终结果，当它出现尖峰时，原因往往已经积累了很久。大规模训练通常持续记录以下指标。
+
+**全局梯度范数** $\|g\|_2$：把所有参数的梯度拼成一个向量后的 $\ell_2$ 范数。它通常在训练早期很大、随后下降并缓慢变化，突然的尖峰往往先于损失尖峰出现。
+
+**更新与参数的比值** $\|\Delta\theta\|/\|\theta\|$：对每个参数矩阵分别计算。它衡量“这一步把参数改变了百分之几”，健康训练中通常在 $10^{-3}$ 量级，并随学习率调度变化。某一层的比值异常偏大，说明这一层的更新失控；异常偏小，说明这一层几乎没有在学习。
+
+**最大注意力 logit** $S_{\max}=\max_{i,j}q_i^\top k_j/\sqrt{d_h}$：按层、按头记录。它是本章实验中最重要的指标，后面会看到，它的持续增长是注意力不稳定的直接征兆。
+
+**输出的对数配分函数** $\log Z=\log\sum_v e^{z_v}$：衡量输出 logit 整体的偏移，z-loss 针对的就是它。
+
+把这些指标变成一个数，OLMo 2 定义了**尖峰分数**（spike score）：一个指标序列中偏离前 1000 步滚动均值超过 7 个标准差的点所占的比例。OLMo 2 报告通过一系列稳定性改动，把梯度范数的尖峰分数从 0.40 降到了 0.03。
+
+<CodeFile path="src/llms_from_scratch/pretraining/stability.py" region="monitor" />
+
+## 不稳定的三个来源
+
+### 注意力 logit 的增长
+
+注意力分数是 $q^\top k/\sqrt{d_h}$，其中 $q=W_Qx$、$k=W_Kx$。它对 $W_Q$ 和 $W_K$ 是**双线性**的：如果两个矩阵的尺度都变成原来的 $c$ 倍，logit 变成原来的 $c^2$ 倍。训练中权重范数的增长会被平方放大到 logit 上。
+
+logit 过大时，softmax 退化为近似 one-hot：每个查询几乎只关注一个键。这有两个后果。一是**注意力熵坍缩**（attention entropy collapse，[Zhai et al. 2023](https://arxiv.org/abs/2303.06296)）：模型失去了“混合多个位置的信息”的能力。二是**梯度消失或剧烈波动**：softmax 的雅可比 $\operatorname{diag}(p)-pp^\top$ 在 $p$ 接近 one-hot 时趋于 0，梯度几乎传不回去；而一旦最大值的位置发生切换，输出又会突变。[Dehghani et al. 2023](https://arxiv.org/abs/2302.05442) 在训练 220 亿参数的 ViT-22B 时首先报告了这一现象：几千步后注意力 logit 失控，损失发散。[Wortsman et al. 2023](https://arxiv.org/abs/2309.14322) 进一步发现，**用小模型配合大学习率就能复现大模型的这类不稳定**，这正是本章实验的思路。
+
+### 输出 logit 的漂移
+
+交叉熵对输出 logit 的整体平移不变：$\operatorname{softmax}(z+c)=\operatorname{softmax}(z)$。所以损失对 $\log Z$ 的绝对大小没有任何约束，$\log Z$ 可以在训练中自由漂移。Wortsman et al. 观察到，在大学习率下，输出 logit 会整体漂移到很大的负值，$\log Z$ 的绝对值很大。在低精度下，这意味着 logit 中有用的“相对差异”只占数值的很小一部分，精度被浪费在公共偏移上，最终导致损失发散。
+
+### Adam 在稀疏梯度下的过大更新
+
+第三个来源在优化器内部。[Molybog et al. 2023](https://arxiv.org/abs/2304.09871) 分析了 Adam 在大规模训练中的一种失效模式：某些参数（例如罕见 token 的嵌入行、某些很少被激活的方向）在很长一段时间里梯度接近 0，它们的二阶矩 $v$ 随之按 $\beta_2^k$ 衰减到很小。一旦梯度突然出现，分母 $\sqrt{v}$ 来不及增长，更新就被放大。
+
+可以定量计算。设某个坐标在很长时间内梯度为 0（$m$、$v$ 都已衰减到可忽略），然后连续 $j$ 步出现相同的梯度 $g$。此时 $m_j=(1-\beta_1^j)g$，$v_j=(1-\beta_2^j)g^2$。由于全局步数 $t$ 很大，偏差修正因子已接近 1，不会起作用，于是这 $j$ 步中最后一步的更新大小为
+
+$$
+\frac{|\Delta\theta|}{\eta}=\frac{1-\beta_1^{\,j}}{\sqrt{1-\beta_2^{\,j}}} .
+$$
+
+在正常训练中这个比值约为 1（Adam 的每坐标更新约为 $\eta$）。但取 $\beta_1=0.9$、$\beta_2=0.999$，$j=1$ 时它等于 $0.1/\sqrt{0.001}\approx3.2$，$j=10$ 时约为 $0.65/\sqrt{0.00995}\approx6.5$：一个沉寂已久的参数在梯度恢复后的头几十步里，每步更新是正常值的 3～6 倍。这正是偏差修正想要处理的“零初始化”问题，只是它发生在训练中途，偏差修正已经不起作用了。
+
+<Plot label="长时间无梯度之后 Adam 的单步更新大小" x={[1, 1000]} y={[0, 7]} logX xLabel="梯度恢复后的步数 j" yLabel="更新大小 / η"
+  series={[
+    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.999 ** j), label: 'β₂ = 0.999', tone: 'accent2' },
+    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.95 ** j), label: 'β₂ = 0.95', tone: 'accent' },
+    { fn: () => 1, label: '正常更新', tone: 'muted', dashed: true },
+  ]}>
+  <Fragment slot="caption">某个坐标在长时间零梯度后连续收到相同的梯度。β₂ = 0.999 时，二阶矩需要上千步才能追上，期间每步的更新是正常的 3～6.5 倍；β₂ = 0.95 时窗口只有约 20 步，最大约为正常值的 1.1 倍。这是大模型普遍采用 β₂ = 0.95 的原因之一。</Fragment>
+</Plot>
+
+这类问题的对策在优化器层面：更小的 $\beta_2$（0.95）、合适的 $\epsilon$、梯度裁剪；也可以在数据层面避免极端稀疏或极端重复的批次。OLMo 2 删除含有长重复 n-gram 序列的文档，正是因为这些片段会产生异常的梯度模式，在梯度范数上表现为尖峰。
+
+## 对策一：初始化与残差缩放
+
+在 Pre-Norm Transformer 中，残差流是各层输出的累加：$x_L=x_0+\sum_{l=1}^{L}f_l(x_{l-1})$。如果各层的输出近似独立、方差都是 $\sigma_f^2$，那么 $\operatorname{Var}(x_L)\approx\operatorname{Var}(x_0)+L\sigma_f^2$，残差流的尺度随深度线性增长。每个块有注意力和 FFN 两个分支，共 $2L$ 个分支。GPT-2 的做法是把每个分支输出投影（$W_O$ 与 FFN 的 $W_2$）的初始化标准差乘以 $1/\sqrt{2L}$，使 $2L$ 个分支的方差之和与单个分支相当。全书共用的 `GPT` 正是这样初始化的：
+
+```python title="transformer/model.py（摘录）"
+for name, p in self.named_parameters():
+    if name.endswith(("o_proj.weight", "w2.weight")):
+        nn.init.normal_(p, std=0.02 / math.sqrt(2 * config.n_layers))
+```
+
+这是一个启发式规则，并不是唯一正确的答案。OLMo 2 反而放弃了逐层缩放，所有参数统一用 $\mathcal N(0,0.02^2)$ 初始化，配合 QK-Norm 和改变归一化位置（对子层的**输出**而不是输入做 RMSNorm），在其消融中得到了更稳定的训练。这提醒我们，初始化、归一化和学习率是耦合的，不能孤立地看。
+
+**嵌入层**需要单独考虑。它的梯度是稀疏的（只有批次中出现的 token 有梯度），而且嵌入向量的尺度直接决定了第一层的输入尺度。几种常见做法：BLOOM 在嵌入之后加一个 LayerNorm；GLM-130B 把嵌入层的梯度乘以 0.1；OLMo 2 取消了嵌入的权重衰减，因为衰减会让嵌入范数持续缩小，与后面的归一化层相互作用，造成不稳定。
+
+## 对策二：梯度裁剪
+
+全局梯度裁剪把梯度整体缩放到范数不超过阈值 $c$：
+
+$$
+\tilde g=g\cdot\min\!\left(1,\frac{c}{\|g\|_2}\right).
+$$
+
+它保持梯度方向不变，只限制步长。大模型几乎都用 $c=1.0$。裁剪是一道保险：偶尔出现的异常批次不会把参数推得太远。但它**不能修复根本原因**。如果某个机制在持续地放大权重（例如注意力 logit 的增长），每一步的梯度可能都很正常，裁剪根本不会被触发；我们的实验会验证这一点。此外，裁剪对 Adam 的效果比对 SGD 弱：Adam 的更新本来就近似 $\eta\operatorname{sign}(g)$，梯度整体缩小后 $m/\sqrt v$ 的比值变化不大，裁剪主要影响的是二阶矩的历史。
+
+## 对策三：z-loss
+
+针对输出 logit 的漂移，PaLM（[Chowdhery et al. 2022](https://arxiv.org/abs/2204.02311)）在损失中加入了一个辅助项：
+
+<KeyEq label="z-loss">
+
+$$
+\mathcal L=\mathcal L_{\text{CE}}+\lambda_z\,(\log Z)^2,\qquad \log Z=\log\sum_{v=1}^{V}e^{z_v}.
+$$
+
+</KeyEq>
+
+它对 logit 的梯度是
+
+$$
+\frac{\partial(\log Z)^2}{\partial z_v}=2\log Z\cdot\frac{e^{z_v}}{Z}=2\log Z\cdot p_v .
+$$
+
+当 $\log Z>0$ 时，它把所有 logit 按各自的概率成比例地往下压；$\log Z<0$ 时往上推。它不改变 softmax 的输出分布（只要整体平移就能满足），只是把交叉熵留下的那个平移自由度固定在 $\log Z\approx0$ 附近，使 $e^{z_v}$ 本身就近似是归一化的概率。PaLM 取 $\lambda_z=10^{-4}$，OLMo 2 取 $10^{-5}$。
+
+<CodeFile path="src/llms_from_scratch/pretraining/stability.py" region="zloss" />
+
+测试 `test_z_loss_is_zero_when_normalized` 验证了这个性质：对一组已经归一化的 log 概率，z-loss 为 0；把它整体加 3 后交叉熵完全不变，z-loss 变为 9。在下面的实验中，加入 $\lambda_z=10^{-2}$ 后，最后 20 步的平均 $|\log Z|$ 从 4.5 降到 0.8。
+
+`lm_loss` 还支持输出 logit 的**软截断**（soft-capping）：$z\leftarrow c\tanh(z/c)$。$|z|\ll c$ 时它近似恒等，$|z|\to\infty$ 时平滑地饱和在 $\pm c$。Gemma 2 对最终输出 logit 取 $c=30$，对注意力 logit 取 $c=50$。
+
+## 对策四：QK-Norm 与注意力软截断
+
+针对注意力 logit，最直接的办法是在计算点积之前对 $q$ 和 $k$ 分别做归一化，即 **QK-Norm**（ViT-22B 首先使用，之后被 OLMo 2、Gemma 3、Qwen3 等采用）：
+
+$$
+\text{logit}_{ij}=\frac{\operatorname{RMSNorm}(q_i)^\top\operatorname{RMSNorm}(k_j)}{\sqrt{d_h}} .
+$$
+
+RMSNorm 之后，$q$ 的范数被固定为 $\sqrt{d_h}$ 乘以增益 $g_q$ 的尺度，于是由 Cauchy–Schwarz，
+
+$$
+|\text{logit}_{ij}|\le\frac{\|\hat q_i\|\,\|\hat k_j\|}{\sqrt{d_h}}\approx\sqrt{d_h}\cdot|g_q|\,|g_k| .
+$$
+
+logit 的上界不再依赖 $W_Q$、$W_K$ 的范数，只由可学习的增益控制，而增益的增长要慢得多。QK-Norm 的位置通常在 RoPE 之前，因为 RoPE 是旋转，不改变范数。
+
+另一种办法是对注意力 logit 做软截断：$\text{logit}\leftarrow c\tanh(\text{logit}/c)$。Gemma 2 采用了这一做法，但它需要修改注意力 kernel（FlashAttention 最初不支持），Gemma 3 改回了 QK-Norm。
+
+我们实现了一个 `StableAttention`，它与共用 GPT 的 `CausalSelfAttention` 权重布局完全相同，额外支持 QK-Norm 与注意力软截断，并在每次前向时记录每个头的 $S_{\max}$：
+
+<CodeFile path="src/llms_from_scratch/pretraining/stability.py" region="stable_attention" />
+
+`make_stable` 把一个已有的 GPT 的注意力层原地替换成它。测试 `test_stable_attention_matches_original` 验证不开启任何选项时，替换前后的输出一致。
+
+## 对策五：QK-Clip 与 MuonClip
+
+QK-Norm 有一个限制：它要求能在注意力计算时拿到完整的 $k$。DeepSeek 的多头潜在注意力（MLA，见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)）在推理时把 $W_K$ 吸收进查询一侧，从不显式地物化每个头的 $k$，于是无法对 $k$ 做归一化。Kimi K2 采用了 MLA，又使用 Muon 训练，Kimi 团队观察到 Muon 训练更容易出现注意力 logit 爆炸。他们的解法是 **QK-Clip**：不改架构，而是在优化器更新之后**直接缩小权重**。
+
+具体做法（[Kimi K2 技术报告](https://arxiv.org/abs/2507.20534)）：对每个头 $h$，在前向时记录本批次的 $S_{\max}^h$。如果它超过阈值 $\tau$，就令 $\gamma_h=\tau/S_{\max}^h$，把这个头的 $W_Q$ 与 $W_K$ 各乘以 $\sqrt{\gamma_h}$。由于 logit 对两者是双线性的，这恰好让该头的 logit 乘以 $\gamma_h$，最大值被压到 $\tau$。
+
+<KeyEq label="QK-Clip">
+
+$$
+\gamma_h=\min\!\left(1,\frac{\tau}{S_{\max}^h}\right),\qquad W_Q^h\leftarrow\sqrt{\gamma_h}\,W_Q^h,\qquad W_K^h\leftarrow\sqrt{\gamma_h}\,W_K^h .
+$$
+
+</KeyEq>
+
+几个细节值得注意。第一，它是**逐头**的：只缩小真正超阈值的头，不影响其他头。第二，在 MLA 中，有些分量是多个头共享的（共享的旋转位置键 $k^R$），缩放它会影响所有头；所以 K2 只缩放每个头独有的分量（$q^C$、$k^C$ 各乘 $\sqrt{\gamma_h}$，头独有的 $q^R$ 乘 $\gamma_h$），共享的 $k^R$ 保持不变。我们的实现对 GQA 采用了同样的思路：当 $K$ 头被多个查询头共享时，只把查询头的 $W_Q$ 乘以 $\gamma_h$。第三，它在**优化器更新之后**执行，不改变梯度，是对权重的一种投影。
+
+Kimi K2 取 $\tau=100$，把 Muon 与 QK-Clip 的组合称为 MuonClip。报告显示，训练初期部分头的 $S_{\max}$ 被截断在 100，之后随训练自然回落到正常范围，QK-Clip 不再触发；1T 参数的 K2 在 15.5T token 的预训练中没有出现损失尖峰。DeepSeek-V4 则走了另一条路：它的注意力结构允许直接对查询和 KV 条目做 RMSNorm，因此不使用 QK-Clip。
+
+<CodeFile path="src/llms_from_scratch/pretraining/stability.py" region="qk_clip" />
+
+测试 `test_qk_clip_caps_max_logit_exactly` 把 $W_Q$、$W_K$ 各放大 40 倍制造大 logit，调用 `qk_clip_` 后用同一输入再次前向，验证 $S_{\max}$ 恰好被压到 $\tau$。
+
+<Diagram width={680} height={320} label="各种稳定性对策在前向计算中的位置">
+  <Box x={10} y={40} w={90} h={48} label="x" sub="残差流" />
+  <Box x={130} y={10} w={110} h={44} label="W_Q x" mono tone="info" />
+  <Box x={130} y={74} w={110} h={44} label="W_K x" mono tone="info" />
+  <Box x={270} y={40} w={110} h={48} label="QK-Norm" tone="accent" />
+  <Box x={410} y={40} w={110} h={48} label="q·k / √d" mono />
+  <Box x={550} y={40} w={120} h={48} label="注意力软截断" tone="accent" size="sm" />
+  <Arrow from={[100, 64]} to={[130, 32]} />
+  <Arrow from={[100, 64]} to={[130, 96]} />
+  <Arrow from={[240, 32]} to={[270, 56]} />
+  <Arrow from={[240, 96]} to={[270, 72]} />
+  <Arrow from={[380, 64]} to={[410, 64]} />
+  <Arrow from={[520, 64]} to={[550, 64]} />
+  <Box x={130} y={150} w={250} h={40} label="QK-Clip：更新后按 √γ 缩小 W_Q、W_K" tone="accent2" size="sm" />
+  <Arrow from={[255, 150]} to={[185, 118]} tone="accent2" dashed />
+  <Text x={485} y={120} label="监控 S_max（按层、按头）" size="sm" tone="muted" />
+  <Arrow from={[465, 88]} to={[465, 106]} tone="muted" />
+  <Box x={10} y={240} w={120} h={48} label="最后的 RMSNorm" size="sm" />
+  <Box x={160} y={240} w={110} h={48} label="输出头" />
+  <Box x={300} y={240} w={150} h={48} label="logit 软截断" tone="accent" />
+  <Box x={480} y={240} w={190} h={48} label="交叉熵 + z-loss" tone="accent" />
+  <Arrow from={[130, 264]} to={[160, 264]} />
+  <Arrow from={[270, 264]} to={[300, 264]} />
+  <Arrow from={[450, 264]} to={[480, 264]} />
+  <Text x={340} y={220} label="输出一侧：约束 log Z 与 logit 的绝对大小" size="sm" tone="muted" />
+  <Fragment slot="caption">上半部分是一个注意力头：QK-Norm 在点积之前归一化 q、k，软截断作用在点积之后，QK-Clip（橙色虚线）不在前向路径上，而是在优化器更新后直接修改权重。下半部分是输出一侧：软截断限制单个 logit，z-loss 约束 log Z。梯度裁剪、预热与 Adam 超参数作用在优化器上，不在图中。</Fragment>
+</Diagram>
+
+## 实验：让小模型的注意力失控
+
+现在把这些对策放到一起比较。`run_stability_experiment` 训练一个小 GPT（2 层、宽度 64、4 个头、词表 64、上下文 32），数据是一个随机的一阶马尔可夫链“语言”：模型需要学会每个 token 之后的转移分布，几百步内损失能从 $\ln64\approx4.16$ 明显下降。优化器是我们自己实现的 AdamW（$\beta_2=0.95$、无权重衰减），每次运行 120 步，在 CPU 上十几秒。
+
+<CodeFile path="src/llms_from_scratch/pretraining/stability.py" region="experiment" />
+
+基线学习率取 $3\times10^{-3}$，“高学习率”取它的 10 倍且不预热。表中的损失是最后 20 步的平均值（单个批次的损失有约 ±0.05 的噪声），$S_{\max}$ 是第 120 步所有层与头中的最大注意力 logit。
+
+| 配置 | 损失 | $S_{\max}$ | 平均 $\lvert\log Z\rvert$ |
+| --- | ---: | ---: | ---: |
+| 基线：$\eta=3\times10^{-3}$ | 3.39 | 1.1 | 4.8 |
+| 高学习率：$\eta=3\times10^{-2}$，无预热 | 3.77 | 402 | 4.5 |
+| 高学习率 + 预热 60 步 | **3.39** | 15 | 4.9 |
+| 高学习率 + QK-Norm | 3.58 | 13 | 4.7 |
+| 高学习率 + QK-Clip（$\tau=10$） | 3.63 | 12 | 4.7 |
+| 高学习率 + z-loss（$\lambda_z=10^{-2}$） | 3.73 | 420 | 0.8 |
+| 高学习率 + 输出 logit 软截断（$c=30$） | 3.72 | 324 | 4.6 |
+| 高学习率 + 梯度裁剪（$c=0.25$） | 3.72 | 331 | 4.6 |
+
+<Plot label="不同配置下最大注意力 logit 随训练步数的变化" x={[0, 120]} y={[0.1, 1000]} logY xLabel="训练步数" yLabel="最大注意力 logit"
+  series={[
+    { points: [[0,0.11],[4,5.51],[8,18.4],[12,36.45],[16,42.49],[20,45.35],[24,66.82],[28,75.36],[32,87.77],[36,121.81],[40,140.32],[44,150.54],[48,156.08],[52,156.6],[56,167.83],[60,145.5],[64,160.27],[68,192.61],[72,207.54],[76,242.07],[80,242.43],[84,280.35],[88,308.47],[92,317.95],[96,325.42],[100,313.18],[104,344.78],[108,360.09],[112,394.66],[116,372.99],[119,401.94]], label: '高学习率', tone: 'accent2' },
+    { points: [[0,0.11],[4,0.15],[8,0.19],[12,0.45],[16,1.02],[20,1.66],[24,2.21],[28,2.73],[32,2.98],[36,5.28],[40,5.54],[44,7.82],[48,9.41],[52,12.41],[56,10.65],[60,14.27],[64,13.83],[68,13.47],[72,14.02],[76,13.65],[80,16.04],[84,15.17],[88,13.09],[92,13.43],[96,13.95],[100,13.79],[104,13.97],[108,14.57],[112,17.18],[116,15.75],[119,15.31]], label: '+ 预热', tone: 'accent' },
+    { points: [[0,3.24],[4,4.0],[8,3.99],[12,4.6],[16,5.16],[20,5.76],[24,6.15],[28,6.58],[32,6.87],[36,7.13],[40,7.54],[44,8.13],[48,8.33],[52,8.58],[56,9.07],[60,9.32],[64,9.43],[68,9.75],[72,10.31],[76,10.61],[80,10.84],[84,11.28],[88,11.41],[92,11.69],[96,11.82],[100,12.47],[104,13.09],[108,13.51],[112,13.41],[116,13.04],[119,12.94]], label: '+ QK-Norm', tone: 'info' },
+    { points: [[0,0.11],[4,5.51],[8,12.86],[12,11.96],[16,12.52],[20,13.72],[24,12.34],[28,12.89],[32,12.52],[36,12.74],[40,11.83],[44,11.9],[48,12.01],[52,11.96],[56,11.65],[60,13.55],[64,11.95],[68,13.84],[72,12.44],[76,12.48],[80,12.45],[84,11.91],[88,11.37],[92,12.36],[96,12.44],[100,12.44],[104,12.43],[108,11.74],[112,12.48],[116,12.85],[119,11.86]], label: '+ QK-Clip', tone: 'muted' },
+  ]}>
+  <Fragment slot="caption">纵轴为对数刻度。高学习率无预热时，最大注意力 logit 在前 10 步就超过 10，120 步后达到约 400，且没有停止的迹象。预热让它缓慢增长并稳定在 15 左右；QK-Norm 从一开始就把它限制在由增益决定的范围内；QK-Clip 允许它先冲高，然后每步都被压回 τ = 10 附近（记录的是裁剪前的前向值，所以略高于 10）。基线学习率下它始终小于 2.2，未画出。</Fragment>
+</Plot>
+
+这组结果讲了几件事。
+
+第一，**高学习率的主要问题在注意力**。$S_{\max}$ 从 0.1 增长到 400，损失比基线差了 0.38；而输出一侧的 $\log Z$ 与基线相差无几。
+
+第二，**对策必须对准病因**。z-loss 把 $|\log Z|$ 从 4.5 压到了 0.8，它确实完成了自己的任务，但注意力 logit 照样涨到 420，损失没有改善。输出 logit 软截断与梯度裁剪同样无效：后者尤其值得注意——整个训练中全局梯度范数最大不到 1，裁剪到 0.25 也只是让每一步都略小一点，挡不住权重的持续增长。
+
+第三，**预热是这里最有效的单一手段**。同样的峰值学习率，加上 60 步线性预热后，损失与小 10 倍学习率的基线一样好。在训练初期，权重和 Adam 的二阶矩都还没有“就位”，大学习率造成的损害在后面难以挽回。
+
+第四，**QK-Norm 与 QK-Clip 都把 logit 控制住了**，损失比无对策时好 0.14～0.19，但不如预热：在这个小实验里，高学习率还有其他副作用（例如其他层的更新过大），只修注意力不够。在真实的大模型训练中，这些对策是叠加使用的：预热、$\beta_2=0.95$、梯度裁剪、QK-Norm（或 QK-Clip）、z-loss，各自负责一类问题。
+
+测试 `test_high_lr_logit_growth_and_fixes` 把这个实验缩短到 40 步作为回归测试：无对策时 $S_{\max}$ 超过 15 且是 QK-Norm 版本的 2 倍以上，QK-Clip 版本在第 20 步之后始终低于 15。
+
+## 当尖峰发生时
+
+即使做了所有预防，大规模训练中仍可能出现尖峰。常见的处理流程是：
+
+1. **判断是否会自愈**。一些尖峰在几十到几百步内自行恢复，不需要干预；如果损失持续上升或梯度范数持续异常，就需要介入。
+2. **回滚并跳过数据**。PaLM 的做法是从尖峰前约 100 步的检查点重启，并跳过尖峰附近约 200～500 个批次。报告指出，单独重放这些批次并不一定能复现尖峰，说明问题是“特定数据遇到特定参数状态”的组合，而不只是坏数据。
+3. **检查数据**。查看尖峰时刻的批次：是否有异常长的重复序列、乱码、极端的 token 分布。OLMo 2 的重复 n-gram 过滤就来自这样的排查。
+4. **调整超参数**。降低学习率、缩短预热后的平台、增大 $\epsilon$ 或减小 $\beta_2$。这是最后的手段，因为它改变了后续的训练轨迹。
+
+更好的策略是在小规模上提前暴露问题。Wortsman et al. 的核心建议是：用小模型配合比正常大得多的学习率做扫描，观察损失对学习率的敏感程度；一个架构如果在小模型上对学习率很敏感，放大后多半也会不稳定。这也是本章实验的出发点。
+
+DeepSeek-V4 报告还列出了两种针对 MoE 的稳定化手段：一是**预期路由**（anticipatory routing），用历史参数 $\theta_{t-\Delta t}$ 计算路由、用当前参数计算特征，以打破路由与参数更新之间的正反馈，额外开销约 20%；二是对 SwiGLU 做**数值截断**，把线性分支限制在 $[-10,10]$、门控分支的上界限制在 10。它们与 MoE 架构紧密相关，细节见[混合专家 MoE](/architecture/moe/)。
+
+## 小结
+
+- 损失尖峰之前通常已有征兆：持续监控全局梯度范数、逐层的更新/参数比、逐头的最大注意力 logit 与输出的 $\log Z$；OLMo 2 的尖峰分数把“尖峰有多频繁”变成一个数。
+- 三类常见来源：注意力 logit 随 $W_Q$、$W_K$ 的范数平方增长，导致熵坍缩；输出 logit 的平移自由度让 $\log Z$ 漂移；Adam 在长时间零梯度后的更新可达正常值的数倍（$\beta_2=0.999$ 时约 3～6.5 倍）。
+- 对策：残差分支 $1/\sqrt{2L}$ 初始化与嵌入层的特殊处理；梯度裁剪作为保险；z-loss 固定 $\log Z\approx0$；QK-Norm 让 logit 的上界与权重范数无关；QK-Clip 在更新后按 $\sqrt{\gamma_h}$ 逐头缩小 $W_Q$、$W_K$，适用于无法做 QK-Norm 的 MLA。
+- 对策要对准病因：实验中 z-loss、输出软截断和梯度裁剪都没能阻止注意力 logit 的增长，预热、QK-Norm、QK-Clip 能。
+
+至此，数据、优化器、稳定性和数值精度这几个“把一次训练做好”的环节都讨论完了。下一章换一个角度：在开始训练之前，怎样用小实验预测大模型的效果，并决定模型规模与数据量。
+
+## 练习
+
+1. 证明：若把 $W_Q$ 和 $W_K$ 分别乘以 $a$ 和 $b$，注意力 logit 乘以 $ab$。QK-Clip 为什么选择 $a=b=\sqrt\gamma$ 而不是 $a=\gamma,\ b=1$？（提示：考虑之后的梯度。）
+2. 计算 z-loss 对 logit 的 Hessian 在 $\log Z=0$ 处的形式。它和交叉熵的 Hessian 有什么关系？
+3. 对 $\beta_1=0.9$、$\beta_2=0.99$，长时间零梯度后连续收到相同梯度，单步更新的最大值约是多少？在第几步附近达到？
+4. 修改 `StabilityConfig` 运行“高学习率 + QK-Norm + 预热”的组合，比较它与只用预热的结果。你预期哪个更好？为什么？
+5. 一个 64 维的注意力头，QK-Norm 的两个增益向量都初始化为全 1。初始化时注意力 logit 的上界是多少？若希望某个查询能以 0.99 的概率关注 1000 个键中的一个，logit 至少需要多大的差距？这对 QK-Norm 的增益提出了什么要求？
+
+<details>
+<summary>练习 1 答案</summary>
+
+$q=aW_Qx$、$k=bW_Kx'$，$q^\top k=ab\,(W_Qx)^\top(W_Kx')$。对称缩放让两个矩阵在缩放后保持相近的尺度。对 $\mathcal L$ 的梯度而言，$\partial\mathcal L/\partial W_Q$ 正比于 $k$ 的尺度，$\partial\mathcal L/\partial W_K$ 正比于 $q$ 的尺度；如果只缩放 $W_Q$，$W_Q$ 会变得很小而 $W_K$ 保持很大，之后 $W_Q$ 收到的梯度相对于它自身的尺度非常大，更新的相对幅度失衡，可能再次引发不稳定。对称地缩放保持了两者的平衡。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+令 $p=\operatorname{softmax}(z)$，$\ell=\log Z$，则 $\nabla\ell=p$，$\nabla^2\ell=\operatorname{diag}(p)-pp^\top$。$(\ell^2)$ 的 Hessian 是 $2\nabla\ell\nabla\ell^\top+2\ell\nabla^2\ell$，在 $\ell=0$ 处等于 $2pp^\top$。交叉熵 $-z_y+\ell$ 的 Hessian 是 $\operatorname{diag}(p)-pp^\top$，它在全 1 方向上为 0（平移不变）；而 $2pp^\top$ 在全 1 方向上 $\mathbf 1^\top(2pp^\top)\mathbf 1=2>0$。z-loss 正好补上了交叉熵在平移方向上的零曲率。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+比值为 $(1-0.9^j)/\sqrt{1-0.99^j}$。$j=1$：$0.1/0.1=1$；$j=5$：$0.41/\sqrt{0.049}\approx1.85$；$j=10$：$0.651/\sqrt{0.0956}\approx2.11$；$j=20$：$0.878/\sqrt{0.182}\approx2.06$；$j=50$：$0.995/\sqrt{0.395}\approx1.58$。最大值约 2.1，在 $j\approx10\sim15$ 附近。介于 $\beta_2=0.95$（约 1.1）和 $0.999$（约 6.5）之间。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+用 `StabilityConfig(lr=3e-2, warmup=60, qk_norm=True)`。预期它与只用预热相近或略好：预热解决了早期大更新的问题，QK-Norm 进一步保证注意力 logit 不会在后期随权重增长而失控。但在 120 步的短实验里，后期增长还来不及表现出来，两者的差别可能落在噪声范围内（约 ±0.05）。这也说明短实验只能检验早期的不稳定，长期的漂移需要更长的运行才能观察到。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+RMSNorm 后 $\|\hat q\|=\|\hat k\|=\sqrt{64}=8$，logit 上界为 $8\times8/\sqrt{64}=8$。要让一个键得到 0.99 的概率，设它比其余 999 个键的 logit 高 $\Delta$，则 $e^\Delta/(e^\Delta+999)=0.99$，$\Delta=\ln(99\times999)\approx11.5$。这超过了初始化时的上界 8（logit 范围是 $[-8,8]$，最大差距 16，但要让其余 999 个键都处于最低值并不现实），所以模型需要把增益学得大于 1 才能形成尖锐的注意力。QK-Norm 并不阻止尖锐注意力，只是让它必须通过缓慢变化的增益来实现。
+
+</details>
+
+## 参考文献
+
+- Wortsman et al. 2023. [Small-scale proxies for large-scale Transformer training instabilities](https://arxiv.org/abs/2309.14322).
+- Dehghani et al. 2023. [Scaling Vision Transformers to 22 Billion Parameters](https://arxiv.org/abs/2302.05442)（QK-Norm）。
+- Zhai et al. 2023. [Stabilizing Transformer Training by Preventing Attention Entropy Collapse](https://arxiv.org/abs/2303.06296).
+- Molybog et al. 2023. [A Theory on Adam Instability in Large-Scale Machine Learning](https://arxiv.org/abs/2304.09871).
+- Chowdhery et al. 2022. [PaLM: Scaling Language Modeling with Pathways](https://arxiv.org/abs/2204.02311)（z-loss、尖峰处理）。
+- Gemma Team 2024. [Gemma 2: Improving Open Language Models at a Practical Size](https://arxiv.org/abs/2408.00118)（logit 软截断）。
+- OLMo Team 2024. [2 OLMo 2 Furious](https://arxiv.org/abs/2501.00656)（稳定性改动与尖峰分数）。
+- Kimi Team 2025. [Kimi K2: Open Agentic Intelligence](https://arxiv.org/abs/2507.20534)（MuonClip / QK-Clip）。
+- DeepSeek-AI 2026. [DeepSeek-V4](https://arxiv.org/abs/2606.19348)（Q/KV 的 RMSNorm、预期路由与 SwiGLU 截断）。
+- Zhang et al. 2022. [OPT: Open Pre-trained Transformer Language Models](https://arxiv.org/abs/2205.01068) 与 [OPT-175B 训练日志](https://github.com/facebookresearch/metaseq/tree/main/projects/OPT/chronicles).
+- Zeng et al. 2022. [GLM-130B: An Open Bilingual Pre-trained Model](https://arxiv.org/abs/2210.02414)（嵌入梯度缩减）。
+- Stanford CS336 Spring 2025，[Lecture 3（Architectures, hyperparameters）](https://cs336.stanford.edu/spring2025/)。

@@ -2,9 +2,50 @@
 title: 预训练
 description: 把模型训好需要的一切：数据从哪里来，用什么优化器，怎样避免训练崩溃，如何用更少的比特计算，以及怎样提前预测大模型的效果。
 order: 0
-draft: true
 ---
 
-把模型训好需要的一切：数据从哪里来，用什么优化器，怎样避免训练崩溃，如何用更少的比特计算，以及怎样提前预测大模型的效果。
+到第三部分结束时，我们已经从零写出了一个 GPT，并在一台机器上把它训练到能生成通顺的文本；第四部分又把它扩展成了 2026 年的主流架构。但一个能跑通的训练脚本，与 Llama 3、DeepSeek-V3、Kimi K2 这样用数万亿 token 训练出来的模型之间，还隔着一整套工程与科学。这一部分讨论的就是这段距离：**当模型和数据都扩大几个数量级时，怎样把预训练做好**。
+
+“做好”可以拆成六个问题，每个问题是一章：
+
+1. **训练什么**？原始网页里充满噪声、重复和隐私。[预训练数据](/pretraining/data/)从 Common Crawl 出发，讲正文抽取、语言识别、启发式与模型过滤、MinHash 近似去重，以及数据配比、退火和合成数据。
+2. **怎样更新参数**？[优化器](/pretraining/optimizers/)从梯度下降推导到 AdamW，解释学习率预热和 WSD 调度，再推导 2025 年起在万亿参数模型上取代 AdamW 的 Muon。
+3. **怎样不让训练崩溃**？[训练稳定性](/pretraining/stability/)分析损失尖峰的来源——注意力 logit 增长、输出 logit 漂移、Adam 在稀疏梯度下的过大更新——以及 z-loss、QK-Norm、QK-Clip 等对策。
+4. **怎样用更少的比特计算**？[混合精度训练](/pretraining/mixed-precision/)从 FP16 的损失缩放讲到 BF16 的主权重，再到 DeepSeek-V3 的细粒度 FP8 量化与高精度累加。
+5. **训练多大、训练多久**？[缩放定律与计算最优](/pretraining/scaling-laws/)用小实验预测大模型：Kaplan 与 Chinchilla 的分歧、IsoFLOP 拟合、μP 超参数迁移，以及推理成本为什么让人“过度训练”小模型。
+6. **训练得怎么样**？[评估](/pretraining/evaluation/)讨论困惑度与 bits-per-byte、多项选择与生成式评估、pass@k、基准的统计误差与数据污染。
+
+<Diagram width={680} height={300} label="第五部分的知识脉络">
+  <Box x={20} y={30} w={190} h={56} label="预训练数据" sub="过滤 · 去重 · 配比" tone="info" />
+  <Box x={245} y={30} w={190} h={56} label="优化器" sub="AdamW · WSD · Muon" tone="accent" />
+  <Box x={470} y={30} w={190} h={56} label="训练稳定性" sub="z-loss · QK-Norm · QK-Clip" tone="accent" />
+  <Box x={245} y={130} w={190} h={56} label="混合精度" sub="BF16 · FP8 分块缩放" tone="accent" />
+  <Box x={20} y={230} w={190} h={56} label="缩放定律" sub="Chinchilla · μP" tone="strong" />
+  <Box x={470} y={230} w={190} h={56} label="评估" sub="BPB · pass@k · 污染" tone="info" />
+  <Arrow from={[210, 58]} to={[245, 58]} label="数据" />
+  <Arrow from={[435, 58]} to={[470, 58]} label="更新" />
+  <Arrow from={[340, 86]} to={[340, 130]} />
+  <Arrow from={[115, 86]} to={[115, 230]} tone="muted" dashed label="配比消融" labelSide="right" />
+  <Arrow from={[470, 258]} to={[210, 258]} tone="accent2" dashed label="用小模型的评估外推大模型" labelSide="below" />
+  <Fragment slot="caption">上排是一次训练的“输入—更新—保护”链条，中间的混合精度决定这些计算用多少比特完成。下排是两件贯穿始终的事：缩放定律决定训练的规模与超参数，评估告诉我们结果好不好；它们共同构成“先做小实验、再外推到大模型”的工作方式。</Fragment>
+</Diagram>
+
+## 与前后部分的关系
+
+这一部分建立在前面的基础上。[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中的 $C\approx6ND$ 与“每参数 16 字节”，在优化器、混合精度和缩放定律中反复出现；[浮点数与数值稳定性](/math/numerics/)是混合精度一章的前提；第三部分[训练 GPT：从零训练一个小模型](/transformer/training-gpt/)中的训练循环，是本部分所有实验的起点。所有实验都直接使用全书共用的 GPT（`src/llms_from_scratch/transformer/model.py`），不另写模型。
+
+往后看，本部分刻意回避了一个问题：所有实验都在单个设备上运行。第六部分[分布式训练](/distributed/)讨论怎样把这里的训练扩展到数千张 GPU——你会看到优化器状态的显存（AdamW 的 8 字节/参数）怎样被 ZeRO 切分，Muon 为什么给分布式实现带来额外的麻烦。第七部分[后训练与对齐](/post-training/)接着处理预训练模型：评估一章中的 pass@k 与 LLM 评委的偏差，在强化学习中会再次出现。
+
+## 阅读与动手建议
+
+六章大体可以按顺序读，但彼此相对独立：只关心训练配方的读者可以从优化器读起，对数据工程感兴趣的读者可以单独读第一章。每章都包含完整的推导，例如 MinHash 碰撞概率的 S 曲线、Adam 的偏差修正、Newton–Schulz 迭代的奇异值映射、z-loss 的梯度、FP8 分块缩放的误差下界、Chinchilla 方法 3 的解析解、pass@k 的无偏性；建议对照着手推一遍。
+
+配套代码在 `src/llms_from_scratch/pretraining/`，测试在 `tests/pretraining/`，全部在 CPU 上几秒到几十秒内完成：
+
+```sh
+uv run pytest tests/pretraining
+```
+
+几个值得亲手改动的实验：在 `run_stability_experiment` 中组合不同的对策，观察注意力 logit 的变化；用 `HybridOptimizer` 替换 AdamW 训练共用的 GPT，比较不同学习率；用 `round_to_format` 把任意张量舍入到 FP8，观察离群值的影响；用 `fit_chinchilla` 拟合你自己的小规模训练结果。本部分涉及的 2024—2026 年进展（FineWeb-Edu、DCLM、Muon、MuonClip、DeepSeek-V3/V4 的训练配方）都对照了原始论文与技术报告，每章末尾列出了参考文献。
 
 <ChapterList part="pretraining" />
