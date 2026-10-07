@@ -2,7 +2,282 @@
 title: 位置编码：从正弦到 RoPE
 description: 注意力本身对顺序不敏感；绝对正弦位置编码、可学习位置嵌入，再推导旋转位置编码 RoPE 只依赖相对位置的性质。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/transformer/positional.py
+  - src/llms_from_scratch/transformer/model.py
+  - tests/transformer/test_positional.py
 ---
 
-本章正在撰写。
+上一章结尾提到，注意力不知道 token 的先后顺序。这听起来不可思议——语言的意义高度依赖词序，`狗咬人` 与 `人咬狗` 是两件完全不同的事。本章先严格证明这一点：没有位置信息时，注意力层（乃至整个 Transformer 块）对输入顺序是**置换等变**的。然后依次介绍三种给模型注入位置信息的方法：原始 Transformer 的正弦位置编码、GPT-2 的可学习位置嵌入，以及 LLaMA 以来几乎所有大模型采用的旋转位置编码（Rotary Position Embedding, RoPE）。我们会从“二维旋转”出发推导 RoPE，证明查询与键的内积只依赖相对位置 $m - n$，并用两种方式（实数旋转与复数乘法）实现它，测试二者一致且满足相对性质。
+
+## 注意力对顺序不敏感
+
+设 $P \in \{0, 1\}^{T \times T}$ 是一个置换矩阵（每行每列恰有一个 1），$PX$ 表示把输入 $X$ 的行重新排列。我们说函数 $f$ 是**置换等变**的，如果对任意置换都有 $f(PX) = P f(X)$：打乱输入的顺序，输出只是以同样方式被打乱。
+
+<Definition term="注意力的置换等变性" kind="命题">
+不带掩码、不带位置信息的自注意力 $f(X) = \operatorname{softmax}(XW_Q W_K^\top X^\top / \sqrt{d_k})\, X W_V$ 满足 $f(PX) = P f(X)$。
+</Definition>
+
+**证明。** 输入换成 $PX$ 后，$Q' = PXW_Q = PQ$，同理 $K' = PK$，$V' = PV$。分数矩阵为
+
+$$
+S' = Q' K'^\top / \sqrt{d_k} = P Q K^\top P^\top / \sqrt{d_k} = P S P^\top .
+$$
+
+$PSP^\top$ 是对 $S$ 的行与列做**同一个**重排。逐行 softmax 对行的重排显然等变；对列的重排，每一行内部只是元素换了位置，softmax 的值随之换位置，所以 $\operatorname{softmax}(PSP^\top) = P \operatorname{softmax}(S) P^\top$。于是
+
+$$
+f(PX) = P \operatorname{softmax}(S) P^\top \cdot P V = P \operatorname{softmax}(S) V = P f(X),
+$$
+
+其中用到了置换矩阵的正交性 $P^\top P = I$。$\blacksquare$
+
+Transformer 块中的其他部件——逐 token 的前馈网络、逐 token 的归一化、残差连接——作用于每一行时互不干扰，显然也是等变的。因此整个不带位置信息、不带掩码的 Transformer 都是置换等变的。它的推论是：对任意位置 $t$，输出向量只依赖于“当前 token 是什么”与“上下文中有哪些 token”（一个多重集合），而不依赖于它们的排列。`狗咬人` 中 `咬` 的输出向量与 `人咬狗` 中 `咬` 的输出向量**完全相同**，模型无从区分谁咬了谁。
+
+测试 `test_attention_without_positions_is_permutation_equivariant` 用随机置换核对了这个命题，也核对了加入 RoPE 之后等变性不再成立。
+
+<Callout tone="note" title="因果掩码会泄露位置信息">
+带因果掩码的解码器并不是严格置换等变的：位置 $t$ 只能看到 $t$ 个 token，例如第一个位置的注意力权重必然是 1。Kazemnejad 等人（2023）证明，不加任何位置编码的因果 Transformer（NoPE）在理论上可以从这种“能看到多少个 token”的信息中恢复绝对位置，实验中也能训练出不错的模型。CS336 作业把 NoPE 列为消融实验之一。不过显式的位置编码仍然让学习更容易，几乎所有主流模型都使用它。
+</Callout>
+
+修复方法很直接：让每个 token 的表示依赖于它的位置。问题在于怎样依赖。
+
+## 正弦位置编码
+
+原始 Transformer 给位置 $p$ 构造一个 $d$ 维的向量 $\operatorname{PE}_p$，加到 token 嵌入上：$h_p = e_{x_p} + \operatorname{PE}_p$。向量的第 $2i$ 与 $2i+1$ 维是同一个频率的正弦与余弦：
+
+<KeyEq label="正弦位置编码">
+
+$$
+\operatorname{PE}_{p,\,2i} = \sin(p\,\omega_i), \qquad \operatorname{PE}_{p,\,2i+1} = \cos(p\,\omega_i), \qquad \omega_i = 10000^{-2i/d}.
+$$
+
+</KeyEq>
+
+频率 $\omega_i$ 从 $\omega_0 = 1$（波长 $2\pi \approx 6.3$ 个位置）几何递减到 $\omega_{d/2-1} \approx 1/10000$（波长约 6 万个位置）。可以把它类比成一个用正弦“指针”表示的多位计数器：高频维度像秒针，相邻位置之间差异很大，用来区分近处；低频维度像时针，变化缓慢，用来区分远处。
+
+<Plot label="正弦位置编码在不同频率上的分量" x={[0, 64]} y={[-1.2, 1.2]} xLabel="位置 p" yLabel="PE 分量" height={260} series={[{ fn: (p) => Math.sin(p), label: 'i = 0（ω = 1）' }, { fn: (p) => Math.sin(p * Math.pow(10000, -4 / 64)), label: 'i = 2', tone: 'info' }, { fn: (p) => Math.sin(p * Math.pow(10000, -16 / 64)), label: 'i = 8', tone: 'accent2' }]}>
+  <Fragment slot="caption">d = 64 时第 2i 维 sin(p·ωᵢ) 随位置的变化。i 越大频率越低：i = 0 每约 6 个位置振荡一次，i = 8 在 64 个位置内只走了约四分之一个周期。所有频率合起来给每个位置一个独特的“指纹”。</Fragment>
+</Plot>
+
+**相对位置是一个线性变换。** 正弦编码的一个好性质是：$\operatorname{PE}_{p+k}$ 可以由 $\operatorname{PE}_p$ 经过一个**只依赖 $k$** 的线性变换得到。对第 $i$ 对分量，由和角公式
+
+$$
+\begin{bmatrix} \sin((p+k)\omega_i) \\ \cos((p+k)\omega_i) \end{bmatrix}
+=
+\begin{bmatrix} \cos(k\omega_i) & \sin(k\omega_i) \\ -\sin(k\omega_i) & \cos(k\omega_i) \end{bmatrix}
+\begin{bmatrix} \sin(p\omega_i) \\ \cos(p\omega_i) \end{bmatrix}.
+$$
+
+右边的 $2\times 2$ 矩阵是一个旋转，与 $p$ 无关。把 $d/2$ 个这样的块排成块对角矩阵 $R_k$，就有 $\operatorname{PE}_{p+k} = R_k \operatorname{PE}_p$。Vaswani 等人据此推测，模型可以通过学习这样的线性变换来关注相对位置。测试在 $p = 0, 7, 30$、$k = 5$ 上核对了这个恒等式。
+
+<CodeFile path="src/llms_from_scratch/transformer/positional.py" region="sinusoidal" />
+
+**加法编码的问题。** 尽管 $\operatorname{PE}$ 本身有相对性质，它是**加**在内容上的。查询与键的点积展开为四项：
+
+$$
+(e_m + \operatorname{PE}_m) W_Q W_K^\top (e_n + \operatorname{PE}_n)^\top
+= \underbrace{e_m A e_n^\top}_{\text{内容-内容}} + \underbrace{e_m A \operatorname{PE}_n^\top + \operatorname{PE}_m A e_n^\top}_{\text{内容-位置}} + \underbrace{\operatorname{PE}_m A \operatorname{PE}_n^\top}_{\text{位置-位置}},
+$$
+
+其中 $A = W_Q W_K^\top$。只有最后一项有机会只依赖 $m - n$，前三项把内容与绝对位置纠缠在一起，模型需要自己学会把它们分开。此外，位置信息只在输入层注入一次，经过几十层残差更新后是否还清晰可辨，也没有保证。
+
+## 可学习的位置嵌入
+
+GPT-2 与 BERT 采用了更简单的做法：位置嵌入也是一张可学习的表 $P \in \mathbb R^{T_{\max} \times d}$，与 token 嵌入相加，即 `nn.Embedding(context_length, d_model)`。它让模型自己决定位置该如何表示，在训练长度以内效果与正弦编码相当。
+
+它的局限也很明显：表的行数固定为训练时的最大长度（GPT-2 是 1024），超出的位置没有对应的向量，模型无法处理更长的输入；即使在表内，训练中较少出现的靠后位置也学得较差。它同样是加法式的绝对编码，存在上面所说的内容与位置纠缠的问题。
+
+我们真正想要的性质是：**查询与键的打分只依赖它们的内容与相对距离**，而且这个性质在每一层都成立。RoPE 正是按照这个目标构造出来的。
+
+## RoPE：用旋转编码位置
+
+### 从二维开始
+
+先考虑查询与键都是二维向量的情形。我们希望找到一个依赖位置的变换 $f(\cdot, m)$，使得
+
+$$
+\langle f(q, m),\, f(k, n) \rangle = g(q, k, m - n),
+$$
+
+即变换后的内积只依赖内容与相对位置。旋转恰好满足这个要求。令 $R(\phi)$ 为逆时针旋转 $\phi$ 角的矩阵，取 $f(q, m) = R(m\theta)\, q$。旋转矩阵满足 $R(\alpha)^\top = R(-\alpha)$ 与 $R(\alpha) R(\beta) = R(\alpha + \beta)$，于是
+
+$$
+\langle R(m\theta) q,\, R(n\theta) k \rangle = q^\top R(m\theta)^\top R(n\theta)\, k = q^\top R\big((n - m)\theta\big)\, k .
+$$
+
+结果只依赖 $n - m$。几何上看更直观：旋转不改变向量的长度，两个向量各自旋转 $m\theta$ 与 $n\theta$ 之后，它们之间的夹角只改变了 $(n - m)\theta$，而内积由长度与夹角决定。
+
+<Diagram width={720} height={260} label="RoPE 的二维几何：查询与键按各自位置旋转，夹角只取决于相对位置">
+  <Region x={20} y={10} w={330} h={240} title="位置 m = 1, n = 3" />
+  <Region x={370} y={10} w={330} h={240} title="位置 m = 4, n = 6（整体平移 3）" />
+  <Arrow from={[90, 200]} to={[300, 200]} tone="ghost" head="none" />
+  <Arrow from={[90, 200]} to={[90, 50]} tone="ghost" head="none" />
+  <Arrow from={[90, 200]} to={[230, 140]} tone="accent" width={2.2} label="q 旋转 1·θ" labelSide="below" />
+  <Arrow from={[90, 200]} to={[150, 70]} tone="info" width={2.2} label="k 旋转 3·θ" labelSide="left" />
+  <Text x={175} y={150} label="夹角 2θ" size="sm" tone="accent2" />
+  <Arrow from={[440, 200]} to={[650, 200]} tone="ghost" head="none" />
+  <Arrow from={[440, 200]} to={[440, 50]} tone="ghost" head="none" />
+  <Arrow from={[440, 200]} to={[530, 80]} tone="accent" width={2.2} label="q 旋转 4·θ" labelSide="right" />
+  <Arrow from={[440, 200]} to={[420, 60]} tone="info" width={2.2} label="k 旋转 6·θ" labelSide="left" />
+  <Text x={480} y={120} label="夹角 2θ" size="sm" tone="accent2" />
+  <Fragment slot="caption">同一对查询与键放在不同的绝对位置上，各自的方向变了，但两者之间的夹角始终是 (n − m)θ，长度不变，因此内积不变。这就是“打分只依赖相对位置”。</Fragment>
+</Diagram>
+
+### 复数形式
+
+二维旋转等价于复数乘法。把 $q = (q_1, q_2)$ 看作复数 $z_q = q_1 + \mathrm i q_2$，旋转 $\phi$ 角就是乘以 $e^{\mathrm i\phi}$。两个二维向量的内积等于 $\operatorname{Re}(z_q \overline{z_k})$。于是
+
+$$
+\langle f(q, m), f(k, n) \rangle = \operatorname{Re}\!\left( z_q e^{\mathrm i m\theta}\, \overline{z_k e^{\mathrm i n\theta}} \right) = \operatorname{Re}\!\left( z_q \overline{z_k}\, e^{\mathrm i (m - n)\theta} \right),
+$$
+
+同样只依赖 $m - n$。复数形式也给出了最简洁的实现：把向量的相邻两维视为一个复数，乘以预先算好的 $e^{\mathrm i m\theta}$ 即可。
+
+### 推广到 d 维
+
+把 $d_h$ 维的查询（或键）分成 $d_h/2$ 对，第 $i$ 对用自己的频率 $\theta_i$ 旋转，频率的取法与正弦编码相同：
+
+$$
+\theta_i = \Theta^{-2i/d_h}, \qquad i = 0, 1, \dots, d_h/2 - 1, \qquad \Theta = 10000 .
+$$
+
+位置 $m$ 的变换是块对角矩阵 $R_m = \operatorname{diag}\big(R(m\theta_0), \dots, R(m\theta_{d_h/2-1})\big)$。由于各块独立，内积是各对内积之和，每一对都只依赖 $m - n$，所以总和也只依赖 $m - n$：
+
+<KeyEq label="RoPE 的相对位置性质">
+
+$$
+\langle R_m q,\, R_n k \rangle = q^\top R_{n-m}\, k = \sum_{i=0}^{d_h/2-1} \operatorname{Re}\!\left( z_{q,i}\, \overline{z_{k,i}}\, e^{\mathrm i (m-n)\theta_i} \right)
+$$
+
+</KeyEq>
+
+与加法编码相比，RoPE 有三个关键区别。第一，它是**乘性**的，作用于每一层注意力的 $Q$ 与 $K$（在投影之后），而不是只在输入层加一次；位置信息在每一层都以同样清晰的方式参与打分。第二，它**只作用于 $Q$ 与 $K$**，不作用于 $V$：位置只影响“看哪里”，不改变“读到什么”。第三，旋转保持范数（测试中位置 123 处旋转前后的范数相同），不会改变查询与键的尺度，上一章关于 $1/\sqrt{d_k}$ 的方差论证依然成立。
+
+### 频率与远程衰减
+
+不同的对有不同的“转速”。第 $i$ 对旋转一整圈需要 $2\pi/\theta_i$ 个位置，即波长：
+
+<Plot label="RoPE 各维度对的波长（d_h = 128，Θ = 10000）" x={[0, 63]} y={[1, 100000]} logY xLabel="维度对编号 i" yLabel="波长 / 位置数（对数刻度）" height={250} series={[{ fn: (i) => 2 * Math.PI * Math.pow(10000, (2 * i) / 128), label: 'Θ = 10000' }, { fn: (i) => 2 * Math.PI * Math.pow(500000, (2 * i) / 128), label: 'Θ = 500000（LLaMA 3）', tone: 'accent2', dashed: true }]}>
+  <Fragment slot="caption">波长随 i 几何增长：最快的一对每 6 个位置转一圈，最慢的一对在 Θ = 10000 时要约 5 万个位置。LLaMA 3 把 Θ 提高到 500000，让低频对转得更慢，为更长的上下文留出余地；长上下文的外推方法（位置插值、NTK、YaRN）都在调整这些频率。</Fragment>
+</Plot>
+
+高频对对相对距离非常敏感，相差几个位置就转过很大角度，适合表达精确的局部关系；低频对在很长的距离上几乎不转，接近“没有位置编码”，适合传递语义内容。Su 等人还指出 RoPE 具有某种**远程衰减**：若 $q$ 与 $k$ 在各对上同向，打分 $\sum_i \cos((m - n)\theta_i)$ 随着距离 $|m - n|$ 增大而整体变小（各对的余弦逐渐失去相位一致性）。
+
+<Plot label="同向查询与键在 RoPE 下的打分随相对距离的变化" x={[0, 400]} y={[-0.2, 1]} xLabel="相对距离 |m − n|" yLabel="平均 cos((m−n)θᵢ)" height={240} series={[{ fn: (t) => { let s = 0; for (let i = 0; i < 64; i++) s += Math.cos(t * Math.pow(10000, -i / 64)); return s / 64 }, label: 'd_h = 128，Θ = 10000' }]}>
+  <Fragment slot="caption">q = k 且每对分量相同时，归一化的内积就是 64 个余弦的平均。距离为 0 时为 1；随着距离增大，高频对迅速失去一致性，整体呈下降趋势并伴随振荡。这是一种归纳偏置：在其他条件相同时，近处的 token 得分更高。</Fragment>
+</Plot>
+
+这条衰减只在特定条件下成立，并不是一个对任意 $q, k$ 都有效的定理，模型完全可以学到关注远处 token 的查询与键。它只是说明 RoPE 的默认几何偏向局部。
+
+## 实现 RoPE
+
+### 实数旋转
+
+最直接的实现照搬定义：取出每对的两个分量 $x_{2i}, x_{2i+1}$，按角度 $m\theta_i$ 做二维旋转
+
+$$
+\begin{bmatrix} x'_{2i} \\ x'_{2i+1} \end{bmatrix} = \begin{bmatrix} \cos m\theta_i & -\sin m\theta_i \\ \sin m\theta_i & \cos m\theta_i \end{bmatrix} \begin{bmatrix} x_{2i} \\ x_{2i+1} \end{bmatrix}.
+$$
+
+用切片 `x[..., 0::2]` 与 `x[..., 1::2]` 一次取出所有对的第一、第二个分量，整个旋转是逐元素运算：
+
+<CodeFile path="src/llms_from_scratch/transformer/positional.py" region="rope" />
+
+旋转在 float32 中进行。角度 $m\theta_i$ 在长序列中可以达到数万，低精度（BF16 只有 8 位有效数字）下 $\cos$ 与 $\sin$ 的误差会显著放大，所以无论模型以什么精度运行，RoPE 的角度与旋转都应在 float32 中计算。
+
+### 复数乘法
+
+全书共用的 `model.py` 采用复数形式：预先计算形状为 `[T, d_h/2]` 的复数旋转因子 $e^{\mathrm i m\theta_i}$，前向时把 `[..., T, d_h]` 的张量重解释为 `[..., T, d_h/2]` 的复数张量，乘以旋转因子再转回实数：
+
+<CodeFile path="src/llms_from_scratch/transformer/model.py" symbol={["rope_frequencies", "apply_rope"]} />
+
+`torch.view_as_complex` 要求最后一维大小为 2 且连续，`reshape(*x.shape[:-1], -1, 2)` 恰好把相邻的两维配成一对，与实数版本的配对方式相同。旋转因子在模型构造时算好，注册为非持久的 buffer（不进入 `state_dict`），前向时按 `start_pos` 切出需要的那一段——生成时第 $t$ 个新 token 的位置是缓存长度加 $t$，这一点在 [KV Cache](/transformer/generation/) 中很关键。
+
+### 两种维度布局
+
+RoPE 的“配对”方式有两种流行的约定。原论文与 LLaMA 的官方实现使用**交错**布局，第 $i$ 对是 $(x_{2i}, x_{2i+1})$；GPT-NeoX 与 Hugging Face Transformers 中的多数模型使用**前后两半**布局，第 $i$ 对是 $(x_i, x_{i + d_h/2})$，实现上常写成 `rotate_half`：
+
+<CodeFile path="src/llms_from_scratch/transformer/positional.py" symbol="rope_rotate_half" />
+
+两者在数学上等价：只差一个固定的维度置换，而 $W_Q$、$W_K$ 的输出维度可以任意重排，所以用哪种布局训练出的模型都一样好。但在**加载别人的权重**时，布局必须一致：Hugging Face 转换 LLaMA 原始权重时，正是对 $W_Q$、$W_K$ 的行做了这个置换。测试 `test_rotate_half_layout_is_a_permutation` 核对了二者只差这个置换。
+
+### 验证
+
+三个测试锁定了 RoPE 的性质。实数版本与 `model.apply_rope` 在随机输入上一致；旋转保持范数；相对性质——对随机的 $q, k$，把两者的位置同时平移 1、17、300，内积不变：
+
+<CodeFile path="tests/transformer/test_positional.py" symbol="test_rope_preserves_norm_and_is_relative" />
+
+这个测试直接检验了 RoPE 的设计目标，比核对中间数值更有说服力：如果把频率公式写错（例如漏了负号），范数和一致性测试或许仍能通过，但相对性质测试会立刻失败；如果误把 RoPE 也作用到 $V$ 上，注意力输出就会依赖绝对位置。
+
+## 其他方案与本书的选择
+
+位置编码的设计空间远不止本章三种。T5 使用**相对位置偏置**：给每个相对距离（分桶后）学一个标量，直接加到注意力分数上。ALiBi（Press 等，2022）更简单，给分数加上与距离成正比的负偏置 $-\lambda_h |m - n|$，每个头的斜率 $\lambda_h$ 固定，不需要任何参数，并且外推到更长序列时表现良好。RoPE 之所以成为主流（LLaMA、Qwen、DeepSeek、Mistral 等都使用它），在于它既把位置注入每一层的打分、只依赖相对距离，又不需要修改注意力的计算形式——旋转在投影之后完成，FlashAttention 等融合实现可以直接使用。
+
+RoPE 也有自己的问题：训练时没见过的远距离对应着没见过的旋转角，直接用于比训练长度更长的序列时效果会崩溃。如何把 RoPE 模型扩展到更长的上下文——位置插值、NTK 感知缩放、YaRN，以及近年部分层不用 RoPE 的混合设计——是第四部分[长上下文](/architecture/long-context/)一章的主题；DeepSeek 的 MLA 为了与低秩压缩兼容而设计的“解耦 RoPE”，则在[注意力变体](/architecture/attention-variants/)中介绍。
+
+## 小结
+
+- 没有位置信息时，自注意力满足 $f(PX) = Pf(X)$，整个 Transformer 只把上下文当作多重集合。因果掩码会泄露一些位置信息，但显式的位置编码让学习更容易。
+- 正弦位置编码用几何级数频率的正弦与余弦表示位置，$\operatorname{PE}_{p+k} = R_k \operatorname{PE}_p$；可学习位置嵌入更灵活但无法超出表长。二者都是加在输入上的绝对编码，打分中内容与位置纠缠。
+- RoPE 把查询与键的每一对坐标按 $m\theta_i$ 旋转，$\langle R_m q, R_n k \rangle = q^\top R_{n-m} k$ 只依赖相对位置；它乘性地作用于每一层的 $Q$、$K$，不作用于 $V$，保持范数。
+- 实现上可用实数旋转或复数乘法，角度在 float32 中计算；交错与前后两半两种布局只差一个维度置换，加载权重时必须一致。
+
+有了注意力和位置信息，我们还缺少把它们堆叠成深层网络的结构。下一章讨论[Transformer 块](/transformer/transformer-block/)：残差、归一化与前馈网络。
+
+## 练习
+
+1. 证明逐行 softmax 满足 $\operatorname{softmax}(PSP^\top) = P\operatorname{softmax}(S)P^\top$，并说明为什么加入因果掩码后 $f(PX) = Pf(X)$ 一般不再成立。
+
+<details>
+<summary>答案</summary>
+
+设置换 $\pi$ 满足 $(PX)_t = X_{\pi(t)}$，则 $(PSP^\top)_{ts} = S_{\pi(t)\pi(s)}$。第 $t$ 行 softmax 后的第 $s$ 个元素是 $e^{S_{\pi(t)\pi(s)}} / \sum_{s'} e^{S_{\pi(t)\pi(s')}}$；由于 $\pi$ 是双射，分母等于 $\sum_{u} e^{S_{\pi(t)u}}$，于是该元素等于 $\operatorname{softmax}(S)_{\pi(t)\pi(s)} = (P\operatorname{softmax}(S)P^\top)_{ts}$。加入因果掩码后分数变为 $S + M$，置换后的输入对应 $PSP^\top + M$，而等变性需要的是 $P(S + M)P^\top = PSP^\top + PMP^\top$；除非 $\pi$ 是恒等置换，$PMP^\top \ne M$（下三角结构被打乱），所以等变性不成立。
+
+</details>
+
+2. 对正弦编码，计算 $\operatorname{PE}_p \cdot \operatorname{PE}_{p+k}$，说明它只依赖 $k$。
+
+<details>
+<summary>答案</summary>
+
+$\operatorname{PE}_p \cdot \operatorname{PE}_{p+k} = \sum_i \big[\sin(p\omega_i)\sin((p+k)\omega_i) + \cos(p\omega_i)\cos((p+k)\omega_i)\big] = \sum_i \cos(k\omega_i)$，由余弦差角公式得到，与 $p$ 无关。这说明位置向量之间的相似度只依赖距离；但在加法编码中，打分还包含内容与位置的交叉项，这个性质无法直接传递给注意力分数。
+
+</details>
+
+3. 设 $d_h = 2$、$\theta = \pi/6$，$q = (1, 0)$、$k = (0, 1)$。计算 $m = 1, n = 2$ 与 $m = 5, n = 6$ 时 RoPE 后的内积，验证它们相等。
+
+<details>
+<summary>答案</summary>
+
+由 $\langle R_m q, R_n k\rangle = q^\top R_{n-m} k$，两种情形都有 $n - m = 1$。$R(\pi/6) k = (-\sin\frac{\pi}{6}, \cos\frac{\pi}{6}) = (-0.5, 0.866)$，与 $q = (1, 0)$ 的内积为 $-0.5$。直接计算 $m=1,n=2$：$R(\pi/6)q = (0.866, 0.5)$，$R(\pi/3)k = (-0.866, 0.5)$，内积 $-0.75 + 0.25 = -0.5$。$m=5, n=6$：$R(5\pi/6)q = (-0.866, 0.5)$，$R(\pi)k = (0, -1)$，内积 $-0.5$。两者相等。
+
+</details>
+
+4. 如果把 RoPE 也作用到 $V$ 上，输出会怎样依赖位置？为什么这是不希望的？
+
+<details>
+<summary>答案</summary>
+
+输出 $o_t = \sum_s \alpha_{ts} R_s v_s$，每个值向量按它**自己的绝对位置** $s$ 旋转，汇总后的向量编码了被读取 token 的绝对位置，而且同样的内容出现在不同位置会读出不同的向量。后续层看到的内容表示因此与绝对位置纠缠，破坏了“相对位置只影响看哪里”的设计。（也有工作研究对输出再做逆旋转 $R_t^{-1}$ 以得到相对的值编码，但主流模型不这样做。）
+
+</details>
+
+5. LLaMA 3 把 $\Theta$ 从 10000 提高到 500000。对 $d_h = 128$，最低频一对的波长变为多少？这对长上下文有什么好处？
+
+<details>
+<summary>答案</summary>
+
+最低频一对 $i = 63$，$\theta_{63} = \Theta^{-126/128}$，波长 $2\pi\,\Theta^{126/128}$。$\Theta = 10000$ 时约 $2\pi \times 8660 \approx 5.4 \times 10^4$；$\Theta = 500000$ 时约 $2\pi \times 4.0 \times 10^5 \approx 2.5 \times 10^6$。更慢的转速使得在几万甚至几十万 token 的距离内，低频对的旋转角仍然较小、不会绕回，模型在长距离上不会遇到“相位混叠”（不同距离对应相同角度），也更少遇到训练中没见过的角度组合。
+
+</details>
+
+## 参考文献
+
+- Ashish Vaswani et al. [Attention Is All You Need](https://arxiv.org/abs/1706.03762). NeurIPS 2017.（正弦位置编码）
+- Jianlin Su et al. [RoFormer: Enhanced Transformer with Rotary Position Embedding](https://arxiv.org/abs/2104.09864). 2021；苏剑林. [Transformer 升级之路：2、博采众长的旋转式位置编码](https://kexue.fm/archives/8265).
+- Amirhossein Kazemnejad et al. [The Impact of Positional Encoding on Length Generalization in Transformers](https://arxiv.org/abs/2305.19466). NeurIPS 2023.（NoPE）
+- Ofir Press, Noah Smith, Mike Lewis. [Train Short, Test Long: Attention with Linear Biases Enables Input Length Extrapolation](https://arxiv.org/abs/2108.12409). ICLR 2022.（ALiBi）
+- Colin Raffel et al. [Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer](https://arxiv.org/abs/1910.10683). JMLR 2020.（T5 相对位置偏置）
+- Meta. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783). 2024.（RoPE base 500000）
+- EleutherAI. [Rotary Embeddings: A Relative Revolution](https://blog.eleuther.ai/rotary-embeddings/). 2021.（GPT-NeoX 的 rotate_half 布局）

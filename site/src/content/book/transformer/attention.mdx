@@ -2,7 +2,298 @@
 title: 注意力机制
 description: 从“按相关性加权平均”的直觉出发推导缩放点积注意力，解释为什么要除以 √d，并实现单头因果自注意力。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/transformer/attention.py
+  - tests/transformer/test_attention.py
 ---
 
-本章正在撰写。
+上一章把文本变成了 token 序列 $x_1, \dots, x_T$，嵌入表又把每个 token 变成一个 $d$ 维向量。语言模型要做的是：在位置 $t$，根据前缀 $x_{\le t}$ 预测 $x_{t+1}$ 的分布。[第一个神经语言模型](/pytorch/first-language-model/)里的 bigram 只看前一个 token，Bengio 式 MLP 看固定的前 $k$ 个 token。本章先分析这种“固定窗口”的根本局限，再从“按相关性加权平均”这个直觉出发，一步步推导出 Transformer 的核心运算——缩放点积注意力（scaled dot-product attention），解释其中每个设计（点积、softmax、除以 $\sqrt d$、因果掩码）的来由，最后实现一个单头因果自注意力层，并与 PyTorch 的官方实现逐元素核对。
+
+先修知识：矩阵乘法与形状规则（[向量、矩阵与张量](/math/vectors-matrices/)）、softmax 与交叉熵（[概率、最大似然与交叉熵](/math/probability/)）、方差的基本性质。
+
+## 固定窗口模型的局限
+
+回顾 MLP 语言模型：把前 $k$ 个 token 的嵌入拼接成一个 $kd$ 维向量，送入隐藏层，再输出下一个 token 的 logits。它有三个结构性的问题。
+
+**上下文长度是硬上限。** 窗口外的信息完全不可见。故事开头说“小女孩叫 Lily”，二十个词之后需要再次写出她的名字时，窗口为 8 的模型无从知道。把 $k$ 加大可以缓解，但下一个问题随之恶化。
+
+**参数随窗口线性增长，且不在位置之间共享。** 第一层权重的形状是 $kd \times d_{\text{hidden}}$，位置 1 与位置 5 的嵌入乘以完全不同的权重块。模型在位置 3 学到的“名词后面常接动词”，不能自动迁移到位置 7，每个位置都要从数据中重新学一遍。
+
+**组合方式与内容无关。** 不论上下文是什么，第 $i$ 个位置的信息总是以同一组权重混入。但哪些前文有用，恰恰取决于当前要预测什么：预测代词时需要找到前文的主语，预测引号的闭合需要找到开引号，这些位置的距离每次都不同。
+
+循环神经网络（RNN）用一个不断更新的隐藏状态处理任意长的序列，解决了前两个问题，但它把整个前缀压缩进一个固定大小的向量，远处的信息要经过许多步的非线性变换才能到达当前位置，梯度也随之衰减；而且第 $t$ 步必须等第 $t-1$ 步算完，无法在序列维度上并行。注意力机制同时解决了这四个问题：每个位置可以**直接**读取前文任何位置的信息，读取的权重由**内容决定**，参数与序列长度无关，所有位置可以**并行**计算。
+
+<Diagram width={720} height={230} label="固定窗口 MLP 与注意力读取上下文的方式">
+  <Region x={10} y={10} w={340} h={210} title="固定窗口（k = 3）" />
+  <Region x={370} y={10} w={340} h={210} title="注意力" />
+  <Matrix x={30} y={50} rows={1} cols={7} cell={[38, 34]} values={[["x₁", "x₂", "x₃", "x₄", "x₅", "x₆", "x₇"]]} highlight={[{ cells: [[0, 0], [0, 1], [0, 2], [0, 3]], tone: 'muted' }, { cells: [[0, 4], [0, 5], [0, 6]], tone: 'info' }]} />
+  <Box x={150} y={130} w={150} h={50} label="拼接 → MLP" tone="info" />
+  <Arrow from={[200, 84]} to={[200, 130]} />
+  <Arrow from={[240, 84]} to={[240, 130]} />
+  <Arrow from={[280, 84]} to={[260, 130]} />
+  <Text x={90} y={110} label="窗口外不可见" size="sm" tone="muted" />
+  <Matrix x={390} y={50} rows={1} cols={7} cell={[38, 34]} values={[["x₁", "x₂", "x₃", "x₄", "x₅", "x₆", "x₇"]]} highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
+  <Box x={560} y={150} w={130} h={46} label="加权平均" tone="accent" />
+  <Arrow from={[409, 84]} to={[575, 150]} tone="accent" width={3} />
+  <Arrow from={[447, 84]} to={[590, 150]} tone="muted" width={1} />
+  <Arrow from={[485, 84]} to={[605, 150]} tone="muted" width={1} />
+  <Arrow from={[523, 84]} to={[620, 150]} tone="accent" width={2.2} />
+  <Arrow from={[561, 84]} to={[635, 150]} tone="muted" width={1} />
+  <Arrow from={[599, 84]} to={[650, 150]} tone="muted" width={1} />
+  <Arrow from={[637, 84]} to={[665, 150]} tone="muted" width={1.4} />
+  <Fragment slot="caption">左：MLP 只能看到窗口内的三个 token，且每个位置乘以固定的权重。右：注意力让当前位置 x₇ 与全部前文直接相连，连线粗细表示由内容决定的权重——这里 x₁ 与 x₄ 最相关。</Fragment>
+</Diagram>
+
+## 按相关性加权平均
+
+设想要预测 `Lily went to the park. Then ___` 的下一个词。一个合理的策略是：在前文中找出与“当前需要什么”相关的位置，把它们的信息汇总过来。最简单的“汇总”是加权平均：
+
+$$
+o_t = \sum_{s \le t} \alpha_{ts} \, v_s, \qquad \alpha_{ts} \ge 0, \quad \sum_{s \le t} \alpha_{ts} = 1,
+$$
+
+其中 $v_s$ 是位置 $s$ 提供的信息，$\alpha_{ts}$ 是位置 $t$ 分配给位置 $s$ 的权重。如果 $\alpha$ 是均匀的，$o_t$ 就是前缀的平均——一个“词袋”摘要，丢失了所有选择性。注意力的要点在于：**权重由内容计算**，当前位置“想找的东西”与某个前文位置“能提供的东西”越匹配，权重越大。
+
+这正是一次“软”的字典查找。普通字典用查询（query）精确匹配某个键（key），返回对应的值（value）。注意力把每个位置都同时当作键值对存入字典，用当前位置的查询与**所有**键计算相似度，再按相似度对**所有**值加权求和。相似度最高的键贡献最大，但其他键也有贡献，整个过程对参数可微。
+
+一个 token 向量要同时扮演三种角色，而三种角色需要的信息并不相同：作为查询，它表达“我在找什么”（例如“我需要一个主语”）；作为键，它表达“我能被什么样的查询找到”（例如“我是一个人名”）；作为值，它表达“被找到后我提供什么”（例如名字本身的内容）。因此我们用三个可学习的线性映射从同一个输入得到三种向量。把位置 $t$ 的输入记作行向量 $x_t \in \mathbb R^{d}$：
+
+$$
+q_t = x_t W_Q, \qquad k_t = x_t W_K, \qquad v_t = x_t W_V, \qquad W_Q, W_K \in \mathbb R^{d \times d_k},\; W_V \in \mathbb R^{d \times d_v}.
+$$
+
+这里采用论文中“行向量右乘矩阵”的写法，与 `nn.Linear` 的计算 $y = x W^\top$ 相比，只是把 `nn.Linear.weight` 转置后记作 $W$。
+
+## 点积打分与 softmax
+
+相似度用什么函数？最简单而高效的选择是点积 $q_t \cdot k_s = q_t k_s^\top$：两个向量方向越一致，点积越大。把它叫作**分数**（score）。分数可以是任意实数，要变成满足“非负、和为一”的权重，用 softmax：
+
+$$
+\alpha_{ts} = \frac{\exp(q_t k_s^\top / \tau)}{\sum_{s'} \exp(q_t k_{s'}^\top / \tau)},
+$$
+
+其中 $\tau > 0$ 是一个温度，下一节会说明它应取 $\sqrt{d_k}$。softmax 是 argmax 的光滑版本：分数最大的位置得到最大的权重，但其他位置的权重不为零，梯度可以流向所有位置。
+
+把所有位置排成矩阵，整个计算就是两次矩阵乘法。令 $X \in \mathbb R^{T \times d}$ 的第 $t$ 行是 $x_t$，则 $Q = X W_Q \in \mathbb R^{T \times d_k}$，$K = X W_K$，$V = X W_V$，所有位置对的分数是 $S = Q K^\top \in \mathbb R^{T \times T}$，其中 $S_{ts} = q_t k_s^\top$。对每一行做 softmax，再乘以 $V$：
+
+<KeyEq label="缩放点积注意力">
+
+$$
+\operatorname{Attention}(Q, K, V) = \operatorname{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_k}} + M\right) V
+$$
+
+</KeyEq>
+
+$M$ 是掩码矩阵，允许的位置为 $0$，禁止的位置为 $-\infty$（下一节解释）。softmax 沿最后一维（键的维度）进行，输出的第 $t$ 行就是 $o_t = \sum_s \alpha_{ts} v_s$。
+
+<Diagram width={720} height={250} label="单头注意力的数据流与张量形状">
+  <Box x={10} y={100} w={90} h={50} label="X" sub="(T, d)" />
+  <Box x={150} y={30} w={90} h={46} label="Q = XW_Q" sub="(T, dₖ)" tone="accent" size="sm" />
+  <Box x={150} y={102} w={90} h={46} label="K = XW_K" sub="(T, dₖ)" tone="accent" size="sm" />
+  <Box x={150} y={174} w={90} h={46} label="V = XW_V" sub="(T, dᵥ)" tone="info" size="sm" />
+  <Box x={290} y={60} w={110} h={50} label="QKᵀ / √dₖ" sub="(T, T)" tone="accent" size="sm" />
+  <Box x={440} y={60} w={110} h={50} label="+ M, softmax" sub="(T, T)" tone="accent" size="sm" />
+  <Box x={590} y={120} w={120} h={56} label="输出 AV" sub="(T, dᵥ)" tone="strong" />
+  <Arrow from={[100, 125]} via={[[125, 125], [125, 53]]} to={[150, 53]} />
+  <Arrow from={[100, 125]} to={[150, 125]} />
+  <Arrow from={[100, 125]} via={[[125, 125], [125, 197]]} to={[150, 197]} />
+  <Arrow from={[240, 53]} via={[[265, 53], [265, 85]]} to={[290, 85]} />
+  <Arrow from={[240, 125]} via={[[265, 125], [265, 85]]} to={[290, 85]} />
+  <Arrow from={[400, 85]} to={[440, 85]} />
+  <Arrow from={[550, 85]} via={[[650, 85]]} to={[650, 120]} label="权重 A" labelSide="above" />
+  <Arrow from={[240, 197]} via={[[650, 197]]} to={[650, 176]} tone="info" label="值" labelSide="below" />
+  <Fragment slot="caption">同一个输入 X 经过三个线性映射得到查询、键、值。查询与键决定 T × T 的权重矩阵 A（“看哪里”），值决定读到什么内容（“读什么”）。两条通路在最后一次矩阵乘法中汇合。</Fragment>
+</Diagram>
+
+注意两条通路的分工：$Q$ 与 $K$ 只用于计算权重，$V$ 只用于提供内容。查询与键必须在同一个空间里比较，所以它们的维度相同（$d_k$）；值的维度 $d_v$ 可以不同，实践中通常取 $d_k = d_v$。
+
+## 为什么除以 √d
+
+公式里的 $1/\sqrt{d_k}$ 不是装饰。没有它，维度一大，softmax 就会饱和，训练几乎停滞。
+
+**方差论证。** 假设在初始化附近，查询与键的各个分量独立，均值为 0、方差为 1（这正是良好初始化与归一化要维持的状态）。点积 $q \cdot k = \sum_{i=1}^{d_k} q_i k_i$ 是 $d_k$ 项之和。每一项的均值为 $\mathbb E[q_i k_i] = \mathbb E[q_i]\mathbb E[k_i] = 0$，方差为
+
+$$
+\operatorname{Var}(q_i k_i) = \mathbb E[q_i^2 k_i^2] - (\mathbb E[q_i k_i])^2 = \mathbb E[q_i^2]\,\mathbb E[k_i^2] - 0 = 1 .
+$$
+
+各项相互独立，方差相加：$\operatorname{Var}(q \cdot k) = d_k$，标准差为 $\sqrt{d_k}$。因此除以 $\sqrt{d_k}$ 后，分数的方差回到 1，与维度无关：
+
+$$
+\operatorname{Var}\!\left(\frac{q \cdot k}{\sqrt{d_k}}\right) = \frac{d_k}{d_k} = 1 .
+$$
+
+**为什么分数的尺度重要。** softmax 对输入的整体尺度极其敏感。若分数的标准差是 32（$d_k = 1024$ 时的未缩放情形），一行 16 个分数中最大值通常比次大值高出十几甚至几十，$e^{20}$ 的差距让 softmax 几乎变成 one-hot。我们在 $T = 16$ 个键、各分量取标准正态的设定下实测了最大权重的平均值：
+
+| $d_k$ | 未缩放分数的标准差 | 未缩放时最大权重 | 缩放后最大权重 |
+| --- | --- | --- | --- |
+| 16 | 4.0 | 0.69 | 0.25 |
+| 64 | 8.0 | 0.84 | 0.25 |
+| 256 | 15.9 | 0.93 | 0.25 |
+| 1024 | 31.9 | 0.96 | 0.25 |
+
+缩放后，最大权重稳定在 0.25 左右，与维度无关；不缩放时，维度越大权重越接近 one-hot。
+
+**饱和为什么有害。** 设 $p = \operatorname{softmax}(z)$，它对输入的雅可比矩阵是（推导见[反向传播](/math/backprop/)）
+
+$$
+\frac{\partial p}{\partial z} = \operatorname{diag}(p) - p p^\top, \qquad \frac{\partial p_i}{\partial z_j} = p_i(\delta_{ij} - p_j).
+$$
+
+当 $p$ 接近 one-hot（某个 $p_i \approx 1$，其余 $\approx 0$）时，每一项 $p_i(\delta_{ij} - p_j)$ 都接近 0：对 $i$ 是最大者，$p_i(1 - p_i) \approx 0$；对其他 $i$，$p_i \approx 0$。梯度几乎无法穿过 softmax 传回 $Q$ 与 $K$，模型学不会“该看哪里”。除以 $\sqrt{d_k}$ 让训练初期的注意力保持在一个较平滑、梯度健康的区域。
+
+<Plot label="不同维度下 softmax 的最大权重" x={[16, 1024]} y={[0, 1]} logX xLabel="键的维度 dₖ（对数刻度）" yLabel="最大注意力权重" height={260} series={[{ points: [[16, 0.69], [64, 0.844], [256, 0.925], [1024, 0.959]], label: '未缩放 QKᵀ' }, { points: [[16, 0.246], [64, 0.245], [256, 0.246], [1024, 0.246]], label: '除以 √dₖ', tone: 'info' }]}>
+  <Fragment slot="caption">16 个随机键时一行权重的最大值（2000 次采样的平均）。均匀分布对应 1/16 ≈ 0.06，one-hot 对应 1。缩放后的曲线是水平线：分数的统计性质与维度无关。</Fragment>
+</Plot>
+
+测试 `test_scaling_keeps_score_variance_near_one` 用 4000 对 256 维随机向量核对了方差论证：未缩放点积的方差约为 256，缩放后约为 1。这个论证只在初始化附近严格成立，训练后 $q$ 与 $k$ 的分量既不独立也不再是单位方差。大模型训练中注意力 logits 仍可能随训练增长，导致不稳定，后来的 QK-Norm 等技术就是为了在整个训练过程中控制这一尺度，[训练稳定性](/pretraining/stability/)会讨论。
+
+## 因果掩码：只看过去
+
+语言模型在位置 $t$ 预测 $x_{t+1}$，它绝不能看到 $x_{t+1}$ 及以后的 token，否则训练时只需“抄答案”。但我们希望一次前向传播就算出所有 $T$ 个位置的预测（这样一个长度为 $T$ 的序列提供 $T$ 个训练信号）。办法是在 softmax 之前把“未来”位置的分数设为 $-\infty$：
+
+$$
+M_{ts} = \begin{cases} 0, & s \le t, \\ -\infty, & s > t. \end{cases}
+$$
+
+$\exp(-\infty) = 0$，被掩码的位置权重恰好为 0，而剩余权重仍然归一化——softmax 自动只在允许的位置之间分配概率。掩码矩阵是下三角的，所以叫**因果掩码**（causal mask）。
+
+手算一个例子。取 $T = 4$、$d_k = 2$，直接给出查询、键与值（省去投影）：
+
+$$
+Q = \begin{bmatrix} 1 & 0 \\ 0 & 1 \\ 1 & 1 \\ 1 & -1 \end{bmatrix}, \quad
+K = \begin{bmatrix} 2 & 0 \\ 0 & 2 \\ 1 & 1 \\ 2 & -2 \end{bmatrix}, \quad
+V = \begin{bmatrix} 1 & 0 \\ 0 & 1 \\ 1 & 1 \\ 0 & 0 \end{bmatrix}.
+$$
+
+分数 $QK^\top/\sqrt 2$ 的第 2 行是 $(0, 2, 1, -2)/\sqrt 2 = (0, 1.41, 0.71, -1.41)$，掩码后只保留前两项 $(0, 1.41)$，softmax 得 $(1, e^{1.41})/(1 + e^{1.41}) = (0.20, 0.80)$，输出 $0.2 \cdot (1, 0) + 0.8 \cdot (0, 1) = (0.20, 0.80)$。第 3 行的三个有效分数都是 $1.41$，权重均为 $1/3$，输出是前三个值的平均 $(0.67, 0.67)$。第 4 行的分数 $(1.41, -1.41, 0, 2.83)$ 全部有效，权重约为 $(0.18, 0.01, 0.04, 0.76)$——查询 $(1, -1)$ 与键 $(2, -2)$ 方向一致，几乎全部注意力都集中在第 4 个位置上。
+
+<Diagram width={720} height={250} label="手算例子的分数矩阵与因果掩码后的注意力权重">
+  <Matrix x={90} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1.41, 0, 0.71, 1.41], [0, 1.41, 0.71, -1.41], [1.41, 1.41, 1.41, 0], [1.41, -1.41, 0, 2.83]]} highlight={[{ upper: true, tone: 'muted' }]} rowLabels={['q₁', 'q₂', 'q₃', 'q₄']} colLabels={['k₁', 'k₂', 'k₃', 'k₄']} title="分数 QKᵀ/√2（灰色将被掩码）" />
+  <Text x={360} y={135} label="+M, softmax" size="sm" tone="muted" />
+  <Arrow from={[320, 150]} to={[400, 150]} />
+  <Matrix x={460} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1, 0, 0, 0], [0.2, 0.8, 0, 0], [0.33, 0.33, 0.33, 0], [0.18, 0.01, 0.04, 0.76]]} highlight={[{ upper: true, tone: 'muted' }, { cells: [[1, 1], [3, 3]], tone: 'accent' }]} rowLabels={['q₁', 'q₂', 'q₃', 'q₄']} colLabels={['k₁', 'k₂', 'k₃', 'k₄']} title="注意力权重 A（每行和为 1）" />
+  <Fragment slot="caption">左图上三角（灰色）是未来位置，加上 −∞ 后在右图中权重为 0。第 1 个位置只能看自己，权重为 1；第 4 行的权重高度集中在与查询方向一致的 k₄ 上。</Fragment>
+</Diagram>
+
+掩码还有一个推论：第 1 个位置的输出就是 $v_1$，它没有任何上下文可用。这与“第一个 token 的预测只能依赖它自己”一致。
+
+## 实现单头因果自注意力
+
+先写一个数值稳定的 softmax。直接计算 $e^{z_i}$ 在 $z_i$ 很大时会上溢（float32 中 $e^{89}$ 已经是 inf），利用 softmax 对平移不变的性质 $\operatorname{softmax}(z) = \operatorname{softmax}(z - c)$，取 $c = \max_i z_i$，所有指数的参数都不超过 0（详见[浮点数与数值稳定性](/math/numerics/)）。还要处理一种边界情形：如果整行都被掩码（例如 padding 位置作为查询时），$\max$ 是 $-\infty$，$-\infty - (-\infty)$ 得到 NaN。我们让这样的行输出全 0：
+
+<CodeFile path="src/llms_from_scratch/transformer/attention.py" region="softmax" />
+
+注意力本身就是上面公式的直译。掩码用布尔张量表示，`True` 表示允许关注，这与 `F.scaled_dot_product_attention` 的 `attn_mask` 约定相同；它会通过广播作用于批维与头维：
+
+<CodeFile path="src/llms_from_scratch/transformer/attention.py" region="sdpa" />
+
+`k.transpose(-2, -1)` 只交换最后两维，前面的批维、头维保持不变，所以同一个函数既能处理 `[T, d]`，也能处理 `[B, T, d]` 与 `[B, h, T, d]`。因果掩码是一个下三角布尔矩阵：
+
+<CodeFile path="src/llms_from_scratch/transformer/attention.py" symbol="causal_mask" />
+
+参数 `s` 用于后面 KV Cache 的场景：已有 $s - t$ 个缓存的位置时，新来的 $t$ 个查询可以看到全部缓存，因此对角线右移 $s - t$。现在 $s = t$，它就是普通的下三角。
+
+把三个投影与注意力组合成一个模块：
+
+<CodeFile path="src/llms_from_scratch/transformer/attention.py" region="single_head" />
+
+逐步打印形状，可以确认每一步都符合预期：
+
+```python
+attn = SingleHeadAttention(d_model=8, d_head=4)
+x = torch.randn(2, 5, 8)          # [B=2, T=5, d=8]
+q = attn.W_q(x)                   # [2, 5, 4]
+scores = q @ attn.W_k(x).transpose(-2, -1) / 2.0   # [2, 5, 5]，√4 = 2
+y, w = attn(x)                    # y: [2, 5, 4]，w: [2, 5, 5]
+w[0].triu(1).abs().max()          # tensor(0.)：上三角全为 0
+w[0].sum(-1)                      # tensor([1., 1., 1., 1., 1.])
+```
+
+`scores` 的形状是 `[B, T, T]`：批中每个样本有自己的 $T \times T$ 权重矩阵。这是注意力与 MLP 最大的不同——MLP 的权重矩阵是参数，对所有输入相同；注意力的权重矩阵是**激活**，由输入计算出来，每个样本、每个位置都不一样。
+
+## 验证
+
+`tests/transformer/test_attention.py` 核对了三件事。第一，手写的 `softmax` 在输入很大（如 1000）时与 `torch.softmax` 一致，整行为 $-\infty$ 时输出全 0。第二，带因果掩码的 `scaled_dot_product_attention` 与 `F.scaled_dot_product_attention(..., is_causal=True)` 逐元素相同，每行权重和为 1，上三角为 0。第三，**因果性**：改变位置 4、5 的输入后，位置 1–3 的输出完全不变。
+
+<CodeFile path="tests/transformer/test_attention.py" symbol="test_single_head_is_causal" />
+
+最后一个测试比检查掩码矩阵更有说服力：它直接检验了我们真正关心的性质——任何未来的信息都不能影响过去的输出。如果在实现中把掩码加错了位置（例如在 softmax 之后才把未来权重置零而忘了重新归一化，或者用了上三角），这个测试会立即失败。
+
+## 注意力是怎样的一种运算
+
+最后从几个角度审视这个运算，它们会在后续章节反复出现。
+
+**对值是线性的，对查询和键是非线性的。** 固定权重 $A$ 时，输出 $AV$ 是值的线性组合；非线性完全来自 softmax 对分数的作用。所以单独的注意力层只能“搬运和混合”信息，不能对每个位置的内容做复杂变换——这是下一步加入逐位置前馈网络（FFN）的原因，见 [Transformer 块](/transformer/transformer-block/)。
+
+**参数量与序列长度无关。** 单头注意力只有 $W_Q, W_K, W_V$ 三个矩阵，共 $d(2d_k + d_v)$ 个参数，处理长度为 10 与 10000 的序列用的是同一组参数。“名词后面常接动词”这样的模式在任何位置都能用同一组参数识别。
+
+**计算量与显存随 $T^2$ 增长。** 分数矩阵是 $T \times T$ 的，计算 $QK^\top$ 需要 $2T^2 d_k$ 次浮点运算，存下它需要 $T^2$ 个数。长序列下这会成为瓶颈，下一章会定量分析，第八部分的 [FlashAttention](/gpu/flash-attention/) 将解决其中的显存问题。
+
+**对顺序不敏感。** 仔细看公式会发现，如果去掉因果掩码，把输入的行打乱，输出的行也只是以同样方式被打乱——注意力本身不知道谁在前、谁在后。这是一个严重的缺陷：`狗咬人` 与 `人咬狗` 会得到同样的表示集合。[位置编码](/transformer/positional-encoding/)一章将证明这一点并修复它。
+
+## 小结
+
+- 固定窗口模型的上下文有硬上限、参数不跨位置共享、组合方式与内容无关；注意力让每个位置按内容决定的权重直接读取全部前文，并且所有位置可以并行计算。
+- 注意力是一次软的字典查找：查询与键的点积经 softmax 得到权重，再对值加权平均。$Q$、$K$ 决定“看哪里”，$V$ 决定“读什么”。
+- 初始化附近点积的方差为 $d_k$，除以 $\sqrt{d_k}$ 使分数方差为 1，避免 softmax 饱和、梯度消失。
+- 因果掩码在 softmax 之前把未来位置设为 $-\infty$，一次前向即可得到全部 $T$ 个位置的预测而不泄露答案。
+- 注意力权重是由输入计算的激活，参数量与 $T$ 无关，但计算量与显存随 $T^2$ 增长；没有位置信息时它对顺序不敏感。
+
+一个头只能计算一种权重模式，而一个位置往往需要同时关注多种关系。下一章把它扩展成[多头注意力](/transformer/multi-head-attention/)。
+
+## 练习
+
+1. 若 $q$ 与 $k$ 的分量独立、均值为 0、方差为 $\sigma^2$，点积的方差是多少？应除以什么才能把方差归一？
+
+<details>
+<summary>答案</summary>
+
+每一项 $q_i k_i$ 的方差为 $\mathbb E[q_i^2]\mathbb E[k_i^2] = \sigma^4$，$d_k$ 项独立相加得 $d_k \sigma^4$。要让方差为 1，应除以 $\sqrt{d_k}\,\sigma^2$。标准的 $1/\sqrt{d_k}$ 隐含了 $\sigma = 1$ 的假设，这正是初始化与归一化层要维持的状态。
+
+</details>
+
+2. 证明：对任意常数 $c$，$\operatorname{softmax}(z + c\mathbf 1) = \operatorname{softmax}(z)$。这个性质对实现有什么用？如果把所有分数乘以常数 $\lambda > 1$，权重分布会怎样变化？
+
+<details>
+<summary>答案</summary>
+
+$\frac{e^{z_i + c}}{\sum_j e^{z_j + c}} = \frac{e^c e^{z_i}}{e^c \sum_j e^{z_j}} = \frac{e^{z_i}}{\sum_j e^{z_j}}$。实现中取 $c = -\max_j z_j$，使所有指数参数非正，避免上溢。乘以 $\lambda$ 相当于把温度降低为 $1/\lambda$：任意两项的权重比 $e^{\lambda(z_i - z_j)}$ 被放大，分布变得更尖锐，$\lambda \to \infty$ 时趋于 argmax 的 one-hot。
+
+</details>
+
+3. 在手算例子中，把第 4 个查询改为 $(-1, 1)$，第 4 行的权重和输出各是多少？
+
+<details>
+<summary>答案</summary>
+
+分数为 $(q \cdot k_s)/\sqrt 2$：$k_1 = (2,0)$ 得 $-2/\sqrt2 = -1.41$；$k_2 = (0,2)$ 得 $1.41$；$k_3 = (1,1)$ 得 $0$；$k_4 = (2,-2)$ 得 $-4/\sqrt 2 = -2.83$。指数为 $(0.243, 4.11, 1, 0.059)$，和 5.41，权重约 $(0.045, 0.76, 0.18, 0.011)$。输出 $= 0.045(1,0) + 0.76(0,1) + 0.18(1,1) + 0.011(0,0) \approx (0.23, 0.94)$。注意力从 $k_4$ 转移到了与新查询方向一致的 $k_2$。
+
+</details>
+
+4. 为什么因果掩码要在 softmax **之前**加 $-\infty$，而不是在 softmax 之后把上三角权重置零？两种做法的输出有何不同？
+
+<details>
+<summary>答案</summary>
+
+在 softmax 之前掩码，归一化只在允许的位置之间进行，每行权重和为 1。在 softmax 之后置零，被保留的权重是在**包含未来位置**的分母下计算的：$\alpha_{ts} = e^{z_{ts}} / \sum_{\text{全部 } s'} e^{z_{ts'}}$，和小于 1；更严重的是，分母依赖未来位置的分数，未来信息通过分母泄露到了过去的输出中，因果性被破坏。若事后再重新归一化，结果与先掩码相同，但多做了无用的计算。
+
+</details>
+
+5. 单头注意力（$d_k = d_v = d$）处理长度为 $T$ 的序列，投影与注意力本身各需要多少 FLOPs（按一次乘加计 2 FLOPs）？$T$ 多大时注意力部分超过投影部分？
+
+<details>
+<summary>答案</summary>
+
+三个投影各是 $[T, d] \times [d, d]$，共 $3 \cdot 2Td^2 = 6Td^2$。$QK^\top$ 是 $[T, d] \times [d, T]$，需 $2T^2 d$；$AV$ 是 $[T, T] \times [T, d]$，也需 $2T^2 d$；合计 $4T^2 d$。令 $4T^2 d > 6Td^2$，得 $T > 1.5d$。例如 $d = 512$ 时，序列超过 768 个 token 后注意力本身成为主要开销（未计入输出投影与 FFN，完整的核算见[组装 GPT](/transformer/gpt/)）。
+
+</details>
+
+## 参考文献
+
+- Ashish Vaswani et al. [Attention Is All You Need](https://arxiv.org/abs/1706.03762). NeurIPS 2017.（缩放点积注意力与 $1/\sqrt{d_k}$ 的方差论证，见第 3.2.1 节脚注）
+- Dzmitry Bahdanau, Kyunghyun Cho, Yoshua Bengio. [Neural Machine Translation by Jointly Learning to Align and Translate](https://arxiv.org/abs/1409.0473). ICLR 2015.（最早的加性注意力）
+- Yoshua Bengio et al. [A Neural Probabilistic Language Model](https://www.jmlr.org/papers/volume3/bengio03a/bengio03a.pdf). JMLR 2003.（固定窗口 MLP 语言模型）
+- PyTorch. [torch.nn.functional.scaled_dot_product_attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html).
+- Stanford CS336. [Assignment 1: Basics](https://github.com/stanford-cs336/assignment1-basics)（softmax 与 scaled_dot_product_attention 两题）
+- Mostafa Dehghani et al. [Scaling Vision Transformers to 22 Billion Parameters](https://arxiv.org/abs/2302.05442). 2023.（注意力 logits 增长导致的不稳定与 QK-Norm）

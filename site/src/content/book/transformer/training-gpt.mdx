@@ -1,8 +1,341 @@
 ---
 title: 训练 GPT：从零训练一个小模型
-description: 实现 AdamW、余弦学习率与梯度裁剪，在 TinyStories 级别语料上训练并观察损失曲线、过拟合与超参数敏感性。
+description: 实现 AdamW、余弦学习率与梯度裁剪，在 TinyStories 风格的语料上训练并观察损失曲线、过拟合与超参数敏感性。
 order: 7
-draft: true
+code:
+  - src/llms_from_scratch/transformer/optim.py
+  - src/llms_from_scratch/transformer/data.py
+  - src/llms_from_scratch/transformer/train.py
+  - tests/transformer/test_optim.py
+  - tests/transformer/test_train.py
 ---
 
-本章正在撰写。
+上一章组装好的 GPT 有 90 多万个参数（本章的配置），全部是随机数：它给每个 token 的概率几乎相同，只会输出乱码。把它变成一个会写故事的模型，只需要三样东西：一个衡量“预测得有多差”的损失，一条源源不断的训练数据流，以及一个根据梯度更新参数的优化器。前两样很简单，难点在第三样——同一个模型、同一份数据，换一组学习率、少一次梯度裁剪，结果可能是收敛、发散，或者停在很差的位置。
+
+本章把这些环节逐一实现并测试：交叉熵与困惑度、随机窗口的数据加载、**AdamW**（与 `torch.optim.AdamW` 逐步数值一致）、预热加余弦的学习率调度、全局梯度范数裁剪，最后把它们拼成一个训练脚本 `train.py`，在离线生成的 TinyStories 风格故事上训练，观察损失曲线、做超参数对比、制造一次过拟合，并看看训练出的注意力头在做什么。优化器的理论（为什么 Adam 有效、Muon 等新方法）留给[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)，本章只要求“正确、可读、能跑通”。
+
+## 目标函数：交叉熵与困惑度
+
+语言模型在每个位置输出 logits $o\in\mathbb R^V$，经 softmax 得到下一个 token 的分布 $p_i = e^{o_i}/\sum_j e^{o_j}$。设真实的下一个 token 是 $y$，训练目标是最大化它的对数似然，即最小化负对数似然（交叉熵）：
+
+$$
+\ell(o, y) = -\log p_y = \log\sum_j e^{o_j} - o_y = \operatorname{logsumexp}(o) - o_y .
+$$
+
+对一个批、$T$ 个位置取平均就是训练损失 $\mathcal L$。对 logits 求导很干净：$\partial \ell / \partial o_i = p_i - [i = y]$，即“预测分布减去独热标签”。这个结论在[第一个神经语言模型](/pytorch/first-language-model/)里用过，此处不再重复推导。
+
+### 数值稳定的实现
+
+直接算 `softmax(o)[y].log()` 有两个问题：$e^{o_i}$ 在 $o_i$ 较大时上溢；$p_y$ 很小时 $\log$ 下溢为 $-\infty$。把 logsumexp 写成减去最大值的形式，$\operatorname{logsumexp}(o) = m + \log\sum_j e^{o_j - m}$，$m=\max_j o_j$，所有指数的幂都 $\le 0$，既不上溢，也保证和至少为 1：
+
+<CodeFile path="src/llms_from_scratch/transformer/train.py" region="loss" />
+
+测试 `test_cross_entropy_matches_torch` 用放大 30 倍的 logits 与 `F.cross_entropy` 对比，两者一致。实际工程里直接用 `F.cross_entropy`；自己写一遍是为了看清它没有任何魔法。
+
+### 困惑度与初始损失
+
+**困惑度**（perplexity）是交叉熵的指数 $\mathrm{PPL} = e^{\mathcal L}$，可以理解为模型平均“在多少个等可能的 token 之间犹豫”。随机初始化时分布接近均匀，$\mathcal L_0\approx\log V$，困惑度约等于词表大小。我们的词表 $V=512$，第一步训练损失实测 6.28，与 $\log 512 = 6.24$ 一致，说明初始化没有问题（见上一章）。训练结束时验证损失 0.166，困惑度 1.18：模型几乎总能确定下一个 token，这是因为合成故事的模板很规整，后面会讨论这一点。
+
+困惑度只在**词表相同**时可比：同样的文本，词表越大，每个 token 承载的信息越多，每个 token 的损失越高。跨分词器比较要换算成每字节的损失（bits per byte），见[评估：困惑度、基准与污染](/pretraining/evaluation/)。
+
+## 数据：随机窗口
+
+### 从文档到 token 流
+
+训练数据是一批文档。我们把每篇文档用 BPE 编码，在文档之间插入 `<|endoftext|>`，然后首尾相接成一条很长的一维 token 流。模型的上下文长度是 $T$（我们的小模型 $T=128$），训练时从流中切出长度为 $T$ 的窗口。不需要 padding，也不需要保证窗口对齐文档边界：窗口跨过 `<|endoftext|>` 时，模型会学到“这个符号之后是一个全新的故事”。
+
+<Diagram width={720} height={250} label="从 token 流中随机取窗口并构造右移的目标">
+  <Matrix x={20} y={50} rows={1} cols={18} cell={[34, 30]} gap={2} values={[["Once", "upon", "a", "time", "…", "Kim", ".", "EOT", "One", "day", ",", "Tom", "went", "to", "the", "park", ".", "EOT"]]} highlight={[{ cells: [[0, 7], [0, 17]], tone: 'accent2' }, { cells: [[0, 3], [0, 4], [0, 5], [0, 6]], tone: 'accent' }]} />
+  <Text x={20} y={30} label="token 流（文档以 EOT 分隔）" size="sm" anchor="start" />
+  <Box x={20} y={110} w={150} h={34} label="起点 s ~ U{0…N−T−1}" size="sm" tone="info" />
+  <Arrow from={[95, 110]} via={[[95, 100], [140, 100]]} to={[140, 82]} tone="info" />
+  <Matrix x={190} y={125} rows={2} cols={4} cell={[56, 30]} gap={2} values={[["time", "…", "Kim", "."], ["…", "Kim", ".", "EOT"]]} highlight={[{ rows: [0], tone: 'accent' }, { rows: [1], tone: 'strong' }]} rowLabels={["x", "y"]} />
+  <Text x={440} y={140} label="x[t] = tokens[s + t]" size="sm" anchor="start" mono />
+  <Text x={440} y={170} label="y[t] = tokens[s + t + 1]" size="sm" anchor="start" mono />
+  <Text x={440} y={215} label="位置 t 的 logits 与 y[t] 计算交叉熵" size="sm" anchor="start" tone="muted" />
+  <Fragment slot="caption">蓝色窗口是输入 x，紫色是右移一位的目标 y，它们来自同一段 token 流，只错开一个位置。一次前向因此同时训练了窗口内 T 个位置的预测。</Fragment>
+</Diagram>
+
+目标 $y$ 是输入 $x$ 向左平移一位：位置 $t$ 看到 $x_{1..t}$，要预测 $x_{t+1}$。因果掩码保证位置 $t$ 看不到 $x_{t+1}$，所以一个窗口等价于 $T$ 个独立的“给前缀预测下一个词”的样本，且共享一次前向计算。
+
+### get_batch
+
+采样函数很短：随机选 $B$ 个起点，取窗口，错开一位取目标：
+
+<CodeFile path="src/llms_from_scratch/transformer/data.py" region="get_batch" />
+
+三个细节。其一，`tokens` 用 `uint16` 存储（词表小于 65536 时），比 `int64` 省 4 倍内存，转成张量才放大；其二，`tokens` 可以是 `np.memmap`，几十 GB 的语料也只有被采到的窗口才会读入内存；其三，传入 `torch.Generator` 就能完全复现，测试 `test_get_batch_targets_are_shifted_inputs` 用 `arange` 作为 token 流，检查 `y == x + 1`。
+
+这里采用“有放回随机采样”而不是“按 epoch 打乱后遍历”：每步独立抽窗口，实现简单，窗口之间有重叠，一个 token 平均被看到的次数是 $\text{步数}\times B\times T / N$。大规模预训练通常只过一遍数据，这两种方式差别很小；小数据集上要留意多次重复带来的过拟合，后面会看到。
+
+### 语料：离线的 TinyStories 风格故事
+
+TinyStories（Eldan 与 Li，2023）是用 GPT-3.5/4 生成的、面向三四岁儿童词汇的短故事集，论文表明只有几百万参数的模型也能在它上面学会写连贯的故事。为了让本书的实验**完全离线、秒级生成、结果可复现**，`data.py` 里的 `synthetic_stories` 用模板与词表随机组合出同风格的短故事：主角的名字、代词、物品在整篇故事里必须保持一致（“Kim ... she ... her shell”），模型只有“回头看”前文才能写对，所以它确实需要注意力。想用真实语料，把以 `<|endoftext|>` 分隔的 TinyStories 文本文件传给 `--data` 即可。
+
+我们用的配置：6000 篇故事，95% 训练、5% 验证，训练一个词表 512 的 BPE，得到 775,890 个训练 token 和 41,218 个验证 token。
+
+## AdamW
+
+### 从 SGD 到 Adam
+
+梯度下降 $\theta\leftarrow\theta-\eta g$ 对所有参数用同一个学习率。语言模型里这很糟糕：嵌入矩阵中稀有 token 的行很少收到梯度，注意力的 $W_Q$ 梯度又与激活尺度耦合，不同参数的梯度量级可以差几个数量级。Adam（Kingma 与 Ba，2015）为**每个参数**维护两个统计量：梯度的指数滑动平均（一阶矩，方向）与梯度平方的指数滑动平均（二阶矩，尺度）：
+
+$$
+m_t = \beta_1 m_{t-1} + (1-\beta_1)\, g_t,\qquad
+v_t = \beta_2 v_{t-1} + (1-\beta_2)\, g_t^2 ,
+$$
+
+初始 $m_0=v_0=0$。用 $m_t$ 代替瞬时梯度，相当于带动量的平滑；用 $\sqrt{v_t}$ 去除，相当于把每个参数的梯度缩放到相近的量级。
+
+### 偏差校正
+
+$m_0=v_0=0$ 使早期的估计偏小。展开递推：$m_t=(1-\beta_1)\sum_{i=1}^t\beta_1^{t-i}g_i$。若梯度的期望 $\mathbb E[g_i]=\mu$ 不随时间变化，则
+
+$$
+\mathbb E[m_t] = (1-\beta_1)\,\mu\sum_{i=1}^t\beta_1^{t-i} = (1-\beta_1^t)\,\mu .
+$$
+
+所以把 $m_t$ 除以 $1-\beta_1^t$ 就得到无偏估计 $\hat m_t$；同理 $\hat v_t = v_t/(1-\beta_2^t)$。当 $t$ 足够大时校正因子趋于 1。$\beta_2=0.999$ 时，前 1000 步校正因子都显著偏离 1，忽略它会让早期的 $v_t$ 过小，步长过大。
+
+### 解耦的权重衰减
+
+L2 正则把 $\tfrac\lambda2\|\theta\|^2$ 加进损失，梯度变成 $g+\lambda\theta$。放进 SGD 时等价于每步把参数乘以 $(1-\eta\lambda)$。但放进 Adam，这一项和 $g$ 一起被 $\sqrt{\hat v_t}$ 除，于是衰减强度变成 $\eta\lambda\theta/\sqrt{\hat v_t}$：梯度大的参数（$v$ 大）几乎不被衰减，梯度小的反而被衰减得更狠，与正则化的初衷不符。Loshchilov 与 Hutter（2019）提出**解耦**：不改梯度，直接在更新里单独做衰减。于是 AdamW 的一步是
+
+<KeyEq label="AdamW 更新">
+
+$$
+\theta_t = \theta_{t-1} - \eta\lambda\,\theta_{t-1} - \eta\,\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon},\qquad
+\hat m_t=\frac{m_t}{1-\beta_1^t},\ \ \hat v_t=\frac{v_t}{1-\beta_2^t}.
+$$
+
+</KeyEq>
+
+我们实现的顺序与 PyTorch 单张量实现相同：先衰减，再更新矩，最后用校正后的矩更新参数。
+
+<CodeFile path="src/llms_from_scratch/transformer/optim.py" region="adamw" />
+
+`state` 在第一次遇到参数时才分配，所以优化器状态（$m$、$v$）与参数同形状、同设备，也会进入 `state_dict()` 被检查点保存。
+
+### 手算一步
+
+取单个参数 $\theta_0=1$，梯度恒为 $g=0.5$，$\eta=0.1$，$\lambda=0.1$，$\beta=(0.9,0.999)$。第一步：衰减得 $\theta=1-0.1\times0.1\times1=0.99$；$m_1=0.1\times0.5=0.05$，$v_1=0.001\times0.25=0.00025$；校正因子 $1-\beta_1=0.1$、$1-\beta_2=0.001$，故 $\hat m_1=0.5$，$\hat v_1=0.25$，更新量 $\eta\cdot0.5/(\sqrt{0.25})=0.1$，$\theta_1=0.89$。
+
+这里有个值得记住的现象：**第一步的更新量恰好是 $\eta$，与梯度大小无关**（只取决于符号）。一般地，在梯度稳定时 $|\hat m/\sqrt{\hat v}|\lesssim1$，所以 Adam 每个参数每步最多移动约 $\eta$。学习率因此有了直观的单位：参数每步的最大位移。这也是 Adam 比 SGD 对梯度尺度更不敏感的原因，却也解释了为什么早期梯度又大又噪时需要预热。
+
+### 与 PyTorch 对照
+
+测试 `test_adamw_matches_torch` 对同一个二次损失，用我们的优化器与 `torch.optim.AdamW(foreach=False)` 各走 20 步，参数轨迹在 $10^{-6}$ 内一致。我们只给矩阵（二维参数）做权重衰减，RMSNorm 的增益等一维参数不衰减，这是 GPT-2 以来的惯例：
+
+<CodeFile path="src/llms_from_scratch/transformer/train.py" symbol="param_groups" />
+
+### 显存
+
+AdamW 为每个参数多存两个张量。FP32 训练时，参数、梯度、$m$、$v$ 各 4 字节，共 $16N$ 字节：我们的 918,656 个参数需要约 14.7 MB，7B 模型则需要 112 GB，这就是第六部分分布式训练要切分优化器状态的原因。
+
+## 学习率调度
+
+### 为什么要预热
+
+训练开头有两个麻烦。其一，参数是随机的，梯度又大又杂：我们的模型前几步的梯度范数约为 2，而到后期只有 0.1 左右，最大一次达到 26.9。其二，Adam 的 $\hat v_t$ 只由寥寥几个梯度估计，方差很大。此时若用全额学习率，每个参数都按约 $\eta$ 的步长移动，很容易把模型推到一个糟糕的区域，后续再也爬不出来。**预热**（warmup）让学习率在前 $W$ 步从 0 线性升到 $\eta_{\max}$，给 $\hat v_t$ 积累统计的时间。
+
+### 余弦退火
+
+预热之后，学习率沿余弦曲线从 $\eta_{\max}$ 平滑降到 $\eta_{\min}$（Loshchilov 与 Hutter，2017 的 SGDR 去掉重启后的形式）。设总步数 $S$，预热步数 $W$，进度 $p=(t-W)/(S-W)$：
+
+<KeyEq label="预热 + 余弦学习率">
+
+$$
+\eta_t=
+\begin{cases}
+\eta_{\max}\,t/W, & t<W,\\[2pt]
+\eta_{\min}+\tfrac12\bigl(1+\cos\pi p\bigr)(\eta_{\max}-\eta_{\min}), & W\le t<S,\\[2pt]
+\eta_{\min}, & t\ge S.
+\end{cases}
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/transformer/optim.py" region="schedule" />
+
+测试检查了关键点：$t=0$ 为 0、预热中点为 $\eta_{\max}/2$、余弦段中点恰为 $(\eta_{\max}+\eta_{\min})/2$、末尾等于 $\eta_{\min}$ 且整段单调不增。
+
+<Plot label="预热加余弦学习率（W = 50，S = 1500）" x={[0, 1500]} y={[0, 0.0035]} xLabel="训练步数 t" yLabel="学习率 η" height={240} series={[{ fn: (t) => t < 50 ? 0.003 * t / 50 : t >= 1500 ? 0.0003 : 0.0003 + 0.5 * (1 + Math.cos(Math.PI * (t - 50) / 1450)) * 0.0027, label: 'η_max = 3e-3，η_min = 3e-4' }]}>
+  <Fragment slot="caption">本章训练使用的学习率曲线：前 50 步线性升到 3×10⁻³，随后沿余弦下降到峰值的 10%。末尾学习率小，参数在最优点附近做精细调整，这是损失在训练最后阶段仍明显下降的原因之一。</Fragment>
+</Plot>
+
+最终学习率取峰值的 10% 是常见选择：GPT-3 与 LLaMA 2 的报告都采用了余弦衰减到峰值的 10%，LLaMA 2 的预热为 2000 步。近年的大模型训练也常用 **WSD**（Warmup-Stable-Decay）：预热后保持恒定学习率，只在最后一段快速衰减。它的好处是不必预先决定总步数，可以随时从稳定阶段的检查点接着训练或开始衰减（MiniCPM，Hu 等，2024）。具体取舍见[优化器](/pretraining/optimizers/)一章。
+
+## 梯度裁剪
+
+即便有预热，个别批次仍会产生异常大的梯度。我们的训练中，第 13 步的梯度范数达到 26.9，是正常值的十倍以上。**全局梯度范数裁剪**把所有参数的梯度看作一个长向量 $g$，若 $\|g\|_2$ 超过阈值 $c$ 就整体等比缩小：
+
+$$
+g\leftarrow g\cdot\min\!\Bigl(1,\ \frac{c}{\|g\|_2+\epsilon}\Bigr).
+$$
+
+方向不变，只限制长度。等比缩放而非逐元素截断，是为了保持梯度的方向。
+
+<CodeFile path="src/llms_from_scratch/transformer/optim.py" region="clip" />
+
+对 Adam 而言裁剪还有一层意义。Adam 的步长对梯度整体缩放不敏感，但一次尖峰会在 $v_t$ 里留下很大的值，并以 $\beta_2$ 衰减，需要约 $1/(1-\beta_2)$ 步才消退，期间所有更新都被压小；一次尖峰还会通过 $m_t$ 把参数推向一个糟糕的方向。把尖峰削平到 $c$，两种影响都被限制住了。测试 `test_clip_grad_norm_matches_torch` 对照 `torch.nn.utils.clip_grad_norm_`，范数与裁剪后的梯度都一致，并验证裁剪后的全局范数恰为 1。
+
+训练中值得监控的量是**裁剪前**的范数，所以函数返回它。我们的 1500 步中只有 55 步的范数超过阈值 1（前 30 步全部超过，之后零星出现，最后一次在第 987 步），说明裁剪平时不起作用，只在异常时兜底。稳定性问题（损失尖峰、QK 范数等）在[训练稳定性](/pretraining/stability/)一章系统讨论。
+
+## 训练循环
+
+把各部件拼起来，一步训练做六件事：设置本步学习率，取批，前向算损失，清零并反向传播，裁剪梯度，更新参数。
+
+<Diagram width={720} height={190} label="一步训练的数据流">
+  <Box x={10} y={60} w={100} h={56} label="取批" sub="get_batch" />
+  <Box x={135} y={60} w={100} h={56} label="前向" sub="logits [B,T,V]" tone="accent" />
+  <Box x={260} y={60} w={100} h={56} label="交叉熵" sub="标量 ℓ" tone="accent" />
+  <Box x={385} y={60} w={100} h={56} label="反向" sub="loss.backward()" tone="accent2" />
+  <Box x={510} y={60} w={90} h={56} label="裁剪" sub="‖g‖ ≤ 1" tone="accent2" />
+  <Box x={625} y={60} w={85} h={56} label="AdamW" sub="θ ← θ − …" tone="strong" />
+  <Arrow from={[110, 88]} to={[135, 88]} />
+  <Arrow from={[235, 88]} to={[260, 88]} />
+  <Arrow from={[360, 88]} to={[385, 88]} />
+  <Arrow from={[485, 88]} to={[510, 88]} />
+  <Arrow from={[600, 88]} to={[625, 88]} />
+  <Box x={560} y={145} w={150} h={30} label="cosine_lr(step)" size="sm" tone="info" mono />
+  <Arrow from={[667, 145]} to={[667, 116]} tone="info" label="设置 lr" labelSide="right" />
+  <Fragment slot="caption">每步先由调度器决定学习率，再依次取批、前向、反向、裁剪、更新。裁剪夹在反向与更新之间；梯度在更新前清零，避免累加上一步的结果。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/transformer/train.py" region="train" />
+
+`train` 的前半段处理数据：加载文档、划出验证集、**只用训练集**训练分词器（避免验证数据泄漏进词表）、编码成 token 流。后半段就是上图的循环，每 100 步在验证集上评估一次。`evaluate` 在验证集上取 10 个随机批取平均，并关闭训练模式。
+
+整个脚本可以直接运行；换成真实数据只要加 `--data`：
+
+```sh
+uv run python -m llms_from_scratch.transformer.train
+uv run python -m llms_from_scratch.transformer.train --data TinyStoriesV2-GPT4-valid.txt --vocab-size 2048 --steps 3000
+```
+
+测试 `test_tiny_training_run_reduces_loss` 用 100 篇故事、1 层、25 步的极小配置做冒烟测试，断言最后 5 步的平均损失比最前 5 步低 0.5 以上，在 CPU 上几秒内完成。
+
+## 在合成故事上训练
+
+默认配置：4 层，$d=128$，4 个头，词表 512，上下文 128，共 918,656 个参数（非嵌入部分 853,120）。批大小 16，每步处理 $16\times128=2048$ 个 token，1500 步共 307 万个 token，约把 77.6 万个训练 token 看了 4 遍。峰值学习率 $3\times10^{-3}$，预热 50 步，余弦衰减到 $3\times10^{-4}$；AdamW 取 $\beta=(0.9,0.95)$，权重衰减 0.1，梯度裁剪阈值 1。$\beta_2=0.95$ 而不是 Adam 论文的 0.999，是 GPT-3 以来大模型训练的惯例，让 $v_t$ 对近期梯度更敏感，对尖峰更稳健。在本书所用的 4 核 CPU 上每步约 0.5 秒，一次完整训练约 12 分钟。
+
+<Plot label="训练损失与验证损失" x={[0, 1500]} y={[0, 1.2]} xLabel="训练步数" yLabel="交叉熵（nats / token）" height={270} series={[{ points: [[75, 0.787], [125, 0.469], [175, 0.44], [225, 0.418], [275, 0.405], [325, 0.388], [375, 0.375], [425, 0.37], [475, 0.354], [525, 0.355], [575, 0.327], [625, 0.313], [675, 0.3], [725, 0.284], [775, 0.27], [825, 0.249], [875, 0.241], [925, 0.237], [975, 0.234], [1025, 0.234], [1075, 0.224], [1125, 0.199], [1175, 0.182], [1225, 0.174], [1275, 0.174], [1325, 0.172], [1375, 0.17], [1425, 0.171], [1475, 0.166]], label: '训练损失（50 步平均）' }, { points: [[100, 0.478], [200, 0.421], [300, 0.386], [400, 0.359], [500, 0.349], [600, 0.315], [700, 0.291], [800, 0.248], [900, 0.233], [1000, 0.229], [1100, 0.204], [1200, 0.182], [1300, 0.171], [1400, 0.17], [1500, 0.166]], label: '验证损失', tone: 'accent2' }]}>
+  <Fragment slot="caption">起点处的损失约为 6.28（log 512 = 6.24），前 75 步的平均已降到 0.79，此后进入缓慢下降的长尾。训练曲线与验证曲线几乎重合，说明没有过拟合；最后 300 步学习率很小，损失仍在降。</Fragment>
+</Plot>
+
+前 100 步的下降幅度最大：损失从 6.28 掉到 0.5 以下，模型先学会了哪些 token 常见、哪些字符串经常连在一起（这是 BPE 词表本身带来的结构）。之后的缓慢下降来自更难的规律：名字、代词和物品要与前文一致。训练结束时验证损失 0.166，困惑度 1.18。
+
+这个数字要小心解读。合成故事由有限的模板生成，随机性只剩名字、物品等少数选择，所以损失下界不是 0，但很低，真实语料上的损失要高得多。我们要的是一个能验证训练流程、能在几分钟内看到“学会了什么”的实验台，而不是一个好模型。
+
+模型学到了什么？用训练好的模型，提示词 “Once upon a time”，温度 0.8、top-p 0.95 采样：
+
+```text
+Once upon a time, there was a little girl named Kim. Kim had a pink shell.
+She loved her shell very much. Kim took the shell to the garden to play.
+When the sun went down, Kim could not find her shell. She was very sad.
+Then a dog came by. "Why are you sad?" asked the dog. "I lost my pink shell,"
+said Kim. "I will help you,"
+```
+
+主角、代词和物品全文保持一致。把训练步数加倍到 3000，验证损失仍是 0.166（最低 0.161），已进入由模板随机性决定的平台期。训练只有 800 步（学习率还没衰减完）的模型则会写出“a little girl named Kim. Mia had a pink shell”这类名字错乱的句子：它学会了句式，但还没学会跟踪指代。
+
+## 超参数敏感性
+
+学习率是影响最大的超参数。固定其他设置，把总步数缩短到 400（预热 20 步），只改 $\eta_{\max}$（$\eta_{\min}=\eta_{\max}/10$）：
+
+<<SWEEP>>
+
+## 过拟合
+
+<<OVERFIT>>
+
+## 模型学到了什么：一个注意力头
+
+[多头注意力与因果掩码](/transformer/multi-head-attention/)一章提到，训练好的模型里不同的头会分工。我们对训练了 3000 步的模型，在 40 篇验证故事上统计每个头的行为：一个是“前一个 token 分数”（该头平均把多少注意力放在前一个位置），另一个是“名字复制分数”（当下一个 token 是人名时，该头把多少注意力放在前文中同一个名字出现过的位置）。
+
+<Diagram width={720} height={250} label="四层四个头的名字复制分数">
+  <Matrix x={150} y={60} rows={4} cols={4} cell={[70, 34]} digits={2} values={[[0.03, 0.01, 0.51, 0.01], [0.06, 0.03, 0.03, 0.07], [0.06, 0.11, 0.0, 0.14], [0.05, 0.05, 0.03, 0.04]]} highlight={[{ cells: [[0, 2]], tone: 'strong' }]} rowLabels={["层 0", "层 1", "层 2", "层 3"]} colLabels={["头 0", "头 1", "头 2", "头 3"]} title="名字复制分数（越大越把注意力放在前文的同名 token 上）" />
+  <Text x={470} y={90} label="第 0 层的头 2 明显突出：" size="sm" anchor="start" />
+  <Text x={470} y={115} label="在下一个 token 是人名时，它把" size="sm" anchor="start" />
+  <Text x={470} y={140} label="一半的注意力放在名字出现过的" size="sm" anchor="start" />
+  <Text x={470} y={165} label="位置上，其余的头都低于 0.15。" size="sm" anchor="start" />
+  <Fragment slot="caption">方格里是分数，其中第 0 层的第 2 个头一枝独秀（深色）。它在底层就把名字信息收集起来，供后面的层使用。</Fragment>
+</Diagram>
+
+具体看一个例子。取一篇验证故事，当前位置是 “Lily ... said” 中的 “ said”，第 0 层头 2 的注意力权重几乎全部落在故事里出现过的人名上：
+
+<Bars label="第 0 层头 2 在 “said” 位置的注意力权重" items={[{ label: "位置 13  “ Kim”", value: 0.33 }, { label: "位置 38  “ Lily”", value: 0.24 }, { label: "位置 29  “ Kim”", value: 0.16 }, { label: "位置 31  “ Lily”", value: 0.11 }, { label: "位置 11  “ Kim”", value: 0.10 }, { label: "其余 35 个位置合计", value: 0.05 }]} max={0.4}>
+  <Fragment slot="caption">五个人名位置占了 95% 的注意力，所有非名字位置合计只有 5%。这个头在做“收集上下文里的人物”，后面的层再据此决定下一个词是哪个名字。</Fragment>
+</Bars>
+
+这是头分工的一个小而具体的实例。我们没有设计它，它是梯度下降为了降低损失自己找到的结构。需要强调：这只是一个最简单的观察，不能说明模型在“理解”故事。
+
+## 小结
+
+- 训练目标是交叉熵 $\operatorname{logsumexp}(o)-o_y$，减去最大值保证数值稳定；困惑度是其指数，随机初始化时约等于词表大小。
+- 数据是一条以 `<|endoftext|>` 分隔的 token 流，随机取窗口，目标是输入右移一位；一次前向同时训练窗口内所有位置。
+- AdamW 维护每个参数的一阶矩与二阶矩，用偏差校正补偿零初始化；解耦权重衰减不经过 $\sqrt{\hat v}$，只对矩阵参数施加。实现与 `torch.optim.AdamW` 数值一致。
+- 学习率先线性预热，再余弦退火到峰值的 10%；梯度裁剪按全局范数等比缩小，挡住个别尖峰。
+- 一个 92 万参数的 GPT 用 12 分钟的 CPU 训练，就能写出主角、代词、物品一致的故事；学习率过大或过小、缺少预热与裁剪、数据太少都会让训练变差，各自有清晰的症状。
+
+模型训练好了，还剩最后一步：用它生成文本。[文本生成](/transformer/generation/)一章讨论怎样从分布中挑出下一个 token，以及怎样让生成不再重复计算。
+
+## 练习
+
+1. 手算 AdamW 的第二步：沿用文中的例子（$\theta_1=0.89$，$m_1=0.05$，$v_1=0.00025$），第二步的梯度为 $g_2=-0.5$，其余超参数不变，求 $\theta_2$。
+
+<details>
+<summary>答案</summary>
+
+衰减：$\theta=0.89\times(1-0.01)=0.8811$。$m_2=0.9\times0.05+0.1\times(-0.5)=-0.005$；$v_2=0.999\times0.00025+0.001\times0.25=0.00049975$。校正因子 $1-0.9^2=0.19$、$1-0.999^2=0.001999$，故 $\hat m_2=-0.005/0.19=-0.02632$，$\hat v_2=0.00049975/0.001999=0.25$，$\sqrt{\hat v_2}=0.5$。更新量 $0.1\times(-0.02632)/0.5=-0.005263$，所以 $\theta_2=0.8811+0.005263=0.88636$。梯度反号后，动量把更新几乎抵消，参数只移动了很小一步。
+
+</details>
+
+2. 证明：若 $\mathbb E[g_i]=\mu$ 且与 $i$ 无关，则 $v_t/(1-\beta_2^t)$ 是 $\mathbb E[g^2]$ 的无偏估计。
+
+<details>
+<summary>答案</summary>
+
+$v_t=(1-\beta_2)\sum_{i=1}^t\beta_2^{t-i}g_i^2$，取期望得 $\mathbb E[v_t]=(1-\beta_2)\mathbb E[g^2]\sum_{i=1}^t\beta_2^{t-i}$。等比数列求和 $\sum_{i=1}^t\beta_2^{t-i}=(1-\beta_2^t)/(1-\beta_2)$，所以 $\mathbb E[v_t]=(1-\beta_2^t)\mathbb E[g^2]$，除以 $1-\beta_2^t$ 即无偏。
+
+</details>
+
+3. 为什么在 Adam 中把 L2 正则项加进梯度，与解耦权重衰减不等价？举出有效衰减强度的表达式。
+
+<details>
+<summary>答案</summary>
+
+L2 把梯度换成 $g+\lambda\theta$，更新里与它相关的部分是 $\eta\lambda\theta/(\sqrt{\hat v}+\epsilon)$，等效衰减系数 $\eta\lambda/\sqrt{\hat v}$ 因参数而异：梯度历史大（$\hat v$ 大）的参数衰减弱，梯度小的衰减强。解耦版本的衰减系数是常数 $\eta\lambda$，与梯度无关。SGD 里 $\sqrt{\hat v}$ 不存在，两者才等价。
+
+</details>
+
+4. 将 $\beta_2$ 从 0.95 改成 0.999，对一次梯度尖峰之后的训练有什么影响？
+
+<details>
+<summary>答案</summary>
+
+尖峰使 $v_t$ 突然变大，随后以 $\beta_2$ 衰减，恢复需要约 $1/(1-\beta_2)$ 步：$\beta_2=0.95$ 约 20 步，$\beta_2=0.999$ 约 1000 步。在这段时间里分母偏大，所有更新都被压小，训练实质上“停滞”。所以大模型训练偏好 $\beta_2=0.95$，并配合梯度裁剪。
+
+</details>
+
+5. 用本章配置训练，若不使用预热（$W=0$）会发生什么？结合 Adam 第一步更新量等于 $\eta$ 的结论解释。
+
+<details>
+<summary>答案</summary>
+
+没有预热时，第一步每个参数都按约 $\eta_{\max}$ 的步长移动，而此时梯度大且噪声多（第 13 步的范数达 26.9）。在 $\eta_{\max}=3\times10^{-3}$ 时一次更新相对 0.02 的初始化标准差已经是 15%，是很大的扰动，因此早期可能出现损失上升或损失尖峰。预热把前几步的步长限制在 $\eta_{\max}t/W$，同时让 $\hat v$ 吸收足够多的梯度样本后再放开步长。
+
+</details>
+
+## 参考文献
+
+- Diederik P. Kingma, Jimmy Ba. [Adam: A Method for Stochastic Optimization](https://arxiv.org/abs/1412.6980). ICLR 2015.
+- Ilya Loshchilov, Frank Hutter. [Decoupled Weight Decay Regularization](https://arxiv.org/abs/1711.05101). ICLR 2019.（AdamW）
+- Ilya Loshchilov, Frank Hutter. [SGDR: Stochastic Gradient Descent with Warm Restarts](https://arxiv.org/abs/1608.03983). ICLR 2017.（余弦退火）
+- Razvan Pascanu, Tomas Mikolov, Yoshua Bengio. [On the difficulty of training recurrent neural networks](https://arxiv.org/abs/1211.5063). ICML 2013.（梯度裁剪）
+- Ronen Eldan, Yuanzhi Li. [TinyStories: How Small Can Language Models Be and Still Speak Coherent English?](https://arxiv.org/abs/2305.07759). 2023.
+- Tom Brown et al. [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165). NeurIPS 2020.（GPT-3 的训练超参数）
+- Hugo Touvron et al. [Llama 2: Open Foundation and Fine-Tuned Chat Models](https://arxiv.org/abs/2307.09288). 2023.（AdamW、余弦调度、预热、裁剪的取值）
+- Shengding Hu et al. [MiniCPM: Unveiling the Potential of Small Language Models with Scalable Training Strategies](https://arxiv.org/abs/2404.06395). 2024.（WSD 学习率调度）
+- Stanford CS336, Assignment 1: [assignment1-basics](https://github.com/stanford-cs336/assignment1-basics).
+- PyTorch. [torch.optim.AdamW](https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html).
