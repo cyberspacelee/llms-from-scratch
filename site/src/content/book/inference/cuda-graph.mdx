@@ -1,8 +1,214 @@
 ---
 title: CUDA Graph：消除启动开销
-description: decode 阶段为什么受 CPU 启动开销限制，CUDA Graph 的捕获与重放，静态形状与按批大小分桶，以及与 torch.compile 的结合。
+description: 推导一次 decode 步要启动多少个 kernel、CPU 开销为什么会超过 GPU 时间；CUDA Graph 的捕获与重放、静态地址要求、按批大小分桶与 padding，注意力元数据与动态形状的冲突以及 vLLM 的 FULL 与 PIECEWISE 模式，和 torch.compile 的配合。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/inference/cuda_graph.py
+  - tests/inference/test_cuda_graph.py
 ---
 
-本章正在撰写。
+[成本模型](/inference/inference-cost/)假设 GPU 一直在干活：一步 decode 的时间就是读权重与 KV 的时间。这个假设漏掉了一个参与者——CPU。GPU 上的每一个 kernel 都要由 CPU 端的 Python、PyTorch 分发器和 CUDA 驱动发起。prefill 的 kernel 又大又少，发射的开销可以忽略；decode 的 kernel 又小又多，一步只有几毫秒，CPU 发射一千多个 kernel 的时间可能比 GPU 执行它们还长。这时 GPU 大部分时间在等 CPU，前面所有关于带宽的优化都无从发挥。
+
+本章先估算这个开销有多大，再介绍 CUDA 提供的解决方案——CUDA Graph：把一整步的 kernel 序列录制一次，之后用一次调用整体重放。它的代价是“静态”：地址固定、形状固定、不能有数据依赖的控制流。推理引擎的大量工程就是在这个约束下让动态的批次也能用上图。本机没有 GPU，我们给出完整的 `torch.cuda.CUDAGraph` 代码（GPU 测试在没有 GPU 时跳过），同时用一个遵守相同契约的“伪图”在 CPU 上测试分桶、padding 与静态地址的逻辑。
+
+## decode 一步要启动多少个 kernel
+
+先数一数。全书共用的 GPT 在 eager 模式下 decode 一个 token 时，派发到 ATen 的算子可以用 `TorchDispatchMode` 记录下来：
+
+<CodeFile path="src/llms_from_scratch/inference/cuda_graph.py" region="count" />
+
+在一个 4 层与一个 2 层的小模型上各跑一步 decode，两者之差除以 2 就是每层的算子数。结果是每层约 82 个 ATen 算子，其中约 47 个是 `view`、`transpose`、`slice` 一类只改元数据的视图操作，剩下约 **35 个**会真正启动 kernel：RMSNorm 被拆成 `pow`、`mean`、`add`、`rsqrt`、`mul` 等 6 个算子（两次），Q/K/V/O 与 FFN 的 7 次矩阵乘法，RoPE 的复数乘法与类型转换，KV Cache 写入的两次 `copy_`，构造因果掩码的 `ones`、`tril`、`where`，注意力本身，SiLU、逐元素乘与两次残差加法。层外还有嵌入、最后的归一化和 LM head，约 9 个。测试 `test_count_ops_of_one_decode_step` 固定了这个量级。
+
+按同样的结构推到 Llama-3-8B 的 32 层：一步 decode 约 $35\times32+9 \approx 1129$ 个 kernel。
+
+<KeyEq label="启动受限时一步的耗时">
+
+$$
+t_{\text{step}} \approx \sum_{k=1}^{K} \max\big(t_{\text{cpu}},\ t_{\text{gpu},k}\big)
+$$
+
+</KeyEq>
+
+CPU 依次发射 $K$ 个 kernel，每次花 $t_{\text{cpu}}$；GPU 依次执行，第 $k$ 个花 $t_{\text{gpu},k}$。只要 GPU 执行得比 CPU 发射得快，GPU 就会追上 CPU、空等下一个 kernel，总时间由 CPU 决定。decode 中大多数 kernel 都很小：对 $(B, 4096)$ 的张量做一次逐元素运算，在 3.35 TB/s 的带宽下只需不到 1 µs，再加上 GPU 端几微秒的调度开销。而 PyTorch eager 模式下发起一个算子要经过 Python 解释器、分发器、CUDA 驱动，每次通常要几微秒到十几微秒。设 $t_{\text{cpu}} = 5\,\mu s$，1129 个 kernel 就是 5.6 ms，已经超过了读一遍权重的 4.5 ms。
+
+这不是纸上推演。PyTorch 团队在 gpt-fast 中从一个最朴素的实现出发：7B 模型在 A100 上 batch=1 只有 **25.5 token/s**，trace 显示它“heavily CPU overhead bound”；用 `torch.compile(mode="reduce-overhead")` 加静态 KV Cache 之后达到 **107 token/s**，对应 72% 的带宽利用率。这 4 倍多的提升主要来自消除 CPU 开销（`reduce-overhead` 模式的核心就是 CUDA Graph），其次是编译器生成的融合 kernel。
+
+<Lanes
+  label="eager 发射与 CUDA Graph 重放的时间线"
+  lanes={['CPU（eager）', 'GPU（eager）', 'CPU（graph）', 'GPU（graph）']}
+  unit="时间（µs）"
+  span={40}
+  tick={5}
+  items={[
+    { lane: 0, start: 0, end: 5, label: 'k1' }, { lane: 0, start: 5, end: 10, label: 'k2' }, { lane: 0, start: 10, end: 15, label: 'k3' }, { lane: 0, start: 15, end: 20, label: 'k4' }, { lane: 0, start: 20, end: 25, label: 'k5' }, { lane: 0, start: 25, end: 30, label: 'k6' }, { lane: 0, start: 30, end: 35, label: 'k7' },
+    { lane: 1, start: 5, end: 7, tone: 'info' }, { lane: 1, start: 10, end: 13, tone: 'info' }, { lane: 1, start: 15, end: 17, tone: 'info' }, { lane: 1, start: 20, end: 22, tone: 'info' }, { lane: 1, start: 25, end: 28, tone: 'info' }, { lane: 1, start: 30, end: 32, tone: 'info' }, { lane: 1, start: 35, end: 37, tone: 'info' },
+    { lane: 2, start: 0, end: 6, label: '拷入+launch', tone: 'accent2' },
+    { lane: 3, start: 6, end: 8, tone: 'info' }, { lane: 3, start: 8, end: 11, tone: 'info' }, { lane: 3, start: 11, end: 13, tone: 'info' }, { lane: 3, start: 13, end: 15, tone: 'info' }, { lane: 3, start: 15, end: 18, tone: 'info' }, { lane: 3, start: 18, end: 20, tone: 'info' }, { lane: 3, start: 20, end: 22, tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">示意图（数值为假设）：每个 kernel 在 GPU 上只需 2–3 µs，而 CPU 发射一个要 5 µs。eager 模式下 GPU 有一半以上时间在空等；CUDA Graph 用一次启动提交整个序列，kernel 在 GPU 上首尾相接，同样 7 个 kernel 的时间从 37 µs 缩短到 22 µs。</Fragment>
+</Lanes>
+
+批越大，每个 kernel 的 GPU 时间越长，CPU 开销越容易被掩盖；所以 CPU 开销主要伤害小批 decode——恰好是对延迟最敏感的场景。prefill 的单个矩阵乘法就要几百微秒，CPU 开销可以忽略，这也是为什么推理引擎通常只为 decode 使用 CUDA Graph。
+
+## CUDA Graph：录制一次，重放多次
+
+CUDA Graph 把一组 GPU 操作及其依赖关系表示成一张图，分三步使用：
+
+1. **捕获（capture）**：让一个 CUDA stream 进入捕获模式。之后提交到这个 stream 的 kernel 不会执行，而是连同它们的**全部参数**——网格尺寸、标量、以及指向输入输出的**设备指针**——被记录成图的节点。
+2. **实例化（instantiate）**：驱动检查并优化这张图，生成可执行图。这一步较慢，只做一次。
+3. **重放（launch / replay）**：一次 `cudaGraphLaunch` 把整张图提交给 GPU，CPU 端的开销与图里有多少个 kernel 基本无关。
+
+PyTorch 把它包装成 `torch.cuda.CUDAGraph` 与 `torch.cuda.graph` 上下文管理器。录制下来的是 kernel 与指针，不是 Python 代码，由此产生几条必须遵守的规则：
+
+- **静态地址**：重放时 kernel 读写的仍是捕获时的那些地址。新数据必须**拷进**捕获时用过的输入张量，而不是换一个新张量；输出也在固定地址，下一次重放会覆盖它。
+- **静态形状**：网格尺寸和形状参数被固定，不同的批大小需要各自捕获一张图。
+- **没有 CPU 同步与数据依赖的控制流**：捕获期间不能调用 `.item()`、`.cpu()`、`print(tensor)`，不能根据张量的值走不同的 Python 分支——这些都无法被录进图里，有的会直接报错。
+- **内存**：捕获期间分配的显存来自图私有的内存池，重放时被反复使用。多张图可以共享一个池（PyTorch 的 `pool` 参数），只要它们不会同时重放。
+- **预热**：cuBLAS 等库在第一次调用时会做懒初始化、选择算法，这些不能发生在捕获中。PyTorch 文档建议先在一个旁路 stream 上跑几次。
+
+下面是完整的捕获代码。它按尺寸**从大到小**捕获，所有图共享第一个（最大的）图的内存池；每个尺寸 $s$ 的图读写的是同一组静态缓冲区的前 $s$ 行。
+
+<CodeFile path="src/llms_from_scratch/inference/cuda_graph.py" region="cuda" />
+
+nano-vllm 的 `ModelRunner.capture_cudagraph` 用的是同一个套路：对 `[1, 2, 4, 8] + range(16, max_bs + 1, 16)` 中的每个批大小先预热一次、再在 `torch.cuda.graph(graph, self.graph_pool)` 中捕获 `self.model(input_ids[:bs], positions[:bs])`，输出写进预先分配的 `outputs[:bs]`。
+
+## 按批大小分桶与 padding
+
+decode 批的大小每一步都在变。为每一个可能的大小捕获一张图既费时间又费显存，常见做法是只捕获一组“桶”，运行时把真实批 pad 到不小于它的最小桶。vLLM 默认的捕获尺寸是
+
+$$
+[1, 2, 4] \cup \{8, 16, \dots, 248\} \cup \{256, 272, \dots, s_{\max}\},
+$$
+
+$s_{\max}$ 默认上限为 512。小批之间间隔小，因为小批的 padding 比例最敏感；大批时 16 行的 padding 相对整体可以忽略。
+
+<CodeFile path="src/llms_from_scratch/inference/cuda_graph.py" region="buckets" />
+
+<Plot
+  label="padding 后的计算量与真实批大小之比"
+  x={[1, 512]}
+  y={[1, 2]}
+  logX
+  xLabel="真实批大小 n"
+  yLabel="padded(n) / n"
+  series={[
+    { label: 'vLLM 默认捕获尺寸', points: Array.from({ length: 512 }, (_, i) => { const k = i + 1; const s = k <= 2 ? k : k <= 4 ? 4 : k <= 248 ? Math.ceil(k / 8) * 8 : Math.ceil(k / 16) * 16; return [k, s / k] }) },
+    { label: '只捕获 2 的幂', points: Array.from({ length: 512 }, (_, i) => [i + 1, 2 ** Math.ceil(Math.log2(i + 1)) / (i + 1)]), tone: 'accent2' },
+  ]}
+>
+  <Fragment slot="caption">纵轴是重放的图实际计算的行数与真实批大小之比。只捕获 2 的幂时最坏要多算接近一倍；vLLM 的桶在小批处最多多算 60%（n = 5 → 8），批大于 16 后浪费不超过 1.5 倍且迅速趋近于 1。</Fragment>
+</Plot>
+
+vLLM 的 `CudagraphDispatcher._compute_bs_to_padded_graph_size` 预先算好一张“真实大小 → 捕获大小”的查找表；超过最大捕获尺寸的批直接走 eager。我们的 `padded_size` 用二分查找做同样的事，测试 `test_capture_sizes_and_padding` 检查桶的列表、若干个 padding 结果，以及“padding 不超过 $\max(n, 16)$ 行”的上界。
+
+### padding 行必须无害
+
+被 pad 出来的行也会被计算——图里的每个 kernel 都按捕获尺寸运行。所以 padding 行的数据必须保证两件事：不会污染任何真实请求的 KV Cache，不会产生 NaN 这样的数值异常（某些 kernel 中 NaN 会传染）。我们的静态缓冲区这样填充 padding 行：
+
+<CodeFile path="src/llms_from_scratch/inference/cuda_graph.py" region="static" />
+
+<Diagram width={720} height={250} label="把 3 个请求放进尺寸为 4 的静态缓冲区">
+  <Matrix x={130} y={50} rows={4} cols={5} cell={[96, 30]} gap={3}
+    colLabels={['input_ids', 'positions', 'slots', 'seq_lens', 'block_table']}
+    rowLabels={['req 0', 'req 1', 'req 2', 'pad']}
+    values={[['14', '3', '11', '4', '[2, 0, …]'], ['27', '6', '30', '7', '[5, 7, …]'], ['35', '4', '40', '5', '[9, 10, …]'], ['0', '0', '0', '1', '[0, 0, …]']]}
+    highlight={[{ rows: [0, 1, 2], tone: 'accent' }, { rows: [3], tone: 'muted' }]} />
+  <Box x={130} y={190} w={260} h={40} label="物理块 0：永不分配的空块" tone="muted" size="sm" />
+  <Arrow from={[322, 172]} to={[300, 190]} dashed />
+  <Box x={450} y={190} w={240} h={40} label="输出只取前 3 行" tone="strong" size="sm" />
+  <Fragment slot="caption">前三行是本步真实的 decode 请求，第四行是 padding：写入槽 0 落在永不分配的块 0，可见长度为 1 保证 softmax 不会除以零，块表全指向块 0。重放后只取前 3 行隐状态送去 LM head 与采样。</Fragment>
+</Diagram>
+
+vLLM 的块池也在初始化时把块 0 留作 `null_block`，专门承接这类无效写入；nano-vllm 则把 padding 行的槽号设成 $-1$，由写缓存的 Triton kernel 跳过。两种做法都满足同一个不变量：**padding 行的写入不能落在任何活跃请求的块里**。仅仅“丢弃 padding 行的输出”是不够的——输出可以丢，已经发生的缓存写入撤销不了。
+
+### 在 CPU 上测试图的契约
+
+没有 GPU 也能检查上面这些逻辑。`FakeGraphRunner` 在“捕获”时记下每个尺寸的静态缓冲区视图的地址；“重放”时只通过这些视图传入数据，并检查地址没有变：
+
+<CodeFile path="src/llms_from_scratch/inference/cuda_graph.py" region="fake" />
+
+`test_fake_graph_matches_eager_and_padding_is_harmless` 让同一个分页 GPT 分别以 eager 和伪图方式执行 3 个请求的 decode：伪图被 pad 到尺寸 4，输出与 eager 完全一致；除了空块 0，所有物理块的 KV 与 eager 逐元素相同。`test_fake_graph_rejects_reallocated_buffers` 演示最常见的错误——把一个静态缓冲区换成新分配的张量，真实的 CUDA Graph 会默默读旧地址，伪图则直接报错。`test_real_cuda_graph_matches_eager` 在有 GPU 时用真实的 `CUDAGraphRunner` 做同样的对比。
+
+## 注意力元数据与动态形状
+
+线性层、归一化、激活函数都是“逐 token”的：它们的形状只依赖本步 token 总数 $N$，与每个请求有多长无关。注意力不一样，它需要一批**元数据**：每个请求的上下文长度、块表、本步每个 token 写到哪个槽，prefill 时还要每个请求的查询区间（FlashAttention varlen 接口的 `cu_seqlens_q/k` 与 `max_seqlen`）。这些量每一步都在变，而且往往以 CPU 端整数的形式传给 kernel（例如网格大小取决于 `max_seqlen`）——这与 CUDA Graph 的“参数在捕获时固定”直接冲突。
+
+decode 批的冲突可以化解：每个请求恰好 1 个查询，元数据的**形状**只依赖批大小；只要 kernel 从**设备内存**里读上下文长度与块表（而不是把它们作为启动参数），值的变化就不影响图。我们的 `paged_attention` 就是这样：块表宽度固定为上下文上限对应的块数，可见长度是一个张量，掩码在 GPU 上由它算出。
+
+prefill 和混合批更难：每个请求的查询长度不同，最优的 kernel 划分方式随之变化。vLLM 的方案是**分段 CUDA Graph**（piecewise CUDA graph）：
+
+<Diagram width={720} height={190} label="分段 CUDA Graph：注意力之外的部分被捕获">
+  <Box x={20} y={60} w={130} h={56} label="嵌入 + QKV 投影" sub="graph 1" tone="accent" />
+  <Box x={170} y={60} w={100} h={56} label="注意力" sub="eager" tone="accent2" />
+  <Box x={290} y={52} w={150} h={72} label={'O 投影 + FFN\n+ 下一层 QKV'} sub="graph 2" tone="accent" />
+  <Box x={460} y={60} w={100} h={56} label="注意力" sub="eager" tone="accent2" />
+  <Box x={580} y={60} w={120} h={56} label="…… + LM head" sub="graph L+1" tone="accent" />
+  <Arrow from={[150, 88]} to={[170, 88]} />
+  <Arrow from={[270, 88]} to={[290, 88]} />
+  <Arrow from={[440, 88]} to={[460, 88]} />
+  <Arrow from={[560, 88]} to={[580, 88]} />
+  <Text x={360} y={150} label="每一段只依赖本步 token 总数 N，按 N 分桶捕获；注意力按真实元数据 eager 执行" size="sm" tone="muted" />
+  <Fragment slot="caption">vLLM 用 torch.compile 把模型编译成一张计算图，在注意力算子处切开（splitting_ops），对两次注意力之间的每一段分别捕获 CUDA Graph。L 层模型被切成 L+1 段，注意力由 CPU 正常发射，其余数百个小 kernel 都在图里。</Fragment>
+</Diagram>
+
+`vllm/config/compilation.py` 中的 `CUDAGraphMode` 定义了几种模式：
+
+| 模式 | 含义 |
+| --- | --- |
+| `NONE` | 不使用 CUDA Graph |
+| `PIECEWISE` | 只捕获分段图，注意力留在图外 |
+| `FULL` | 为所有批捕获包含注意力在内的完整图；只适合少数支持的注意力后端，适合小模型或短提示负载 |
+| `FULL_DECODE_ONLY` | 只为纯 decode 批捕获完整图，混合批走 eager；适合 PD 分离中的 decode 实例 |
+| `FULL_AND_PIECEWISE` | decode 批用完整图，prefill 与混合批用分段图；V1 的默认值 |
+
+运行时，`CudagraphDispatcher.dispatch` 根据本步的 token 数、是否是“统一 decode”（每个请求的查询长度都等于 $1+$草稿数）等信息，决定用 FULL 图、PIECEWISE 图还是 eager，并给出 pad 之后的尺寸。注意 vLLM V1 是按**本步 token 总数**而不是请求数分桶的——对纯 decode 批两者相同，对分段图来说 token 数才是形状。
+
+## 与 torch.compile 的配合
+
+[算子融合与 torch.compile](/gpu/kernel-fusion/)介绍过编译器怎样把多个逐元素算子融合成一个 kernel。它与 CUDA Graph 解决的是两个不同的问题：融合减少 kernel 的**数量**和中间结果的访存，CUDA Graph 减少每个 kernel 的**发射开销**。两者叠加效果最好——先把每层的 35 个 kernel 融合成十来个，再把剩下的整体录进图里。
+
+`torch.compile(mode="reduce-overhead")` 在编译后的图上自动使用 CUDA Graph（PyTorch 内部称为 CUDA Graph Trees），gpt-fast 就是这样做的，并且把 prefill 和 decode 分成两个以不同策略编译的函数——prefill 的形状太多变。vLLM 的做法更显式：用 `torch.compile` 对模型做一次带符号形状（token 数是符号维度）的编译，得到融合后的 Inductor 代码；再在 `GPUModelRunner.capture_model` 中对每个捕获尺寸做一次捕获。编译与捕获在引擎启动时完成，可能要几十秒到几分钟，这是 CUDA Graph 在部署上的主要代价；另一个代价是显存——每个尺寸的图都要保留自己的中间激活，vLLM 因此把最大捕获尺寸默认限制在 512。
+
+## 小结
+
+- decode 一步要启动上千个小 kernel。当 CPU 发射一个 kernel 的时间超过 GPU 执行它的时间，GPU 就会空等，一步的耗时由 CPU 决定；小批 decode 最容易落入这种“开销受限”状态。
+- CUDA Graph 把 kernel 序列及其参数（包括设备指针）录制成图，之后一次提交整体重放；代价是静态地址、静态形状、不能有 CPU 同步和数据依赖的分支。
+- 推理引擎为一组批大小分别捕获图，运行时把真实批 pad 到最近的桶。输入先拷进固定地址的静态缓冲区；padding 行必须写到无害的位置（空块），不能只丢弃输出。
+- 注意力的元数据随请求变化。decode 批可以让 kernel 从设备内存读取长度与块表，从而被完整捕获；prefill 与混合批用分段图——vLLM 在注意力处切开，只捕获其余部分。V1 默认 `FULL_AND_PIECEWISE`。
+- torch.compile 负责融合、CUDA Graph 负责去掉发射开销，两者互补；gpt-fast 在 A100 上的 7B 模型 decode 从 25.5 token/s 提升到 107 token/s。
+
+[下一章](/inference/vllm/)把前四章的机制放回一个真实的系统：沿着一个请求的生命周期阅读 vLLM V1 的源码。
+
+## 练习
+
+1. 一个 decode 步有 600 个 kernel，每个 GPU 执行 3 µs，CPU 发射 8 µs。eager 模式下一步约多长？用 CUDA Graph（设重放本身的 CPU 开销为 20 µs）呢？
+2. 为什么捕获期间不能调用 `tensor.item()`？举一个模型代码中容易不小心写出 `.item()` 的例子。
+3. 真实批大小为 37，vLLM 默认的捕获尺寸会 pad 到多少？如果最大捕获尺寸设为 32 会怎样？
+4. 把 padding 行的槽号设为 0（空块）而不是某个“看起来没人用”的槽，为什么更安全？
+5. 一个注意力 kernel 的网格大小取决于 CPU 端传入的 `max_seqlen`。它能被完整捕获进 decode 图吗？需要怎样修改？
+
+<details>
+<summary>答案</summary>
+
+1. eager：CPU 每 8 µs 发一个，GPU 3 µs 就做完，总时间约 $600\times8 = 4.8$ ms。graph：GPU 连续执行 $600\times3 = 1.8$ ms，加上约 20 µs 的启动，约 1.8 ms，快 2.6 倍。
+
+2. `.item()` 会把设备上的值拷回 CPU，需要同步 stream，而捕获中的 stream 并没有真正执行任何东西，同步没有意义（PyTorch 会报错）。常见的例子：用 `if (mask.sum() > 0).item():` 决定是否走某个分支，或者用 `int(lengths.max())` 计算切片长度。
+
+3. pad 到 40（8 的倍数）。若最大尺寸为 32，37 超出所有桶，这一步走 eager；也可以把批拆开，但 vLLM 选择直接回退。
+
+4. 空块 0 永远不会被分配给任何请求，写入它对谁都没有影响。“看起来没人用”的槽可能在下一步就被分配给新请求，或者属于一个仍在前缀缓存中、随时可能被命中的块；而且槽的“空闲”状态由调度器维护，模型运行器不应该做这种猜测。
+
+5. 不能直接捕获：图会固定捕获时的网格大小，`max_seqlen` 变大后 kernel 只会处理旧网格覆盖的范围。可以按最大上下文长度确定网格，让每个线程块从设备内存读本序列的长度，超出长度的块提前返回（FlashAttention 的分页 decode kernel 与 FlashInfer 都有这类支持 CUDA Graph 的变体）；或者把注意力留在图外（分段图）。
+
+</details>
+
+## 参考文献
+
+- NVIDIA. *CUDA C++ Programming Guide: CUDA Graphs*. [docs.nvidia.com](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#cuda-graphs)
+- PyTorch 文档：*CUDA semantics — CUDA Graphs*（`torch.cuda.CUDAGraph`、`torch.cuda.graph`、`make_graphed_callables`）. [pytorch.org/docs](https://pytorch.org/docs/stable/notes/cuda.html#cuda-graphs)
+- PyTorch Team. *Accelerating PyTorch with CUDA Graphs*. 2021. [pytorch.org/blog](https://pytorch.org/blog/accelerating-pytorch-with-cuda-graphs/)
+- PyTorch Team. *Accelerating Generative AI with PyTorch II: GPT, Fast*. 2023. [pytorch.org/blog](https://pytorch.org/blog/accelerating-generative-ai-2/)
+- Horace He. *Making Deep Learning Go Brrrr From First Principles*. 2022. [horace.io/brrr_intro.html](https://horace.io/brrr_intro.html)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/config/compilation.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/config/compilation.py)（`CUDAGraphMode`、`cudagraph_capture_sizes`），[`vllm/v1/cudagraph_dispatcher.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/cudagraph_dispatcher.py)；vLLM 文档 *CUDA Graphs* 设计说明 [docs.vllm.ai](https://docs.vllm.ai/en/latest/design/cuda_graphs.html)
+- nano-vllm：[`nanovllm/engine/model_runner.py`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/model_runner.py)（`capture_cudagraph`、`run_model`）
