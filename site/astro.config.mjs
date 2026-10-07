@@ -1,6 +1,5 @@
 import { defineConfig } from 'astro/config'
 import mdx from '@astrojs/mdx'
-import react from '@astrojs/react'
 import { unified } from '@astrojs/markdown-remark'
 import remarkMath from 'remark-math'
 import remarkCjkFriendly from 'remark-cjk-friendly'
@@ -19,7 +18,7 @@ export default defineConfig({
   site: 'https://cyberspacelee.github.io',
   base,
   trailingSlash: 'always',
-  integrations: [react(), mdx()],
+  integrations: [mdx()],
   vite: {
     cacheDir: `node_modules/.vite/${cacheCommand}`,
     plugins: [tailwindcss()],
