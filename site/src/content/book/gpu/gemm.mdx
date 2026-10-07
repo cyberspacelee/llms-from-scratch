@@ -2,7 +2,284 @@
 title: 矩阵乘法优化：从朴素到 Tensor Core
 description: GEMM 的算术强度，共享内存分块、寄存器分块与向量化加载，Tensor Core 与 WMMA/WGMMA，以及 CUTLASS 的分层思想。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/gpu/kernels/gemm.cu
+  - src/llms_from_scratch/gpu/gemm_tiling.py
+  - tests/gpu/test_gemm_tiling.py
 ---
 
-本章正在撰写。
+在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中我们看到，Transformer 的 FLOPs 几乎全部来自矩阵乘法：QKV 与输出投影、FFN 的三个线性层、注意力里的 $QK^\top$ 与 $PV$。前三章处理的都是带宽受限的算子，优化的目标是“跑满带宽”；矩阵乘法（GEMM，General Matrix Multiply）不同，它有足够多的数据复用，**有可能** 成为计算受限的算子，目标是逼近峰值算力。
+
+“有可能”是关键：同一个 GEMM，朴素写法在一张 RTX A6000 上只能达到 cuBLAS 的 1.3%，而层层优化之后可以达到 93.7%（Simon Boehm 的实验，数字见下文）。这七十倍的差距几乎完全来自 **数据复用**：同一个从 HBM 读出的元素，能在片上被用多少次。本章用算术强度作为唯一的度量，从朴素 kernel 出发，依次引入共享内存分块、寄存器分块与向量化加载，每一步都推导强度怎样提高，并用 CPU 模拟器核对全局读取量；最后转向 Tensor Core，介绍 WMMA、Hopper 的 WGMMA 与 TMA，以及 CUTLASS/CuTe 的分层设计。
+
+## GEMM 的算术强度
+
+### 问题的上限
+
+考虑 $C = AB$，$A\in\mathbb R^{M\times K}$，$B\in\mathbb R^{K\times N}$，每个元素 $e$ 字节。计算量为
+
+$$
+\text{FLOPs} = 2MNK
+$$
+
+（每个输出元素 $K$ 次乘加，每次乘加算 2 FLOPs）。如果片上存储无限大，每个输入只需从 HBM 读一次、输出写一次，访存量最少为 $(MK + KN + MN)\,e$。对方阵 $M=N=K$：
+
+<KeyEq label="方阵 GEMM 的最大算术强度">
+
+$$
+I_{\max} = \frac{2N^3}{3N^2 e} = \frac{2N}{3e}
+$$
+
+</KeyEq>
+
+$N = 4096$、FP32（$e=4$）时 $I_{\max}\approx 683$ FLOP/byte，远高于任何 GPU 的脊点。所以大矩阵乘法 **原则上** 是计算受限的。但片上存储是有限的（每 SM 数百 KB），kernel 实际达到的强度取决于它把多大的块留在片上反复使用。下面每一步优化，都可以看作在提高“每从 HBM 读一个字节做多少运算”。
+
+## 朴素 kernel：没有复用
+
+### 一个线程一个输出
+
+最直接的映射：每个线程计算 $C$ 的一个元素，循环 $K$ 次，每次从全局内存读一个 $A$ 元素和一个 $B$ 元素。
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/gemm.cu" region="naive" />
+
+每次乘加读 2 个元素（8 字节），做 2 FLOPs，算术强度 **0.25 FLOP/byte**——和向量加法一样低。整个 GEMM 的全局读取量是 $2MNK$ 个元素，是最小值的 $\sim N$ 倍。
+
+实际情况没有这么糟：由于 `threadIdx.x` 对应列，同一个 warp 的 32 个线程读 $B$ 的同一行中连续的 32 个元素（合并），读 $A$ 的同一个元素（广播）；L1 与 L2 缓存也会命中一部分重复读取。但缓存是“碰运气”的复用；高性能 kernel 要把复用写进算法里。Boehm 的实验中，最朴素的版本（`threadIdx.x` 对应行，读 $B$ 不合并）只有 309 GFLOPS，仅仅调换线程映射使访问合并，就提升到 1987 GFLOPS——再次印证上一章的结论。
+
+模拟器 `gemm_naive_sim` 记录全局读取量，测试断言它恰好是 $2MNK$：
+
+<CodeFile path="src/llms_from_scratch/gpu/gemm_tiling.py" region="naive" />
+
+## 共享内存分块
+
+### 一个块的输出共享输入
+
+观察：$C$ 中同一行的元素都要读 $A$ 的同一行，同一列的元素都要读 $B$ 的同一列。如果一个线程块负责 $C$ 的一个 $T\times T$ 子块，块内 $T^2$ 个线程需要的 $A$ 只有 $T$ 行、$B$ 只有 $T$ 列。把它们 **分批** 读进共享内存，就能让每个从 HBM 读出的元素被 $T$ 个线程使用。
+
+具体做法是沿 $K$ 维切成长度为 $T$ 的段：每一轮，block 把 $A$ 的一个 $T\times T$ 子块和 $B$ 的一个 $T\times T$ 子块搬进共享内存（每个线程搬一个元素），同步，然后每个线程用共享内存中的数据做 $T$ 次乘加，再同步，进入下一轮。
+
+<Diagram width={700} height={300} label="共享内存分块：一个 block 计算 C 的一个子块">
+  <Matrix x={250} y={40} rows={6} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ rows: [2, 3], cols: [], tone: 'accent' }, { cells: [[2, 0], [2, 1], [3, 0], [3, 1]], tone: 'strong' }]} title="A（M × K）" />
+  <Matrix x={480} y={40} rows={8} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ cols: [4, 5], tone: 'info' }, { cells: [[0, 4], [0, 5], [1, 4], [1, 5]], tone: 'strong' }]} title="B（K × N）" />
+  <Matrix x={480} y={236} rows={2} cols={8} cell={22} gap={1} tone="muted" highlight={[{ cells: [[0, 4], [0, 5], [1, 4], [1, 5]], tone: 'accent2' }]} />
+  <Text x={420} y={260} label="C 的子块" anchor="end" size="sm" tone="accent2" />
+  <Box x={20} y={60} w={190} h={60} label="共享内存 As" sub="T × T，本轮的 A 子块" tone="accent" />
+  <Box x={20} y={190} w={190} h={56} label="共享内存 Bs" sub="T × T，本轮的 B 子块" tone="info" />
+  <Arrow from={[250, 92]} to={[210, 90]} tone="accent" />
+  <Arrow from={[480, 74]} via={[[450, 74], [450, 218]]} to={[210, 218]} tone="info" />
+  <Text x={115} y={278} label="沿 K 方向滑动：K / T 轮" size="sm" tone="muted" />
+  <Fragment slot="caption">以 T = 2 示意。block 负责 C 中橙色的 T×T 子块，它需要 A 的两行（绿色）与 B 的两列（蓝色）。每一轮只把其中一个 T×T 子块（深色）搬进共享内存，块内所有线程从共享内存读取；K/T 轮之后累加完毕。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/gemm.cu" region="smem" />
+
+### 强度推导
+
+每一轮，block 从 HBM 读入 $2T^2$ 个元素，做 $T^2\cdot T$ 次乘加，即 $2T^3$ FLOPs：
+
+$$
+I_{\text{smem}} = \frac{2T^3}{2T^2 e} = \frac{T}{e}\ \text{FLOP/byte},
+$$
+
+FP32、$T=32$ 时为 8 FLOP/byte，比朴素版本提高 $T$ 倍。从整体看，$C$ 被分成 $(M/T)(N/T)$ 个子块，每个子块读 $A$ 的 $T\times K$ 与 $B$ 的 $K\times T$，全局读取量为
+
+$$
+\frac{M}{T}\cdot\frac{N}{T}\cdot 2TK = \frac{2MNK}{T}.
+$$
+
+更一般地，若 block 子块为 $B_M\times B_N$，读取量为 $MNK\left(\frac{1}{B_N} + \frac{1}{B_M}\right)$，即 $A$ 被读 $N/B_N$ 遍、$B$ 被读 $M/B_M$ 遍。`gemm_global_loads` 实现了这个公式，模拟器逐轮累加实际搬运的元素数，测试断言二者相等：
+
+<CodeFile path="src/llms_from_scratch/gpu/gemm_tiling.py" region="smem_tiled" />
+
+### 新瓶颈：共享内存带宽
+
+全局读取量降了 $T$ 倍，但每次乘加仍要从 **共享内存** 读两个操作数。Boehm 的实验中这一版只从 1987 提升到 2980 GFLOPS。原因是共享内存的带宽虽高，也是有限的：每个 SM 每周期 128 字节，即 32 个 `float`；而 A6000 的每个 SM 每周期能做 128 次 FMA，需要 256 个操作数。每次 FMA 读两次共享内存，共享内存带宽只能喂饱八分之一的算力。下一步要把复用从“HBM→共享内存”推进到“共享内存→寄存器”。
+
+## 寄存器分块
+
+### 每个线程算一个小块
+
+让每个线程计算 $C$ 的一个 $T_M\times T_N$ 小块（thread tile），而不是一个元素。对每个 $k$，线程从共享内存读 $A$ 的一列中的 $T_M$ 个值和 $B$ 的一行中的 $T_N$ 个值到寄存器，然后做它们的 **外积**：$T_M T_N$ 次乘加，累加到 $T_M\times T_N$ 个寄存器累加器中。
+
+<Diagram width={700} height={260} label="寄存器分块：线程的外积更新">
+  <Matrix x={60} y={60} rows={8} cols={1} cell={[26, 20]} gap={2} tone="neutral" highlight={[{ rows: [4, 5, 6, 7], tone: 'accent' }]} title="As[:, k]" />
+  <Matrix x={160} y={20} rows={1} cols={8} cell={[26, 20]} gap={2} tone="neutral" highlight={[{ cols: [0, 1, 2, 3], tone: 'info' }]} />
+  <Text x={268} y={10} label="Bs[k, :]" size="sm" />
+  <Matrix x={160} y={60} rows={8} cols={8} cell={[26, 20]} gap={2} tone="muted" highlight={[{ cells: [[4, 0], [4, 1], [4, 2], [4, 3], [5, 0], [5, 1], [5, 2], [5, 3], [6, 0], [6, 1], [6, 2], [6, 3], [7, 0], [7, 1], [7, 2], [7, 3]], tone: 'accent2' }]} />
+  <Text x={268} y={252} label="block 子块 B_M × B_N" size="sm" tone="muted" />
+  <Box x={440} y={50} w={250} h={56} label="读入寄存器：T_M + T_N 个值" sub="ra[0..3]、rb[0..3]" tone="info" />
+  <Box x={440} y={122} w={250} h={56} label="外积：T_M × T_N 次 FMA" sub="acc[i][j] += ra[i] * rb[j]" tone="accent" />
+  <Box x={440} y={194} w={250} h={44} label="每次 FMA 读 (T_M+T_N)/(T_M T_N) 次" size="sm" tone="strong" />
+  <Arrow from={[565, 106]} to={[565, 122]} />
+  <Arrow from={[565, 178]} to={[565, 194]} />
+  <Fragment slot="caption">T_M = T_N = 4 的一个线程（橙色 4×4）。对每个 k，它从共享内存读 As 的一列中 4 个值、Bs 的一行中 4 个值，做 16 次乘加。每次乘加的共享内存读取从 2 次降到 0.5 次。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/gemm.cu" region="register_tiled" />
+
+`As` 以转置形式 `As[BK][BM]` 存放：线程读 `As[p][tr * TM + i]` 时，$T_M$ 个值在共享内存中连续，便于下一步向量化。
+
+### 两级强度
+
+寄存器分块同时改善了两级数据复用：
+
+- **共享内存 → 寄存器**：每次 FMA 的共享内存读取次数从 2 降到 $\frac{T_M + T_N}{T_M T_N}$。$T_M = T_N = 8$ 时为 $1/4$，降了 8 倍。
+- **HBM → 共享内存**：一个 block 有 $(B_M/T_M)(B_N/T_N)$ 个线程，同样的线程数可以覆盖更大的 $B_M\times B_N$ 子块。每个 $k$ 步读 $B_M + B_N$ 个元素，做 $2B_M B_N$ FLOPs：
+
+<KeyEq label="block 子块的算术强度">
+
+$$
+I_{\text{block}} = \frac{2B_M B_N}{(B_M + B_N)\,e}
+$$
+
+</KeyEq>
+
+$B_M = B_N = 128$、FP32 时为 32 FLOP/byte。Boehm 的 2D 分块 kernel 用 $B_M=B_N=128$、$B_K = 8$、$T_M=T_N=8$，256 个线程，达到 15972 GFLOPS（cuBLAS 的 68.7%）。
+
+模拟器以同样的循环顺序执行：
+
+<CodeFile path="src/llms_from_scratch/gpu/gemm_tiling.py" region="register_tiled" />
+
+测试 `test_register_tiled_traffic` 断言：全局读取量等于 `gemm_global_loads(M, N, K, BM, BN)`；共享内存读取量恰好是 FMA 次数的一半（$T_M=T_N=4$ 时 $(4+4)/16 = 0.5$）。
+
+### 寄存器的代价
+
+寄存器分块用寄存器换带宽：每个线程需要 $T_M T_N$ 个累加器加上 $T_M + T_N$ 个操作数寄存器，$T_M = T_N = 8$ 时超过 80 个。回忆[GPU 硬件：SM、warp 与内存层次](/gpu/gpu-architecture/)的占用率计算，这会限制每个 SM 驻留的 warp 数——但这里的低占用率是值得的：每个线程内部有 64 个相互独立的 FMA，指令级并行足以掩盖延迟。$T_M, T_N$ 太大则寄存器溢出（spill）到本地内存（实际在 HBM 中），性能骤降。编译时加 `-Xptxas -v` 可以看到每个线程的寄存器数与溢出字节数。
+
+## 向量化加载与更多技巧
+
+### 128 位访问
+
+把标量加载换成 `float4`，一条指令读 16 字节：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/gemm.cu" region="vectorized" />
+
+全局内存一侧，指令数减为四分之一；共享内存一侧，`As[p][tr*4 .. tr*4+3]` 一次读出。代价是地址对齐：`K` 与 `N` 必须是 4 的倍数，共享内存数组要声明 `__align__(16)`。Boehm 的实验中这一步达到 18237 GFLOPS（78.4%）。
+
+### 通往 cuBLAS 的最后一段
+
+剩下的差距来自几项更精细的技术，本书只列出要点：
+
+- **warp 分块**（warptiling）：在 block 子块与线程小块之间再加一层，让每个 warp 负责一个子块，使 warp 内的共享内存访问模式无冲突，并与 Tensor Core 的 warp 级指令对齐。
+- **双缓冲 / 多级流水**：用两份（或更多）共享内存缓冲区，在计算第 $k$ 个子块的同时异步加载第 $k+1$ 个（Ampere 的 `cp.async`），隐藏全局内存延迟。
+- **自动调优**：$B_M, B_N, B_K, T_M, T_N$ 的最佳组合依赖于 GPU 型号与矩阵形状，需要搜索。
+
+<Bars
+  label="SGEMM 各优化步骤的吞吐（RTX A6000，4092³，FP32）"
+  unit="GFLOPS"
+  items={[
+    { label: '朴素', value: 309, tone: 'muted' },
+    { label: '合并访问', value: 1987, tone: 'muted' },
+    { label: '共享内存分块', value: 2980, tone: 'info' },
+    { label: '1D 寄存器分块', value: 8475, tone: 'info' },
+    { label: '2D 寄存器分块', value: 15972, tone: 'accent' },
+    { label: '向量化加载', value: 18237, tone: 'accent' },
+    { label: '自动调优', value: 19721, tone: 'accent' },
+    { label: 'warp 分块', value: 21779, tone: 'accent' },
+    { label: 'cuBLAS', value: 23250, tone: 'strong' },
+  ]}
+>
+  <Fragment slot="caption">数据来自 Simon Boehm, “How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance”（2022），非本书实测。最大的两次跃升分别来自共享内存之上的寄存器分块（1D、2D），对应两级数据复用；最终 warp 分块版本达到 cuBLAS 的 93.7%。</Fragment>
+</Bars>
+
+以上全是 FP32 标量 FMA（CUDA core）。在现代 GPU 上，深度学习的 GEMM 几乎全部跑在 Tensor Core 上，峰值高一个数量级以上，但分块与复用的思想完全一样。
+
+## Tensor Core
+
+### WMMA：warp 级矩阵乘加
+
+Tensor Core 的编程接口以 **warp** 为单位：32 个线程协作持有矩阵片段（fragment），一起发出一条矩阵乘加指令。最高层的接口是 CUDA C++ 的 WMMA（`nvcuda::wmma`）：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/gemm.cu" region="wmma" />
+
+`fragment` 是分布在 warp 32 个线程寄存器中的一个 $16\times 16$ 矩阵块，具体哪个线程持有哪些元素由硬件决定、对程序员不透明；`load_matrix_sync` 从内存读入片段，`mma_sync` 计算 $C \leftarrow AB + C$，`store_matrix_sync` 写回。输入是 FP16，累加器是 FP32——这正是混合精度训练的数值配置。
+
+这个 kernel 只是演示接口：每个 warp 直接从全局内存读片段，没有共享内存分块，性能远不及 cuBLAS。一个实用的 Tensor Core GEMM 需要把前面所有技巧叠加上去：block 分块到共享内存、warp 分块、`cp.async` 多级流水、避免 bank conflict 的共享内存布局（swizzle）。
+
+在 PTX 层，WMMA 对应 `mma.sync` 指令（如 `mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32`），它暴露了片段在线程间的确切布局，CUTLASS 等库直接使用这一层。
+
+CPU 模拟器把 GEMM 拆成一串 $16\times 16\times 16$ 的 mma，输入先舍入到 FP16、累加保持 FP32：
+
+<CodeFile path="src/llms_from_scratch/gpu/gemm_tiling.py" region="mma_sim" />
+
+测试验证：结果与“把输入舍入到 FP16 后用 FP64 精确相乘”一致到 $10^{-4}$——误差只来自输入的舍入，而不是累加，这说明了 FP32 累加器的作用。
+
+### Hopper：WGMMA 与 TMA
+
+H100 的第四代 Tensor Core 引入了新的指令 `wgmma.mma_async`（warpgroup MMA）。与 Ampere 的 `mma.sync` 相比有三点变化（NVIDIA H100 白皮书、PTX ISA）：
+
+1. **以 warpgroup 为单位**：4 个连续的 warp（128 个线程）协作执行一条指令，单条指令的矩阵块更大（如 $64\times N\times 16$，$N$ 最大 256）。
+2. **操作数直接来自共享内存**：$B$（以及可选的 $A$）通过描述符指向共享内存，不必先加载到寄存器，减轻了寄存器压力与共享内存→寄存器的带宽。
+3. **异步**：指令发出后线程可以继续执行，用 `wgmma.commit_group` / `wait_group` 等待完成。
+
+与之配合的是上一章提到的 **TMA**：一个线程发出指令，由专门硬件把一个多维 tile 从全局内存搬进共享内存，并通过 mbarrier 通知。于是 Hopper 上的高性能 GEMM（以及 FlashAttention-3）普遍采用 **warp 专门化**（warp specialization）：一部分 warp 作为生产者，只负责发出 TMA 加载；另一部分 warp 作为消费者，只负责发出 WGMMA；两者通过共享内存中的环形缓冲区与屏障同步。Hopper 还引入了 **线程块簇**（thread block cluster）：同一簇内的 block 可以访问彼此的共享内存（distributed shared memory），TMA 可以把同一块数据组播（multicast）给簇内多个 block，进一步减少 L2 流量。
+
+Blackwell（B200）的第五代 Tensor Core 再进一步：`tcgen05.mma` 的累加器不再放在寄存器里，而是放在每个 SM 新增的 256 KB **张量内存**（Tensor Memory，TMEM）中；单条 MMA 可以由两个 SM 上的一对 block 协作完成。趋势很清楚：每一代都在把数据搬运从通用线程手中拿走，交给专用硬件异步完成，让 Tensor Core 不间断地运转。
+
+## CUTLASS 与 CuTe：分层的 GEMM
+
+### 分块层次
+
+回顾本章，一个高性能 GEMM 在每一级存储上都做了分块，每一级的子块是下一级的“问题”：
+
+<Diagram width={700} height={250} label="GEMM 的分层分块">
+  <Box x={15} y={40} w={150} h={70} label="设备级" sub="C：M × N" tone="neutral" />
+  <Box x={190} y={40} w={150} h={70} label="线程块 tile" sub="B_M × B_N · 共享内存" tone="info" />
+  <Box x={365} y={40} w={150} h={70} label="warp tile" sub="W_M × W_N · 寄存器" tone="accent" />
+  <Box x={540} y={40} w={145} h={70} label="MMA 指令" sub="如 16×8×16" tone="strong" />
+  <Arrow from={[165, 75]} to={[190, 75]} />
+  <Arrow from={[340, 75]} to={[365, 75]} />
+  <Arrow from={[515, 75]} to={[540, 75]} />
+  <Text x={90} y={136} label="网格：每个 block 一块" size="sm" tone="muted" />
+  <Text x={265} y={136} label="沿 K 循环，多级流水" size="sm" tone="muted" />
+  <Text x={440} y={136} label="每个 warp 一块" size="sm" tone="muted" />
+  <Text x={612} y={136} label="Tensor Core" size="sm" tone="muted" />
+  <Box x={15} y={170} w={670} h={56} label="每一级都是同一个问题：把下一级需要的数据搬到更近的存储，在那里复用尽可能多次" tone="ghost" />
+  <Fragment slot="caption">CUTLASS 把 GEMM 组织为设备、线程块、warp、指令四个层次。每一层只关心“自己的 tile 从哪里来、到哪里去”，从而可以独立地替换实现：同样的线程块层可以搭配 Ampere 的 mma.sync 或 Hopper 的 WGMMA。</Fragment>
+</Diagram>
+
+NVIDIA 的 CUTLASS 库把这些层次实现为可组合的 C++ 模板。CUTLASS 3.x 的核心是 **CuTe**：一套描述“布局”（layout）的代数。一个布局是一对 $(\text{shape}, \text{stride})$，把逻辑坐标映射到线性地址；分块、转置、swizzle、线程到数据的分配都表示成布局的组合与划分。例如行主序 $M\times K$ 矩阵的布局是 $((M,K),(K,1))$，把它按 $(B_M, B_K)$ 划分得到“tile 的布局”与“tile 内的布局”两部分。用这种统一的语言，同一份 GEMM 主循环可以适配不同的数据类型、tile 大小与硬件指令。
+
+对本书的读者而言，CUTLASS 的价值在于它的结构：**写一个快的 GEMM，就是在每一级存储层次上回答“tile 多大、谁来搬、怎样复用、怎样与计算重叠”这四个问题**。下一章的 Triton 把下面三层交给编译器，程序员只需描述 block 级的 tile；而 FlashAttention 则把同样的分层思想用在了注意力上。
+
+## 小结
+
+- GEMM 的最大算术强度约 $2N/(3e)$，原则上计算受限；实际强度取决于 kernel 在片上复用数据的程度。
+- 朴素 kernel 每次乘加读两个全局元素，强度 0.25 FLOP/byte；共享内存分块把全局读取量降为 $MNK(1/B_N + 1/B_M)$，block 子块的强度为 $2B_M B_N/((B_M+B_N)e)$。
+- 寄存器分块让每个线程计算 $T_M\times T_N$ 的外积，共享内存读取从每次 FMA 2 次降到 $(T_M+T_N)/(T_M T_N)$ 次；寄存器用量与占用率需要权衡。
+- 向量化加载、warp 分块、多级流水与自动调优把 FP32 GEMM 推到 cuBLAS 的九成以上（Boehm 的实验）。
+- Tensor Core 以 warp（Hopper 起为 warpgroup）为单位执行矩阵乘加；Hopper 的 WGMMA 直接读共享内存并异步执行，配合 TMA 与 warp 专门化；CUTLASS/CuTe 把这些组织成设备—线程块—warp—指令的层次。
+
+## 练习
+
+1. 对 $M = N = K = 4096$ 的 FP32 GEMM，分别计算朴素 kernel（无缓存）、$T=32$ 共享内存分块、$B_M=B_N=128$ 分块的全局读取字节数。在 A100（FP32 非张量峰值 19.5 TFLOPS、带宽 2.039 TB/s）上，哪一版的访存时间下界低于计算时间下界？
+2. $T_M = T_N = 8$ 时，每个线程至少需要多少个寄存器存放累加器与操作数？若再加上地址计算等约 30 个寄存器，H100 上每个 SM 最多驻留多少个 256 线程的 block？
+3. 推导：在 block 子块的元素总数 $B_M B_N$ 固定时，$I_{\text{block}}$ 何时最大？这对 tile 形状的选择意味着什么？
+4. 为什么 Tensor Core 的累加器通常是 FP32，而输入可以是 FP16/BF16/FP8？用 `gemm_mma_sim` 设计一个实验：把累加器也改为 FP16，比较 $K=4096$ 时的误差。
+5. Hopper 的 WGMMA 允许操作数直接来自共享内存。从“共享内存 → 寄存器”这一级的带宽与寄存器容量两方面，说明它为什么有利于更大的 tile。
+
+<details>
+<summary>答案</summary>
+
+1. 朴素：$2\cdot 4096^3\cdot 4 \approx 550$ GB；$T=32$：$550/32\approx 17.2$ GB；$128$ 分块：$4096^3\cdot(1/128+1/128)\cdot 4 \approx 4.3$ GB。计算时间下界 $2\cdot 4096^3/19.5\times 10^{12}\approx 7.0$ ms；访存时间下界分别为 270 ms、8.4 ms、2.1 ms。只有 128 分块的访存下界低于计算下界（$T=32$ 仍略高）。
+
+2. 累加器 64 个，操作数 $8+8=16$ 个，共 80 个；加 30 个约 110 个，按 8 的倍数分配取 112。每 warp $112\times 32 = 3584$，按 256 的粒度为 3584；每 block 8 个 warp 需要 28672 个，65536/28672 = 2 个 block（16 个 warp，占用率 25%）。
+
+3. $I \propto \frac{B_M B_N}{B_M + B_N}$。乘积固定时，由均值不等式 $B_M + B_N \ge 2\sqrt{B_M B_N}$，当 $B_M = B_N$ 时分母最小、强度最大。因此 tile 应尽量接近正方形；狭长的 tile（例如 decode 时 $M$ 很小）复用差，这正是推理中小批量 GEMM 带宽受限的原因。
+
+4. FP16 只有 10 位尾数，累加 $K=4096$ 项时，部分和变大后再加上一个小的乘积会被舍入掉（与第四章串行求和的误差同理），误差随 $K$ 增长；FP32 有 23 位尾数，误差小得多。实验：把 `frag_c` 改为 `np.float16` 并在每次 mma 后舍入，与 FP64 参考比较最大相对误差，会看到 FP16 累加的误差大出几个数量级。
+
+5. `mma.sync` 的操作数要先从共享内存读入寄存器：tile 越大，每个线程需要越多寄存器存放操作数，与累加器争用寄存器，限制 tile 大小；并且共享内存→寄存器的带宽会成为瓶颈。WGMMA 直接从共享内存取操作数，寄存器只需存放累加器，因此可以使用更大的 tile（如 $64\times 256$ 每个 warpgroup），获得更高的复用。
+
+</details>
+
+## 参考文献
+
+- S. Boehm. [How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance: a Worklog](https://siboehm.com/articles/22/CUDA-MMM), 2022.
+- V. Volkov, J. Demmel. [Benchmarking GPUs to Tune Dense Linear Algebra](https://doi.org/10.1109/SC.2008.5214359), SC 2008.
+- NVIDIA. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：Warp Matrix Functions（WMMA）。
+- NVIDIA. [Parallel Thread Execution ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/)：`mma.sync`、`wgmma.mma_async`、`tcgen05` 指令。
+- NVIDIA. [NVIDIA H100 Tensor Core GPU Architecture](https://resources.nvidia.com/en-us-tensor-core/gtc22-whitepaper-hopper)（第四代 Tensor Core、TMA、线程块簇）。
+- NVIDIA. [CUTLASS](https://github.com/NVIDIA/cutlass) 与 [CuTe 文档](https://docs.nvidia.com/cutlass/media/docs/cpp/cute/00_quickstart.html)。
+- NVIDIA. [Efficient GEMM in CUDA](https://docs.nvidia.com/cutlass/media/docs/cpp/efficient_gemm.html)（CUTLASS 文档中的分层分块说明）。
+- Stanford CS336, Spring 2025. [Lecture 5: GPUs; Lecture 6: Kernels, Triton](https://github.com/stanford-cs336/spring2025-lectures).

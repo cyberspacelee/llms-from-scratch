@@ -2,7 +2,247 @@
 title: CUDA 编程模型：第一个 kernel
 description: 线程、线程块与网格，索引计算，主机与设备内存，kernel 启动与同步，用 PyTorch 的 load_inline 编译并调用自己的 kernel。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/gpu/kernels/vector_add_standalone.cu
+  - src/llms_from_scratch/gpu/kernels/vector_add.cu
+  - src/llms_from_scratch/gpu/cuda_ext.py
+  - src/llms_from_scratch/gpu/simulator.py
+  - tests/gpu/test_simulator.py
+  - tests/gpu/test_cuda_ext.py
 ---
 
-本章正在撰写。
+上一章从硬件的角度看 GPU：SM、warp、寄存器与 HBM。本章换到程序员的角度：怎样描述“让一万个线程各做一件小事”？CUDA 的回答是一个三层的线程层次——网格（grid）、线程块（block）、线程（thread）——以及一条规则：**每个线程运行同一段代码，只靠自己的编号决定处理哪份数据**。
+
+我们用最简单的计算，向量加法 $c_i = a_i + b_i$，走完一个 CUDA 程序的完整生命周期：分配显存、把数据拷到 GPU、启动 kernel、等待它完成、检查错误、把结果拷回来。然后把同一个 kernel 接入 PyTorch，用 `torch.utils.cpp_extension.load_inline` 在运行时编译，让它像普通的 PyTorch 函数一样接收和返回张量。由于本书的写作环境没有 GPU，每个 kernel 都配有一个在 CPU 上逐线程执行的模拟器，读者可以用它验证“哪个线程处理哪个元素”。
+
+## 线程层次：grid、block 与 thread
+
+### 为什么要分三层
+
+如果 GPU 只有“一大堆线程”这一层，程序员会很省事，但硬件做不到：线程之间的协作（共享数据、同步）需要它们位于同一个 SM 上，而一个 SM 能容纳的线程有限。CUDA 因此把线程分成两层：
+
+- **线程块**（block）：一组至多 1024 个线程，保证被调度到 **同一个 SM** 上，可以通过共享内存交换数据、用 `__syncthreads()` 同步。
+- **网格**（grid）：一次 kernel 启动的全部线程块。不同线程块之间 **不保证** 执行顺序，也不能直接同步；硬件按照资源情况把它们分发到各个 SM 上，可能并行、也可能先后执行。
+
+正是“块之间相互独立”这一约定，让同一个 CUDA 程序可以在 SM 数不同的 GPU 上运行：108 个 SM 的 A100 和 132 个 SM 的 H100 只是每一轮能同时运行的块数不同。线程块内部还会被硬件切成 warp（32 个线程一组），但 warp 不是编程模型的一部分——程序员通常只需要让块大小是 32 的倍数。
+
+<Diagram width={720} height={290} label="CUDA 的线程层次与一维索引">
+  <Region x={20} y={14} w={680} h={170} title="grid：gridDim.x = 3 个 block" />
+  <Box x={40} y={46} w={200} h={120} label="block 0" title tone="info" />
+  <Box x={260} y={46} w={200} h={120} label="block 1" title tone="info" />
+  <Box x={480} y={46} w={200} h={120} label="block 2" title tone="info" />
+  <Matrix x={54} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" />
+  <Matrix x={274} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" />
+  <Matrix x={494} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" highlight={[{ cols: [2, 3], tone: 'muted' }]} />
+  <Text x={360} y={206} label="全局下标 i = blockIdx.x × blockDim.x + threadIdx.x" mono bold />
+  <Matrix x={124} y={226} rows={1} cols={12} cell={[36, 30]} gap={4} values={[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]} tone="accent" highlight={[{ cols: [10, 11], tone: 'muted' }]} />
+  <Text x={110} y={241} label="i" anchor="end" mono />
+  <Text x={364} y={274} label="n = 10：i = 10、11 的线程被 if (i < n) 挡掉" size="sm" tone="muted" />
+  <Fragment slot="caption">一次启动 3 个 block，每个 block 4 个线程（blockDim.x = 4）。每个线程用 blockIdx.x 与 threadIdx.x 算出自己负责的全局下标；元素数 n = 10 不是块大小的整数倍，最后一个 block 有两个线程无事可做（灰色）。</Fragment>
+</Diagram>
+
+### 内建变量与索引公式
+
+在 kernel 中，每个线程可以读到四个内建变量，它们都是有 `x`、`y`、`z` 三个分量的 `dim3`：
+
+| 变量 | 含义 |
+| --- | --- |
+| `threadIdx` | 本线程在线程块内的编号 |
+| `blockIdx` | 本线程块在网格内的编号 |
+| `blockDim` | 线程块的形状（每个维度的线程数） |
+| `gridDim` | 网格的形状（每个维度的线程块数） |
+
+对一维数据，最常用的映射是“第 $b$ 个块的第 $t$ 个线程处理第 $b\cdot B + t$ 个元素”，其中 $B$ 是块大小：
+
+<KeyEq label="一维全局下标">
+
+$$
+i = \texttt{blockIdx.x}\cdot\texttt{blockDim.x} + \texttt{threadIdx.x},\qquad
+\texttt{gridDim.x} = \left\lceil \frac{n}{B} \right\rceil
+$$
+
+</KeyEq>
+
+向上取整在整数运算中写作 `(n + B - 1) / B`。手算一遍：$n=10$、$B=4$，需要 $\lceil 10/4\rceil = 3$ 个块，共 12 个线程；block 2 的 thread 1 得到 $i = 2\cdot 4+1 = 9$，是最后一个有效元素；thread 2、3 得到 10、11，必须被边界检查挡住，否则就会越界写内存。
+
+二维数据（矩阵）通常用二维的块和网格，例如 `dim3 block(32, 8)`。约定俗成的写法是 `x` 对应列、`y` 对应行：
+
+$$
+\text{col} = \texttt{blockIdx.x}\cdot\texttt{blockDim.x} + \texttt{threadIdx.x},\qquad
+\text{row} = \texttt{blockIdx.y}\cdot\texttt{blockDim.y} + \texttt{threadIdx.y}.
+$$
+
+这不只是习惯。一个 warp 由 `threadIdx.x` 连续的 32 个线程组成（先 `x`，再 `y`，再 `z`），让 `x` 对应行主序矩阵中连续的列，warp 里的线程就会访问连续的地址——下一章会看到这对带宽的决定性影响。
+
+### 在 CPU 上模拟线程映射
+
+模拟器把这个映射显式地列出来：对每个 block、每个线程算出下标，并记录它是否通过边界检查。`vector_add_sim` 再按这个表逐线程执行加法：
+
+<CodeFile path="src/llms_from_scratch/gpu/simulator.py" region="thread_map" />
+
+测试验证了两件事：每个元素恰好被一个线程处理；被挡掉的线程，其下标都不小于 $n$。这看起来平凡，但几乎所有 kernel 的第一个 bug 都出在这里——忘了边界检查、取整方向错误、或者二维索引的行列颠倒。
+
+## 第一个 kernel：向量加法
+
+### kernel 函数
+
+CUDA C++ 用 `__global__` 标记一个 kernel：它由主机（CPU）调用，在设备（GPU）上由网格中的每个线程各执行一次。
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/vector_add_standalone.cu" region="kernel" />
+
+函数体就是一个线程要做的事：算出自己的下标，若在范围内就做一次加法。没有循环——“循环”被展开到了一万个线程上。这种写法要求每个元素的计算相互独立，向量加法显然满足。
+
+kernel 中的限定符还有两个：`__device__` 函数只能被设备代码调用（相当于 kernel 的辅助函数）；`__host__ __device__` 让同一个函数在两侧都能编译。kernel 的返回类型必须是 `void`，结果只能写进参数指向的显存。
+
+### 主机代码：分配、拷贝、启动、同步
+
+kernel 只能访问设备内存，所以主机代码要先在 GPU 上分配缓冲区，把输入拷过去，启动 kernel，再把结果拷回：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/vector_add_standalone.cu" region="host" />
+
+逐行看几个要点：
+
+- `cudaMalloc` 返回的是 **设备指针**。它在主机代码里只是一个数字，不能解引用；把它传给 kernel 后，在设备上才有意义。
+- `cudaMemcpy` 的最后一个参数指明方向。主机与设备之间通过 PCIe（H100 PCIe 版为 Gen5，数据手册给出 128 GB/s 双向）或 NVLink-C2C（Grace Hopper）连接，比 HBM 慢一个数量级以上。**数据一旦上了 GPU，就尽量留在那里**——这也是 PyTorch 让张量常驻 `cuda` 设备的原因。
+- `vector_add<<<blocks, threads>>>(...)` 是 kernel 启动语法：三重尖括号里依次是网格大小、块大小，以及可选的动态共享内存字节数与 stream。
+
+本章所有 `.cu` 文件都可以用 `nvcc -O2 -o vector_add vector_add_standalone.cu` 编译成独立程序运行。
+
+### 块大小怎样选
+
+块大小应当是 32 的倍数（否则最后一个 warp 有空闲的线程），常见取值是 128、256 或 512。太小的块会让每个 SM 受“最多 32 个块”的限制而达不到满占用率（例如 32 线程/块 × 32 块 = 1024 线程，只有一半）；太大的块（1024）会让一个块独占过多寄存器，降低调度的灵活性。对于向量加法这种简单 kernel，256 是一个稳妥的默认值；对复杂 kernel，块大小与寄存器、共享内存的用量一起决定占用率，需要实测。
+
+## 异步执行与同步
+
+### kernel 启动是异步的
+
+`vector_add<<<...>>>` 这一行在 CPU 上几乎立即返回——它只是把“执行这个 kernel”的命令放进一个队列（stream），GPU 稍后从队列中取出执行。CPU 可以继续准备下一个 kernel。同一个 stream 中的命令按顺序执行；没有显式指定 stream 时使用默认 stream。
+
+<Lanes
+  label="主机与设备的时间线：启动是异步的"
+  width={660}
+  lanes={['CPU', 'GPU']}
+  unit="时间（示意）"
+  tick={0}
+  span={20}
+  items={[
+    { lane: 0, start: 0, end: 1, label: 'H2D' },
+    { lane: 1, start: 0, end: 4, label: '拷贝 a、b', tone: 'info' },
+    { lane: 0, start: 4, end: 5, label: '启动 K1', tone: 'accent2' },
+    { lane: 0, start: 5, end: 6, label: '启动 K2', tone: 'accent2' },
+    { lane: 0, start: 6, end: 14, label: '同步：等待 GPU', tone: 'muted' },
+    { lane: 1, start: 5, end: 10, label: 'kernel 1' },
+    { lane: 1, start: 10, end: 14, label: 'kernel 2' },
+    { lane: 0, start: 14, end: 15, label: 'D2H' },
+    { lane: 1, start: 14, end: 17, label: '拷贝 c', tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">cudaMemcpy（同步版本）会阻塞 CPU 直到拷贝完成；kernel 启动只是入队，CPU 连续启动两个 kernel 后就可以做别的事，直到显式同步或下一次同步拷贝才会等待 GPU。</Fragment>
+</Lanes>
+
+异步带来两个后果。第一，**在 CPU 上直接计时 kernel 是错误的**：`t0 = now(); kernel<<<>>>(); t1 = now()` 量到的只是入队时间。正确做法是在 GPU 时间线上记录事件或在计时前后同步，见[性能分析：Roofline 与 Profiler](/gpu/profiling/)。第二，**错误报告也是延迟的**：kernel 内部的越界访问，要到下一个同步点才会被发现。
+
+同步点有几种：`cudaDeviceSynchronize()` 等待设备上所有工作完成；`cudaStreamSynchronize(s)` 等待某个 stream；同步的 `cudaMemcpy` 会隐式等待之前的命令。PyTorch 中，`tensor.item()`、`tensor.cpu()`、`print(tensor)` 都会触发同步——训练循环里随手写的 `loss.item()` 会让 CPU 每步都停下来等 GPU，这是一个常见的性能陷阱。
+
+### 错误检查
+
+几乎每个 CUDA runtime 函数都返回 `cudaError_t`。不检查的错误会“粘”在上下文里，在之后某个无关的调用中才冒出来，让调试变得困难。惯用法是用一个宏包住每个调用：
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/vector_add_standalone.cu" region="check" />
+
+kernel 启动本身不返回值，需要分两步检查：启动后立即调用 `cudaGetLastError()`，捕获 **启动配置** 错误（例如块大小超过 1024、共享内存申请过多）；在同步之后检查返回值，捕获 **执行期** 错误（例如非法地址访问）。调试时还有两个工具值得记住：设置环境变量 `CUDA_LAUNCH_BLOCKING=1` 让每次启动都同步，使错误在出错的那一行报告（PyTorch 的报错信息里也会提示这一点）；`compute-sanitizer ./program` 可以检测越界访问、竞争条件与未初始化内存。
+
+## 从 PyTorch 调用 CUDA kernel
+
+### 写一个接收张量的启动函数
+
+把 kernel 接入 PyTorch，需要一个 C++ 函数：接收 `torch::Tensor`，做必要的检查，分配输出，启动 kernel，返回输出。
+
+<CodeFile path="src/llms_from_scratch/gpu/kernels/vector_add.cu" region="launcher" />
+
+这里有几个与独立程序不同的地方：
+
+- **不再手动 `cudaMalloc`/`cudaMemcpy`**。张量已经在 GPU 上，`torch::empty_like` 通过 PyTorch 的缓存分配器拿到显存，`data_ptr<float>()` 取出设备指针。
+- **检查输入**。`TORCH_CHECK` 失败时抛出 Python 异常。kernel 假定输入是连续的 `float32`，因此先 `.contiguous()`——对非连续张量（例如转置后的视图）直接按下标读会得到错误的结果。
+- **使用当前 stream**。PyTorch 可能在非默认 stream 上运行（例如数据加载或通信重叠时），kernel 必须启动在 `at::cuda::getCurrentCUDAStream()` 上，才能与前后的 PyTorch 算子保持正确的先后顺序。
+- `C10_CUDA_KERNEL_LAUNCH_CHECK()` 相当于 `cudaGetLastError()` 加上抛出异常。
+
+### 用 load_inline 在运行时编译
+
+`torch.utils.cpp_extension.load_inline` 接收 C++ 与 CUDA 源码字符串，调用 `nvcc` 与主机编译器编译成一个 Python 扩展模块，并用 pybind11 自动生成绑定。`cuda_ext.load` 是本书的一个薄封装：从 `kernels/` 读出 `.cu` 文件，配上函数声明：
+
+<CodeFile path="src/llms_from_scratch/gpu/cuda_ext.py" region="load" />
+
+在有 GPU 的机器上使用它：
+
+```python
+import torch
+from llms_from_scratch.gpu.cuda_ext import load
+
+ext = load("vector_add")            # 第一次调用编译，结果缓存在 ~/.cache/torch_extensions
+a = torch.randn(1_000_003, device="cuda")
+b = torch.randn_like(a)
+c = ext.vector_add(a, b)
+torch.testing.assert_close(c, a + b)
+```
+
+第一次编译需要数十秒，之后只要源码不变就直接加载缓存的 `.so`。对生产代码，更常见的做法是用 `setup.py` 中的 `CUDAExtension` 预先编译，或者用 `torch.library` 注册自定义算子，让它能被 `torch.compile` 识别；`load_inline` 的优点是零配置，适合实验与教学。测试 `tests/gpu/test_cuda_ext.py` 在没有 GPU 时跳过编译，但仍会静态检查每个声明的函数确实在 `.cu` 文件中有定义。
+
+### 网格跨步循环
+
+上面的 kernel 用“一个线程一个元素”的映射，网格大小随 $n$ 增长。另一种常见写法是固定网格大小（例如 SM 数的若干倍），让每个线程用 **网格跨步循环**（grid-stride loop）处理多个元素：
+
+```cpp
+for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n;
+     i += (int64_t)blockDim.x * gridDim.x) {
+    c[i] = a[i] + b[i];
+}
+```
+
+每一轮，所有线程一起前进“网格中的线程总数”这么多个元素，因此同一个 warp 的访问在每一轮都是连续的。这种写法的好处是网格大小与数据规模解耦，线程可以在循环中累积状态（例如部分和），下一章的归约正是这样做的。
+
+## 小结
+
+- CUDA 的线程层次是 grid → block → thread。块内线程位于同一个 SM，可通过共享内存协作并同步；块之间相互独立、顺序不定。
+- 每个线程执行同一个 kernel，靠 `blockIdx`、`blockDim`、`threadIdx` 算出自己负责的数据；网格大小向上取整，边界检查必不可少。
+- kernel 只能访问设备内存；主机与设备之间的拷贝远慢于 HBM，数据应常驻 GPU。
+- kernel 启动是异步的：计时与错误报告都要考虑同步点；每个 runtime 调用都应检查返回值。
+- PyTorch 扩展函数接收张量、检查连续性与类型、在当前 stream 上启动 kernel；`load_inline` 可在运行时编译并调用它。
+
+下一章[访存优化：合并访问与共享内存](/gpu/memory-optimization/)从一个看似和向量加法一样简单的 kernel——矩阵转置——出发，解释为什么同样的读写量，访问模式不同，速度可以差好几倍。
+
+## 练习
+
+1. 对 $n = 1{,}000{,}000$ 的向量用 256 线程/块，需要多少个块？最后一个块有多少个线程处于空闲？
+2. 一个 $1000\times 3000$ 的行主序矩阵，用 `dim3 block(32, 8)` 处理每个元素。写出网格的形状，以及线程计算元素地址的表达式。如果把 `x` 对应行、`y` 对应列，同一个 warp 访问的地址会怎样分布？
+3. 下面的计时代码有什么问题？怎样修正？
+   ```python
+   t0 = time.time(); y = x @ w; t1 = time.time()
+   ```
+4. kernel 启动配置 `<<<blocks, 2048>>>` 会怎样失败？如果不调用 `cudaGetLastError()`，这个错误会在什么时候被发现？
+5. 为什么 PyTorch 扩展中的 kernel 要在 `getCurrentCUDAStream()` 上启动？举一个在默认 stream 上启动会出错的场景。
+
+<details>
+<summary>答案</summary>
+
+1. $\lceil 10^6/256\rceil = 3907$ 个块，共 $3907\times 256 = 1{,}000{,}192$ 个线程，最后一个块有 192 个线程空闲。
+
+2. 网格为 `dim3((3000 + 31) / 32, (1000 + 7) / 8) = (94, 125)`。`col = blockIdx.x * 32 + threadIdx.x`，`row = blockIdx.y * 8 + threadIdx.y`，地址 `row * 3000 + col`，并检查 `row < 1000 && col < 3000`。若 `x` 对应行，同一个 warp 的 32 个线程访问 32 个不同的行、同一列，地址间隔 3000 个元素，无法合并，每个线程需要一个独立的内存事务。
+
+3. 矩阵乘法在 GPU 上是异步启动的，`t1 - t0` 只量到了启动开销（以及可能的一次 cuBLAS 选择）。应当预热后，用 CUDA Event 记录起止，或在 `t0` 前和 `t1` 前各调用一次 `torch.cuda.synchronize()`，并重复多次取中位数。
+
+4. 每块线程数上限是 1024，启动会失败（`invalid configuration argument`），kernel 根本不会执行。不检查的话，输出缓冲区保持未初始化的内容，错误要到之后某个检查返回值的 runtime 调用时才“冒出来”，或者根本不报错而只是结果错误。
+
+5. 同一 stream 中的命令按顺序执行，不同 stream 之间没有顺序保证。若 PyTorch 在 stream S 上刚刚启动了一个产生输入 `a` 的算子，而我们的 kernel 在默认 stream 上启动，它可能在 `a` 写完之前就开始读，得到错误结果；结果张量随后被 S 上的算子读取时也可能尚未写完。
+
+</details>
+
+## 参考文献
+
+- NVIDIA. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：Programming Model、Thread Hierarchy、Asynchronous Concurrent Execution、Error Checking 各节。
+- NVIDIA. [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)。
+- NVIDIA. [Compute Sanitizer](https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html)。
+- M. Harris. [CUDA Pro Tip: Write Flexible Kernels with Grid-Stride Loops](https://developer.nvidia.com/blog/cuda-pro-tip-write-flexible-kernels-grid-stride-loops/), NVIDIA Technical Blog, 2013.
+- PyTorch. [Custom C++ and CUDA Extensions](https://pytorch.org/tutorials/advanced/cpp_extension.html)；[`torch.utils.cpp_extension`](https://pytorch.org/docs/stable/cpp_extension.html)。
+- NVIDIA. [H100 数据手册](https://www.nvidia.com/en-us/data-center/h100/)（PCIe Gen5 带宽）。
+- Stanford CS336, Spring 2025. [Lecture 6: Kernels, Triton](https://github.com/stanford-cs336/spring2025-lectures).

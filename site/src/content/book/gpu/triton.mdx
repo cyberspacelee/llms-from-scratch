@@ -2,7 +2,180 @@
 title: Triton 编程
 description: 以块为单位思考的编程模型，向量加法、融合 softmax 与矩阵乘法的 Triton 实现，自动调优与性能对比。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/gpu/triton_kernels.py
+  - tests/gpu/test_triton_kernels.py
 ---
 
-本章正在撰写。
+前面三章手写 CUDA 时，我们反复在做同一类事：决定每个线程处理哪些元素，让 warp 的访问合并，把 tile 搬进共享内存并同步，避免 bank conflict，用寄存器做外积，再把这些层次上的参数调到最优。这些工作对性能至关重要，但大部分是机械的；而真正与算法相关的决定只有一个：**按什么大小的块来切分问题**。
+
+Triton（Tillet、Kung、Cox，2019；现由 OpenAI 维护）把编程的粒度从“线程”提升到“块”。程序员写的是一个 **program**，它处理一个数据块，块内的操作写成张量运算（`tl.load` 一个向量、`tl.dot` 两个矩阵块）；块内怎样分配给线程、怎样合并访存、何时使用共享内存与 Tensor Core、怎样做软件流水，由编译器决定。PyTorch 的 `torch.compile` 在 GPU 上生成的正是 Triton 代码，CS336 的作业 2 也要求用 Triton 实现 FlashAttention-2。
+
+本章用 Triton 重写三个已经熟悉的 kernel：向量加法、融合 softmax、矩阵乘法，并讨论自动调优、提高 L2 命中率的分组排序，以及 Triton 与 CUDA 的取舍。本书的写作环境没有 GPU，所以每个 Triton kernel 都配有一个按 program 粒度执行同样逻辑的 CPU 参考实现。
+
+## 块级编程模型
+
+### 从线程到 program
+
+CUDA 中，kernel 描述的是 **一个线程** 的行为，块内协作要显式写出来；Triton 中，kernel 描述的是 **一个 program** 的行为，一个 program 大致对应 CUDA 的一个线程块，但其中的操作是对整个块的向量化运算。
+
+<Diagram width={720} height={250} label="CUDA 与 Triton 的编程粒度">
+  <Region x={20} y={14} w={330} h={226} title="CUDA：写一个线程" />
+  <Matrix x={40} y={60} rows={1} cols={8} cell={[34, 34]} gap={4} values={[["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"]]} tone="accent" />
+  <Text x={185} y={124} label="i = blockIdx.x * blockDim.x + threadIdx.x" size="sm" mono />
+  <Text x={185} y={150} label="if (i < n) c[i] = a[i] + b[i];" size="sm" mono />
+  <Text x={185} y={190} label="合并、共享内存、同步、寄存器分配" size="sm" tone="muted" />
+  <Text x={185} y={212} label="都由程序员负责" size="sm" tone="muted" />
+  <Region x={370} y={14} w={330} h={226} title="Triton：写一个 program（一个块）" />
+  <Box x={380} y={60} w={310} h={34} label="offs = pid*BLOCK + tl.arange(0, BLOCK)" size="sm" mono tone="accent" />
+  <Text x={535} y={124} label="x = tl.load(x_ptr + offs, mask=offs < n)" size="sm" mono />
+  <Text x={535} y={150} label="tl.store(out_ptr + offs, x + y, mask=...)" size="sm" mono />
+  <Text x={535} y={190} label="块内线程分配、访存合并、共享内存" size="sm" tone="muted" />
+  <Text x={535} y={212} label="与 Tensor Core 由编译器负责" size="sm" tone="muted" />
+  <Fragment slot="caption">同一个向量加法。CUDA 版本中每个线程处理一个标量；Triton 版本中一个 program 处理一个长度为 BLOCK 的向量，块内的并行由编译器展开到 num_warps 个 warp 上。</Fragment>
+</Diagram>
+
+Triton 的核心原语只有少数几个：
+
+| 原语 | 作用 |
+| --- | --- |
+| `tl.program_id(axis)` | 本 program 在启动网格中的编号（类似 `blockIdx`） |
+| `tl.arange(0, BLOCK)` | 长度为 `BLOCK` 的整数向量 $0,1,\dots$，`BLOCK` 必须是编译期常量、2 的幂 |
+| `ptr + offsets` | 指针算术：得到一个“指针块” |
+| `tl.load(ptrs, mask, other)` | 按指针块读取；`mask` 为假的位置不访问内存，取 `other` |
+| `tl.store(ptrs, value, mask)` | 按指针块写入 |
+| `tl.dot(a, b, acc)` | 块矩阵乘加，编译到 Tensor Core |
+| `tl.sum / tl.max(x, axis)` | 块内归约 |
+| `tl.constexpr` | 标注编译期常量；不同取值会编译出不同的 kernel |
+
+编译器把一个 program 的块运算分配给 `num_warps` 个 warp（默认 4）：它决定每个线程持有块中的哪些元素，使 `tl.load` 合并；在 `tl.dot` 之前把操作数放进共享内存并选择无冲突的布局；对循环做软件流水（`num_stages` 级），让下一轮的加载与本轮的计算重叠。
+
+## 向量加法
+
+<CodeFile path="src/llms_from_scratch/gpu/triton_kernels.py" region="add_kernel" />
+
+逐行对照 CUDA 版本：`pid` 相当于 `blockIdx.x`；`offsets` 是本 program 负责的 `BLOCK` 个下标，相当于把 `threadIdx.x` 向量化；`mask` 相当于边界检查 `if (i < n)`，但作用于整个向量。启动时 `add_kernel[grid](...)` 的 `grid` 是 program 数，`triton.cdiv(n, block)` 即向上取整。`BLOCK=1024` 意味着每个 program 处理 1024 个元素——如果 `num_warps=4`（128 个线程），编译器会让每个线程处理 8 个连续元素，自动生成向量化的 128 位加载。
+
+CPU 参考实现逐个 program 执行同样的逻辑，用来验证掩码处理尾部的正确性：
+
+<CodeFile path="src/llms_from_scratch/gpu/triton_kernels.py" region="add_ref" />
+
+<Callout tone="tip" title="没有 GPU 也能运行 Triton">
+设置环境变量 `TRITON_INTERPRET=1` 后，Triton 会用一个基于 NumPy 的解释器在 CPU 上逐个 program 执行 kernel（需要安装 `triton` 包）。它很慢，但足以调试索引与掩码，也可以在 kernel 中用 `print` 查看中间张量。本书仓库没有把 Triton 列为必需依赖，读者可以在 Linux 上 `uv pip install triton` 后尝试。
+</Callout>
+
+## 融合 softmax
+
+### 整行放进寄存器
+
+[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)中的 CUDA softmax kernel 需要两次扫描与复杂的 warp/block 协作。在 Triton 中，如果一行的长度不超过几千，最简单的做法是让 **一个 program 处理一整行**，把整行一次读进寄存器：
+
+<CodeFile path="src/llms_from_scratch/gpu/triton_kernels.py" region="softmax_kernel" />
+
+`BLOCK` 取不小于列数的 2 的幂；超出列数的部分用 `other=-inf` 填充，它们的 `exp` 为 0，不影响求和。`tl.max` 与 `tl.sum` 是块内归约，编译器会把它们翻译成第四章那样的 warp shuffle 加共享内存的归约树。整行常驻寄存器，所以输入只从 HBM 读一次、输出写一次——达到了 softmax 的访存下限。
+
+这里的“融合”是相对 PyTorch eager 模式而言：`x - x.max()`、`exp`、`sum`、除法在 eager 中是多个独立的 kernel，每个都要读写完整的中间张量；Triton 版本把它们合并成一个 kernel。下一章[算子融合与 torch.compile](/gpu/kernel-fusion/)会量化这种融合的收益。
+
+`num_warps` 随行长调整：行越长，每个 program 需要越多线程来分担寄存器与归约。当行长达到数万（例如大词表的 logits），一行已经放不进一个 program 的寄存器，就需要回到在线 softmax 的分块做法。
+
+## 矩阵乘法
+
+### kernel 结构
+
+Triton 的矩阵乘法 kernel 只描述 **block 级** 的分块：每个 program 计算 $C$ 的一个 $B_M\times B_N$ 子块，沿 $K$ 循环，每轮加载 $A$ 的 $B_M\times B_K$ 子块与 $B$ 的 $B_K\times B_N$ 子块，调用 `tl.dot` 累加。上一章的 warp 分块、寄存器分块、共享内存布局、Tensor Core 指令选择，全部由编译器完成。
+
+<CodeFile path="src/llms_from_scratch/gpu/triton_kernels.py" region="matmul_kernel" />
+
+几处细节：
+
+- **二维指针块**：`offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak` 通过广播构造一个 $B_M\times B_K$ 的指针矩阵。传入 stride 而不是假定连续，使 kernel 能直接处理转置等非连续视图。
+- **掩码只加在 K 上**：`offs_m` 与 `offs_n` 对 `M`、`N` 取模，越界的行列会读到重复的有效数据，但这些结果在最后 `tl.store` 时被掩码丢弃；`K` 方向的越界必须置 0，否则会把错误的乘积累加进有效结果。
+- **FP32 累加器**：`acc` 是 `float32`，最后才 `to` 回输出类型。
+- **`tl.dot(a, b, acc)`**：在 Ampere 上编译成 `mma.sync`，在 Hopper 上编译成 WGMMA。
+
+### 分组排序：提高 L2 命中率
+
+一维的 `program_id` 怎样映射到二维的输出块 $(\text{pid}_m, \text{pid}_n)$，会影响 L2 缓存的命中率。GPU 同时运行的 program 大致是编号相邻的一批。若按 **行优先** 映射，相邻的 program 计算 $C$ 的同一行块：它们共享 $A$ 的同一个行块，但各自需要 $B$ 的不同列块。
+
+考虑 $C$ 被分成 $9\times 9$ 个块、同时运行 9 个 program 的情形（Triton 官方教程的例子）：
+
+- 行优先：9 个 program 是第 0 行的 9 个块，需要读 $A$ 的 1 个行块与 $B$ 的 9 个列块，共 **10** 个 panel；
+- 分组（`GROUP_M = 3`）：先在 3 行内按列走，9 个 program 是左上角的 $3\times 3$ 个块，需要 $A$ 的 3 个行块与 $B$ 的 3 个列块，共 **6** 个 panel。
+
+若 $K$ 方向也分成 9 段，每个 panel 由 9 个子块组成，两种顺序分别要把 90 个和 54 个子块读入片上存储——这正是教程中给出的数字。
+
+<Diagram width={660} height={300} label="行优先与分组排序下前 9 个 program 覆盖的输出块">
+  <Matrix x={40} y={46} rows={9} cols={9} cell={24} gap={2} values={[[0, 1, 2, 3, 4, 5, 6, 7, 8], [9, 10, 11, 12, 13, 14, 15, 16, 17], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""]]} tone="muted" highlight={[{ rows: [0], tone: 'accent' }]} title="行优先：10 个 panel" />
+  <Matrix x={370} y={46} rows={9} cols={9} cell={24} gap={2} values={[[0, 3, 6, 9, 12, 15, 18, 21, 24], [1, 4, 7, 10, 13, 16, 19, 22, 25], [2, 5, 8, 11, 14, 17, 20, 23, 26], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""], ["", "", "", "", "", "", "", "", ""]]} tone="muted" highlight={[{ cells: [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2], [2, 0], [2, 1], [2, 2]], tone: 'accent' }]} title="GROUP_M = 3：6 个 panel" />
+  <Fragment slot="caption">格子中的数字是负责该输出块的 program 编号（只标出前几行）。深色是编号 0–8 的 9 个 program。行优先时它们排成一行，需要 B 的全部 9 个列块；分组排序时它们组成 3×3 的方块，只需要 A 的 3 个行块与 B 的 3 个列块。</Fragment>
+</Diagram>
+
+映射公式写在 kernel 的开头；CPU 上我们把它原样提取成 `program_to_tile`，并统计前 `wave` 个 program 涉及的 panel 数：
+
+<CodeFile path="src/llms_from_scratch/gpu/triton_kernels.py" region="grouped_order" />
+
+测试 `test_grouped_order_reduces_footprint` 断言了上面的 10 与 6，`test_program_to_tile_is_a_permutation` 验证映射覆盖每个输出块恰好一次——包括行数不能被 `GROUP_M` 整除的情形（最后一组的 `group_size_m` 变小）。Triton 教程报告，在 A100 上这一技巧把矩阵乘法从约 220 TFLOPS 提升到约 245 TFLOPS。工作集变小意味着更多读取命中 L2（A100 有 40 MB），HBM 流量下降。
+
+`matmul_ref` 在 CPU 上以同样的映射逐个 program 计算输出块，用来端到端地验证映射与掩码。
+
+### 自动调优
+
+`@triton.autotune` 接受一组候选配置，每个配置给定 constexpr 参数（$B_M, B_N, B_K$, `GROUP_M`）以及两个编译选项：`num_warps`（每个 program 的 warp 数）和 `num_stages`（软件流水的级数，即共享内存中同时存在几份 $A$、$B$ 子块）。第一次以某组 `key`（这里是 `M, N, K`）调用时，Triton 依次编译并计时每个配置，缓存最快的一个；之后同样形状的调用直接使用它。
+
+配置空间的取舍与上一章一致：更大的 tile 提高算术强度，但需要更多寄存器与共享内存（$B_M B_K + B_K B_N$ 个元素乘以 `num_stages`），可能降低占用率甚至编译失败；小矩阵则需要小 tile 才能产生足够多的 program 填满所有 SM。自动调优的代价是首次调用的编译与计时时间，在训练中通常可以忽略，在推理服务的冷启动中则需要预热。
+
+## Triton 与 CUDA 的取舍
+
+Triton 适合的场景：
+
+- **带宽受限的融合算子**（各种逐元素、归一化、softmax、交叉熵、量化/反量化）：块级描述足以表达，编译器生成的访存通常已接近最优，开发效率远高于 CUDA。
+- **常规形状的 GEMM 及其变体**（带 epilogue 的矩阵乘、分组 GEMM）以及 FlashAttention 一类的分块算法：Triton 版本通常能达到手写库的大部分性能。
+- **与 PyTorch 集成**：kernel 就是 Python 函数，参数直接是张量，无需编译扩展。
+
+需要 CUDA（或 CUTLASS/CuTe）的场景：
+
+- 需要 **warp 级或线程级的显式控制**：精确的寄存器布局、warp shuffle 的特定模式、跨 warp 的生产者—消费者分工。FlashAttention-3 在 H100 上的 warp 专门化与乒乓调度最初就是用 CUTLASS 写的。
+- 需要使用编译器尚未完全暴露的 **最新硬件特性**（新一代 Tensor Core 指令、TMA 的高级用法、线程块簇），新特性通常先出现在 CUDA/PTX 中。
+- 极致性能的库代码（cuBLAS、cuDNN 级别）。
+
+这一界限在移动：Triton 后端在持续加入 Hopper/Blackwell 的特性支持，社区也出现了介于两者之间的 DSL（如 ThunderKittens、TileLang，以及 Triton 项目中实验性的 Gluon），在保留块级抽象的同时允许更细的控制。实践中的经验法则是：**先用 Triton 写出正确且足够快的版本，用 profiler 确认它是瓶颈且离 roofline 还远，再考虑降到更低的层次**。
+
+## 小结
+
+- Triton 以 program（块）为编程单位，块内运算写成张量操作；线程分配、合并访存、共享内存、Tensor Core 与软件流水由编译器负责。
+- `program_id` + `tl.arange` + 掩码构成索引的基本套路；`tl.constexpr` 参数在编译期确定，不同取值生成不同 kernel。
+- 行长适中时，融合 softmax 让一个 program 持有整行，只读写 HBM 各一次。
+- 矩阵乘法只需描述 block 级分块与 K 循环，`tl.dot` 映射到 Tensor Core；分组排序缩小同时运行的 program 的工作集，提高 L2 命中率。
+- 自动调优在 tile 大小、`num_warps`、`num_stages` 的组合中选最快的配置；Triton 适合大多数融合与分块算子，需要 warp 级控制或最新硬件特性时再降到 CUDA/CUTLASS。
+
+## 练习
+
+1. `add_kernel` 用 `BLOCK=1024`、`num_warps=4`。每个线程负责多少个元素？若 `n = 10^6`，启动多少个 program？最后一个 program 中有多少元素被掩码？
+2. 融合 softmax 对列数为 781 的矩阵，`BLOCK` 是多少？填充的位置为什么用 `-inf` 而不是 0？如果用 0 会得到什么错误结果？
+3. 在 `matmul_kernel` 中，如果忘了给 `K` 方向的加载加掩码，当 $K$ 不是 $B_K$ 的整数倍时会发生什么？为什么 `M`、`N` 方向可以用取模而不加掩码？
+4. 对 $16\times 16$ 个输出块、同时运行 16 个 program，计算行优先与 `GROUP_M = 4` 时的 panel 数，并用 `panels_touched` 验证。`GROUP_M` 取多大时 panel 数最小？
+5. 一个配置 $B_M = 128, B_N = 256, B_K = 64$、BF16、`num_stages = 3`，需要多少共享内存？它能在 A100（每 SM 共享内存上限 164 KB）上运行吗？在 H100 上呢？
+
+<details>
+<summary>答案</summary>
+
+1. 128 个线程处理 1024 个元素，每线程 8 个。$\lceil 10^6/1024\rceil = 977$ 个 program，覆盖 $977\times 1024 = 1{,}000{,}448$ 个下标，最后一个 program 有 448 个元素被掩码。
+
+2. `BLOCK = 1024`。`-inf` 使填充位置的 `exp` 为 0、且不影响最大值。若填 0，当整行都是负数时最大值会变成 0（错误），并且每个填充位置贡献 $e^{0-m}$ 到分母，使所有概率偏小。
+
+3. 最后一轮会读入 $A$ 与 $B$ 中越界的元素（属于下一行的数据或未分配内存），它们的乘积被累加进有效的输出，结果错误，甚至访问越界。`M`、`N` 方向越界的行列只影响它们自己对应的输出位置，这些位置在 `tl.store` 时被掩码丢弃，所以读到什么都无所谓；取模保证了读取的地址合法。
+
+4. 行优先：1 个 $A$ 行块 + 16 个 $B$ 列块 = 17。`GROUP_M = 4`：16 个 program 组成 $4\times 4$ 的方块，4 + 4 = 8。`GROUP_M` 取 $\sqrt{16} = 4$ 时最小（方块形状，与上一章 tile 越接近正方形复用越好同理）。
+
+5. 每级 $(128\cdot 64 + 64\cdot 256)\cdot 2 = 49152$ 字节 = 48 KB，3 级共 144 KB。A100 上限 164 KB，可以运行（但每 SM 只能驻留一个这样的 program）；H100 上限 228 KB，也可以。若 `num_stages = 4` 则需要 192 KB，A100 上会因共享内存不足而无法编译/启动。
+
+</details>
+
+## 参考文献
+
+- P. Tillet, H. T. Kung, D. Cox. [Triton: An Intermediate Language and Compiler for Tiled Neural Network Computations](https://www.eecs.harvard.edu/~htk/publication/2019-mapl-tillet-kung-cox.pdf), MAPL 2019.
+- Triton 官方教程：[Vector Addition](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html)、[Fused Softmax](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html)、[Matrix Multiplication](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)。
+- Triton. [`triton.autotune`](https://triton-lang.org/main/python-api/generated/triton.autotune.html) 与 [Debugging / Interpreter](https://triton-lang.org/main/programming-guide/chapter-3/debugging.html)。
+- Stanford CS336, Spring 2025. [Lecture 6: Kernels, Triton](https://github.com/stanford-cs336/spring2025-lectures)；[Assignment 2: Systems](https://github.com/stanford-cs336/assignment2-systems).
+- B. Spector 等. [ThunderKittens: Simple, Fast, and Adorable AI Kernels](https://arxiv.org/abs/2410.20399), 2024.
+- L. Wang 等. [TileLang: A Composable Tiled Programming Model for AI Systems](https://arxiv.org/abs/2504.17577), 2025.
