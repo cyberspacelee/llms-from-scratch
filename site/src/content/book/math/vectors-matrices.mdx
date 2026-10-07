@@ -2,7 +2,350 @@
 title: 向量、矩阵与张量
 description: 把一批数据写成张量，把一层网络写成矩阵乘法：点积、矩阵乘法的四种看法、形状规则、广播与 einsum。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/math/linalg.py
+  - tests/math/test_linalg.py
 ---
 
-本章正在撰写。
+语言模型从头到尾都在做同一件事：把一批数字排成整齐的数组，再用矩阵乘法把它们变成另一批数字。一个 token 进入模型时变成一个长度为 $d$ 的向量；一句话是 $T$ 个这样的向量叠成的矩阵；一个训练批次是 $B$ 句话叠成的三维数组；模型的每一层，本质上是用一个权重矩阵去乘这个数组，再逐元素地套一个非线性函数。注意力分数是点积，前馈网络是两次矩阵乘，输出层把向量投影到词表上——还是矩阵乘。
+
+所以在讨论梯度、概率和优化之前，先要对这些数组有可靠的直觉：一个点积在几何上意味着什么？矩阵乘法除了“行乘列”之外还能怎样理解？形状 `(B, T, d)` 的张量和形状 `(d, 4d)` 的矩阵相乘时，哪些维度被消掉、哪些被保留？两个形状不同的张量相加时 PyTorch 在背后做了什么？本章回答这些问题，最后把它们拼成“一层神经网络 = 矩阵乘 + 非线性”。阅读本章只需要高中代数；所有结论都会落到可运行的 PyTorch 代码上，并在 `tests/math/test_linalg.py` 中验证。
+
+## 向量：一组数，也是一个箭头
+
+**向量**（vector）最朴素的定义是一列有序的数：$x = (x_1, x_2, \dots, x_d)$，记作 $x \in \mathbb R^d$。在本书中，向量默认是列向量，写成行时只是为了排版。$d$ 叫作向量的维数（dimension）。PyTorch 里它就是一个形状为 `(d,)` 的一维张量。
+
+同一个对象还有一个几何身份：$\mathbb R^2$ 中的 $(3, 1)$ 是从原点出发、向右 3 格、向上 1 格的箭头。几何视角让我们能用“长度”“方向”“夹角”这些词来谈论数组，而这些词恰好是理解嵌入（embedding）和注意力的关键：两个词的向量方向接近，往往意味着它们语义接近。
+
+向量支持两种基本运算。**加法**逐分量相加，几何上是箭头首尾相接；**数乘**把每个分量乘同一个数 $c$，几何上是把箭头拉伸 $c$ 倍（$c$ 为负时反向）。由这两种运算组合出来的 $c_1 v_1 + c_2 v_2 + \cdots + c_k v_k$ 叫作 $v_1,\dots,v_k$ 的**线性组合**（linear combination）。后面我们会看到，矩阵乘法的大部分看法都可以归结为“取线性组合”。
+
+向量的长度用**欧几里得范数**（Euclidean norm）度量：
+
+$$
+\lVert x \rVert = \sqrt{x_1^2 + x_2^2 + \cdots + x_d^2}.
+$$
+
+这是勾股定理在 $d$ 维的推广。长度为 1 的向量叫单位向量，任何非零向量除以自身长度 $x / \lVert x \rVert$ 就得到同方向的单位向量，这个操作叫作归一化（normalization）。
+
+### 点积与夹角
+
+两个同维向量的**点积**（dot product，也叫内积）定义为对应分量乘积之和：
+
+$$
+u \cdot v = u^\top v = \sum_{i=1}^{d} u_i v_i .
+$$
+
+这个纯代数的定义有一个漂亮的几何解释。把 $u$、$v$ 和 $u - v$ 看成三角形的三条边，余弦定理给出 $\lVert u - v\rVert^2 = \lVert u\rVert^2 + \lVert v\rVert^2 - 2\lVert u\rVert\lVert v\rVert\cos\theta$，其中 $\theta$ 是 $u$、$v$ 的夹角。另一方面，把左边按定义展开：
+
+$$
+\lVert u - v\rVert^2 = \sum_i (u_i - v_i)^2 = \sum_i u_i^2 + \sum_i v_i^2 - 2\sum_i u_i v_i = \lVert u\rVert^2 + \lVert v\rVert^2 - 2\, u\cdot v .
+$$
+
+两式对比，立即得到
+
+<KeyEq label="点积的几何意义">
+
+$$
+u \cdot v = \lVert u\rVert\,\lVert v\rVert\cos\theta,
+\qquad
+\cos\theta = \frac{u\cdot v}{\lVert u\rVert\,\lVert v\rVert}.
+$$
+
+</KeyEq>
+
+于是点积同时编码了两件事：两个向量各自有多长，以及它们的方向有多一致。方向相同时 $\cos\theta = 1$，点积最大；垂直（正交，orthogonal）时点积为 0；方向相反时为负。把长度的影响除掉，就得到**余弦相似度**（cosine similarity），它只关心方向，取值在 $[-1, 1]$。
+
+手算一个例子：$u = (1, 2, 2)$，$v = (2, 0, 1)$。点积 $u\cdot v = 2 + 0 + 2 = 4$，长度 $\lVert u\rVert = \sqrt{1+4+4} = 3$，$\lVert v\rVert = \sqrt{5}$，所以 $\cos\theta = 4/(3\sqrt5) \approx 0.596$，夹角约 53°。
+
+<Diagram width={720} height={270} label="点积的几何意义：u 在 v 方向上的投影长度乘以 v 的长度">
+  <Region x={20} y={20} w={330} h={240} title="点积 = 投影 × 长度" />
+  <Arrow from={[60, 200]} to={[300, 200]} tone="accent" width={2.2} />
+  <Text x={310} y={200} label="v" anchor="start" bold tone="accent" />
+  <Arrow from={[60, 200]} to={[220, 70]} tone="info" width={2.2} />
+  <Text x={226} y={62} label="u" anchor="start" bold tone="info" />
+  <Arrow from={[220, 70]} to={[220, 200]} tone="muted" dashed head="none" />
+  <Arrow from={[60, 222]} to={[220, 222]} tone="accent2" head="both" label="‖u‖cos θ" labelSide="below" />
+  <Text x={100} y={186} label="θ" tone="muted" />
+  <Region x={380} y={20} w={300} h={240} title="三种典型关系" />
+  <Arrow from={[420, 110]} to={[490, 70]} tone="info" />
+  <Arrow from={[420, 110]} to={[500, 90]} tone="accent" />
+  <Text x={460} y={140} label="同向：u·v > 0" size="sm" />
+  <Arrow from={[560, 110]} to={[560, 60]} tone="info" />
+  <Arrow from={[560, 110]} to={[630, 110]} tone="accent" />
+  <Text x={600} y={140} label="正交：u·v = 0" size="sm" />
+  <Arrow from={[530, 196]} to={[450, 196]} tone="info" />
+  <Arrow from={[530, 204]} to={[610, 204]} tone="accent" />
+  <Text x={530} y={230} label="反向：u·v < 0" size="sm" />
+  <Fragment slot="caption">左：$u$ 在 $v$ 方向上的投影长度是 $\lVert u\rVert\cos\theta$，再乘以 $\lVert v\rVert$ 就是点积。右：点积的符号只由夹角决定，大小还取决于两个向量的长度。</Fragment>
+</Diagram>
+
+图的左半部分给出点积的另一种读法：$u$ 往 $v$ 所在直线上投下的“影子”长 $\lVert u\rVert\cos\theta$，点积就是影子长度乘 $\lVert v\rVert$。当 $v$ 是单位向量时，点积就是投影长度本身——这正是“用一组单位向量做坐标轴、用点积读出坐标”的原理。
+
+在语言模型里，点积几乎无处不在。词嵌入的相似度用余弦相似度衡量；注意力机制用查询向量 $q$ 与键向量 $k$ 的点积 $q\cdot k$ 打分，打分越高表示越“相关”（见[注意力机制](/transformer/attention/)）；输出层用隐藏状态与每个词的输出向量做点积得到 logits。点积大的原因有两种——方向一致或长度很大——这一区别会在注意力为什么要除以 $\sqrt{d}$ 时再次出现。
+
+<CodeFile path="src/llms_from_scratch/math/linalg.py" region="cosine" />
+
+## 矩阵乘法的四种看法
+
+**矩阵**（matrix）是数排成的矩形表格。$A \in \mathbb R^{m\times k}$ 有 $m$ 行 $k$ 列，第 $i$ 行第 $j$ 列的元素记作 $A_{ij}$。两个矩阵 $A\in\mathbb R^{m\times k}$ 与 $B\in\mathbb R^{k\times n}$ 的乘积 $C = AB \in \mathbb R^{m\times n}$ 定义为
+
+<KeyEq label="矩阵乘法">
+
+$$
+C_{ij} = \sum_{p=1}^{k} A_{ip} B_{pj}, \qquad i = 1,\dots,m,\; j = 1,\dots,n .
+$$
+
+</KeyEq>
+
+只有当 $A$ 的列数等于 $B$ 的行数（“内维”相同）时乘法才有定义，结果的形状由两个“外维”决定。这一行公式可以从四个角度去读，每个角度在后续章节里都有用武之地。下面用同一个小例子把四种看法各算一遍：
+
+$$
+A = \begin{bmatrix} 1 & 2 \\ 3 & 4 \end{bmatrix},\qquad
+B = \begin{bmatrix} 5 & 6 \\ 7 & 8 \end{bmatrix},\qquad
+AB = \begin{bmatrix} 19 & 22 \\ 43 & 50 \end{bmatrix}.
+$$
+
+### 看法一：行与列的点积
+
+最直接的读法：$C_{ij}$ 是 $A$ 的第 $i$ 行与 $B$ 的第 $j$ 列的点积。例如 $C_{12} = (1, 2)\cdot(6, 8) = 6 + 16 = 22$。这种看法告诉我们矩阵乘法是 $mn$ 个点积的集合，每个点积要做 $k$ 次乘法和 $k$ 次加法，因此总计算量约为 $2mnk$ 次浮点运算（FLOPs）。这个数字是[资源核算](/pytorch/resource-accounting/)的出发点：Transformer 的训练成本几乎全部来自矩阵乘法。
+
+### 看法二：列的线性组合
+
+把 $B$ 的第 $j$ 列 $b_j$ 看成系数，$C$ 的第 $j$ 列等于 $A$ 的各列以这些系数做的线性组合：
+
+$$
+C_{:,j} = A b_j = \sum_{p=1}^{k} B_{pj}\, A_{:,p}.
+$$
+
+例子中 $C$ 的第一列是 $5\cdot(1,3) + 7\cdot(2,4) = (19, 43)$。这个看法揭示了一个重要事实：$AB$ 的每一列都落在 $A$ 的列所张成的空间里。所以 $AB$ 的“信息量”不会超过 $A$——更准确地说，$\operatorname{rank}(AB) \le \min(\operatorname{rank}A, \operatorname{rank}B)$。秩（rank）的概念会在[特征分解、SVD 与低秩近似](/math/linear-algebra-advanced/)中展开。
+
+### 看法三：外积之和
+
+把 $A$ 按列、$B$ 按行切开，乘积是 $k$ 个**外积**（outer product）之和：
+
+$$
+AB = \sum_{p=1}^{k} A_{:,p}\, B_{p,:} .
+$$
+
+列向量乘行向量 $a b^\top$ 得到一个矩阵，第 $(i,j)$ 个元素是 $a_i b_j$，它的每一行都是 $b^\top$ 的倍数，所以秩为 1。例子中
+
+$$
+\begin{bmatrix}1\\3\end{bmatrix}\begin{bmatrix}5 & 6\end{bmatrix} + \begin{bmatrix}2\\4\end{bmatrix}\begin{bmatrix}7 & 8\end{bmatrix}
+= \begin{bmatrix}5 & 6\\15 & 18\end{bmatrix} + \begin{bmatrix}14 & 16\\28 & 32\end{bmatrix}
+= \begin{bmatrix}19 & 22\\43 & 50\end{bmatrix}.
+$$
+
+外积视角有两个直接的用处。第一，它是低秩分解的语言：LoRA 把权重更新写成 $BA$，正是 $r$ 个秩 1 矩阵之和。第二，它会在[反向传播](/math/backprop/)中出现：线性层权重的梯度 $\mathrm dW = \mathrm dY^\top X$ 是“每个样本贡献一个外积，再全部加起来”。
+
+### 看法四：线性变换
+
+把矩阵看成一个函数。对行向量 $x \in \mathbb R^{1\times k}$，映射 $x \mapsto xB$ 满足 $(\alpha x + \beta y)B = \alpha\, xB + \beta\, yB$，这种保持线性组合的函数叫**线性变换**（linear transformation）。于是 $C = AB$ 的第 $i$ 行就是把 $A$ 的第 $i$ 行送进这个变换的结果：
+
+$$
+C_{i,:} = A_{i,:}\, B .
+$$
+
+这正是神经网络里的读法：$A$ 的每一行是一个样本（或一个 token 的向量），$B$ 是一层的权重，整个矩阵乘法就是把同一个变换并行地施加到所有样本上。线性变换的另一个性质是可以复合：先做 $B$ 再做 $D$，等于直接做 $BD$，因为 $(xB)D = x(BD)$——矩阵乘法满足结合律。这个性质马上会告诉我们为什么神经网络必须有非线性。
+
+<Diagram width={720} height={250} label="同一个矩阵乘法 C = AB 的两种读法：一个元素是行与列的点积，一列是 A 的列的线性组合">
+  <Matrix x={60} y={60} rows={2} cols={2} cell={44} values={[[1, 2], [3, 4]]} title="A" highlight={[{ rows: [0], tone: 'accent' }]} />
+  <Text x={175} y={105} label="×" size="lg" />
+  <Matrix x={200} y={60} rows={2} cols={2} cell={44} values={[[5, 6], [7, 8]]} title="B" highlight={[{ cols: [1], tone: 'accent' }]} />
+  <Text x={315} y={105} label="=" size="lg" />
+  <Matrix x={340} y={60} rows={2} cols={2} cell={44} values={[[19, 22], [43, 50]]} title="C" highlight={[{ cells: [[0, 1]], tone: 'strong' }]} />
+  <Text x={240} y={190} label="C₁₂ = 1·6 + 2·8 = 22（行 · 列）" size="sm" />
+  <Text x={495} y={105} label="5 ·" anchor="end" />
+  <Matrix x={502} y={60} rows={2} cols={1} cell={44} values={[[1], [3]]} title="A 第 1 列" tone="info" />
+  <Text x={575} y={105} label="+ 7 ·" />
+  <Matrix x={606} y={60} rows={2} cols={1} cell={44} values={[[2], [4]]} title="A 第 2 列" tone="info" />
+  <Text x={575} y={190} label="C 第 1 列 = (19, 43)" size="sm" />
+  <Fragment slot="caption">左：$C$ 的一个元素来自 $A$ 的一行与 $B$ 的一列的点积（看法一）。右：$C$ 的一整列是 $A$ 各列的线性组合，系数取自 $B$ 的对应列（看法二），即 $(19, 43) = 5\cdot(1,3) + 7\cdot(2,4)$。</Fragment>
+</Diagram>
+
+四种看法在代码里分别是四种循环结构。它们的数值结果完全相同，测试逐一把它们与 `a @ b` 比对：
+
+<CodeFile path="src/llms_from_scratch/math/linalg.py" region="four-views" />
+
+这些循环只用于理解，真实计算永远应该交给 `@`：PyTorch 会把它分派给高度优化的 BLAS 库或 GPU 上的 Tensor Core 内核，比 Python 循环快几个数量级。第八部分会从零写出这样的内核，届时“行·列”和“外积和”会分别对应两种不同的循环顺序与数据复用方式。
+
+## 形状规则与批量矩阵乘
+
+在实际代码中，最常见的错误不是公式写错，而是形状对不上。养成一个习惯：每写一行张量运算，都在注释里写下输入和输出的形状。矩阵乘法的形状规则只有一条：
+
+$$
+(m, k) \;@\; (k, n) \;\to\; (m, n).
+$$
+
+内维 $k$ 被求和“消掉”，外维 $m$ 和 $n$ 保留下来。
+
+**张量**（tensor）是矩阵向更多维度的推广：标量是 0 维张量，向量是 1 维，矩阵是 2 维，一个批次的 token 表示 `(B, T, d)` 是 3 维，多头注意力里的 `(B, h, T, d_h)` 是 4 维。PyTorch 的 `@`（`torch.matmul`）对高维张量的约定是：**只有最后两维参与矩阵乘，前面的所有维度都当作“批”维度**，逐批独立地做矩阵乘。例如
+
+$$
+(B, h, T, d_h) \;@\; (B, h, d_h, T) \;\to\; (B, h, T, T),
+$$
+
+这就是注意力分数的计算：对每个样本、每个头，用 $T\times d_h$ 的查询矩阵乘 $d_h\times T$ 的转置键矩阵，得到 $T\times T$ 的分数表。
+
+批维度之间还允许广播（下一节）。最常见的情形是一个二维权重乘一个三维激活：`(B, T, d) @ (d, d_ff)`。这里权重没有批维度，PyTorch 把它当作对所有 $B$ 个批次共享的矩阵，结果形状为 `(B, T, d_ff)`。等价地，可以把前两维合并成 $BT$ 行，看成一次 `(B·T, d) @ (d, d_ff)` 的普通矩阵乘——这在估算计算量时非常方便：一次线性层的 FLOPs 是 $2 \cdot BT \cdot d \cdot d_{\text{ff}}$。
+
+本书遵循 `torch.nn.Linear` 的约定：权重存储为 $W \in \mathbb R^{d_{\text{out}}\times d_{\text{in}}}$，作用于按行存放样本的输入 $X \in \mathbb R^{B\times d_{\text{in}}}$ 时写作 $Y = XW^\top + b$。之所以存成 $(d_{\text{out}}, d_{\text{in}})$，是因为这样 $W$ 的第 $j$ 行就是第 $j$ 个输出神经元的权重向量，$Y_{ij} = X_{i,:}\cdot W_{j,:} + b_j$ 恰好是“样本 $i$ 与神经元 $j$ 的点积”。数学文献中常把列向量写在右边 $y = Wx + b$，两种写法描述的是同一个计算，只是转置不同。
+
+## 广播：形状不同的张量怎样运算
+
+上面的 $XW^\top + b$ 里藏着一个形状问题：$XW^\top$ 是 $(B, d_{\text{out}})$，而 $b$ 是 $(d_{\text{out}},)$，二者形状不同，加法却能进行——结果是把 $b$ 加到每一行上。这种机制叫**广播**（broadcasting）。它让我们不必手动把 $b$ 复制 $B$ 遍，也不会真的在内存中复制。
+
+<Definition term="广播规则" kind="定义" source="https://numpy.org/doc/stable/user/basics.broadcasting.html">
+两个张量做逐元素运算时，从**最后一维**开始向前逐维比较形状：维数较少的张量在前面补 1；每一维上，两个大小要么相等，要么其中一个为 1；大小为 1 的维度被“拉伸”到另一个张量的大小。任何一维不满足条件则报错。结果的每一维取两者中较大的那个。
+</Definition>
+
+例如 `(8, 1, 6, 1)` 与 `(7, 1, 5)` 广播：先把后者补成 `(1, 7, 1, 5)`，再逐维取较大者，得到 `(8, 7, 6, 5)`。而 `(2, 3)` 与 `(4,)` 无法广播，因为最后一维 3 与 4 既不相等也没有 1。
+
+<Diagram width={720} height={230} label="广播的逐维对齐：右对齐、补 1、逐维取较大者">
+  <Text x={60} y={50} label="张量 a" anchor="start" size="sm" tone="muted" />
+  <Matrix x={160} y={36} rows={1} cols={4} cell={[64, 28]} values={[['8', '1', '6', '1']]} highlight={[{ cells: [[0, 1], [0, 3]], tone: 'muted' }]} />
+  <Text x={60} y={100} label="张量 b" anchor="start" size="sm" tone="muted" />
+  <Matrix x={160} y={86} rows={1} cols={4} cell={[64, 28]} values={[['(1)', '7', '1', '5']]} highlight={[{ cells: [[0, 0], [0, 2]], tone: 'muted' }, { cells: [[0, 0]], tone: 'ghost' }]} />
+  <Text x={60} y={160} label="结果" anchor="start" size="sm" tone="muted" bold />
+  <Matrix x={160} y={146} rows={1} cols={4} cell={[64, 28]} values={[['8', '7', '6', '5']]} tone="accent" />
+  <Text x={480} y={50} label="右对齐：从最后一维开始比较" anchor="start" size="sm" />
+  <Text x={480} y={100} label="缺失的前导维视为 1（虚线）" anchor="start" size="sm" />
+  <Text x={480} y={160} label="每维：相等，或其一为 1" anchor="start" size="sm" />
+  <Arrow from={[422, 200]} to={[192, 200]} tone="muted" label="比较方向：从右往左" labelSide="below" />
+  <Fragment slot="caption">灰色格子是大小为 1、将被拉伸的维度。`(8,1,6,1)` 与 `(7,1,5)` 广播得到 `(8,7,6,5)`。广播只改变“看起来”的形状，不复制内存。</Fragment>
+</Diagram>
+
+广播规则可以用十几行代码完整地写出来，测试用 `torch.broadcast_shapes` 核对：
+
+<CodeFile path="src/llms_from_scratch/math/linalg.py" region="broadcast" />
+
+<Callout tone="warn" title="广播最常见的陷阱">
+形状 `(B,)` 与 `(B, 1)` 相减，结果不是 `(B,)` 而是 `(B, B)`：前者被补成 `(1, B)`，两者互相拉伸成一个 $B\times B$ 的矩阵。这类 bug 不会报错，只会让损失算错。计算损失前用 `assert pred.shape == target.shape` 是值得养成的习惯。
+</Callout>
+
+广播在反向传播时有一个对偶：前向时 $b$ 被“复制”到了 $B$ 行，反向时 $b$ 的梯度就要把这 $B$ 行的梯度**加起来**。这条规则会在[反向传播](/math/backprop/)推导 $\mathrm db = \sum_n \mathrm dY_n$ 时出现，并在[从零实现自动微分](/math/autodiff/)里实现成通用的 `sum_to_shape`。
+
+## einsum：用下标写出张量运算
+
+当运算涉及三四个维度时，`@`、`transpose`、`reshape` 的组合很快变得难读。爱因斯坦求和约定（Einstein summation）提供了一种更直接的写法：给每个维度起一个字母，写出输入和输出的下标，**在输入中出现、却不在输出中出现的下标被求和**，其余下标原样保留。
+
+| 运算 | 数学 | einsum |
+| --- | --- | --- |
+| 点积 | $\sum_i u_i v_i$ | `"i,i->"` |
+| 外积 | $u_i v_j$ | `"i,j->ij"` |
+| 矩阵乘 | $\sum_k A_{ik}B_{kj}$ | `"ik,kj->ij"` |
+| 批量矩阵乘 | $\sum_j A_{bij}B_{bjk}$ | `"bij,bjk->bik"` |
+| 线性层 | $\sum_i X_{bti} W_{oi}$ | `"bti,oi->bto"` |
+| 注意力分数 | $\sum_d Q_{bhid}K_{bhjd}$ | `"bhid,bhjd->bhij"` |
+| 迹 | $\sum_i A_{ii}$ | `"ii->"` |
+
+这张表的价值在于：einsum 字符串就是数学公式本身。读到 `"bhid,bhjd->bhij"`，立刻能看出 $d$ 被求和（它是点积的维度），$i, j$ 是查询和键的位置，$b, h$ 是批与头。它也天然地处理了转置：键矩阵不需要显式 `transpose`，因为下标已经说明了哪两维配对。
+
+<CodeFile path="src/llms_from_scratch/math/linalg.py" region="einsum" />
+
+测试确认两种写法逐元素相等。性能上，`torch.einsum` 会把表达式改写成批量矩阵乘再调用同样的内核，因此在大多数情况下与手写 `@` 一样快。
+
+## 一层神经网络：矩阵乘加非线性
+
+现在可以写出神经网络最基本的构件了。一个全连接层（fully connected layer）接收 $X\in\mathbb R^{B\times d_{\text{in}}}$，输出
+
+$$
+H = \sigma\!\left(XW^\top + b\right),
+$$
+
+其中 $W\in\mathbb R^{d_{\text{out}}\times d_{\text{in}}}$、$b\in\mathbb R^{d_{\text{out}}}$ 是可学习的参数，$\sigma$ 是逐元素作用的**激活函数**（activation function）。最常见的选择是 ReLU：$\operatorname{relu}(z) = \max(0, z)$；现代语言模型多用它的平滑变体 GELU 与 SiLU（它们的导数在[反向传播](/math/backprop/)中推导）。
+
+为什么非要加 $\sigma$？回忆看法四：线性变换可以复合，且复合仍是线性变换。如果去掉激活函数，两层网络
+
+$$
+(XW_1^\top + b_1)W_2^\top + b_2 = X\,(W_2W_1)^\top + (b_1W_2^\top + b_2)
+$$
+
+就塌缩成了一层，权重为 $W_2W_1$，偏置为 $b_1W_2^\top + b_2$。不管叠多少层，结果都只能表示线性函数——它连“异或”这样简单的模式都无法拟合。非线性打断了这种塌缩：ReLU 把每个超平面一侧的输出置零，许多这样的“折痕”叠加起来，网络就能逼近任意复杂的连续函数（通用逼近定理）。
+
+<Diagram width={720} height={200} label="两层 MLP 的形状流：矩阵乘、加偏置、逐元素非线性、再矩阵乘">
+  <Box x={10} y={70} w={90} h={56} label="X" sub="(B, d_in)" tone="info" />
+  <Box x={140} y={70} w={140} h={56} label="X W₁ᵀ + b₁" sub="(B, d_hidden)" tone="accent" mono />
+  <Box x={320} y={70} w={90} h={56} label="relu" sub="逐元素" />
+  <Box x={450} y={70} w={140} h={56} label="H W₂ᵀ + b₂" sub="(B, d_out)" tone="accent" mono />
+  <Box x={620} y={70} w={60} h={56} label="Y" tone="strong" />
+  <Arrow from={[100, 98]} to={[140, 98]} />
+  <Arrow from={[280, 98]} to={[320, 98]} />
+  <Arrow from={[410, 98]} to={[450, 98]} label="H" />
+  <Arrow from={[590, 98]} to={[620, 98]} />
+  <Text x={210} y={155} label="W₁: (d_hidden, d_in)" size="sm" tone="muted" mono />
+  <Text x={520} y={155} label="W₂: (d_out, d_hidden)" size="sm" tone="muted" mono />
+  <Text x={345} y={35} label="去掉 relu，两次矩阵乘会合并成一次：W₂W₁" size="sm" tone="accent2" />
+  <Fragment slot="caption">每个强调色的框是一次矩阵乘加偏置（偏置沿批维度广播），中间的 relu 逐元素作用、不改变形状。Transformer 的前馈网络就是这个结构，只是激活函数换成了 GELU 或 SwiGLU。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/math/linalg.py" region="layer" />
+
+测试用 `torch.nn.Linear` 构造同样的两层网络，并输入一个形状为 `(2, 7, 4)` 的三维张量——这模拟了 `(B, T, d)` 的语言模型激活。`linear` 中的 `x @ weight.T` 把前两维当作批维度，`+ bias` 沿前两维广播，结果与 PyTorch 完全一致。
+
+到这里，“一层神经网络”这个概念已经被完全拆解成了本章的四块积木：样本是向量，一批样本按行叠成矩阵；矩阵乘法把同一个线性变换施加到每一行；偏置通过广播加到每一行；激活函数逐元素作用。剩下的问题是：$W$ 和 $b$ 从哪里来？答案是从数据中**学**出来——为此需要知道损失对每个参数的变化率，这就是下一章的主题。
+
+## 小结
+
+- 向量既是数组也是箭头；点积 $u\cdot v = \lVert u\rVert\lVert v\rVert\cos\theta$ 同时度量长度与方向一致性，余弦相似度只看方向。注意力分数、logits 都是点积。
+- 矩阵乘法有四种等价读法：行·列的点积（计算量 $2mnk$）、列的线性组合（秩的来源）、秩 1 外积之和（低秩分解与权重梯度的语言）、线性变换（神经网络对每个样本做同一变换）。
+- 形状规则 $(m,k)@(k,n)\to(m,n)$；高维张量只在最后两维做矩阵乘，前面的维度是批。本书线性层约定 $Y = XW^\top + b$，$W$ 形状为 $(d_{\text{out}}, d_{\text{in}})$。
+- 广播从最后一维对齐，大小为 1 的维度被拉伸；它的反向是沿被拉伸维度求和。
+- einsum 用下标直接写出公式：未出现在输出中的下标被求和。
+- 一层网络 = 矩阵乘 + 偏置 + 非线性；没有非线性，多层会塌缩成一层。
+
+## 练习
+
+1. 设 $u = (3, 4)$，$v = (4, -3)$，$w = (6, 8)$。分别计算 $u\cdot v$、$u\cdot w$ 以及 $u$ 与 $w$ 的余弦相似度，并解释结果。
+
+<details>
+<summary>答案</summary>
+
+$u\cdot v = 12 - 12 = 0$，两个向量正交。$u\cdot w = 18 + 32 = 50$；$\lVert u\rVert = 5$，$\lVert w\rVert = 10$，余弦相似度为 $50/50 = 1$，因为 $w = 2u$，方向完全相同。点积 50 比余弦 1 大得多，说明点积同时受到长度影响，而余弦只看方向。
+
+</details>
+
+2. 用外积之和的看法证明：若 $A\in\mathbb R^{m\times r}$、$B\in\mathbb R^{r\times n}$，则 $\operatorname{rank}(AB)\le r$。当 $m = n = 4096$、$r = 8$ 时，直接存储 $AB$ 与存储 $A, B$ 各需要多少个参数？
+
+<details>
+<summary>答案</summary>
+
+$AB = \sum_{p=1}^{r} A_{:,p}B_{p,:}$ 是 $r$ 个秩 1 矩阵之和。每个秩 1 矩阵的列都在一维空间 $\operatorname{span}(A_{:,p})$ 中，所以 $AB$ 的列空间包含于 $\operatorname{span}(A_{:,1},\dots,A_{:,r})$，维数不超过 $r$。直接存储 $AB$ 需要 $4096^2 \approx 1678$ 万个数；存储 $A$ 和 $B$ 只需 $2\times 4096\times 8 = 65536$ 个，约为前者的 $0.4\%$。这正是 LoRA 的出发点。
+
+</details>
+
+3. 判断下列形状能否广播，能的话写出结果形状：(a) `(32, 1, 64)` 与 `(10, 1)`；(b) `(5, 3)` 与 `(5,)`；(c) `(B, T, d)` 与 `(T, 1)`。
+
+<details>
+<summary>答案</summary>
+
+(a) 右对齐：`(32, 1, 64)` 与 `(1, 10, 1)`，逐维取较大得 `(32, 10, 64)`。(b) 最后一维 3 与 5 不相等且都不是 1，不能广播；若想让 `(5,)` 作用在每一列上，应写成 `(5, 1)`。(c) `(T, 1)` 补成 `(1, T, 1)`，结果 `(B, T, d)`，相当于每个位置加一个与通道无关的数。
+
+</details>
+
+4. 写出下列运算的 einsum 字符串：(a) 一批向量各自的长度平方，输入 `(B, d)`，输出 `(B,)`；(b) 注意力权重 `(B, h, T, T)` 乘值 `(B, h, T, d_h)` 得到 `(B, h, T, d_h)`；(c) 双线性形式 $x^\top A y$。
+
+<details>
+<summary>答案</summary>
+
+(a) `"bd,bd->b"`：$d$ 不在输出中，被求和。(b) `"bhij,bhjd->bhid"`：对键位置 $j$ 求和。(c) `"i,ij,j->"`：$i, j$ 都被求和，结果为标量。
+
+</details>
+
+5. 一个三层网络 $Y = \operatorname{relu}(\operatorname{relu}(XW_1^\top)W_2^\top)W_3^\top$ 去掉全部 relu 后等价于什么？若 $W_1$ 是 $(64, 512)$、$W_2$ 是 $(64, 64)$、$W_3$ 是 $(512, 64)$，等价矩阵的秩最多是多少？
+
+<details>
+<summary>答案</summary>
+
+等价于 $Y = X(W_3W_2W_1)^\top$，一个 $(512, 512)$ 的单一线性层。由于中间维度只有 64，等价矩阵的秩不超过 64：去掉非线性的深网络不仅表达能力退化为线性，还被最窄的一层限制了秩。
+
+</details>
+
+## 参考文献
+
+- Gilbert Strang. *Introduction to Linear Algebra*, 6th ed. Wellesley-Cambridge Press, 2023. 第 1–2 章（向量、点积与矩阵乘法的多种看法）。[math.mit.edu/linearalgebra](https://math.mit.edu/~gs/linearalgebra/)
+- NumPy 文档：Broadcasting. [numpy.org/doc/stable/user/basics.broadcasting.html](https://numpy.org/doc/stable/user/basics.broadcasting.html)
+- PyTorch 文档：`torch.matmul`（批维度与广播语义）。[pytorch.org/docs/stable/generated/torch.matmul.html](https://pytorch.org/docs/stable/generated/torch.matmul.html)
+- PyTorch 文档：`torch.einsum`。[pytorch.org/docs/stable/generated/torch.einsum.html](https://pytorch.org/docs/stable/generated/torch.einsum.html)
+- Ian Goodfellow, Yoshua Bengio, Aaron Courville. *Deep Learning*, Chapter 2: Linear Algebra; Chapter 6: Deep Feedforward Networks. MIT Press, 2016. [deeplearningbook.org](https://www.deeplearningbook.org/)
+- Stanford CS336 Spring 2025, Lecture 2: PyTorch, resource accounting（张量、einsum 与矩阵乘 FLOPs）。[github.com/stanford-cs336/spring2025-lectures](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py)
+- Kurt Hornik, Maxwell Stinchcombe, Halbert White. Multilayer feedforward networks are universal approximators. *Neural Networks* 2(5), 1989. [doi.org/10.1016/0893-6080(89)90020-8](https://doi.org/10.1016/0893-6080(89)90020-8)

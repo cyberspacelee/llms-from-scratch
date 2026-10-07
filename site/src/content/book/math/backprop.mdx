@@ -2,7 +2,346 @@
 title: 反向传播：从标量到矩阵
 description: 雅可比矩阵与向量-雅可比积（VJP），推导线性层、激活、softmax 交叉熵与 LayerNorm 的反向公式，并用数值梯度核对。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/math/backprop.py
+  - tests/math/test_backprop.py
 ---
 
-本章正在撰写。
+上一章在一个只有 2 个输入、2 个隐藏单元的网络上手算了反向传播，并且看到两条规律：参数的梯度是“上游梯度与输入的外积”，输入的梯度是“权重转置乘上游梯度”。真实模型处理的是一批样本、几千维的向量，每个算子的输入输出都是矩阵甚至四维张量。本章把链式法则提升到矩阵层面，为 Transformer 中用到的每一种算子推导出反向公式：线性层、逐元素激活（ReLU、GELU、SiLU）、softmax 与交叉熵、LayerNorm 与 RMSNorm。
+
+推导的工具只有一个：**向量-雅可比积**（VJP）。我们会看到，每个算子的反向都可以写成几次矩阵乘和逐元素运算，从来不需要真的构造雅可比矩阵。每个公式都在 `src/llms_from_scratch/math/backprop.py` 中实现为一对 `forward`/`backward` 函数，并与 `torch.autograd` 和数值梯度逐项比对。
+
+## 雅可比矩阵与向量-雅可比积
+
+### 雅可比矩阵
+
+对函数 $y = f(x)$，$x\in\mathbb R^n$，$y\in\mathbb R^m$，**雅可比矩阵** $J\in\mathbb R^{m\times n}$ 收集了每个输出对每个输入的偏导数：$J_{ij} = \partial y_i/\partial x_j$。它是多元线性近似里的“斜率”：$f(x + \delta)\approx f(x) + J\delta$。
+
+两个特殊情形值得记住。线性映射 $y = Ax$ 的雅可比就是 $A$ 本身。逐元素函数 $y_i = \phi(x_i)$ 的雅可比是对角矩阵 $\operatorname{diag}(\phi'(x_1), \dots, \phi'(x_n))$，因为 $y_i$ 只依赖 $x_i$。
+
+### 反向传播只需要 VJP
+
+训练时，计算图的终点是一个标量损失 $\mathcal L$。设某个算子 $y = f(x)$ 位于图中间，反向传递已经算出了上游梯度 $g = \partial\mathcal L/\partial y\in\mathbb R^m$。由多元链式法则，
+
+$$
+\frac{\partial\mathcal L}{\partial x_j} = \sum_{i=1}^m\frac{\partial\mathcal L}{\partial y_i}\frac{\partial y_i}{\partial x_j} = \sum_i g_i J_{ij},
+\qquad\text{i.e.}\qquad
+\frac{\partial\mathcal L}{\partial x} = J^\top g .
+$$
+
+<KeyEq label="反向传播的基本运算：向量-雅可比积">
+
+$$
+\bar x = J^\top \bar y,\qquad \bar y := \frac{\partial\mathcal L}{\partial y},\quad \bar x := \frac{\partial\mathcal L}{\partial x}.
+$$
+
+</KeyEq>
+
+上横线记号 $\bar y$ 读作“$y$ 的伴随”（adjoint），代码里写作 `dy`。每个算子只需要实现一个函数：给定 $\bar y$，返回 $\bar x = J^\top\bar y$。这就是 VJP。
+
+关键在于：**几乎从不需要构造 $J$ 本身**。一个逐元素激活作用在 $(B, T, d) = (8, 2048, 4096)$ 的张量上，$n = m\approx 6.7\times10^7$，完整雅可比有 $4.5\times10^{15}$ 个元素，但它是对角的，VJP 只是 $\bar x = \phi'(x)\odot\bar y$，一次逐元素乘法。对每个算子，我们的任务就是找出这样的“不构造 $J$ 的 $J^\top\bar y$”。
+
+### 矩阵变量与形状检查
+
+当变量是矩阵时，把它“摊平”成向量，上面的公式照样成立。实践中更方便的做法是用下标直接写：
+
+$$
+\frac{\partial\mathcal L}{\partial X_{ij}} = \sum_{k,l}\frac{\partial\mathcal L}{\partial Y_{kl}}\frac{\partial Y_{kl}}{\partial X_{ij}},
+$$
+
+然后识别出右边是哪种矩阵运算。一个极其有用的检查是**形状**：$\bar X$ 必须与 $X$ 同形状。很多时候，只要知道答案是“$\bar Y$ 与某个矩阵相乘”，形状本身就能确定转置放在哪里、乘法放在哪一侧。
+
+## 线性层
+
+线性层 $Y = XW^\top + b$，其中 $X\in\mathbb R^{N\times d_{\text{in}}}$（$N$ 行样本），$W\in\mathbb R^{d_{\text{out}}\times d_{\text{in}}}$，$b\in\mathbb R^{d_{\text{out}}}$，$Y\in\mathbb R^{N\times d_{\text{out}}}$。逐元素写出：
+
+$$
+Y_{nk} = \sum_{j} X_{nj}W_{kj} + b_k .
+$$
+
+**对 $X$ 求导。** $X_{nj}$ 只出现在第 $n$ 行的输出中，且 $\partial Y_{nk}/\partial X_{nj} = W_{kj}$。所以
+
+$$
+\bar X_{nj} = \sum_k\bar Y_{nk}W_{kj}\quad\Longrightarrow\quad\bar X = \bar Y\,W .
+$$
+
+形状检查：$(N, d_{\text{out}})\,@\,(d_{\text{out}}, d_{\text{in}})\to(N, d_{\text{in}})$，与 $X$ 一致。
+
+**对 $W$ 求导。** $W_{kj}$ 出现在**每一行**的第 $k$ 个输出中，$\partial Y_{nk}/\partial W_{kj} = X_{nj}$。对所有样本求和：
+
+$$
+\bar W_{kj} = \sum_n\bar Y_{nk}X_{nj}\quad\Longrightarrow\quad\bar W = \bar Y^\top X .
+$$
+
+形状：$(d_{\text{out}}, N)\,@\,(N, d_{\text{in}})\to(d_{\text{out}}, d_{\text{in}})$。用[矩阵乘法的外积看法](/math/vectors-matrices/)读它：$\bar W = \sum_n \bar Y_{n,:}^\top X_{n,:}$，**每个样本贡献一个秩 1 的外积，再全部相加**。这正是上一章单样本结论 $\bar W = \bar z x^\top$ 的批量版本。求和之所以出现，是因为所有样本共用同一个 $W$——多元链式法则的“路径相加”。
+
+**对 $b$ 求导。** $b_k$ 通过广播加到每一行，$\partial Y_{nk}/\partial b_k = 1$，于是 $\bar b_k = \sum_n\bar Y_{nk}$，即 $\bar Y$ 沿批维度求和。这就是[广播](/math/vectors-matrices/)在反向时的对偶：前向复制，反向求和。
+
+<KeyEq label="线性层的反向">
+
+$$
+\bar X = \bar Y\, W,\qquad \bar W = \bar Y^\top X,\qquad \bar b = \textstyle\sum_n \bar Y_{n,:}.
+$$
+
+</KeyEq>
+
+<Diagram width={720} height={240} label="线性层反向传播的三个矩阵乘法及其形状">
+  <Box x={20} y={30} w={130} h={50} label="dY" sub="(N, d_out)" tone="accent2" />
+  <Box x={200} y={30} w={130} h={50} label="W" sub="(d_out, d_in)" tone="info" />
+  <Box x={470} y={30} w={130} h={50} label="dX = dY W" sub="(N, d_in)" tone="accent" />
+  <Box x={20} y={100} w={130} h={50} label="dYᵀ" sub="(d_out, N)" tone="accent2" />
+  <Box x={200} y={100} w={130} h={50} label="X" sub="(N, d_in)" tone="info" />
+  <Box x={470} y={100} w={130} h={50} label="dW = dYᵀ X" sub="(d_out, d_in)" tone="accent" />
+  <Box x={20} y={170} w={130} h={50} label="dY" sub="(N, d_out)" tone="accent2" />
+  <Box x={200} y={170} w={130} h={50} label="沿 N 求和" />
+  <Box x={470} y={170} w={130} h={50} label="db" sub="(d_out,)" tone="accent" />
+  <Text x={175} y={55} label="@" />
+  <Text x={175} y={125} label="@" />
+  <Arrow from={[150, 195]} to={[200, 195]} />
+  <Arrow from={[330, 55]} to={[470, 55]} label="内维 d_out 被消掉" />
+  <Arrow from={[330, 125]} to={[470, 125]} label="内维 N 被消掉" />
+  <Arrow from={[330, 195]} to={[470, 195]} />
+  <Fragment slot="caption">每个梯度的形状都与对应变量相同。$\bar W$ 的内维是批大小 $N$：样本被求和消掉，因为所有样本共用一个 $W$。两个矩阵乘的 FLOPs 各为 $2N d_{\text{in}} d_{\text{out}}$，与前向相同，所以反向约是前向的两倍。</Fragment>
+</Diagram>
+
+手算一个例子。$X = \begin{bmatrix}1 & 2\\ 3 & -1\end{bmatrix}$，$W = \begin{bmatrix}1 & 0\\ 2 & -1\\ 0 & 1\end{bmatrix}$，上游梯度 $\bar Y = \begin{bmatrix}1 & 0 & -1\\ 0 & 2 & 1\end{bmatrix}$。则
+
+$$
+\bar X = \bar Y W = \begin{bmatrix}1 & -1\\ 4 & -1\end{bmatrix},\quad
+\bar W = \bar Y^\top X = \begin{bmatrix}1 & 2\\ 6 & -2\\ 2 & -3\end{bmatrix},\quad
+\bar b = (1, 2, 0).
+$$
+
+例如 $\bar W_{21} = \bar Y_{12}X_{11} + \bar Y_{22}X_{21} = 0\cdot1 + 2\cdot3 = 6$：两个样本各贡献一项。
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" region="linear" />
+
+`forward` 返回的 `cache` 保存了反向需要的 $X$ 和 $W$——这就是“反向模式要保存激活”在代码里的样子。对于形状为 $(B, T, d)$ 的输入，可以把前两维合并成 $N = BT$ 行，公式不变。
+
+## 逐元素激活函数
+
+逐元素函数 $y = \phi(x)$ 的雅可比是对角矩阵，所以 VJP 就是 $\bar x = \phi'(x)\odot\bar y$。只需要推导标量导数 $\phi'$。
+
+**ReLU**：$\phi(x) = \max(0, x)$，$\phi'(x) = \mathbf 1[x > 0]$。在 $x = 0$ 处不可导，约定取 0。
+
+**GELU**（Gaussian Error Linear Unit）：$\phi(x) = x\,\Phi(x)$，$\Phi$ 是标准正态分布的累积分布函数。它可以理解为“以概率 $\Phi(x)$ 保留 $x$”的期望。由乘积法则，
+
+$$
+\phi'(x) = \Phi(x) + x\,\varphi(x),\qquad \varphi(x) = \tfrac{1}{\sqrt{2\pi}}e^{-x^2/2},
+$$
+
+因为 $\Phi' = \varphi$。PyTorch 的 `F.gelu` 默认使用这个精确形式（用 $\operatorname{erf}$ 计算 $\Phi$），另有 `approximate="tanh"` 的近似版本。
+
+**SiLU**（又名 Swish）：$\phi(x) = x\,\sigma(x)$。由乘积法则和 $\sigma' = \sigma(1-\sigma)$，
+
+$$
+\phi'(x) = \sigma(x) + x\,\sigma(x)(1 - \sigma(x)) = \sigma(x)\bigl(1 + x(1 - \sigma(x))\bigr).
+$$
+
+SiLU 是现代 LLM 前馈层 SwiGLU 的组成部分。
+
+<Plot
+  label="ReLU、GELU、SiLU 的导数"
+  x={[-4, 4]}
+  y={[-0.2, 1.2]}
+  xLabel="x"
+  series={[
+    { label: "ReLU′", fn: (t) => (t > 0 ? 1 : 0), samples: 400 },
+    { label: "GELU′", fn: (t) => { const a = Math.abs(t) / Math.SQRT2; const k = 1 / (1 + 0.3275911 * a); const erf = 1 - k * (0.254829592 + k * (-0.284496736 + k * (1.421413741 + k * (-1.453152027 + k * 1.061405429)))) * Math.exp(-a * a); const cdf = 0.5 * (1 + Math.sign(t) * erf); return cdf + t * Math.exp(-t * t / 2) / Math.sqrt(2 * Math.PI) } },
+    { label: "SiLU′", fn: (t) => { const s = 1 / (1 + Math.exp(-t)); return s * (1 + t * (1 - s)) } },
+  ]}
+>
+  <Fragment slot="caption">ReLU 的导数是阶跃函数，负半轴梯度恒为 0（“死亡 ReLU”问题的根源）。GELU 与 SiLU 的导数是光滑的：在负半轴有小的负值，在正半轴略微超过 1 后回落到 1。</Fragment>
+</Plot>
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" region="activations" />
+
+## softmax 与交叉熵
+
+### softmax 的雅可比
+
+softmax 把 logits $z\in\mathbb R^V$ 变成概率分布：$s_i = e^{z_i}/\sum_k e^{z_k}$。与逐元素函数不同，每个 $s_i$ 都依赖**所有** $z_j$（通过分母），所以雅可比是满的。对 $s_i = e^{z_i}/S$，$S = \sum_k e^{z_k}$，用商的求导：
+
+- $i = j$ 时：$\frac{\partial s_i}{\partial z_i} = \frac{e^{z_i}S - e^{z_i}e^{z_i}}{S^2} = s_i - s_i^2$；
+- $i\ne j$ 时：$\frac{\partial s_i}{\partial z_j} = \frac{-e^{z_i}e^{z_j}}{S^2} = -s_is_j$。
+
+合起来 $\frac{\partial s_i}{\partial z_j} = s_i(\delta_{ij} - s_j)$，即 $J = \operatorname{diag}(s) - ss^\top$。$J$ 是对称的，所以 VJP 为
+
+$$
+\bar z = J^\top\bar s = s\odot\bar s - s\,(s^\top\bar s) = s\odot\bigl(\bar s - \langle\bar s, s\rangle\bigr).
+$$
+
+计算只需一次点积和逐元素运算，复杂度 $O(V)$ 而不是 $O(V^2)$。注意 $\sum_j\bar z_j = \langle s, \bar s\rangle - \langle s, \bar s\rangle\sum_j s_j = 0$：给所有 logits 加同一个常数不改变 softmax，所以梯度在全 1 方向上的分量为零。
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" symbol={['softmax_forward', 'softmax_backward']} />
+
+### 交叉熵：梯度为什么是 p − y
+
+语言模型的损失是交叉熵（其概率意义见[概率、最大似然与交叉熵](/math/probability/)）。对一个样本，logits 为 $z$，正确类别为 $y$，预测分布 $p = \operatorname{softmax}(z)$：
+
+$$
+\ell = -\log p_y = -z_y + \log\sum_k e^{z_k}.
+$$
+
+第二个等号是把 $p_y = e^{z_y}/\sum_k e^{z_k}$ 代入后取对数。这个形式比“先 softmax 再取 log”好求导得多。对 $z_j$ 求偏导：第一项给出 $-\mathbf 1[j = y]$；第二项 $\log\sum_k e^{z_k}$ 的导数是 $e^{z_j}/\sum_k e^{z_k} = p_j$。所以
+
+<KeyEq label="softmax 交叉熵的梯度">
+
+$$
+\frac{\partial\ell}{\partial z} = p - e_y ,
+$$
+
+</KeyEq>
+
+其中 $e_y$ 是第 $y$ 个位置为 1 的独热（one-hot）向量。也可以用 softmax 的 VJP 验证：$\bar s = \partial\ell/\partial s = -e_y/s_y$，$\langle\bar s, s\rangle = -1$，所以 $\bar z = s\odot(-e_y/s_y + 1) = s - e_y$。
+
+这个结果极其简洁，也很有启发性：正确类别的 logit 被推高，力度是 $1 - p_y$（预测越没把握，推得越用力）；每个错误类别的 logit 被压低，力度正好是模型赋给它的概率 $p_j$。所有梯度之和为 $0$。批平均损失 $\mathcal L = \frac1N\sum_n\ell_n$ 的梯度再除以 $N$。
+
+手算：$z = (2, 1, 0)$，$y = 0$。$p\approx(0.665, 0.245, 0.090)$，$\ell = -\log 0.665\approx 0.408$，梯度 $p - e_0\approx(-0.335, 0.245, 0.090)$。
+
+<Diagram width={720} height={170} label="softmax 交叉熵梯度的手算例子：概率减去独热标签">
+  <Matrix x={40} y={60} rows={1} cols={3} cell={[70, 40]} values={[[2, 1, 0]]} title="logits z" />
+  <Arrow from={[262, 80]} to={[304, 80]} label="softmax" />
+  <Matrix x={310} y={60} rows={1} cols={3} cell={[60, 40]} values={[[0.665, 0.245, 0.09]]} digits={3} title="p" tone="info" />
+  <Text x={515} y={80} label="−" size="lg" />
+  <Matrix x={530} y={60} rows={1} cols={3} cell={[40, 40]} values={[[1, 0, 0]]} title="e_y" highlight={[{ cells: [[0, 0]], tone: 'accent' }]} />
+  <Text x={420} y={140} label="∂ℓ/∂z = (−0.335, 0.245, 0.090)：推高正确类，按概率压低其余类" size="sm" tone="accent2" />
+  <Fragment slot="caption">正确类别（第 0 个）的梯度为负，梯度下降会增大它的 logit；其余类别按各自的预测概率被压低。三个分量之和为 0。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" symbol={['cross_entropy_forward', 'cross_entropy_backward']} />
+
+前向函数在计算 $\log\sum e^{z_k}$ 时先减去最大值，这是数值稳定的 log-sum-exp 技巧，[浮点数与数值稳定性](/math/numerics/)一章会解释为什么必须这样做。实践中 softmax 与交叉熵总是**融合**为一个算子（PyTorch 的 `F.cross_entropy` 接受的是 logits），正是因为融合后的反向 $p - e_y$ 既简单又稳定，而分开计算会在 $p_y$ 很小时出现 $1/p_y$ 的大数相消。
+
+## LayerNorm 与 RMSNorm
+
+归一化层的反向是本章最复杂的推导，因为每个输出都通过均值和方差依赖所有输入。
+
+### LayerNorm 的推导
+
+LayerNorm 对每个样本的 $D$ 维特征向量 $x$ 做标准化，再做逐元素仿射变换：
+
+$$
+\mu = \frac1D\sum_i x_i,\quad \sigma = \sqrt{\frac1D\sum_i(x_i - \mu)^2 + \epsilon},\quad
+\hat x_i = \frac{x_i - \mu}{\sigma},\quad y_i = \gamma_i\hat x_i + \beta_i .
+$$
+
+仿射部分简单：$\bar\gamma = \sum_n\bar y\odot\hat x$、$\bar\beta = \sum_n\bar y$（对批中所有行求和，与线性层的 $\bar b$ 同理），以及 $\bar{\hat x} = \gamma\odot\bar y$，记为 $g$。
+
+难点是 $\hat x$ 对 $x$ 的雅可比。先求两个辅助导数：$\partial\mu/\partial x_j = 1/D$；对方差项求导，$\partial\sigma/\partial x_j = \frac{1}{2\sigma}\cdot\frac{2}{D}(x_j - \mu) = \hat x_j/D$（交叉项 $\sum_i(x_i - \mu)\cdot(-1/D)$ 因 $\sum_i(x_i-\mu) = 0$ 而消失）。于是由商的求导，
+
+$$
+\frac{\partial\hat x_i}{\partial x_j} = \frac{\delta_{ij} - \frac1D}{\sigma} - \frac{x_i - \mu}{\sigma^2}\cdot\frac{\hat x_j}{D}
+= \frac1\sigma\left(\delta_{ij} - \frac1D - \frac{\hat x_i\hat x_j}{D}\right).
+$$
+
+写成矩阵：$J = \frac1\sigma\bigl(I - \frac1D\mathbf 1\mathbf 1^\top - \frac1D\hat x\hat x^\top\bigr)$。它是对称的，VJP 为
+
+<KeyEq label="LayerNorm 对输入的梯度">
+
+$$
+\bar x = \frac{1}{\sigma}\Bigl(g - \operatorname{mean}(g)\,\mathbf 1 - \hat x\,\operatorname{mean}(g\odot\hat x)\Bigr),\qquad g = \gamma\odot\bar y .
+$$
+
+</KeyEq>
+
+这个公式有清楚的几何含义。忽略 $\epsilon$ 时 $\lVert\hat x\rVert^2 = D$，且 $\hat x\perp\mathbf 1$，所以 $\frac1D\mathbf 1\mathbf 1^\top$ 和 $\frac1D\hat x\hat x^\top$ 是向 $\mathbf 1$ 与 $\hat x$ 两个正交方向的投影。$\bar x$ 就是把 $g$ 去掉这两个方向的分量，再除以 $\sigma$。原因是 LayerNorm 对“整体平移 $x$”（沿 $\mathbf 1$）和“整体缩放 $x$”（沿 $x - \mu$，即 $\hat x$）不敏感，输出不变，所以这两个方向上的梯度必须为零。测试 `test_layernorm_input_gradient_is_orthogonal_to_ones_and_xhat` 直接检验了这一点。
+
+### RMSNorm
+
+RMSNorm 去掉了减均值和 $\beta$：$r = \sqrt{\frac1D\sum_ix_i^2 + \epsilon}$，$\hat x = x/r$，$y = \gamma\odot\hat x$。推导与上面相同，只是少了 $\mu$：$\partial r/\partial x_j = \hat x_j/D$，
+
+$$
+\frac{\partial\hat x_i}{\partial x_j} = \frac1r\Bigl(\delta_{ij} - \frac{\hat x_i\hat x_j}{D}\Bigr),\qquad
+\bar x = \frac1r\Bigl(g - \hat x\,\operatorname{mean}(g\odot\hat x)\Bigr).
+$$
+
+RMSNorm 只对缩放不变，所以只投影掉 $\hat x$ 一个方向。它比 LayerNorm 少一次归约，是 LLaMA 以来大多数开源模型的选择（见 [Transformer 块](/transformer/transformer-block/)）。
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" region="norms" />
+
+## 用数值梯度与 gradcheck 验证
+
+手推的反向公式很容易出错：漏一个转置、少一个求和、符号写反。好在验证很便宜。我们用三层核对：
+
+1. **与 PyTorch 比较**：用同样的输入调用 `F.linear`、`F.gelu`、`F.layer_norm` 等，对一个随机的上游梯度调用 `backward`，比较 `.grad` 与手写 `backward` 的输出。
+2. **与数值梯度比较**：用[上一章](/math/derivatives/)的 `numerical_gradient` 对损失做中心差分。这一层不依赖 PyTorch 的实现是否正确。
+3. **`torch.autograd.gradcheck`**：把手写的一对函数包装成 `torch.autograd.Function`，交给 `gradcheck`。它对每个输入坐标做有限差分，构造完整的数值雅可比，再用我们的 `backward` 对每个输出方向求 VJP 构造解析雅可比，逐元素比较。它要求 float64 输入，原因见上一章关于数值差分误差的分析。
+
+<CodeFile path="src/llms_from_scratch/math/backprop.py" region="as-autograd" />
+
+以 LayerNorm 的测试为例，三层核对写在一起：
+
+<CodeFile path="tests/math/test_backprop.py" symbol="test_layernorm_backward" />
+
+<Callout tone="tip" title="写反向公式的检查清单">
+（1）每个梯度与对应变量同形状；（2）被广播或共享的量（偏置、权重、$\gamma$）在反向时沿被复制的维度求和；（3）`forward` 缓存的中间量足够反向使用，且没有缓存不需要的大张量；（4）在 float64 下用 `gradcheck` 或数值梯度核对，输入避开不可导点（如 ReLU 的 0）。
+</Callout>
+
+## 小结
+
+- 反向传播的基本运算是 VJP：$\bar x = J^\top\bar y$。每个算子只需实现“给定 $\bar y$ 求 $\bar x$”，从不构造雅可比。
+- 线性层 $Y = XW^\top + b$：$\bar X = \bar YW$，$\bar W = \bar Y^\top X$（每个样本一个外积，求和），$\bar b = \sum_n\bar Y_n$（广播的对偶）。
+- 逐元素激活：$\bar x = \phi'(x)\odot\bar y$。GELU $' = \Phi + x\varphi$，SiLU $' = \sigma(1 + x(1-\sigma))$。
+- softmax 的雅可比 $\operatorname{diag}(s) - ss^\top$；与交叉熵融合后梯度为 $p - e_y$。
+- LayerNorm 的输入梯度是把 $\gamma\odot\bar y$ 投影掉 $\mathbf 1$ 和 $\hat x$ 两个方向再除以 $\sigma$；RMSNorm 只投影掉 $\hat x$。
+- 用 PyTorch、数值梯度和 `gradcheck`（float64）三重核对手写反向。
+
+这些规则足以手写任何网络的反向传播，但每加一个算子都要重新推导和接线，非常繁琐。下一章把“接线”自动化：实现一个自动微分引擎，让每个算子只声明自己的局部 VJP，其余交给拓扑排序。
+
+## 练习
+
+1. 对 $Y = XW$（注意没有转置，$W\in\mathbb R^{d_{\text{in}}\times d_{\text{out}}}$），写出 $\bar X$ 和 $\bar W$，并用形状检查验证。
+
+<details>
+<summary>答案</summary>
+
+$Y_{nk} = \sum_jX_{nj}W_{jk}$。$\bar X_{nj} = \sum_k\bar Y_{nk}W_{jk}$，即 $\bar X = \bar YW^\top$，形状 $(N, d_{\text{out}})@(d_{\text{out}}, d_{\text{in}})$。$\bar W_{jk} = \sum_nX_{nj}\bar Y_{nk}$，即 $\bar W = X^\top\bar Y$，形状 $(d_{\text{in}}, N)@(N, d_{\text{out}})$。与 $Y = XW^\top$ 的结果相比只是 $W$ 的转置位置不同。
+
+</details>
+
+2. 证明对 sigmoid 输出 $p = \sigma(z)$ 与标签 $y\in\{0, 1\}$ 的二元交叉熵 $\ell = -y\log p - (1-y)\log(1-p)$，有 $\partial\ell/\partial z = p - y$。
+
+<details>
+<summary>答案</summary>
+
+$\partial\ell/\partial p = -y/p + (1-y)/(1-p)$，$\partial p/\partial z = p(1-p)$。相乘得 $-y(1-p) + (1-y)p = p - y$。这是 softmax 交叉熵在两类情形下的特例：两个 logits $(z, 0)$ 的 softmax 第一个分量就是 $\sigma(z)$。
+
+</details>
+
+3. 一个 softmax 的输入是 $z = (0, 0, 0, 0)$，上游梯度 $\bar s = (1, 0, 0, 0)$。求 $\bar z$，并解释为什么它的分量之和为零。
+
+<details>
+<summary>答案</summary>
+
+$s = (0.25, 0.25, 0.25, 0.25)$，$\langle\bar s, s\rangle = 0.25$，$\bar z = s\odot(\bar s - 0.25) = 0.25\cdot(0.75, -0.25, -0.25, -0.25) = (0.1875, -0.0625, -0.0625, -0.0625)$。和为 0，因为 softmax 对 $z + c\mathbf 1$ 不变，沿 $\mathbf 1$ 方向的方向导数为 0，即 $\bar z\cdot\mathbf 1 = 0$。
+
+</details>
+
+4. 若 LayerNorm 的输入 $x$ 的所有分量都相等，会发生什么？$\epsilon$ 起什么作用？
+
+<details>
+<summary>答案</summary>
+
+此时 $x - \mu = 0$，方差为 0。没有 $\epsilon$ 时 $\sigma = 0$，$\hat x = 0/0$ 无定义，反向的 $1/\sigma$ 也是无穷大。加上 $\epsilon$ 后 $\sigma = \sqrt\epsilon$，$\hat x = 0$，$y = \beta$，梯度 $\bar x = (g - \operatorname{mean}(g))/\sqrt\epsilon$ 有限但可能很大（$\epsilon = 10^{-5}$ 时放大约 316 倍）。$\epsilon$ 防止除零，代价是在方差很小时梯度被放大。
+
+</details>
+
+5. 手写 `backward` 时漏掉了线性层 $\bar b$ 的求和，直接返回 $\bar Y$。哪一项检查会最先发现？
+
+<details>
+<summary>答案</summary>
+
+形状检查：$\bar Y$ 的形状是 $(N, d_{\text{out}})$，而 $b$ 是 $(d_{\text{out}},)$。在 `torch.autograd.Function` 中返回形状不匹配的梯度会直接报错，`gradcheck` 也会失败。如果 $N = 1$ 恰好形状相近，数值比较仍能发现；这是测试中使用 $N > 1$ 的原因。
+
+</details>
+
+## 参考文献
+
+- Justin Johnson. Backpropagation for a Linear Layer（CS231n 讲义）。[web.eecs.umich.edu/~justincj/teaching/eecs498/FA2019/linear-backprop.pdf](https://web.eecs.umich.edu/~justincj/teaching/eecs498/FA2019/linear-backprop.pdf)
+- Dan Hendrycks, Kevin Gimpel. Gaussian Error Linear Units (GELUs), 2016. [arXiv:1606.08415](https://arxiv.org/abs/1606.08415)
+- Stefan Elfwing, Eiji Uchibe, Kenji Doya. Sigmoid-Weighted Linear Units for Neural Network Function Approximation in Reinforcement Learning, 2017. [arXiv:1702.03118](https://arxiv.org/abs/1702.03118)
+- Jimmy Lei Ba, Jamie Ryan Kiros, Geoffrey E. Hinton. Layer Normalization, 2016. [arXiv:1607.06450](https://arxiv.org/abs/1607.06450)
+- Biao Zhang, Rico Sennrich. Root Mean Square Layer Normalization. NeurIPS 2019. [arXiv:1910.07467](https://arxiv.org/abs/1910.07467)
+- PyTorch 文档：Extending torch.autograd（自定义 `Function` 与 `gradcheck`）。[pytorch.org/docs/stable/notes/extending.html](https://pytorch.org/docs/stable/notes/extending.html)
+- Stanford CS336 Spring 2025, Assignment 1（从零实现 softmax、交叉熵与 RMSNorm）。[github.com/stanford-cs336/assignment1-basics](https://github.com/stanford-cs336/assignment1-basics)

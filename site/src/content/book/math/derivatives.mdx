@@ -2,7 +2,344 @@
 title: 导数、偏导数与梯度
 description: 从切线斜率到多元函数的梯度：方向导数、梯度为什么指向上升最快的方向，以及梯度下降的第一个实现。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/math/calculus.py
+  - tests/math/test_calculus.py
 ---
 
-本章正在撰写。
+上一章把一层神经网络写成了 $\sigma(XW^\top + b)$。权重 $W$ 和偏置 $b$ 决定了网络算出什么，但它们的值从哪里来？训练的思路很朴素：先定义一个**损失函数**（loss function）$\mathcal L$，它把“模型的输出离正确答案有多远”压缩成一个数；然后反复微调参数，让这个数变小。问题在于，一个语言模型有上亿个参数，不可能逐个去试“往大调还是往小调”。我们需要一种办法，一次性算出“每个参数往哪个方向调、调多少，损失下降得最快”。
+
+这个办法就是梯度。本章从一元函数的导数出发，建立“导数 = 局部线性近似的斜率”这一核心直觉；然后推广到多元函数的偏导数和梯度，证明梯度方向是函数上升最快的方向；最后写出第一个梯度下降程序拟合一条直线，并分析学习率为什么不能太大。数值差分会贯穿全章——它是检验一切手推梯度的“标准答案”，后面几章会反复用到。
+
+## 导数：函数的局部线性近似
+
+### 从平均变化率到瞬时变化率
+
+考虑一元函数 $f(x)$。当输入从 $x$ 变到 $x + h$，输出变化 $f(x+h) - f(x)$，两者之比 $\frac{f(x+h)-f(x)}{h}$ 是区间上的**平均变化率**，几何上是过两点的割线斜率。让 $h$ 趋于零，割线逼近切线，这个极限就是**导数**（derivative）：
+
+<KeyEq label="导数的定义">
+
+$$
+f'(x) = \frac{\mathrm d f}{\mathrm d x} = \lim_{h\to 0}\frac{f(x+h) - f(x)}{h}.
+$$
+
+</KeyEq>
+
+以 $f(x) = x^2$ 为例：$\frac{(x+h)^2 - x^2}{h} = \frac{2xh + h^2}{h} = 2x + h$，令 $h\to 0$ 得 $f'(x) = 2x$。在 $x = 3$ 处导数为 6，意思是：输入在 3 附近增加一个很小的量，输出大约增加 6 倍于此的量。
+
+### 线性近似：深度学习真正使用的读法
+
+把定义改写一下，对很小的 $h$，
+
+$$
+f(x + h) \approx f(x) + f'(x)\, h .
+$$
+
+这就是**一阶泰勒近似**（first-order Taylor approximation）。它说：在 $x$ 附近，任何光滑函数都长得像一条直线，斜率就是导数。误差有多大？如果 $f$ 二阶可导，泰勒定理给出 $f(x+h) = f(x) + f'(x)h + \tfrac12 f''(\xi)h^2$，其中 $\xi$ 在 $x$ 与 $x+h$ 之间，因此误差是 $O(h^2)$。$h$ 缩小 10 倍，近似误差缩小约 100 倍。
+
+这种读法比“切线斜率”更有用，因为它直接回答了训练要问的问题：参数改动 $h$，损失大约改变 $f'(x)h$。若 $f'(x) > 0$，减小 $x$ 能让 $f$ 下降；若 $f'(x) < 0$，增大 $x$ 才行。总之，沿 $-f'(x)$ 的方向走一小步，函数值下降。这一句话就是梯度下降的全部思想。
+
+### 常用导数
+
+下表列出本书会反复用到的导数。前四行是基本函数；后两行是 sigmoid 与 tanh，它们的导数可以用函数值本身表达，这在反向传播中非常方便——前向时算出的值可以直接复用。
+
+| 函数 $f(x)$ | 导数 $f'(x)$ | 备注 |
+| --- | --- | --- |
+| $x^n$ | $n x^{n-1}$ | 对任意实数 $n$ 成立 |
+| $e^x$ | $e^x$ | 唯一导数等于自身的函数（差一个常数倍） |
+| $\log x$ | $1/x$ | 自然对数 |
+| $\lvert x\rvert$，$\max(0, x)$ | $\operatorname{sign}(x)$，$\mathbf 1[x > 0]$ | 在 $0$ 处不可导，实践中取 $0$ |
+| $\sigma(x) = \frac{1}{1+e^{-x}}$ | $\sigma(x)\,(1-\sigma(x))$ | sigmoid |
+| $\tanh x$ | $1 - \tanh^2 x$ | |
+
+导数满足线性性 $(af + bg)' = af' + bg'$ 与乘积法则 $(fg)' = f'g + fg'$。sigmoid 的导数可以用商的求导验证：$\sigma(x) = (1 + e^{-x})^{-1}$，所以 $\sigma'(x) = e^{-x}(1+e^{-x})^{-2} = \sigma(x)\cdot\frac{e^{-x}}{1+e^{-x}} = \sigma(x)(1 - \sigma(x))$。其中“把 $(1+e^{-x})^{-1}$ 当作 $u^{-1}$ 求导再乘以 $u'$”这一步用到了链式法则，它是[下一章](/math/chain-rule/)的主题。
+
+## 数值差分：没有公式时怎样求导
+
+导数的定义本身就提供了一种计算方法：取一个小的 $h$，直接算差商。这叫**有限差分**（finite difference）。它不需要知道函数的解析形式，只要能求值就行，因此是检验手推导数和自动微分结果的标准工具。
+
+最直接的**前向差分**是 $\frac{f(x+h) - f(x)}{h}$。由泰勒展开，
+
+$$
+\frac{f(x+h) - f(x)}{h} = f'(x) + \tfrac12 f''(x)\, h + O(h^2),
+$$
+
+误差与 $h$ 成正比，记作 $O(h)$。**中心差分**对称地在两侧各取一点：
+
+$$
+\frac{f(x+h) - f(x-h)}{2h} = f'(x) + \tfrac16 f'''(x)\, h^2 + O(h^4).
+$$
+
+推导：分别展开 $f(x\pm h) = f(x) \pm f'(x)h + \tfrac12 f''(x)h^2 \pm \tfrac16 f'''(x)h^3 + \cdots$，相减后偶数次项全部抵消，只剩 $2f'(x)h + \tfrac13 f'''(x)h^3 + \cdots$。中心差分的误差是 $O(h^2)$，代价只是多求一次函数值（前向差分的 $f(x)$ 往往可以复用，中心差分不行），所以本书一律使用中心差分。
+
+<CodeFile path="src/llms_from_scratch/math/calculus.py" region="difference" />
+
+那么 $h$ 是不是越小越好？不是。计算机里的数只有有限精度（详见[浮点数与数值稳定性](/math/numerics/)），$f(x+h)$ 与 $f(x-h)$ 各自带有约 $\epsilon\lvert f\rvert$ 的舍入误差，$\epsilon \approx 1.1\times10^{-16}$ 是 float64 的单位舍入。两个几乎相等的数相减再除以 $2h$，舍入误差被放大成约 $\epsilon\lvert f\rvert / h$。总误差约为
+
+$$
+\underbrace{C h^2}_{\text{truncation}} + \underbrace{\epsilon\lvert f\rvert / h}_{\text{rounding}},
+$$
+
+在 $h \approx \epsilon^{1/3} \approx 10^{-5}$ 时最小。前向差分的对应结论是 $h\approx\sqrt\epsilon\approx 10^{-8}$。下图是对 $\sin x$ 在 $x = 1$ 处实测的误差，两条 V 形曲线的左半支是舍入误差，右半支是截断误差。
+
+<Plot
+  label="前向差分与中心差分的误差随步长 h 的变化（float64，f = sin，x = 1）"
+  x={[1e-13, 0.1]}
+  y={[1e-12, 0.1]}
+  logX
+  logY
+  xLabel="步长 h"
+  yLabel="绝对误差"
+  series={[
+    { label: '前向差分', points: [[0.1, 0.0429], [0.01, 0.00422], [0.001, 0.000421], [0.0001, 4.21e-05], [1e-05, 4.21e-06], [1e-06, 4.21e-07], [1e-07, 4.18e-08], [1e-08, 2.97e-09], [1e-09, 5.25e-08], [1e-10, 5.85e-08], [1e-11, 1.17e-06], [1e-12, 4.32e-05], [1e-13, 0.000734]] },
+    { label: '中心差分', points: [[0.1, 0.0009], [0.01, 9e-06], [0.001, 9.01e-08], [0.0001, 9e-10], [1e-05, 1.11e-11], [1e-06, 2.77e-11], [1e-07, 1.94e-10], [1e-08, 2.58e-09], [1e-09, 2.97e-09], [1e-10, 5.85e-08], [1e-11, 1.17e-06], [1e-12, 1.23e-05], [1e-13, 0.000179]] },
+  ]}
+>
+  <Fragment slot="caption">双对数坐标下，截断误差是斜率为 1（前向）或 2（中心）的直线；$h$ 太小时舍入误差以 $1/h$ 增长。中心差分在 $h\approx 10^{-5}$ 处误差约 $10^{-11}$，比前向差分的最好结果好两个数量级。</Fragment>
+</Plot>
+
+<Callout tone="tip" title="数值梯度检查的实践">
+用数值差分核对梯度时，一律使用 float64。float32 的 $\epsilon\approx 6\times10^{-8}$，按上面的分析最好的 $h$ 约 $10^{-2.5}$，误差也只能到 $10^{-5}$ 量级，很难区分“实现正确”与“有小 bug”。`torch.autograd.gradcheck` 默认要求输入为双精度，原因相同。
+</Callout>
+
+## 偏导数与梯度
+
+### 一次只动一个变量
+
+神经网络的损失依赖成千上万个参数，所以需要多元函数的导数。设 $f(x_1, \dots, x_n)$。固定其余所有变量，只让 $x_i$ 变化，得到的导数叫作对 $x_i$ 的**偏导数**（partial derivative）：
+
+$$
+\frac{\partial f}{\partial x_i} = \lim_{h\to 0}\frac{f(x_1,\dots,x_i + h,\dots,x_n) - f(x_1,\dots,x_n)}{h}.
+$$
+
+计算方法和一元导数完全相同，只要把其他变量当作常数。例如 $f(x, y) = x^2 + 3y^2$，则 $\frac{\partial f}{\partial x} = 2x$，$\frac{\partial f}{\partial y} = 6y$。在点 $(1, 1)$，沿 $x$ 方向的变化率是 2，沿 $y$ 方向是 6——这个碗在 $y$ 方向更陡。
+
+### 梯度：把所有偏导数排成向量
+
+把全部偏导数排在一起，就是**梯度**（gradient）：
+
+<KeyEq label="梯度与多元线性近似">
+
+$$
+\nabla f(x) = \left(\frac{\partial f}{\partial x_1}, \dots, \frac{\partial f}{\partial x_n}\right),
+\qquad
+f(x + \delta) \approx f(x) + \nabla f(x)\cdot\delta .
+$$
+
+</KeyEq>
+
+右边的近似是一元情形 $f(x+h)\approx f(x)+f'(x)h$ 的直接推广：每个坐标各自贡献 $\frac{\partial f}{\partial x_i}\delta_i$，对于可微函数，同时改动多个坐标时这些贡献在一阶上**简单相加**，于是总变化就是梯度与位移的点积。这个结论要求 $f$ 可微（偏导数存在且连续即可），神经网络里用到的函数除了 ReLU 的折点之外都满足。
+
+梯度有一个约定在本书中很重要：**梯度与变量同形状**。如果参数是矩阵 $W\in\mathbb R^{m\times n}$，损失 $\mathcal L$ 对它的梯度 $\nabla_W\mathcal L$ 也是 $m\times n$ 的矩阵，第 $(i,j)$ 个元素是 $\partial\mathcal L/\partial W_{ij}$。此时线性近似里的点积换成逐元素相乘再求和：$\mathcal L(W + \Delta) \approx \mathcal L(W) + \sum_{ij}(\nabla_W\mathcal L)_{ij}\Delta_{ij}$。PyTorch 中 `param.grad` 总是与 `param` 同形状，正是这个约定。
+
+数值梯度就是对每个坐标各做一次中心差分。代码一次只扰动一个元素，所以对任意形状的张量都适用；代价是 $2n$ 次函数求值，只适合用来检查小规模的例子：
+
+<CodeFile path="src/llms_from_scratch/math/calculus.py" region="numerical-gradient" />
+
+测试中用它求 $f(x) = \tfrac12 x^\top A x$（$A$ 对称）的梯度，并与解析结果 $Ax$ 比较。这个解析结果可以逐分量验证：$f = \tfrac12\sum_{ij}A_{ij}x_ix_j$，对 $x_k$ 求偏导时 $x_k$ 出现在 $i=k$ 和 $j=k$ 两组项里，得到 $\tfrac12(\sum_j A_{kj}x_j + \sum_i A_{ik}x_i) = (Ax)_k$。
+
+## 方向导数：梯度为什么指向上升最快的方向
+
+偏导数只沿坐标轴测量变化率。如果沿任意方向呢？取单位向量 $u$（$\lVert u\rVert = 1$），沿 $u$ 的**方向导数**（directional derivative）定义为
+
+$$
+D_u f(x) = \lim_{h\to 0}\frac{f(x + hu) - f(x)}{h}.
+$$
+
+把多元线性近似中的 $\delta$ 取为 $hu$，立即得到 $f(x + hu) - f(x) \approx h\,\nabla f(x)\cdot u$，所以
+
+$$
+D_u f(x) = \nabla f(x)\cdot u .
+$$
+
+偏导数是它的特例：$u$ 取第 $i$ 个坐标轴方向时，点积只剩第 $i$ 个分量。
+
+现在可以回答最重要的问题：在所有方向中，沿哪个方向 $f$ 上升最快？
+
+<Definition term="梯度是最速上升方向" kind="定理">
+设 $f$ 在 $x$ 处可微且 $\nabla f(x)\ne 0$。对所有单位向量 $u$，$D_u f(x)\le\lVert\nabla f(x)\rVert$，等号当且仅当 $u = \nabla f(x)/\lVert\nabla f(x)\rVert$。相应地，$-\nabla f(x)$ 是下降最快的方向，最大下降率为 $\lVert\nabla f(x)\rVert$。
+</Definition>
+
+证明只需一行。由上一章点积的几何意义，$D_uf = \nabla f\cdot u = \lVert\nabla f\rVert\,\lVert u\rVert\cos\theta = \lVert\nabla f\rVert\cos\theta$，其中 $\theta$ 是 $u$ 与梯度的夹角。$\cos\theta\le 1$，当且仅当 $\theta = 0$（$u$ 与梯度同向）时取等。（不借助几何直观的版本是柯西–施瓦茨不等式 $\lvert a\cdot b\rvert\le\lVert a\rVert\lVert b\rVert$。）同一个公式还说明：与梯度垂直的方向上 $\cos\theta = 0$，方向导数为零，函数值在一阶上不变。
+
+这给出了**等高线**（contour，level set）的几何图景。$f(x, y) = c$ 的点构成一条曲线；沿等高线走，函数值不变，所以等高线的切线方向一定与梯度垂直。换句话说，**梯度处处垂直于等高线，指向函数值增大的一侧**。
+
+<Plot
+  label="f(x, y) = x² + 3y² 的等高线、点 (1, 0.5) 处的负梯度方向，以及学习率 0.3 时的梯度下降轨迹"
+  x={[-2.5, 2.5]}
+  y={[-1.1, 1.1]}
+  series={[
+    ...[0.25, 1, 2.25, 4].map((c) => ({ tone: 'muted', points: Array.from({ length: 121 }, (_, i) => { const t = (2 * Math.PI * i) / 120; return [Math.sqrt(c) * Math.cos(t), Math.sqrt(c / 3) * Math.sin(t)] }) })),
+    { label: '下降轨迹', tone: 'accent', points: Array.from({ length: 12 }, (_, k) => [2 * 0.4 ** k, 0.9 * (-0.8) ** k]) },
+    { label: '负梯度', tone: 'accent2', points: [[1, 0.5], [1 - 0.1 * 2, 0.5 - 0.1 * 3]] },
+  ]}
+  markers={[{ at: [1, 0.5], label: '(1, 0.5)', tone: 'accent2' }, { at: [2, 0.9], tone: 'accent' }]}
+>
+  <Fragment slot="caption">椭圆是等高线 $f = 0.25, 1, 2.25, 4$。短线是点 $(1, 0.5)$ 处的负梯度 $-(2, 3)$ 方向，它垂直于经过该点的等高线。折线是 $\eta = 0.3$ 的梯度下降，从 $(2, 0.9)$ 出发：$y$ 方向曲率 $c = 6$，$\eta c = 1.8$ 让它每步越过谷底、幅度只缩到 0.8 倍；$x$ 方向 $\eta c = 0.6$，每步缩到 0.4 倍。收敛被陡峭方向的振荡拖慢。</Fragment>
+</Plot>
+
+图中的椭圆说明了一个后面会反复遇到的现象：负梯度指向“局部最陡”的方向，却不一定指向最小值。在狭长的碗里，最陡方向几乎横穿山谷，于是梯度下降走出之字形。这个问题的定量分析见本章最后一节，它也是动量法、Adam 等优化器要解决的核心问题（见[优化器](/pretraining/optimizers/)）。
+
+## 梯度下降：第一个训练程序
+
+### 算法
+
+根据最速下降定理，想让 $\mathcal L(\theta)$ 变小，就沿负梯度走一小步：
+
+<KeyEq label="梯度下降">
+
+$$
+\theta_{t+1} = \theta_t - \eta\,\nabla\mathcal L(\theta_t).
+$$
+
+</KeyEq>
+
+$\eta > 0$ 叫**学习率**（learning rate）。为什么这一步能让损失下降？代入线性近似 $\mathcal L(\theta - \eta g)\approx\mathcal L(\theta) - \eta\, g\cdot g = \mathcal L(\theta) - \eta\lVert g\rVert^2$，其中 $g = \nabla\mathcal L(\theta)$。只要 $g\ne 0$ 且 $\eta$ 足够小（小到线性近似仍然可靠），损失就严格下降。“足够小”到底是多小，取决于函数的弯曲程度，下一节会精确地算出来。
+
+### 用梯度下降拟合一条直线
+
+给定数据点 $(x_i, y_i)_{i=1}^N$，用 $\hat y = wx + b$ 拟合它们。损失取均方误差的一半：
+
+$$
+\mathcal L(w, b) = \frac{1}{2N}\sum_{i=1}^N (w x_i + b - y_i)^2 .
+$$
+
+记残差 $r_i = wx_i + b - y_i$。对 $w$ 求偏导时，每一项 $\tfrac12 r_i^2$ 的导数是 $r_i\cdot\frac{\partial r_i}{\partial w} = r_i x_i$；对 $b$ 则是 $r_i\cdot 1$。所以
+
+$$
+\frac{\partial\mathcal L}{\partial w} = \frac1N\sum_i r_i x_i,\qquad
+\frac{\partial\mathcal L}{\partial b} = \frac1N\sum_i r_i .
+$$
+
+损失定义中的 $\tfrac12$ 正是为了抵消平方求导产生的 2。
+
+手算第一步。数据 $x = (0, 1, 2, 3)$，$y = (1, 3, 5, 7)$（真实关系 $y = 2x + 1$），从 $w = b = 0$ 出发，$\eta = 0.1$：
+
+- 残差 $r = (-1, -3, -5, -7)$，损失 $\mathcal L = \tfrac{1}{8}(1 + 9 + 25 + 49) = 10.5$；
+- 梯度 $\partial_w\mathcal L = \tfrac14(0 - 3 - 10 - 21) = -8.5$，$\partial_b\mathcal L = \tfrac14(-16) = -4$；
+- 更新 $w = 0 + 0.1\times 8.5 = 0.85$，$b = 0 + 0.1\times 4 = 0.4$；
+- 新残差 $(-0.6, -1.75, -2.9, -4.05)$，新损失 $\approx 3.529$。
+
+一步就把损失降到原来的三分之一。程序只是把这四步写成循环：
+
+<CodeFile path="src/llms_from_scratch/math/calculus.py" region="fit-line" />
+
+测试检查三件事：手推的 `line_gradient` 与 PyTorch autograd 一致；在 $y = 2x + 1$ 的数据上 200 步后恢复出 $w = 2$、$b = 1$（误差小于 $10^{-4}$）；以及在合适的学习率下损失单调下降。
+
+## 学习率：太小太慢，太大发散
+
+### 一维二次函数的精确分析
+
+学习率的作用可以在最简单的函数上看得一清二楚。取 $f(x) = \tfrac{c}{2}x^2$（$c > 0$ 是曲率，即二阶导数），梯度 $f'(x) = cx$，梯度下降更新为
+
+$$
+x_{t+1} = x_t - \eta c\,x_t = (1 - \eta c)\,x_t
+\quad\Longrightarrow\quad
+x_t = (1-\eta c)^t x_0 .
+$$
+
+整个过程由一个数 $q = 1 - \eta c$ 决定：
+
+- $0 < \eta < 1/c$：$0 < q < 1$，$x$ 单调地缩向 0。$\eta$ 越小越慢。
+- $\eta = 1/c$：$q = 0$，**一步到达**最小值。这正是牛顿法的步长：用曲率的倒数做学习率。
+- $1/c < \eta < 2/c$：$-1 < q < 0$，$x$ 每步越过 0 跳到另一侧，但幅度在缩小——振荡收敛。
+- $\eta > 2/c$：$\lvert q\rvert > 1$，每步跳得更远，**发散**。
+
+所以收敛的充要条件是 $\eta < 2/c$：**学习率的上限由曲率决定**。
+
+<CodeFile path="src/llms_from_scratch/math/calculus.py" region="quadratic" />
+
+### 多维情形与条件数
+
+拟合直线的损失是 $(w, b)$ 的二次函数，但两个方向的曲率不同。它的二阶导数矩阵（Hessian）是
+
+$$
+H = \begin{bmatrix}\overline{x^2} & \bar x\\ \bar x & 1\end{bmatrix}
+= \begin{bmatrix}3.5 & 1.5\\ 1.5 & 1\end{bmatrix},
+$$
+
+其中上划线表示对数据取平均。$H$ 的两个特征值（沿两个主轴方向的曲率，见[特征分解、SVD 与低秩近似](/math/linear-algebra-advanced/)）约为 $4.20$ 和 $0.297$。梯度下降在每个主轴上各自是一个一维二次问题，收敛要求对**所有**方向都满足 $\eta < 2/c$，因此 $\eta < 2/4.20\approx 0.476$。而收敛速度却由最平的方向决定：沿曲率 $0.297$ 的方向每步只缩小 $1 - 0.297\eta$。最大与最小曲率之比 $\kappa = 4.20/0.297\approx 14$ 叫作**条件数**（condition number）；$\kappa$ 越大，“既不发散又跑得快”的学习率越难找，等高线越狭长，之字形越明显。
+
+<Plot
+  label="不同学习率下拟合直线的损失曲线（对数纵轴），临界学习率约 0.476"
+  x={[0, 60]}
+  y={[1e-7, 1e5]}
+  logY
+  xLabel="迭代步数"
+  yLabel="损失"
+  series={[
+    { label: 'η = 0.05', points: [[0, 10.5], [3, 2.55], [6, 0.62], [9, 0.151], [12, 0.0369], [15, 0.00918], [18, 0.00244], [21, 0.000783], [24, 0.000365], [27, 0.000248], [30, 0.000206], [33, 0.000183], [36, 0.000166], [39, 0.000152], [42, 0.000139], [45, 0.000127], [48, 0.000116], [51, 0.000106], [54, 9.67e-05], [57, 8.84e-05], [60, 8.08e-05]] },
+    { label: 'η = 0.2', points: [[0, 10.5], [3, 0.00051], [6, 0.000234], [9, 0.000162], [12, 0.000112], [15, 7.75e-05], [18, 5.36e-05], [21, 3.71e-05], [24, 2.57e-05], [27, 1.78e-05], [30, 1.23e-05], [33, 8.52e-06], [36, 5.9e-06], [39, 4.08e-06], [42, 2.82e-06], [45, 1.96e-06], [48, 1.35e-06], [51, 9.37e-07], [54, 6.48e-07], [57, 4.49e-07], [60, 3.11e-07]] },
+    { label: 'η = 0.45', points: [[0, 10.5], [3, 5.26], [6, 2.63], [9, 1.32], [12, 0.661], [15, 0.331], [18, 0.166], [21, 0.083], [24, 0.0416], [27, 0.0208], [30, 0.0104], [33, 0.00522], [36, 0.00262], [39, 0.00131], [42, 0.000656], [45, 0.000329], [48, 0.000165], [51, 8.25e-05], [54, 4.13e-05], [57, 2.07e-05], [60, 1.04e-05]] },
+    { label: 'η = 0.49', points: [[0, 10.5], [3, 14.8], [6, 20.9], [9, 29.6], [12, 41.8], [15, 59.0], [18, 83.4], [21, 118.0], [24, 166.0], [27, 235.0], [30, 332.0], [33, 469.0], [36, 663.0], [39, 936.0], [42, 1320.0], [45, 1870.0], [48, 2640.0], [51, 3730.0], [54, 5260.0], [57, 7430.0], [60, 10500.0]] },
+  ]}
+>
+  <Fragment slot="caption">每条曲线都有两个阶段：先快速下降（陡峭方向被消掉），再进入由平坦方向决定的慢速直线段（对数坐标下是直线，即指数收敛）。$\eta = 0.05$ 太保守；$\eta = 0.45$ 接近临界值，陡峭方向几乎不收敛（$\lvert 1 - 0.45\times4.2\rvert = 0.89$），所以反而比 $\eta = 0.2$ 慢；$\eta = 0.49$ 超过 $2/4.20$，损失指数增长。</Fragment>
+</Plot>
+
+这张图浓缩了调学习率的全部经验：存在一个由最大曲率决定的硬上限，超过它训练必然发散；在上限以下，太小浪费步数，太接近上限则在陡峭方向上来回振荡。大模型训练里“loss spike”和学习率预热（warmup）背后都有这一机制的影子，[训练稳定性](/pretraining/stability/)一章会回到这里。
+
+## 小结
+
+- 导数是局部线性近似的斜率：$f(x+h)\approx f(x)+f'(x)h$，误差 $O(h^2)$。训练只需要这种局部信息。
+- 中心差分 $\frac{f(x+h)-f(x-h)}{2h}$ 的截断误差为 $O(h^2)$；$h$ 过小会被舍入误差淹没。检查梯度时用 float64、$h\approx10^{-6}$。
+- 梯度是偏导数排成的向量，与变量同形状；多元线性近似为 $f(x+\delta)\approx f(x)+\nabla f\cdot\delta$。
+- 方向导数 $D_uf = \nabla f\cdot u\le\lVert\nabla f\rVert$：梯度是最速上升方向，且垂直于等高线。
+- 梯度下降 $\theta\leftarrow\theta-\eta\nabla\mathcal L$；在二次函数上收敛当且仅当 $\eta < 2/c_{\max}$，速度受最小曲率限制，二者之比是条件数。
+
+下一章解决一个现实问题：神经网络的损失是许多函数层层复合而成的，怎样高效地求出它对每一层参数的梯度？答案是链式法则和计算图。
+
+## 练习
+
+1. 用导数定义求 $f(x) = 1/x$ 的导数，并写出它在 $x = 2$ 附近的线性近似。用它估计 $1/2.1$，与真实值比较。
+
+<details>
+<summary>答案</summary>
+
+$\frac{1/(x+h) - 1/x}{h} = \frac{x - (x+h)}{hx(x+h)} = \frac{-1}{x(x+h)}\to -\frac{1}{x^2}$。在 $x=2$：$f(2+h)\approx 0.5 - 0.25h$。取 $h = 0.1$ 得 $0.475$，真实值 $1/2.1\approx 0.47619$，误差约 $0.0012$，与 $\tfrac12 f''h^2 = \tfrac12\cdot\tfrac{2}{8}\cdot 0.01 = 0.00125$ 吻合。
+
+</details>
+
+2. 设 $f(x, y) = x^2 y + \sin y$。求 $\nabla f$，并求在点 $(1, 0)$ 处沿方向 $u = (3, 4)/5$ 的方向导数。哪个单位方向上升最快？最大上升率是多少？
+
+<details>
+<summary>答案</summary>
+
+$\partial_x f = 2xy$，$\partial_y f = x^2 + \cos y$。在 $(1,0)$ 处 $\nabla f = (0, 2)$。$D_uf = (0,2)\cdot(0.6, 0.8) = 1.6$。最速上升方向是 $(0, 1)$，最大上升率是 $\lVert\nabla f\rVert = 2$。
+
+</details>
+
+3. 用中心差分在 float32 下估计 $\sin'(1)$，分别取 $h = 10^{-2}, 10^{-3}, 10^{-4}$。哪个最准？用误差分析解释。
+
+<details>
+<summary>答案</summary>
+
+float32 的 $\epsilon\approx 6\times10^{-8}$。截断误差约 $\tfrac16\lvert\cos 1\rvert h^2\approx 0.09h^2$，舍入误差约 $\epsilon/h$。三个 $h$ 对应的两项分别为 $(9\times10^{-6}, 6\times10^{-6})$、$(9\times10^{-8}, 6\times10^{-5})$、$(9\times10^{-10}, 6\times10^{-4})$，所以 $h = 10^{-2}$ 最好，误差约 $10^{-5}$。令 $0.09h^2 + \epsilon/h$ 对 $h$ 的导数为零，得最优 $h = (\epsilon/0.18)^{1/3}\approx 7\times10^{-3}$。实验时注意要把 $x$ 和 $h$ 都放在 float32 张量里计算。
+
+</details>
+
+4. 在 $f(x) = 2x^2$ 上做梯度下降，$x_0 = 1$。分别取 $\eta = 0.1, 0.25, 0.4, 0.5, 0.6$，写出 $x_t$ 的通项并说明行为。
+
+<details>
+<summary>答案</summary>
+
+$f'(x) = 4x$，$c = 4$，$x_t = (1-4\eta)^t$。$\eta = 0.1$：$0.6^t$，单调收敛；$\eta = 0.25$：一步到 0；$\eta = 0.4$：$(-0.6)^t$，振荡收敛；$\eta = 0.5$：$(-1)^t$，在 $\pm1$ 间永远振荡；$\eta = 0.6$：$(-1.4)^t$，振荡发散。临界值 $2/c = 0.5$。
+
+</details>
+
+5. 对拟合直线问题，如果把数据 $x$ 中心化为 $x - \bar x$（即 $(-1.5, -0.5, 0.5, 1.5)$），Hessian 变成什么？条件数是多少？这说明了数据预处理的什么作用？
+
+<details>
+<summary>答案</summary>
+
+中心化后 $\bar x = 0$，$\overline{x^2} = (2.25 + 0.25 + 0.25 + 2.25)/4 = 1.25$，$H = \operatorname{diag}(1.25, 1)$，条件数 $1.25$，远小于原来的 14。$w$ 与 $b$ 解耦，等高线接近圆形，梯度直指最小值，可以用 $\eta\approx 0.8$ 在几步内收敛。归一化输入（以及网络内部的 LayerNorm、RMSNorm）降低条件数，是让优化更容易的重要手段。
+
+</details>
+
+## 参考文献
+
+- Ian Goodfellow, Yoshua Bengio, Aaron Courville. *Deep Learning*, Chapter 4: Numerical Computation（梯度下降、Hessian 与条件数）。MIT Press, 2016. [deeplearningbook.org/contents/numerical.html](https://www.deeplearningbook.org/contents/numerical.html)
+- Jorge Nocedal, Stephen J. Wright. *Numerical Optimization*, 2nd ed., Chapter 3（线搜索与最速下降的收敛速率）与 Chapter 8.1（有限差分导数近似）。Springer, 2006.
+- Gabriel Goh. Why Momentum Really Works. *Distill*, 2017（二次函数上梯度下降的特征方向分析）。[distill.pub/2017/momentum](https://distill.pub/2017/momentum/)
+- PyTorch 文档：`torch.autograd.gradcheck`。[pytorch.org/docs/stable/generated/torch.autograd.gradcheck.gradcheck.html](https://pytorch.org/docs/stable/generated/torch.autograd.gradcheck.gradcheck.html)
+- Stanford CS231n. Gradient checks（数值梯度检查的实践建议）。[cs231n.github.io/neural-networks-3/#gradcheck](https://cs231n.github.io/neural-networks-3/#gradcheck)

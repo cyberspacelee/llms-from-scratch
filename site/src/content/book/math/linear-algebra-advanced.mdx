@@ -2,7 +2,284 @@
 title: 特征分解、SVD 与低秩近似
 description: 特征值与奇异值分解、Eckart–Young 定理与条件数——LoRA、MLA 与 Muon 正交化背后的线性代数。
 order: 8
-draft: true
+code:
+  - src/llms_from_scratch/math/svd.py
+  - tests/math/test_svd.py
 ---
 
-本章正在撰写。
+[向量、矩阵与张量](/math/vectors-matrices/)把矩阵看作线性变换：把一个向量送进去，得到另一个向量。那一章没有回答的问题是：一个线性变换的“本质”是什么？一个 $4096\times4096$ 的权重矩阵有 1678 万个数，但它对输入做的事情，能不能用少得多的数描述？哪些方向被放大、哪些被压扁？一个矩阵离“退化”有多近？
+
+这些问题的答案是两种矩阵分解：对称矩阵的**特征分解**和任意矩阵的**奇异值分解**（SVD）。本章从特征向量的几何意义出发，推导 SVD，并用它定义谱范数和条件数——前者度量一个矩阵最多能把向量放大多少，后者度量数值计算对扰动有多敏感。核心结论是 Eckart–Young 定理：截断 SVD 是最优的低秩近似。最后用这些工具预先解释三个后面会遇到的现代技术：LoRA 的低秩微调、DeepSeek MLA 的 KV 低秩压缩，以及 Muon 优化器中的正交化 $UV^\top$。本章只做数学铺垫，具体方法在对应章节展开。
+
+## 特征值与特征向量
+
+### 只被拉伸的方向
+
+一般的线性变换会同时旋转和拉伸向量。但对很多矩阵，存在一些特殊方向，变换只沿着它们拉伸（或反向），不改变方向。这样的非零向量 $v$ 叫**特征向量**（eigenvector），拉伸倍数 $\lambda$ 叫**特征值**（eigenvalue）：
+
+$$
+Av = \lambda v .
+$$
+
+例如 $A = \begin{bmatrix}2 & 1\\ 1 & 2\end{bmatrix}$：$A(1, 1)^\top = (3, 3)^\top$，所以 $(1, 1)$ 是特征值为 3 的特征向量；$A(1, -1)^\top = (1, -1)^\top$，所以 $(1, -1)$ 的特征值为 1。沿对角线方向，$A$ 把向量拉长 3 倍；沿反对角线方向，向量不变。任意向量都可以分解成这两个方向的分量，$A$ 对它的作用就是“把第一个分量乘 3，第二个分量乘 1”。
+
+### 对称矩阵的谱定理
+
+神经网络中最常遇到的是**对称矩阵**（$A = A^\top$）：损失的 Hessian、协方差矩阵、$A^\top A$ 形式的格拉姆矩阵。它们有特别好的性质。
+
+<Definition term="谱定理（对称矩阵）" kind="定理">
+实对称矩阵 $A\in\mathbb R^{n\times n}$ 的特征值都是实数，并且存在由特征向量组成的标准正交基。写成矩阵形式：$A = Q\Lambda Q^\top$，其中 $Q$ 是正交矩阵（$Q^\top Q = I$，列是特征向量），$\Lambda$ 是以特征值为对角元的对角矩阵。
+</Definition>
+
+不同特征值的特征向量必然正交，这一部分容易验证：若 $Av = \lambda v$，$Aw = \mu w$，$\lambda\ne\mu$，则 $\lambda\,w^\top v = w^\top Av = (Aw)^\top v = \mu\,w^\top v$（第二个等号用到 $A$ 对称），所以 $w^\top v = 0$。
+
+$A = Q\Lambda Q^\top$ 可以读成三步：$Q^\top$ 把向量转到特征向量坐标系，$\Lambda$ 沿各坐标轴独立缩放，$Q$ 再转回来。也可以写成外积之和 $A = \sum_i\lambda_iq_iq_i^\top$——每个特征对贡献一个秩 1 的投影。
+
+[导数、偏导数与梯度](/math/derivatives/)中拟合直线的 Hessian 有特征值 4.20 和 0.297，它们是损失曲面沿两个主轴方向的曲率，决定了梯度下降的学习率上限和收敛速度。这正是谱定理的一个应用：把二次函数转到特征向量坐标系，就分解成了互不耦合的一维问题。
+
+### 幂迭代
+
+$A^k = Q\Lambda^kQ^\top$：矩阵的幂只是特征值的幂。把任意初始向量写成 $x_0 = \sum_ic_iq_i$，则 $A^kx_0 = \sum_ic_i\lambda_i^kq_i$。如果 $\lvert\lambda_1\rvert > \lvert\lambda_2\rvert\ge\cdots$，第一项增长得最快，归一化后 $A^kx_0/\lVert A^kx_0\rVert\to\pm q_1$，误差按 $\lvert\lambda_2/\lambda_1\rvert^k$ 衰减。这就是**幂迭代**（power iteration），只需要矩阵-向量乘法，是在大矩阵上估计最大特征值的标准方法。
+
+<CodeFile path="src/llms_from_scratch/math/svd.py" symbol="power_iteration" />
+
+## 奇异值分解
+
+### 从 AᵀA 推导 SVD
+
+特征分解只适用于方阵，且只有对称矩阵才保证有正交的特征向量。权重矩阵通常既不对称也不是方阵。办法是借助一个总是对称的矩阵：对任意 $A\in\mathbb R^{m\times n}$，$A^\top A$ 是 $n\times n$ 的对称矩阵，并且**半正定**：$x^\top A^\top Ax = \lVert Ax\rVert^2\ge0$，所以它的特征值都非负。
+
+按谱定理，$A^\top A = V\Lambda V^\top$，$V$ 的列 $v_1, \dots, v_n$ 标准正交，特征值 $\lambda_1\ge\cdots\ge\lambda_n\ge0$。定义**奇异值** $\sigma_i = \sqrt{\lambda_i}$。对 $\sigma_i > 0$ 的 $i$，令 $u_i = Av_i/\sigma_i$。这些 $u_i$ 也是标准正交的：
+
+$$
+u_i^\top u_j = \frac{v_i^\top A^\top Av_j}{\sigma_i\sigma_j} = \frac{\lambda_j\,v_i^\top v_j}{\sigma_i\sigma_j} = \frac{\sigma_j^2\,\delta_{ij}}{\sigma_i\sigma_j} = \delta_{ij}.
+$$
+
+由定义 $Av_i = \sigma_iu_i$，写成矩阵就是 $AV = U\Sigma$，两边右乘 $V^\top$：
+
+<KeyEq label="奇异值分解">
+
+$$
+A = U\Sigma V^\top = \sum_{i=1}^{r}\sigma_i\,u_iv_i^\top,\qquad \sigma_1\ge\sigma_2\ge\cdots\ge\sigma_r > 0 .
+$$
+
+</KeyEq>
+
+其中 $r$ 是非零奇异值的个数，即 $A$ 的**秩**。这里用的是“精简”形式：$U\in\mathbb R^{m\times r}$、$V\in\mathbb R^{n\times r}$ 的列分别标准正交，$\Sigma$ 是 $r\times r$ 对角矩阵。右边的外积展开正是[矩阵乘法的外积看法](/math/vectors-matrices/)：SVD 把任意矩阵写成 $r$ 个秩 1 矩阵之和，并且这些秩 1 矩阵按“重要性” $\sigma_i$ 排好了序。
+
+### 几何意义：旋转、缩放、旋转
+
+$Ax = U\Sigma V^\top x$ 可以分三步读：$V^\top$ 把 $x$ 转到右奇异向量的坐标系（正交变换，长度不变）；$\Sigma$ 沿各坐标轴分别乘以 $\sigma_i$；$U$ 再把结果转到左奇异向量的方向。因此**任何线性变换都把单位球映成一个椭球**，椭球的半轴方向是 $u_i$，半轴长度是 $\sigma_i$。
+
+手算一个例子：$A = \begin{bmatrix}3 & 0\\ 4 & 5\end{bmatrix}$。$A^\top A = \begin{bmatrix}25 & 20\\ 20 & 25\end{bmatrix}$，特征值 45 和 5，特征向量 $(1, 1)/\sqrt2$ 与 $(-1, 1)/\sqrt2$。所以 $\sigma_1 = \sqrt{45} = 3\sqrt5\approx6.708$，$\sigma_2 = \sqrt5\approx2.236$。左奇异向量 $u_1 = Av_1/\sigma_1 = (3, 9)/(\sqrt2\cdot3\sqrt5) = (1, 3)/\sqrt{10}$，$u_2 = (-3, 1)/\sqrt{10}$。
+
+<Plot
+  label="A = [[3, 0], [4, 5]] 把单位圆映成椭圆；椭圆的半轴是 σ₁u₁ 与 σ₂u₂"
+  x={[-9.6, 9.6]}
+  y={[-7, 7]}
+  height={460}
+  series={[
+    { label: '单位圆', tone: 'muted', points: Array.from({ length: 121 }, (_, i) => { const t = (2 * Math.PI * i) / 120; return [Math.cos(t), Math.sin(t)] }) },
+    { label: 'A × 单位圆', tone: 'accent', points: Array.from({ length: 121 }, (_, i) => { const t = (2 * Math.PI * i) / 120; return [3 * Math.cos(t), 4 * Math.cos(t) + 5 * Math.sin(t)] }) },
+    { label: 'σ₁u₁', tone: 'accent2', points: [[0, 0], [2.121, 6.364]] },
+    { label: 'σ₂u₂', tone: 'info', points: [[0, 0], [-2.121, 0.707]] },
+    { label: 'v₁, v₂', tone: 'neutral', dashed: true, points: [[0.707, 0.707], [0, 0], [-0.707, 0.707]] },
+  ]}
+>
+  <Fragment slot="caption">虚线是右奇异向量 $v_1, v_2$（单位圆上的两个正交方向）。$A$ 把它们分别映到 $\sigma_1u_1$ 与 $\sigma_2u_2$，也就是椭圆的长半轴（长 6.71）与短半轴（长 2.24）。椭圆的面积是单位圆的 $\sigma_1\sigma_2 = 15 = \lvert\det A\rvert$ 倍。</Fragment>
+</Plot>
+
+测试验证了 `torch.linalg.svd` 的输出能重建 $A$，并且 $A^\top A$ 的特征值恰好是奇异值的平方——这正是上面推导的出发点。
+
+## 谱范数与条件数
+
+### 谱范数：最大放大倍数
+
+矩阵的**谱范数**（spectral norm，也叫算子 2-范数）定义为它对向量长度的最大放大倍数：
+
+$$
+\lVert A\rVert_2 = \max_{x\ne0}\frac{\lVert Ax\rVert}{\lVert x\rVert} = \sigma_1 .
+$$
+
+由 SVD 很容易证明第二个等号。$V$ 是正交的，把 $x$ 写成 $x = Vc$，$\lVert x\rVert = \lVert c\rVert$；则 $\lVert Ax\rVert^2 = \lVert U\Sigma c\rVert^2 = \sum_i\sigma_i^2c_i^2\le\sigma_1^2\sum_ic_i^2 = \sigma_1^2\lVert x\rVert^2$，取 $c = e_1$（即 $x = v_1$）时等号成立。
+
+谱范数不需要完整的 SVD 也能算：$\sigma_1^2$ 是 $A^\top A$ 的最大特征值，对 $A^\top A$ 做幂迭代即可，每步只需要一次 $Av$ 和一次 $A^\top u$。谱归一化（spectral normalization）和许多优化器的分析都用这种方式估计谱范数。
+
+另一个常用的范数是 **Frobenius 范数** $\lVert A\rVert_F = \sqrt{\sum_{ij}A_{ij}^2}$，即把矩阵摊平后的向量长度。因为正交变换不改变 Frobenius 范数，$\lVert A\rVert_F = \lVert\Sigma\rVert_F = \sqrt{\sum_i\sigma_i^2}$。两者的关系是 $\lVert A\rVert_2\le\lVert A\rVert_F\le\sqrt r\,\lVert A\rVert_2$。
+
+### 条件数：对扰动有多敏感
+
+对可逆方阵，**条件数**（condition number）定义为
+
+$$
+\kappa(A) = \lVert A\rVert_2\,\lVert A^{-1}\rVert_2 = \frac{\sigma_{\max}}{\sigma_{\min}} .
+$$
+
+它度量解线性方程组 $Ax = b$ 时，输入误差会被放大多少。设 $b$ 有扰动 $\delta b$，解随之变化 $\delta x = A^{-1}\delta b$。则 $\lVert\delta x\rVert\le\lVert\delta b\rVert/\sigma_{\min}$，而 $\lVert b\rVert = \lVert Ax\rVert\le\sigma_{\max}\lVert x\rVert$。两式相除：
+
+$$
+\frac{\lVert\delta x\rVert}{\lVert x\rVert}\le\kappa(A)\,\frac{\lVert\delta b\rVert}{\lVert b\rVert}.
+$$
+
+$\kappa = 10^k$ 意味着最坏情况下会损失约 $k$ 位十进制有效数字。结合[浮点数与数值稳定性](/math/numerics/)的结论：BF16 只有约 2.4 位有效数字，$\kappa\ge10^3$ 的计算在 BF16 下可能完全没有有效位。一个经典的病态矩阵是 $8\times8$ 的 Hilbert 矩阵 $H_{ij} = 1/(i + j - 1)$，条件数约 $1.5\times10^{10}$。正交矩阵则是条件最好的矩阵，$\kappa = 1$：所有奇异值都是 1，任何方向都不放大也不压缩。
+
+条件数在优化中也有同样的含义。二次函数 Hessian 的条件数 $\kappa = \lambda_{\max}/\lambda_{\min}$ 决定了梯度下降的收敛速度（[导数、偏导数与梯度](/math/derivatives/)中的狭长椭圆）。
+
+<CodeFile path="src/llms_from_scratch/math/svd.py" symbol={['spectral_norm', 'condition_number']} />
+
+## Eckart–Young：最优低秩近似
+
+### 截断 SVD 与定理
+
+SVD 把矩阵写成按重要性排序的秩 1 矩阵之和。只保留前 $k$ 项，得到**截断 SVD**：
+
+$$
+A_k = \sum_{i=1}^k\sigma_i\,u_iv_i^\top .
+$$
+
+<Definition term="Eckart–Young–Mirsky 定理" kind="定理" source="https://doi.org/10.1007/BF02288367">
+对任意秩不超过 $k$ 的矩阵 $B$，$\lVert A - B\rVert\ge\lVert A - A_k\rVert$，其中范数可以是谱范数或 Frobenius 范数。最优误差为
+$\lVert A - A_k\rVert_2 = \sigma_{k+1}$，$\lVert A - A_k\rVert_F = \sqrt{\sigma_{k+1}^2 + \cdots + \sigma_r^2}$。
+</Definition>
+
+误差公式本身直接来自 SVD：$A - A_k = \sum_{i>k}\sigma_iu_iv_i^\top$ 仍是一个 SVD，它的最大奇异值是 $\sigma_{k+1}$，Frobenius 范数是剩余奇异值的平方和开方。
+
+**最优性的证明（谱范数）。** 设 $B$ 的秩不超过 $k$，则它的零空间维数至少为 $n - k$。子空间 $\operatorname{span}(v_1, \dots, v_{k+1})$ 的维数是 $k + 1$。两个子空间维数之和超过 $n$，所以它们有非零的公共向量 $w$，取 $\lVert w\rVert = 1$。一方面 $Bw = 0$；另一方面 $w = \sum_{i\le k+1}c_iv_i$，$\sum c_i^2 = 1$，于是
+
+$$
+\lVert(A - B)w\rVert = \lVert Aw\rVert = \Bigl\lVert\sum_{i\le k+1}\sigma_ic_iu_i\Bigr\rVert = \sqrt{\sum_{i\le k+1}\sigma_i^2c_i^2}\ge\sigma_{k+1}.
+$$
+
+所以 $\lVert A - B\rVert_2\ge\sigma_{k+1}$。Frobenius 范数版本的证明思路类似，需要对每个奇异值分别用一次同样的维数论证（Weyl 不等式），此处从略。
+
+<CodeFile path="src/llms_from_scratch/math/svd.py" region="low-rank" />
+
+测试对一个随机 $8\times6$ 矩阵检查了每个 $k$ 下的误差公式，并且随机生成的秩 $k$ 矩阵（即使允许最优缩放）误差都不小于截断 SVD。
+
+### 什么时候低秩近似有效
+
+低秩近似的效果完全取决于奇异值的衰减。如果奇异值迅速下降，少数几个分量就抓住了矩阵的大部分“能量”（$\sum\sigma_i^2$）；如果奇异值平坦，任何低秩近似都很差。下图是一个 $64\times64$ 矩阵：它由一个秩 8 的“信号”加上小的随机噪声构成。
+
+<Plot
+  label="秩 8 信号加噪声的 64×64 矩阵：截断 SVD 的相对 Frobenius 误差随保留秩 k 的变化"
+  x={[0, 20]}
+  y={[0, 1]}
+  xLabel="保留的秩 k"
+  yLabel="相对误差"
+  series={[
+    { label: '‖A − A_k‖_F / ‖A‖_F', points: [[0, 1.0], [1, 0.8679], [2, 0.7584], [3, 0.6499], [4, 0.5636], [5, 0.4737], [6, 0.375], [7, 0.2687], [8, 0.0884], [9, 0.0855], [10, 0.0828], [11, 0.0801], [12, 0.0774], [13, 0.075], [14, 0.0726], [15, 0.0703], [16, 0.0679], [17, 0.0656], [18, 0.0633], [19, 0.0611], [20, 0.0589]] },
+  ]}
+  markers={[{ at: [8, 0.0884], label: 'k = 8：信号全部保留', tone: 'accent2' }]}
+>
+  <Fragment slot="caption">前 8 个奇异值在 16 到 31 之间，第 9 个骤降到 1.4。保留 8 个分量后相对误差只剩 8.8%（全部来自噪声），之后每多保留一个分量只改善约 0.3%。存储 $A_8$ 只需 $8\times(64 + 64) = 1024$ 个数，是原矩阵 4096 个数的四分之一。</Fragment>
+</Plot>
+
+$m\times n$ 矩阵的秩 $k$ 近似可以存成两个因子 $U_k\Sigma_k\in\mathbb R^{m\times k}$ 与 $V_k^\top\in\mathbb R^{k\times n}$，共 $k(m + n)$ 个数，而不是 $mn$ 个；用它乘一个向量的计算量也从 $2mn$ 降到 $2k(m + n)$。当 $k\ll\min(m, n)$ 时节省非常可观。
+
+## 低秩与正交化在大模型中的用途
+
+下面三个技术分别在后续章节中详细讲解，这里只指出它们用到了本章的哪个结论。
+
+### LoRA：低秩的权重更新
+
+全参数微调要为每个权重矩阵 $W\in\mathbb R^{d\times k}$ 存储并更新一个同样大小的 $\Delta W$。LoRA 假设微调所需的更新是低秩的，直接把它参数化为 $\Delta W = BA$，$B\in\mathbb R^{d\times r}$，$A\in\mathbb R^{r\times k}$，$r$ 通常为 8–64。可训练参数从 $dk$ 降到 $r(d + k)$：$d = k = 4096$、$r = 16$ 时减少约 128 倍。由“列的线性组合”的看法，$\operatorname{rank}(BA)\le r$；由 Eckart–Young，如果真实的最优更新的奇异值衰减得快，秩 $r$ 的更新就足以逼近它。见 [LoRA 与参数高效微调](/post-training/lora/)。
+
+### MLA：低秩压缩 KV Cache
+
+推理时，每个 token 的键和值要缓存下来，每层每个 token 占 $2n_hd_h$ 个数。DeepSeek-V2 提出的多头潜在注意力（MLA）先用一个下投影把隐藏状态压缩成维度为 $d_c$（远小于 $n_hd_h$）的潜在向量 $c^{KV}$，只缓存它；需要时再用上投影恢复各头的键和值。这相当于假设所有头的键值矩阵 $[K; V]$ 在 token 维度上可以用一个共享的低秩因子表示，即把 $W^{KV}$ 分解为 $W^{UKV}W^{DKV}$。见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)。
+
+### Muon：把梯度正交化
+
+Muon 优化器对矩阵参数的更新方向做**正交化**：把动量矩阵 $G = U\Sigma V^\top$ 替换为它的极分解正交因子 $UV^\top$，即把所有奇异值换成 1、保留奇异向量。一个解释是，$UV^\top$ 是所有半正交矩阵中与 $G$ 内积 $\langle G, O\rangle = \operatorname{tr}(G^\top O)$ 最大的那个：$\operatorname{tr}(V\Sigma U^\top O)\le\sum_i\sigma_i$，在 $O = UV^\top$ 时取等。因此它是谱范数约束下的“最速下降”方向：不论 $G$ 的奇异值多么悬殊（条件数多大），更新在每个奇异方向上的步长都相同。
+
+计算 SVD 在 GPU 上很慢，Muon 改用只需矩阵乘法的 **Newton–Schulz 迭代**。最简单的版本是 $X\leftarrow\tfrac32X - \tfrac12XX^\top X$。代入 $X = U\Sigma V^\top$，$XX^\top X = U\Sigma^3V^\top$，所以每一步只是对每个奇异值作用多项式 $p(\sigma) = \tfrac32\sigma - \tfrac12\sigma^3$，奇异向量不变。$p$ 在 $(0, \sqrt3)$ 上把 $\sigma$ 推向不动点 1；先把 $G$ 除以它的 Frobenius 范数，保证所有奇异值都在 $(0, 1]$ 中。
+
+<CodeFile path="src/llms_from_scratch/math/svd.py" region="polar" />
+
+<Plot
+  label="Newton–Schulz 迭代对奇异值的作用：p(σ) = 1.5σ − 0.5σ³ 迭代 1、3、10 次"
+  x={[0, 1.7]}
+  y={[0, 1.2]}
+  xLabel="输入奇异值 σ"
+  yLabel="迭代后的奇异值"
+  series={[
+    { label: '1 次', fn: (s) => 1.5 * s - 0.5 * s ** 3 },
+    { label: '3 次', fn: (s) => { let x = s; for (let i = 0; i < 3; i += 1) x = 1.5 * x - 0.5 * x ** 3; return x } },
+    { label: '10 次', fn: (s) => { let x = s; for (let i = 0; i < 10; i += 1) x = 1.5 * x - 0.5 * x ** 3; return x } },
+    { label: 'y = σ', fn: (s) => s, dashed: true, tone: 'muted' },
+  ]}
+>
+  <Fragment slot="caption">每次迭代把 $(0, \sqrt3)$ 中的奇异值推向 1，迭代 10 次后，$\sigma\ge0.05$ 的部分已经非常接近 1。很小的奇异值每步约放大 1.5 倍，需要更多步。Muon 实际使用一个系数经过调优的五次多项式，用 5 步把奇异值推到 1 附近的一个区间（而不是精确的 1），以速度换取精度。</Fragment>
+</Plot>
+
+测试验证了 `newton_schulz` 在 40 步后与 SVD 得到的 $UV^\top$ 一致到 $10^{-8}$，对“高”矩阵和“宽”矩阵都成立。Muon 的完整算法与它的五次多项式系数见[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)。
+
+## 小结
+
+- 对称矩阵 $A = Q\Lambda Q^\top$：特征值是实数，特征向量正交；$A$ 在特征向量方向上只做缩放。幂迭代用 $A^kx$ 求主特征向量。
+- 任意矩阵 $A = U\Sigma V^\top = \sum_i\sigma_iu_iv_i^\top$，由 $A^\top A$ 的特征分解推出；几何上是“旋转—缩放—旋转”，把单位球映成半轴为 $\sigma_iu_i$ 的椭球。
+- 谱范数 $\lVert A\rVert_2 = \sigma_1$ 是最大放大倍数；Frobenius 范数 $= \sqrt{\sum\sigma_i^2}$；条件数 $\kappa = \sigma_{\max}/\sigma_{\min}$ 度量误差放大，正交矩阵 $\kappa = 1$。
+- Eckart–Young：截断 SVD 是谱范数与 Frobenius 范数下的最优秩 $k$ 近似，误差分别为 $\sigma_{k+1}$ 与 $\sqrt{\sum_{i>k}\sigma_i^2}$。效果取决于奇异值衰减得多快。
+- LoRA 用低秩因子参数化权重更新；MLA 用低秩潜在向量压缩 KV Cache；Muon 用 Newton–Schulz 迭代把更新正交化为 $UV^\top$。
+
+至此，第一部分的数学工具已经齐备：张量运算描述模型，链式法则与自动微分求梯度，概率论定义损失，数值分析保证这些计算在机器上可靠，矩阵分解帮助我们理解与压缩权重。[第二部分](/pytorch/)将用 PyTorch 把它们组织成真正的训练代码，并学会估算每一步的计算与显存开销。
+
+## 练习
+
+1. 求 $A = \begin{bmatrix}4 & 0\\ 0 & -2\end{bmatrix}$ 的特征值与奇异值。为什么二者不同？
+
+<details>
+<summary>答案</summary>
+
+特征值是 4 和 $-2$（对角矩阵的对角元）。$A^\top A = \operatorname{diag}(16, 4)$，奇异值是 4 和 2。奇异值总是非负的：符号被吸收进奇异向量（$u_2 = -v_2$）。对于对称矩阵，奇异值是特征值的绝对值。
+
+</details>
+
+2. 证明正交矩阵 $Q$ 的所有奇异值都是 1，且 $\lVert QA\rVert_2 = \lVert A\rVert_2$。
+
+<details>
+<summary>答案</summary>
+
+$Q^\top Q = I$，特征值全为 1，所以奇异值全为 1。$\lVert QAx\rVert = \lVert Ax\rVert$ 对所有 $x$ 成立（正交变换保持长度），故最大放大倍数不变。同理 $QA$ 的奇异值与 $A$ 相同：$(QA)^\top(QA) = A^\top A$。
+
+</details>
+
+3. 一个 $1000\times1000$ 矩阵的奇异值为 $\sigma_i = 1/i$。保留多少个分量能使相对 Frobenius 误差低于 10%？
+
+<details>
+<summary>答案</summary>
+
+$\lVert A\rVert_F^2 = \sum_{i=1}^{1000}1/i^2\approx\pi^2/6 - 0.001\approx1.644$。误差平方 $\sum_{i>k}1/i^2\approx1/k$（尾部积分近似）。要求 $\sqrt{(1/k)/1.644} < 0.1$，即 $1/k < 0.01644$，$k > 61$。约保留 61 个分量即可，存储量从 $10^6$ 降到 $61\times2000\approx1.2\times10^5$。
+
+</details>
+
+4. 对 $G = \begin{bmatrix}3 & 0\\ 4 & 5\end{bmatrix}$，写出极分解因子 $UV^\top$（利用正文中的 SVD），并验证它是正交矩阵。
+
+<details>
+<summary>答案</summary>
+
+$U = [u_1, u_2] = \frac{1}{\sqrt{10}}\begin{bmatrix}1 & -3\\ 3 & 1\end{bmatrix}$，$V = [v_1, v_2] = \frac{1}{\sqrt2}\begin{bmatrix}1 & -1\\ 1 & 1\end{bmatrix}$。
+$UV^\top = \frac{1}{\sqrt{20}}\begin{bmatrix}1 & -3\\ 3 & 1\end{bmatrix}\begin{bmatrix}1 & 1\\ -1 & 1\end{bmatrix} = \frac{1}{\sqrt{20}}\begin{bmatrix}4 & -2\\ 2 & 4\end{bmatrix} = \frac{1}{\sqrt5}\begin{bmatrix}2 & -1\\ 1 & 2\end{bmatrix}$。它的列互相正交且长度为 1，是一个旋转矩阵（逆时针约 26.6°）。
+
+</details>
+
+5. LoRA 对一个 $4096\times11008$ 的前馈层权重使用 $r = 16$。可训练参数是多少？与全参数相比节省多少？若用 Eckart–Young 的语言，什么情况下秩 16 的更新会不够？
+
+<details>
+<summary>答案</summary>
+
+$16\times(4096 + 11008) = 241664$，全参数为 $4096\times11008\approx4.51\times10^7$，约为 0.54%。如果理想的权重更新 $\Delta W^\star$ 的奇异值衰减缓慢（第 17 个以后的奇异值平方和仍占很大比例），任何秩 16 的更新与它的 Frobenius 距离都至少是 $\sqrt{\sum_{i>16}\sigma_i^2}$，此时需要更大的 $r$ 或全参数微调。
+
+</details>
+
+## 参考文献
+
+- Carl Eckart, Gale Young. The approximation of one matrix by another of lower rank. *Psychometrika* 1(3), 1936. [doi.org/10.1007/BF02288367](https://doi.org/10.1007/BF02288367)
+- Lloyd N. Trefethen, David Bau III. *Numerical Linear Algebra*, Lectures 4–5（SVD）、12（条件数）、27（幂迭代）。SIAM, 1997.
+- Gene H. Golub, Charles F. Van Loan. *Matrix Computations*, 4th ed. Johns Hopkins University Press, 2013.
+- Nicholas J. Higham. *Functions of Matrices: Theory and Computation*, Chapter 8（极分解与 Newton–Schulz 迭代）。SIAM, 2008.
+- Edward J. Hu et al. LoRA: Low-Rank Adaptation of Large Language Models. ICLR 2022. [arXiv:2106.09685](https://arxiv.org/abs/2106.09685)
+- DeepSeek-AI. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model, 2024（Multi-head Latent Attention）。[arXiv:2405.04434](https://arxiv.org/abs/2405.04434)
+- Keller Jordan et al. Muon: An optimizer for hidden layers in neural networks, 2024. [kellerjordan.github.io/posts/muon](https://kellerjordan.github.io/posts/muon/)
+- Jeremy Bernstein, Laker Newhouse. Old Optimizer, New Norm: An Anthology, 2024（谱范数下的最速下降）。[arXiv:2409.20325](https://arxiv.org/abs/2409.20325)
+- Jingyuan Liu et al. Muon is Scalable for LLM Training, 2025. [arXiv:2502.16982](https://arxiv.org/abs/2502.16982)

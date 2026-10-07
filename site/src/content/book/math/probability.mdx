@@ -2,7 +2,322 @@
 title: 概率、最大似然与交叉熵
 description: 从随机变量与条件概率出发，把语言建模写成最大似然；交叉熵、KL 散度、熵与困惑度之间的关系。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/math/probability.py
+  - tests/math/test_probability.py
 ---
 
-本章正在撰写。
+前五章解决了“怎样求梯度”：给定任何由可微运算组成的损失，自动微分都能高效地算出它对每个参数的梯度。但损失本身从哪里来？训练语言模型时，几乎所有代码都写着 `F.cross_entropy(logits, targets)`。为什么是交叉熵，而不是平方误差或别的什么？困惑度（perplexity）又是什么，为什么论文用它比较模型？
+
+答案来自概率论。本章先建立描述“下一个 token 是什么”所需的最少概率语言：随机变量、条件概率和链式分解，由此把语言模型精确地定义为一组条件分布。然后用**最大似然**原则说明训练目标应该是什么，并证明它恰好等价于最小化交叉熵。接着引入信息论中的熵、交叉熵与 KL 散度，解释损失数值的含义，以及困惑度和 bits-per-byte 这两个评估指标。最后讨论 softmax 的温度，它在生成和蒸馏中都会再次出现。
+
+## 随机变量与条件概率
+
+### 离散分布
+
+**随机变量**（random variable）是取值不确定的量。语言模型关心的随机变量是“下一个 token”，它取值于大小为 $V$ 的词表 $\{1, \dots, V\}$。离散随机变量 $X$ 的分布由**概率质量函数** $P(X = x)$ 描述，满足 $P(X = x)\ge 0$ 且 $\sum_xP(X = x) = 1$。在词表上的这种分布叫作**类别分布**（categorical distribution），它就是一个长度为 $V$、非负、和为 1 的向量——softmax 的输出正是这样的向量。
+
+函数 $f(X)$ 的**期望**是按概率加权的平均：$\mathbb E[f(X)] = \sum_xP(X = x)f(x)$。期望可以用样本近似：从分布中独立抽取 $x_1, \dots, x_N$，则 $\frac1N\sum_if(x_i)\to\mathbb E[f(X)]$（大数定律）。训练时对一个批次求平均损失，就是在用样本平均近似期望。
+
+### 联合、边缘与条件
+
+两个随机变量 $X, Y$ 的**联合分布** $P(X = x, Y = y)$ 给出它们同时取某对值的概率。对一个变量求和得到另一个的**边缘分布**：$P(X = x) = \sum_yP(X = x, Y = y)$。**条件概率**定义为
+
+$$
+P(Y = y\mid X = x) = \frac{P(X = x, Y = y)}{P(X = x)},
+$$
+
+它回答“已知 $X = x$ 时，$Y$ 的分布是什么”。把定义移项就得到**乘法法则**：$P(x, y) = P(x)\,P(y\mid x)$。（下文在不引起混淆时省略随机变量名，写作 $P(x)$、$P(y\mid x)$。）若 $P(y\mid x) = P(y)$ 对所有 $x, y$ 成立，称 $X, Y$ **独立**。
+
+举例：语料“a b c a b a c c b a”中，统计相邻的 token 对 $(x_{t-1}, x_t)$，共 9 对。其中以 a 开头的有 3 对：(a, b) 出现 2 次，(a, c) 1 次。于是经验条件概率 $P(b\mid a) = 2/3$，$P(c\mid a) = 1/3$，$P(a\mid a) = 0$。
+
+## 链式分解：语言模型的数学形式
+
+一段文本是一个 token 序列 $x_1, x_2, \dots, x_T$。语言模型要做的是给任意序列一个概率 $P(x_1, \dots, x_T)$。直接对所有可能的序列建表是不可能的：$V = 50000$、$T = 1000$ 时有 $50000^{1000}$ 种序列。乘法法则提供了出路。反复应用它：
+
+$$
+P(x_1, x_2, x_3) = P(x_1)\,P(x_2, x_3\mid x_1) = P(x_1)\,P(x_2\mid x_1)\,P(x_3\mid x_1, x_2),
+$$
+
+推广到任意长度：
+
+<KeyEq label="概率的链式分解（自回归分解）">
+
+$$
+P(x_1, \dots, x_T) = \prod_{t=1}^{T}P(x_t\mid x_{<t}),\qquad x_{<t} := (x_1, \dots, x_{t-1}).
+$$
+
+</KeyEq>
+
+这个等式**不依赖任何假设**，对任何分布都精确成立。它把“给整个序列一个概率”这个不可能的任务，变成了“给定前文，预测下一个 token 的分布”这个可以学习的任务，每一步只需要输出一个长度为 $V$ 的类别分布。这就是**自回归语言模型**（autoregressive language model）：GPT 系列的模型 $P_\theta(x_t\mid x_{<t}) = \operatorname{softmax}(f_\theta(x_{<t}))_{x_t}$ 用一个神经网络 $f_\theta$ 把前文映射为 logits。生成时，从这个分布中采样一个 token，把它接到前文后面，再预测下一个——“自回归”就是“用自己的输出作为下一步的输入”。
+
+<Diagram width={720} height={200} label="自回归分解：每个位置在给定前文的条件下预测下一个 token">
+  <Box x={30} y={110} w={90} h={50} label="x₁" tone="info" />
+  <Box x={150} y={110} w={90} h={50} label="x₂" tone="info" />
+  <Box x={270} y={110} w={90} h={50} label="x₃" tone="info" />
+  <Box x={390} y={110} w={90} h={50} label="x₄" tone="info" />
+  <Box x={150} y={20} w={90} h={50} label="P(x₂ | x₁)" tone="accent" size="sm" />
+  <Box x={270} y={20} w={90} h={50} label="P(x₃ | x≤₂)" tone="accent" size="sm" />
+  <Box x={390} y={20} w={90} h={50} label="P(x₄ | x≤₃)" tone="accent" size="sm" />
+  <Arrow from={[75, 110]} to={[180, 70]} />
+  <Arrow from={[75, 110]} to={[290, 70]} />
+  <Arrow from={[195, 110]} to={[305, 70]} />
+  <Arrow from={[75, 110]} to={[400, 70]} />
+  <Arrow from={[195, 110]} to={[420, 70]} />
+  <Arrow from={[315, 110]} to={[440, 70]} />
+  <Box x={520} y={60} w={170} h={70} label={"log P(x₁…x₄)\n= Σₜ log P(xₜ | x<ₜ)"} tone="strong" size="sm" />
+  <Arrow from={[480, 45]} to={[520, 80]} tone="muted" dashed />
+  <Fragment slot="caption">每个条件分布只能看到它左边的 token（箭头）。序列的对数概率是各位置条件对数概率之和。Transformer 用因果掩码在一次前向中同时计算所有位置的条件分布。</Fragment>
+</Diagram>
+
+实际计算时总是取对数：$\log P(x_{1:T}) = \sum_t\log P(x_t\mid x_{<t})$。一方面乘积变成求和，便于求导和求平均；另一方面，1000 个约 $10^{-3}$ 的概率相乘是 $10^{-3000}$，远小于浮点数能表示的最小正数，会下溢为 0（见[浮点数与数值稳定性](/math/numerics/)）。对数把它变成 $-6900$ 左右的普通数字。
+
+最简单的近似是**二元模型**（bigram model）：假设下一个 token 只依赖前一个，$P(x_t\mid x_{<t})\approx P(x_t\mid x_{t-1})$。这是一阶马尔可夫假设。它的参数是一张 $V\times V$ 的条件概率表，第 $a$ 行是 $P(\cdot\mid a)$。下面用它把最大似然讲清楚。
+
+## 最大似然估计
+
+### 原则
+
+模型 $P_\theta$ 有参数 $\theta$。给定训练数据 $\mathcal D$，参数应该怎么选？**最大似然估计**（maximum likelihood estimation，MLE）的回答是：选使数据出现概率最大的那个，
+
+$$
+\theta^\star = \arg\max_\theta P_\theta(\mathcal D) = \arg\max_\theta\sum_{t}\log P_\theta(x_t\mid x_{<t}) = \arg\min_\theta\Bigl(-\frac1N\sum_{t}\log P_\theta(x_t\mid x_{<t})\Bigr).
+$$
+
+第二步取对数（单调函数不改变最大值点），第三步取负、除以 token 总数 $N$ 变成最小化问题。括号里的量叫**负对数似然**（negative log-likelihood，NLL），它就是语言模型的训练损失。对每个位置，$-\log P_\theta(x_t\mid x_{<t}) = -\log\operatorname{softmax}(z)_{x_t}$ 正是[反向传播](/math/backprop/)中梯度为 $p - e_y$ 的那个损失。
+
+### 二元模型的闭式解
+
+对二元模型，MLE 可以精确求出。固定前一个 token $a$，记 $q_b = P(b\mid a)$，$n_{ab}$ 为语料中 $(a, b)$ 出现的次数。对数似然中与第 $a$ 行有关的部分是 $\sum_bn_{ab}\log q_b$，约束是 $\sum_bq_b = 1$。用拉格朗日乘子法，令 $\mathcal J = \sum_bn_{ab}\log q_b - \lambda(\sum_bq_b - 1)$ 对 $q_b$ 的偏导为零：
+
+$$
+\frac{n_{ab}}{q_b} - \lambda = 0\ \Longrightarrow\ q_b = \frac{n_{ab}}{\lambda},\qquad
+\sum_bq_b = 1\ \Longrightarrow\ \lambda = \sum_bn_{ab},
+$$
+
+所以 $P(b\mid a) = n_{ab}/\sum_{b'}n_{ab'}$——**最大似然估计就是计数的频率**。这与直觉一致，但现在它有了原则性的依据。
+
+在“a b c a b a c c b a”上，计数矩阵和 MLE 为（行是前一个 token，列是下一个）：
+
+$$
+n = \begin{bmatrix}0 & 2 & 1\\ 2 & 0 & 1\\ 1 & 1 & 1\end{bmatrix},\qquad
+\hat P = \begin{bmatrix}0 & 2/3 & 1/3\\ 2/3 & 0 & 1/3\\ 1/3 & 1/3 & 1/3\end{bmatrix}.
+$$
+
+9 个预测的平均 NLL 为 $0.791$ nat。作为对照，均匀分布的平均 NLL 是 $\log 3\approx 1.099$。
+
+<CodeFile path="src/llms_from_scratch/math/probability.py" region="bigram" />
+
+`fit_bigram_logits` 是同一个模型的“神经网络”版本：参数是一张 $V\times V$ 的 logits 表，每行经过 softmax 得到条件分布，用 `F.cross_entropy` 和梯度下降训练。测试 `test_mle_is_minimum_cross_entropy` 验证它收敛到的分布与计数给出的 MLE 一致（误差小于 $2\times10^{-3}$）。这说明“用交叉熵训练 softmax 输出”和“最大似然估计”是同一件事——Transformer 只是把这张表换成了一个能看到全部前文的神经网络。
+
+计数估计有个缺陷：没见过的组合概率为 0，一旦测试数据中出现，$-\log 0 = \infty$。**加性平滑**（Laplace smoothing）给每个计数加一个常数 $\alpha$ 来避免这一点。神经语言模型通过参数共享自然地给未见组合分配非零概率，这是它泛化能力的来源之一。
+
+## 熵、交叉熵与 KL 散度
+
+最大似然把损失定为平均负对数概率。信息论给这个量提供了直观的含义，也让我们知道它的下界在哪里。
+
+### 信息量与熵
+
+一个概率为 $p$ 的事件发生时，带来的**信息量**（surprisal）定义为 $-\log p$。确定事件（$p = 1$）的信息量为 0；越罕见的事件越“意外”。以 2 为底时单位是比特（bit），以 $e$ 为底时是奈特（nat），$1\text{ nat} = 1/\ln 2\approx 1.443\text{ bit}$。PyTorch 的交叉熵用自然对数，所以损失的单位是 nat。
+
+分布 $p$ 的**熵**（entropy）是信息量的期望：
+
+$$
+H(p) = -\sum_xp(x)\log p(x).
+$$
+
+公平硬币的熵是 $\log 2$ nat，即 1 bit；确定性分布的熵为 0；$V$ 个结果的均匀分布熵为 $\log V$，是所有 $V$ 元分布中最大的。香农的信源编码定理给出了熵的操作含义：对来自 $p$ 的符号做无损编码，平均每个符号至少需要 $H(p)$ bit，且可以任意接近这个下界。
+
+### 交叉熵与 KL 散度
+
+如果数据来自 $p$，我们却按另一个分布 $q$ 来设计编码（给 $x$ 分配约 $-\log q(x)$ bit），平均码长是**交叉熵**：
+
+$$
+H(p, q) = -\sum_xp(x)\log q(x) = \mathbb E_{x\sim p}[-\log q(x)].
+$$
+
+多付出的部分叫 **KL 散度**（Kullback–Leibler divergence）：
+
+<KeyEq label="交叉熵 = 熵 + KL 散度">
+
+$$
+H(p, q) = H(p) + D_{\mathrm{KL}}(p\,\Vert\,q),\qquad D_{\mathrm{KL}}(p\,\Vert\,q) = \sum_xp(x)\log\frac{p(x)}{q(x)}.
+$$
+
+</KeyEq>
+
+<Definition term="吉布斯不等式" kind="定理">
+$D_{\mathrm{KL}}(p\,\Vert\,q)\ge 0$，等号当且仅当 $p = q$。因此对固定的 $p$，$H(p, q)$ 在 $q = p$ 处取得最小值 $H(p)$。
+</Definition>
+
+证明用不等式 $\log u\le u - 1$（等号当且仅当 $u = 1$，因为 $\log$ 是凹函数，$u - 1$ 是它在 $u = 1$ 处的切线）。令 $u = q(x)/p(x)$，在 $p(x) > 0$ 的 $x$ 上求和：
+
+$$
+-D_{\mathrm{KL}}(p\,\Vert\,q) = \sum_xp(x)\log\frac{q(x)}{p(x)}\le\sum_xp(x)\Bigl(\frac{q(x)}{p(x)} - 1\Bigr) = \sum_{x: p(x)>0}q(x) - 1\le 0 .
+$$
+
+<CodeFile path="src/llms_from_scratch/math/probability.py" region="information" />
+
+### 最大似然 ⇔ 最小化交叉熵
+
+现在可以把最大似然与交叉熵联系起来。记训练数据的**经验分布** $\hat p$（每个观测到的样本各占 $1/N$ 的概率）。平均 NLL 正是 $\hat p$ 与模型分布 $q_\theta$ 的交叉熵：
+
+$$
+-\frac1N\sum_{i=1}^N\log q_\theta(x_i) = \mathbb E_{x\sim\hat p}[-\log q_\theta(x)] = H(\hat p, q_\theta) = H(\hat p) + D_{\mathrm{KL}}(\hat p\,\Vert\,q_\theta).
+$$
+
+$H(\hat p)$ 与参数无关，所以**最大化似然 = 最小化交叉熵 = 最小化模型与数据分布的 KL 散度**。这三种说法描述的是同一个优化问题。对语言模型，$\hat p$ 是给定前文时下一个 token 的经验分布，在每个训练位置上它是一个独热向量，交叉熵退化为 $-\log q_\theta(x_t\mid x_{<t})$。
+
+这也解释了损失曲线的“地板”：即使模型完美（$q_\theta$ 等于真实分布 $p$），损失也只能降到 $H(p)$，即语言本身的不确定性。[缩放定律](/pretraining/scaling-laws/)中的不可约损失项正是对这个熵的估计。
+
+<Plot
+  label="二元分布 p = (0.3, 0.7) 时交叉熵 H(p, q) 随 q 的变化"
+  x={[0.01, 0.99]}
+  y={[0, 2]}
+  xLabel="q(x = 1)"
+  yLabel="nat"
+  series={[
+    { label: 'H(p, q)', fn: (q) => -(0.3 * Math.log(q) + 0.7 * Math.log(1 - q)) },
+    { label: 'H(p)', fn: () => -(0.3 * Math.log(0.3) + 0.7 * Math.log(0.7)), dashed: true, tone: 'muted' },
+    { label: 'KL(p‖q)', fn: (q) => 0.3 * Math.log(0.3 / q) + 0.7 * Math.log(0.7 / (1 - q)), tone: 'accent2' },
+  ]}
+  markers={[{ at: [0.3, 0.6109], label: 'q = p', tone: 'accent' }]}
+>
+  <Fragment slot="caption">交叉熵（实线）是熵（水平虚线，约 0.611 nat）加上 KL 散度。最小值恰好在 $q = p$ 处，此时 KL 为零。$q$ 把很小的概率分配给实际常见的结果时（右端），交叉熵急剧增大。</Fragment>
+</Plot>
+
+<Callout tone="note" title="KL 散度不对称">
+$D_{\mathrm{KL}}(p\,\Vert\,q)\ne D_{\mathrm{KL}}(q\,\Vert\,p)$。前向 KL（数据在前）惩罚模型在数据有概率的地方给出低概率，促使 $q$“覆盖”$p$ 的所有模式；反向 KL 惩罚模型在数据没有概率的地方给出高概率，促使 $q$“锁定”某个模式。最大似然训练使用前向 KL；RLHF 中约束策略不偏离参考模型的 KL 惩罚、以及[知识蒸馏](/post-training/distillation/)中的选择，都需要留意方向。
+</Callout>
+
+## 困惑度与 bits-per-byte
+
+### 困惑度
+
+**困惑度**（perplexity）是平均 NLL 的指数：
+
+$$
+\operatorname{PPL} = \exp\Bigl(-\frac1N\sum_t\log P(x_t\mid x_{<t})\Bigr).
+$$
+
+它的含义是“有效分支数”：若模型在每一步都在 $k$ 个 token 上均匀分配概率（并且正确答案总在其中），平均 NLL 为 $\log k$，困惑度恰好是 $k$。上面的二元模型平均 NLL 为 0.791，困惑度 $e^{0.791}\approx 2.20$——比在 3 个字母中瞎猜（困惑度 3）好一些。损失下降 0.1 nat，困惑度乘以 $e^{-0.1}\approx 0.905$，即降低约 10%。
+
+### 为什么需要 bits-per-byte
+
+困惑度是**每个 token** 的指标，而不同模型的分词器不同。同一段文本，一个分词器切成 1000 个 token，另一个切成 1300 个，二者的每 token 损失不可直接比较：切得越粗，每个 token 承载的信息越多，每 token 损失自然越高，但这并不意味着模型更差。
+
+解决办法是把总信息量摊到与分词无关的单位上，例如 UTF-8 字节。**bits-per-byte**（BPB）定义为
+
+<KeyEq label="bits-per-byte">
+
+$$
+\operatorname{BPB} = \frac{\sum_t-\log P(x_t\mid x_{<t})}{\ln 2\cdot N_{\text{bytes}}} = \frac{\bar\ell_{\text{token}}}{\ln 2}\cdot\frac{N_{\text{tokens}}}{N_{\text{bytes}}},
+$$
+
+</KeyEq>
+
+其中 $\bar\ell_{\text{token}}$ 是每 token 平均损失（nat）。例如每 token 损失 2.0 nat、平均每个 token 对应 4.2 个字节，则 BPB $= 2.0/0.693/4.2\approx 0.69$。由于总似然 $P(\text{text})$ 本身与分词无关（只要分词是可逆的），BPB 可以在不同分词器之间公平比较。The Pile 等基准和 CS336 的作业都用它报告结果，[评估](/pretraining/evaluation/)一章会进一步讨论。
+
+<CodeFile path="src/llms_from_scratch/math/probability.py" region="metrics" />
+
+## softmax 与温度
+
+softmax 把 logits 变成分布。给 logits 除以一个**温度**（temperature）$\tau > 0$：
+
+$$
+p_i(\tau) = \frac{\exp(z_i/\tau)}{\sum_j\exp(z_j/\tau)} .
+$$
+
+这个名字来自统计物理的玻尔兹曼分布 $p_i\propto e^{-E_i/kT}$，logits 相当于负能量。温度控制分布的“尖锐程度”：
+
+- $\tau\to 0$：最大 logit 与其余 logits 的差被放大到无穷，分布集中到 $\arg\max$ 上（贪心解码）。
+- $\tau = 1$：模型训练时的原始分布。
+- $\tau\to\infty$：所有 $z_i/\tau\to 0$，分布趋于均匀。
+
+可以证明熵 $H(p(\tau))$ 随 $\tau$ 单调递增（只要 logits 不全相等）。对 $z = (2, 1, 0)$：$\tau = 0.5$ 时 $p\approx(0.867, 0.117, 0.016)$，熵 0.44 nat；$\tau = 1$ 时 $(0.665, 0.245, 0.090)$，熵 0.83；$\tau = 2$ 时 $(0.506, 0.307, 0.186)$，熵 1.02，接近上限 $\log 3\approx 1.10$。
+
+<Plot
+  label="logits (2, 1, 0) 的 softmax 概率随温度 τ 的变化（对数横轴）"
+  x={[0.1, 10]}
+  y={[0, 1]}
+  logX
+  xLabel="温度 τ"
+  yLabel="概率"
+  series={[
+    { label: 'p₁（z = 2）', fn: (t) => Math.exp(2 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: 'p₂（z = 1）', fn: (t) => Math.exp(1 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: 'p₃（z = 0）', fn: (t) => 1 / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: '1/3', fn: () => 1 / 3, dashed: true, tone: 'muted' },
+  ]}
+>
+  <Fragment slot="caption">低温时最大 logit 独占全部概率，高温时三者都趋于 $1/3$。温度不改变 logits 的排序，只改变分布的尖锐程度。</Fragment>
+</Plot>
+
+温度在本书中会多次出现：[文本生成](/transformer/generation/)用它在“确定但单调”与“多样但可能出错”之间权衡；[知识蒸馏](/post-training/distillation/)用高温软化教师分布，让学生学到非最大类之间的相对关系。
+
+## 小结
+
+- 链式分解 $P(x_{1:T}) = \prod_tP(x_t\mid x_{<t})$ 精确成立，把序列建模变成逐位置的下一 token 分类；自回归模型用 softmax 输出每个条件分布。
+- 最大似然：选使训练数据概率最大的参数，等价于最小化平均负对数似然。对类别分布，MLE 就是计数频率。
+- 熵 $H(p)$ 是最优平均码长；交叉熵 $H(p, q) = H(p) + D_{\mathrm{KL}}(p\Vert q)\ge H(p)$。最大似然 ⇔ 最小化交叉熵 ⇔ 最小化与经验分布的 KL。
+- 困惑度 $= \exp(\text{平均 NLL})$，是有效分支数；BPB 把总 NLL 摊到字节上并换算成 bit，可跨分词器比较。
+- 温度 $\tau$ 缩放 logits：$\tau\to0$ 趋于 argmax，$\tau\to\infty$ 趋于均匀，熵随 $\tau$ 单调增。
+
+下一章转向计算机怎样**实际**计算这些量：浮点数的精度和范围有限，$\exp$ 会溢出，$\log 0$ 是无穷大。稳定地计算 softmax 和交叉熵需要专门的技巧。
+
+## 练习
+
+1. 一个模型在验证集上的平均损失是 3.0 nat/token。它的困惑度是多少？若词表大小为 50000，与均匀猜测相比如何？
+
+<details>
+<summary>答案</summary>
+
+$\operatorname{PPL} = e^{3}\approx 20.1$。均匀猜测的困惑度为 50000，平均 NLL 为 $\log 50000\approx 10.8$ nat。模型相当于在约 20 个候选中均匀选择，比均匀猜测好了约 2500 倍。
+
+</details>
+
+2. 证明：对 $V$ 元分布 $p$，$H(p)\le\log V$，等号当且仅当 $p$ 均匀。
+
+<details>
+<summary>答案</summary>
+
+取 $q$ 为均匀分布 $u$，则 $D_{\mathrm{KL}}(p\Vert u) = \sum_xp(x)\log\frac{p(x)}{1/V} = \log V - H(p)\ge 0$，等号当且仅当 $p = u$。
+
+</details>
+
+3. 用“a b c a b a c c b a”的二元 MLE，计算序列“a b a”（把第一个 a 视为给定）的概率和平均 NLL。序列“a a b”呢？
+
+<details>
+<summary>答案</summary>
+
+$P(b\mid a)P(a\mid b) = \frac23\cdot\frac23 = \frac49$，平均 NLL $= -\frac12\log\frac49\approx 0.405$。“a a b”包含 $P(a\mid a) = 0$，概率为 0，NLL 为无穷大。这就是需要平滑的原因：加 1 平滑后 $P(a\mid a) = 1/6$。
+
+</details>
+
+4. 两个模型在同一测试集（10 MB UTF-8 文本）上评估。模型 A 用 32k 词表，切出 2.5M token，平均损失 2.2 nat；模型 B 用 128k 词表，切出 2.0M token，平均损失 2.6 nat。哪个更好？
+
+<details>
+<summary>答案</summary>
+
+A 的总 NLL $= 2.5\times10^6\times2.2 = 5.5\times10^6$ nat；B 为 $2.0\times10^6\times2.6 = 5.2\times10^6$ nat。BPB 分别为 $5.5\times10^6/(0.693\times10^7)\approx 0.79$ 与 $5.2\times10^6/(0.693\times10^7)\approx 0.75$。B 更好，尽管它的每 token 损失更高。
+
+</details>
+
+5. 证明 softmax 的输出对 logits 的整体平移不变，但对整体缩放（即温度）不是不变的。在 logits 全相等时，温度有什么作用？
+
+<details>
+<summary>答案</summary>
+
+$\frac{e^{z_i + c}}{\sum_je^{z_j + c}} = \frac{e^ce^{z_i}}{e^c\sum_je^{z_j}}$，$e^c$ 约去。缩放 $z_i/\tau$ 改变 logits 之间的差 $(z_i - z_j)/\tau$，从而改变概率比 $p_i/p_j = e^{(z_i - z_j)/\tau}$。logits 全相等时所有差为 0，任何温度下分布都是均匀的，温度不起作用。
+
+</details>
+
+## 参考文献
+
+- Claude E. Shannon. A Mathematical Theory of Communication. *Bell System Technical Journal* 27, 1948. [doi.org/10.1002/j.1538-7305.1948.tb01338.x](https://doi.org/10.1002/j.1538-7305.1948.tb01338.x)
+- Thomas M. Cover, Joy A. Thomas. *Elements of Information Theory*, 2nd ed., Chapter 2（熵、相对熵与吉布斯不等式）。Wiley, 2006.
+- Yoshua Bengio, Réjean Ducharme, Pascal Vincent, Christian Jauvin. A Neural Probabilistic Language Model. *JMLR* 3, 2003. [jmlr.org/papers/v3/bengio03a.html](https://www.jmlr.org/papers/v3/bengio03a.html)
+- Daniel Jurafsky, James H. Martin. *Speech and Language Processing*, 3rd ed. draft, Chapter 3: N-gram Language Models（最大似然、平滑与困惑度）。[web.stanford.edu/~jurafsky/slp3](https://web.stanford.edu/~jurafsky/slp3/)
+- Leo Gao et al. The Pile: An 800GB Dataset of Diverse Text for Language Modeling, 2020（以 bits-per-byte 报告结果）。[arXiv:2101.00027](https://arxiv.org/abs/2101.00027)
+- Geoffrey Hinton, Oriol Vinyals, Jeff Dean. Distilling the Knowledge in a Neural Network, 2015（softmax 温度）。[arXiv:1503.02531](https://arxiv.org/abs/1503.02531)
+- Stanford CS336 Spring 2025, Lecture 1: Overview, tokenization; Lecture 12: Evaluation. [github.com/stanford-cs336/spring2025-lectures](https://github.com/stanford-cs336/spring2025-lectures)

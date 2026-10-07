@@ -2,7 +2,336 @@
 title: 链式法则与计算图
 description: 把复合函数画成计算图，沿图做局部求导再相乘；前向模式与反向模式的代价差异，以及分支汇合时梯度相加。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/math/chain_rule.py
+  - tests/math/test_chain_rule.py
 ---
 
-本章正在撰写。
+上一章用梯度下降拟合了一条直线。那个例子里的梯度可以一眼写出来，因为损失只是参数的二次函数。真实的神经网络却是一长串函数的复合：输入经过线性层、激活函数、又一个线性层、归一化……最后才得到损失。一个 Transformer 有几十层，每层又由十几个运算组成。对这样的函数手推梯度公式既不现实，也没有必要——只要知道每个**局部**运算的导数，再用链式法则把它们“串”起来就够了。
+
+本章先从一元复合函数讲起，用线性近似解释链式法则为什么成立；再引入计算图，把多元链式法则表述为“沿所有路径相乘，再把路径相加”；然后比较把链条从左乘起和从右乘起的两种方式——前向模式与反向模式——说明深度学习为什么几乎只用后者；最后手算一个两层网络的完整前向与反向传播，并用 PyTorch 逐项核对。
+
+## 复合函数与一元链式法则
+
+设 $y = f(u)$，$u = g(x)$，复合函数 $y = f(g(x))$ 的导数是
+
+<KeyEq label="链式法则">
+
+$$
+\frac{\mathrm d y}{\mathrm d x} = \frac{\mathrm d y}{\mathrm d u}\cdot\frac{\mathrm d u}{\mathrm d x} = f'(g(x))\, g'(x).
+$$
+
+</KeyEq>
+
+用上一章的线性近似可以直接看出它为什么成立。$x$ 变化 $h$，$u$ 大约变化 $\delta = g'(x)h$；$u$ 变化 $\delta$，$y$ 大约变化 $f'(u)\delta = f'(u)g'(x)h$。**变化率沿着链条相乘**：如果 $u$ 对 $x$ 的敏感度是 3，$y$ 对 $u$ 的敏感度是 2，那么 $y$ 对 $x$ 的敏感度就是 6。严格证明只需把“大约”换成带余项的等式，并说明余项是 $o(h)$。
+
+例：$y = \sin(x^2)$。令 $u = x^2$，则 $\frac{\mathrm dy}{\mathrm du} = \cos u$，$\frac{\mathrm du}{\mathrm dx} = 2x$，所以 $\frac{\mathrm dy}{\mathrm dx} = 2x\cos(x^2)$。
+
+链条可以任意长。对 $y = f_3(f_2(f_1(x)))$，记中间结果 $u_1 = f_1(x)$、$u_2 = f_2(u_1)$，则
+
+$$
+\frac{\mathrm dy}{\mathrm dx} = f_3'(u_2)\cdot f_2'(u_1)\cdot f_1'(x).
+$$
+
+注意每个因子都在**自己的输入点**上求值：$f_2'$ 用的是 $u_1$，不是 $x$。这意味着要计算导数，必须先算出（并记住）所有中间结果 $u_1, u_2$。这个看似平凡的事实决定了反向传播的内存开销。
+
+## 计算图：把复合函数画出来
+
+**计算图**（computational graph）把一个计算过程画成有向无环图：每个节点是一个变量（输入、参数或中间结果），每条边表示“这个变量被用来计算那个变量”。例如单个神经元的平方损失
+
+$$
+z = wx + b,\qquad a = \tanh z,\qquad \ell = \tfrac12(a - t)^2
+$$
+
+对应一个从 $w, x, b$ 出发、经过 $z, a$、到达 $\ell$ 的图。在图上求导分两趟：
+
+1. **前向传递**（forward pass）：按拓扑顺序从输入算到输出，记下每个节点的值。
+2. **反向传递**（backward pass）：从输出出发，$\frac{\partial\ell}{\partial\ell} = 1$；按相反的顺序，每个节点把“损失对自己的导数”乘以局部导数，传给它的输入。
+
+取 $w = 0.5$，$x = 2$，$b = -0.5$，$t = 1$。前向：$z = 0.5$，$a = \tanh 0.5\approx 0.4621$，$\ell\approx 0.1447$。反向：
+
+$$
+\frac{\partial\ell}{\partial a} = a - t\approx -0.5379,\quad
+\frac{\partial\ell}{\partial z} = \frac{\partial\ell}{\partial a}(1 - a^2)\approx -0.4231,\quad
+\frac{\partial\ell}{\partial w} = \frac{\partial\ell}{\partial z}\,x\approx -0.8462,\quad
+\frac{\partial\ell}{\partial b} = \frac{\partial\ell}{\partial z}\approx -0.4231.
+$$
+
+<Diagram width={720} height={250} label="单个神经元的计算图：上方是前向值，下方虚线是反向传回的梯度">
+  <Box x={20} y={30} w={70} h={44} label="w" sub="0.5" tone="info" />
+  <Box x={20} y={100} w={70} h={44} label="x" sub="2" tone="info" />
+  <Box x={20} y={170} w={70} h={44} label="b" sub="−0.5" tone="info" />
+  <Box x={170} y={90} w={110} h={64} label="z = wx + b" sub="0.5" tone="accent" mono />
+  <Box x={350} y={90} w={100} h={64} label="a = tanh z" sub="0.4621" tone="accent" mono />
+  <Box x={520} y={90} w={110} h={64} label="ℓ = ½(a−t)²" sub="0.1447" tone="strong" mono />
+  <Arrow from={[90, 52]} to={[170, 108]} />
+  <Arrow from={[90, 122]} to={[170, 122]} />
+  <Arrow from={[90, 192]} to={[170, 138]} />
+  <Arrow from={[280, 122]} to={[350, 122]} />
+  <Arrow from={[450, 122]} to={[520, 122]} />
+  <Text x={485} y={185} label="∂ℓ/∂a = −0.538" size="sm" tone="accent2" />
+  <Text x={315} y={185} label="∂ℓ/∂z = −0.423" size="sm" tone="accent2" />
+  <Text x={315} y={205} label="（× (1 − a²) = 0.786）" size="sm" tone="muted" />
+  <Text x={130} y={30} label="∂ℓ/∂w = −0.846" size="sm" tone="accent2" anchor="start" />
+  <Text x={130} y={230} label="∂ℓ/∂b = −0.423" size="sm" tone="accent2" anchor="start" />
+  <Arrow from={[575, 154]} via={[[575, 166]]} to={[225, 166]} tone="accent2" dashed />
+  <Fragment slot="caption">上方实线是前向依赖，框内小字是前向值。反向传递从 $\ell$ 出发，每经过一个节点乘以该节点的局部导数（例如 $\tanh$ 的局部导数 $1 - a^2$），到达参数时就得到损失对参数的偏导数。</Fragment>
+</Diagram>
+
+整个过程中没有出现任何“大公式”。每个节点只需要知道两件事：前向时怎样从输入算出输出，反向时怎样把输出的梯度乘以局部导数传回输入。这种局部性正是自动微分能够自动化的原因——[从零实现自动微分](/math/autodiff/)一章会把它写成一个不到一百行的引擎。
+
+## 多元链式法则：路径相乘，路径相加
+
+单链只是特例。在一般的计算图里，一个变量可能**被多个后继节点使用**。例如 $f(x) = x\cdot e^x$：$x$ 既直接进入乘法，又先经过 $e^x$ 再进入乘法。此时 $x$ 的一个小变化会沿两条路径同时影响输出。
+
+设 $z = F(u, v)$，而 $u = u(x)$、$v = v(x)$ 都依赖 $x$。$x$ 变化 $h$ 时，$u$ 变化约 $u'(x)h$，$v$ 变化约 $v'(x)h$；再由多元线性近似 $F(u + \delta_u, v + \delta_v)\approx F + \frac{\partial F}{\partial u}\delta_u + \frac{\partial F}{\partial v}\delta_v$，两个变化在一阶上**直接相加**：
+
+<KeyEq label="多元链式法则">
+
+$$
+\frac{\mathrm d z}{\mathrm d x} = \frac{\partial z}{\partial u}\frac{\mathrm d u}{\mathrm d x} + \frac{\partial z}{\partial v}\frac{\mathrm d v}{\mathrm d x}.
+$$
+
+</KeyEq>
+
+推广到任意计算图：**损失对某个节点的导数，等于沿从该节点到损失的每一条路径，把路径上的局部导数相乘，再对所有路径求和。** 对 $f(x) = x e^x$，令 $u = x$，$v = e^x$，$z = uv$：
+
+$$
+\frac{\mathrm d f}{\mathrm d x} = \underbrace{v\cdot 1}_{\text{path through }u} + \underbrace{u\cdot e^x}_{\text{path through }v} = e^x(1 + x),
+$$
+
+正是乘积法则的结果。乘积法则本身只是多元链式法则的一个特例。
+
+<Diagram width={720} height={230} label="多路径汇合：x 通过 u 和 v 两条路径影响 z，梯度沿两条路径传回后相加">
+  <Box x={40} y={85} w={80} h={56} label="x" tone="info" />
+  <Box x={250} y={20} w={110} h={56} label="u = g(x)" tone="accent" mono />
+  <Box x={250} y={150} w={110} h={56} label="v = h(x)" tone="accent" mono />
+  <Box x={500} y={85} w={120} h={56} label="z = F(u, v)" tone="strong" mono />
+  <Arrow from={[120, 105]} to={[250, 48]} label="g′(x)" />
+  <Arrow from={[120, 121]} to={[250, 178]} label="h′(x)" labelSide="below" />
+  <Arrow from={[360, 48]} to={[500, 105]} label="∂F/∂u" />
+  <Arrow from={[360, 178]} to={[500, 121]} label="∂F/∂v" labelSide="below" />
+  <Text x={180} y={113} label="+" size="lg" tone="accent2" bold />
+  <Text x={640} y={60} label="dz/dx =" anchor="start" size="sm" tone="accent2" />
+  <Text x={640} y={82} label="∂F/∂u · g′" anchor="start" size="sm" tone="accent2" />
+  <Text x={640} y={104} label="+ ∂F/∂v · h′" anchor="start" size="sm" tone="accent2" />
+  <Fragment slot="caption">每条边标着它的局部导数。从 $x$ 到 $z$ 有两条路径，各自的边相乘，再把两条路径的结果相加。在反向传递中，“相加”发生在 $x$ 处：两个后继节点各自送回一份梯度，$x$ 把它们累加起来。</Fragment>
+</Diagram>
+
+“梯度相加”在实际代码中极其常见：残差连接 $y = x + F(x)$ 让 $x$ 同时走恒等路径和 $F$ 路径；权重共享（输入嵌入与输出层共用一个矩阵）让同一参数出现在图的两个位置；一个批次里的 $B$ 个样本共用同一组权重，每个样本都贡献一份梯度。PyTorch 的 `.grad` 是**累加**的，而不是覆盖的，原因就在这里——这也是为什么每步训练前必须 `zero_grad()`。
+
+### 向量形式：雅可比矩阵相乘
+
+当中间变量是向量时，链式法则的每一项变成矩阵。设 $u = g(x)\in\mathbb R^m$，$x\in\mathbb R^n$，**雅可比矩阵**（Jacobian）$J_g\in\mathbb R^{m\times n}$ 的第 $(i, j)$ 个元素是 $\partial u_i/\partial x_j$。复合函数 $y = f(g(x))$ 的雅可比是两个雅可比的矩阵乘积：
+
+$$
+J_{f\circ g}(x) = J_f(g(x))\; J_g(x).
+$$
+
+逐元素看，$\frac{\partial y_i}{\partial x_j} = \sum_k\frac{\partial y_i}{\partial u_k}\frac{\partial u_k}{\partial x_j}$——对中间变量的每个分量求和，正是“路径相加”：$x_j$ 经过 $u_1, \dots, u_m$ 共 $m$ 条路径影响 $y_i$。矩阵乘法自动完成了路径求和。下一章会系统地处理这种向量形式。
+
+## 前向模式与反向模式
+
+### 同一条链，两种乘法顺序
+
+考虑一个 $L$ 层的复合函数 $y = f_L(\cdots f_2(f_1(x)))$，$x\in\mathbb R^n$，$y\in\mathbb R^m$。它的雅可比是一串矩阵的乘积
+
+$$
+J = J_L\, J_{L-1}\cdots J_2\, J_1 .
+$$
+
+矩阵乘法满足结合律，所以可以从任一端开始乘。两种顺序对应自动微分的两种模式：
+
+- **前向模式**（forward mode）从右往左：先算 $J_1 v$，再算 $J_2(J_1 v)$……每一步都是“雅可比乘向量”（Jacobian-vector product，JVP）。它沿着前向计算的方向，追踪“输入沿方向 $v$ 微动时，每个中间变量怎样变化”。一次前向模式传递得到 $Jv$，即**一个输入方向**对全部输出的影响。
+- **反向模式**（reverse mode）从左往右：先算 $g^\top J_L$，再算 $(g^\top J_L)J_{L-1}$……每一步都是“向量乘雅可比”（vector-Jacobian product，VJP）。它逆着前向计算的方向，追踪“每个中间变量对输出的某个组合 $g^\top y$ 有多重要”。一次反向传递得到 $g^\top J$，即**一个输出组合**对全部输入的梯度。
+
+<Diagram width={720} height={210} label="同一串雅可比乘积的两种计算顺序：前向模式从右乘起，反向模式从左乘起">
+  <Box x={130} y={70} w={90} h={50} label="J₃" sub="(m, d₂)" />
+  <Box x={250} y={70} w={90} h={50} label="J₂" sub="(d₂, d₁)" />
+  <Box x={370} y={70} w={90} h={50} label="J₁" sub="(d₁, n)" />
+  <Box x={490} y={70} w={70} h={50} label="v" sub="(n, 1)" tone="info" />
+  <Box x={30} y={70} w={70} h={50} label="gᵀ" sub="(1, m)" tone="accent2" />
+  <Arrow from={[525, 140]} via={[[525, 160], [175, 160]]} to={[175, 140]} tone="info" label="前向模式：J₁v → J₂(J₁v) → …（JVP）" labelSide="below" />
+  <Arrow from={[65, 50]} via={[[65, 30], [415, 30]]} to={[415, 50]} tone="accent2" label="反向模式：gᵀJ₃ → (gᵀJ₃)J₂ → …（VJP）" />
+  <Text x={600} y={95} label="n 个输入" anchor="start" size="sm" tone="muted" />
+  <Text x={600} y={117} label="m 个输出" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">两种顺序得到的数学结果相同，但中间结果的形状不同：前向模式始终携带一个列向量（与输入同维），反向模式始终携带一个行向量（与输出同维）。都只做矩阵-向量乘，从不构造完整的雅可比矩阵。</Fragment>
+</Diagram>
+
+### 为什么深度学习用反向模式
+
+要得到完整的雅可比 $J\in\mathbb R^{m\times n}$，前向模式需要对 $n$ 个坐标方向各跑一遍（每遍得到一列），反向模式需要对 $m$ 个输出各跑一遍（每遍得到一行）。训练神经网络时，输出是**一个标量损失**（$m = 1$），输入是**全部参数**（$n$ 可达 $10^{9}$ 以上）。前向模式需要 $10^9$ 遍；反向模式只需要 **1 遍**，一次就得到损失对所有参数的梯度。
+
+一遍反向传递有多贵？对于常见的运算，VJP 的计算量与前向运算同量级。例如矩阵乘 $Y = XW^\top$ 的前向是一次矩阵乘，反向要算 $\mathrm dX$ 和 $\mathrm dW$ 两次同样大小的矩阵乘（见[反向传播](/math/backprop/)）。所以完整的“前向 + 反向”大约是前向的 3 倍，这就是[资源核算](/pytorch/resource-accounting/)里“训练 FLOPs $\approx 6\times$ 参数量 $\times$ token 数”中那个 6 的来源（前向 2、反向 4）。Griewank 把这一点总结为“廉价梯度原理”：计算标量函数梯度的代价，最多是计算函数本身的一个小常数倍，与参数数量无关。
+
+反向模式的代价是**内存**。回忆一元链式法则的观察：每个局部导数要在自己的输入点上求值。反向传递按与前向相反的顺序进行，所以前向时的所有中间结果（激活值）都必须保存下来，直到反向用完为止。对大模型来说，这些激活往往比参数本身还占显存，这催生了激活重计算（activation checkpointing）等技术。前向模式没有这个问题：导数与值同时向前流动，用完即弃。
+
+| | 前向模式（JVP） | 反向模式（VJP） |
+| --- | --- | --- |
+| 一遍得到 | $Jv$：一个输入方向的影响 | $g^\top J$：一个输出组合的梯度 |
+| 完整雅可比需要 | $n$ 遍（输入数） | $m$ 遍（输出数） |
+| 标量损失、$n$ 个参数 | $n$ 遍 | 1 遍 |
+| 额外内存 | 与单步运算同量级 | 需保存全部中间结果 |
+| 典型用途 | 少输入多输出、Hessian-向量积的内层 | 神经网络训练 |
+
+### 用对偶数实现前向模式
+
+前向模式有一种优雅的实现：**对偶数**（dual number）。给每个数配一个“切向分量”，写成 $a + \dot a\,\varepsilon$，并规定 $\varepsilon^2 = 0$。于是
+
+$$
+(a + \dot a\varepsilon)(b + \dot b\varepsilon) = ab + (\dot a b + a\dot b)\varepsilon,
+$$
+
+$\varepsilon$ 的系数恰好是乘积法则。对任意光滑函数，定义 $f(a + \dot a\varepsilon) = f(a) + f'(a)\dot a\,\varepsilon$（这就是泰勒展开在 $\varepsilon^2 = 0$ 时的截断），链式法则就会自动成立。把输入设为 $x + 1\cdot\varepsilon$，算完以后读出 $\varepsilon$ 的系数，就是导数。
+
+<CodeFile path="src/llms_from_scratch/math/chain_rule.py" symbol={['Dual', 'd_sin']} />
+
+用它求梯度时，要对每个输入坐标单独跑一遍，把那个坐标的切向分量设为 1、其余设为 0：
+
+<CodeFile path="src/llms_from_scratch/math/chain_rule.py" region="forward-mode" />
+
+测试中对三元函数 $f(x, y, z) = \tanh(xy + z)\,x + \sin z$ 跑了 3 遍前向模式，结果与 PyTorch 的一次 `backward()` 完全一致。三个输入时 3 遍尚可接受；十亿个参数时，这就是十亿遍。
+
+## 手算一个两层网络
+
+现在把所有工具用在一个完整的小网络上。网络有 2 个输入、2 个隐藏单元（ReLU）、1 个输出，损失为平方误差：
+
+$$
+z = W_1x + b_1,\qquad h = \operatorname{relu}(z),\qquad y = w_2\cdot h + b_2,\qquad \ell = \tfrac12(y - t)^2 .
+$$
+
+这里用列向量写法 $W_1x$（单个样本），下一章再处理批量。取
+
+$$
+x = \begin{bmatrix}1\\2\end{bmatrix},\quad
+W_1 = \begin{bmatrix}1 & -1\\ 0.5 & 1\end{bmatrix},\quad
+b_1 = \begin{bmatrix}0.5\\-1\end{bmatrix},\quad
+w_2 = \begin{bmatrix}2\\-1\end{bmatrix},\quad
+b_2 = 0.5,\quad t = 1.
+$$
+
+### 前向传递
+
+$$
+z = \begin{bmatrix}1 - 2 + 0.5\\ 0.5 + 2 - 1\end{bmatrix} = \begin{bmatrix}-0.5\\1.5\end{bmatrix},\quad
+h = \begin{bmatrix}0\\1.5\end{bmatrix},\quad
+y = 2\cdot 0 - 1.5 + 0.5 = -1,\quad
+\ell = \tfrac12(-1 - 1)^2 = 2 .
+$$
+
+第一个隐藏单元的预激活为负，被 ReLU 置零。
+
+### 反向传递
+
+从 $\ell$ 出发，逐个节点乘以局部导数：
+
+1. $\frac{\partial\ell}{\partial y} = y - t = -2$。
+2. $y = w_2\cdot h + b_2$ 对 $w_2$、$b_2$、$h$ 的局部导数分别是 $h$、$1$、$w_2$。于是 $\frac{\partial\ell}{\partial w_2} = -2h = (0, -3)$，$\frac{\partial\ell}{\partial b_2} = -2$，$\frac{\partial\ell}{\partial h} = -2w_2 = (-4, 2)$。
+3. ReLU 的局部导数是 $\mathbf 1[z > 0] = (0, 1)$，逐元素相乘：$\frac{\partial\ell}{\partial z} = (-4\cdot0,\ 2\cdot1) = (0, 2)$。第一个单元“死”了，梯度在这里被截断。
+4. $z_i = \sum_j (W_1)_{ij}x_j + (b_1)_i$，所以 $\frac{\partial\ell}{\partial (W_1)_{ij}} = \frac{\partial\ell}{\partial z_i}x_j$，写成矩阵是外积：
+
+$$
+\frac{\partial\ell}{\partial W_1} = \frac{\partial\ell}{\partial z}\,x^\top = \begin{bmatrix}0\\2\end{bmatrix}\begin{bmatrix}1 & 2\end{bmatrix} = \begin{bmatrix}0 & 0\\ 2 & 4\end{bmatrix},\qquad
+\frac{\partial\ell}{\partial b_1} = \begin{bmatrix}0\\2\end{bmatrix}.
+$$
+
+5. 每个 $x_j$ 通过 $z_1$ 和 $z_2$ **两条路径**影响损失，按多元链式法则相加：$\frac{\partial\ell}{\partial x_j} = \sum_i\frac{\partial\ell}{\partial z_i}(W_1)_{ij}$，即
+
+$$
+\frac{\partial\ell}{\partial x} = W_1^\top\frac{\partial\ell}{\partial z} = \begin{bmatrix}1 & 0.5\\-1 & 1\end{bmatrix}\begin{bmatrix}0\\2\end{bmatrix} = \begin{bmatrix}1\\2\end{bmatrix}.
+$$
+
+<Diagram width={720} height={280} label="两层网络的前向值与反向梯度">
+  <Box x={20} y={100} w={80} h={56} label="x" sub="(1, 2)" tone="info" />
+  <Box x={150} y={100} w={110} h={56} label="z = W₁x + b₁" sub="(−0.5, 1.5)" tone="accent" />
+  <Box x={310} y={100} w={90} h={56} label="h = relu z" sub="(0, 1.5)" tone="accent" />
+  <Box x={450} y={100} w={110} h={56} label="y = w₂·h + b₂" sub="−1" tone="accent" />
+  <Box x={610} y={100} w={70} h={56} label="ℓ" sub="2" tone="strong" />
+  <Arrow from={[100, 128]} to={[150, 128]} />
+  <Arrow from={[260, 128]} to={[310, 128]} />
+  <Arrow from={[400, 128]} to={[450, 128]} />
+  <Arrow from={[560, 128]} to={[610, 128]} />
+  <Box x={150} y={20} w={110} h={44} label="W₁, b₁" tone="info" />
+  <Box x={450} y={20} w={110} h={44} label="w₂, b₂" tone="info" />
+  <Arrow from={[205, 64]} to={[205, 100]} />
+  <Arrow from={[505, 64]} to={[505, 100]} />
+  <Text x={645} y={190} label="∂ℓ/∂y = −2" size="sm" tone="accent2" />
+  <Text x={505} y={190} label="∂ℓ/∂h = (−4, 2)" size="sm" tone="accent2" />
+  <Text x={355} y={190} label="∂ℓ/∂z = (0, 2)" size="sm" tone="accent2" />
+  <Text x={205} y={190} label="∂ℓ/∂x = (1, 2)" size="sm" tone="accent2" />
+  <Text x={355} y={215} label="relu 截断第 1 个分量" size="sm" tone="muted" />
+  <Text x={505} y={215} label="∂ℓ/∂w₂ = (0, −3)" size="sm" tone="accent2" />
+  <Text x={205} y={215} label="∂ℓ/∂W₁ = [[0,0],[2,4]]" size="sm" tone="accent2" />
+  <Arrow from={[680, 245]} to={[40, 245]} tone="accent2" dashed label="反向传递" labelSide="below" />
+  <Fragment slot="caption">框内小字是前向值，下方是反向传递得到的梯度。ReLU 在 $z_1 = -0.5 < 0$ 处导数为 0，所以与第一个隐藏单元相连的参数（$W_1$ 第一行、$b_1$ 第一个分量、$w_2$ 第一个分量）本步都得不到梯度。</Fragment>
+</Diagram>
+
+整个反向传递只用到三种操作：标量或逐元素的乘法（第 1–3 步），外积（参数的梯度），以及转置矩阵乘向量（输入的梯度，对应路径求和）。代码与上面的推导一一对应：
+
+<CodeFile path="src/llms_from_scratch/math/chain_rule.py" region="tiny-network" />
+
+测试先核对手算的数值（$z$、$\ell$、$\partial\ell/\partial w_2$、$\partial\ell/\partial W_1$、$\partial\ell/\partial x$），再用 PyTorch 对同一个网络调用 `backward()`，五个梯度全部一致。注意步骤 4 和步骤 5 的形式：参数梯度是“上游梯度 ⊗ 输入”的外积，输入梯度是“权重转置 × 上游梯度”。这两条规则推广到批量矩阵，就是下一章线性层反向传播的 $\mathrm dW = \mathrm dY^\top X$ 和 $\mathrm dX = \mathrm dY\, W$。
+
+## 小结
+
+- 链式法则：变化率沿链条相乘，每个局部导数在自己的输入点上求值，因此必须保存前向的中间结果。
+- 计算图把复合函数拆成局部运算。前向传递计算并保存值；反向传递从 $\partial\ell/\partial\ell = 1$ 出发，逐节点乘以局部导数。
+- 多元链式法则：沿每条路径相乘，再对所有路径求和。一个变量被多处使用时，它的梯度是各处送回的梯度之和——`.grad` 因此是累加的。
+- 雅可比链 $J_L\cdots J_1$ 可以从右乘（前向模式，JVP）或从左乘（反向模式，VJP）。标量损失、海量参数的情形下，反向模式一遍得到全部梯度，代价约为前向的 2 倍，但要保存激活。
+- 两层网络的反向传播只用到逐元素乘、外积（参数梯度）和转置矩阵乘（输入梯度）。
+
+## 练习
+
+1. 求 $f(x) = \log(1 + e^{-x})$ 的导数，并用 sigmoid 函数 $\sigma$ 表示结果。
+
+<details>
+<summary>答案</summary>
+
+令 $u = 1 + e^{-x}$，$f = \log u$。$\frac{\mathrm df}{\mathrm du} = 1/u$，$\frac{\mathrm du}{\mathrm dx} = -e^{-x}$，所以 $f'(x) = \frac{-e^{-x}}{1+e^{-x}} = -(1 - \sigma(x)) = \sigma(x) - 1$。$f$ 是二分类逻辑回归在标签为 1 时的损失 $-\log\sigma(x)$，导数 $\sigma(x) - 1$ 是“预测概率减标签”的形式，与第四章 softmax 交叉熵的结论一致。
+
+</details>
+
+2. 设 $f(x) = x^x$（$x > 0$）。把它写成 $e^{u\log v}$ 的形式，其中 $u = v = x$，用多元链式法则求 $f'(x)$。
+
+<details>
+<summary>答案</summary>
+
+$f = e^{g}$，$g = u\log v$。$\frac{\partial g}{\partial u} = \log v$，$\frac{\partial g}{\partial v} = u/v$。两条路径相加：$\frac{\mathrm dg}{\mathrm dx} = \log x + 1$。所以 $f'(x) = x^x(\log x + 1)$。只沿一条路径求导会得到错误的 $x^x\log x$（把 $x$ 当作只出现在指数上）或 $x\cdot x^{x-1}$（只出现在底数上）。
+
+</details>
+
+3. 一个网络把 $n = 1000$ 维输入映射到 $m = 3$ 维输出。要得到完整的 $3\times1000$ 雅可比，前向模式和反向模式各需要几遍？如果要的是 Hessian-向量积 $\nabla^2\ell\cdot v$ 呢？
+
+<details>
+<summary>答案</summary>
+
+前向模式需要 1000 遍，反向模式需要 3 遍，后者更好。Hessian-向量积可以写成 $\nabla_x(\nabla\ell\cdot v)$，也可以写成“梯度函数 $\nabla\ell$ 沿 $v$ 的方向导数”。常用做法是“反向套前向”：用反向模式计算梯度 $\nabla\ell(x)$，再对这个计算整体用一遍前向模式沿 $v$ 求方向导数，总代价是常数倍的一次梯度计算，不需要构造 $n\times n$ 的 Hessian。
+
+</details>
+
+4. 在本章的两层网络中，若把 $b_1$ 改成 $(1.5, -1)$，重新计算前向和全部梯度。哪些梯度从零变成了非零？
+
+<details>
+<summary>答案</summary>
+
+$z = (1 - 2 + 1.5,\ 1.5) = (0.5, 1.5)$，$h = (0.5, 1.5)$，$y = 1 - 1.5 + 0.5 = 0$，$\ell = 0.5$。$\partial\ell/\partial y = -1$，$\partial\ell/\partial w_2 = -h = (-0.5, -1.5)$，$\partial\ell/\partial b_2 = -1$，$\partial\ell/\partial h = -w_2 = (-2, 1)$，两个单元都激活，$\partial\ell/\partial z = (-2, 1)$，$\partial\ell/\partial W_1 = \begin{bmatrix}-2 & -4\\1 & 2\end{bmatrix}$，$\partial\ell/\partial b_1 = (-2, 1)$，$\partial\ell/\partial x = W_1^\top(-2, 1) = (-1.5, 3)$。$W_1$ 的第一行、$b_1$ 和 $w_2$ 的第一个分量都从 0 变成非零：第一个单元复活了。
+
+</details>
+
+5. 一个 70 亿参数的模型在一个含 $10^6$ 个 token 的批次上训练一步。按“前向 2、反向 4”的规则估算这一步的 FLOPs。
+
+<details>
+<summary>答案</summary>
+
+前向每个参数每个 token 约 2 FLOPs（一次乘一次加），反向约 4 FLOPs（输入梯度和权重梯度各一次矩阵乘）。总计 $6\times7\times10^9\times10^6 = 4.2\times10^{16}$ FLOPs。这个估算忽略了注意力分数等与参数无关的计算，序列较长时需要另加。
+
+</details>
+
+## 参考文献
+
+- David E. Rumelhart, Geoffrey E. Hinton, Ronald J. Williams. Learning representations by back-propagating errors. *Nature* 323, 533–536, 1986. [doi.org/10.1038/323533a0](https://doi.org/10.1038/323533a0)
+- Atılım Güneş Baydin, Barak A. Pearlmutter, Alexey Andreyevich Radul, Jeffrey Mark Siskind. Automatic Differentiation in Machine Learning: a Survey. *JMLR* 18(153), 2018. [arXiv:1502.05767](https://arxiv.org/abs/1502.05767)
+- Andreas Griewank, Andrea Walther. *Evaluating Derivatives: Principles and Techniques of Algorithmic Differentiation*, 2nd ed. SIAM, 2008（廉价梯度原理与内存开销）。
+- Christopher Olah. Calculus on Computational Graphs: Backpropagation, 2015. [colah.github.io/posts/2015-08-Backprop](https://colah.github.io/posts/2015-08-Backprop/)
+- JAX 文档：Autodiff Cookbook（JVP、VJP 与 Hessian-向量积）。[docs.jax.dev/en/latest/notebooks/autodiff_cookbook.html](https://docs.jax.dev/en/latest/notebooks/autodiff_cookbook.html)
+- Jared Kaplan et al. Scaling Laws for Neural Language Models, 2020（训练 FLOPs $\approx 6ND$）。[arXiv:2001.08361](https://arxiv.org/abs/2001.08361)

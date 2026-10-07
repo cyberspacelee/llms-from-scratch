@@ -2,7 +2,246 @@
 title: 从零实现自动微分
 description: 先写一个标量 autograd 引擎，再把它推广到张量：拓扑排序、梯度累加、广播的反向归约，最后与 PyTorch 逐项对照。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/math/micrograd.py
+  - src/llms_from_scratch/math/tensor_autograd.py
+  - tests/math/test_micrograd.py
+  - tests/math/test_tensor_autograd.py
 ---
 
-本章正在撰写。
+前两章已经具备了反向传播需要的全部数学：链式法则告诉我们沿计算图把局部导数相乘、在汇合处相加；VJP 告诉我们每个算子怎样把输出梯度变成输入梯度。但到目前为止，每个网络的反向传递都是手写的——[链式法则](/math/chain-rule/)里两层网络的 `tiny_network` 把前向和反向一行行写死。换一个网络结构，就要重写一遍。
+
+**自动微分**（automatic differentiation，autodiff）把这件事交给程序：用户只写前向计算，程序在计算的同时记录计算图，然后自动按正确的顺序调用每个算子的局部 VJP。这不是符号微分（不推导公式），也不是数值差分（没有截断误差），而是对链式法则的精确、机械的执行。PyTorch 的 `loss.backward()` 做的就是这件事。
+
+本章分两步实现它。第一步是一个只处理标量的引擎（思路来自 Andrej Karpathy 的 micrograd），不到一百行，却包含了反向模式自动微分的全部核心：节点、局部反向闭包、拓扑排序、梯度累加。我们用它训练一个小 MLP。第二步把节点从标量换成 NumPy 数组，处理矩阵乘、广播和交叉熵，并与 PyTorch 逐个参数比对梯度。
+
+## 设计：每个节点记住什么
+
+回忆[链式法则与计算图](/math/chain-rule/)中反向传递的规则：从损失出发，按与前向相反的顺序，每个节点把“损失对自己的梯度”乘以局部导数，**累加**到它的每个输入上。要执行这个规则，每个节点需要保存四样东西：
+
+1. **值** `data`：前向计算的结果，局部导数要在这个点上求值。
+2. **梯度** `grad`：最终损失对本节点的偏导数，初始为 0，反向时累加。
+3. **父节点** `_parents`：本节点由哪些节点计算而来，即计算图的边。
+4. **局部反向函数** `_backward`：一个闭包，知道怎样把 `self.grad` 乘以局部导数并加到父节点的 `grad` 上。
+
+<Diagram width={720} height={210} label="一个乘法节点保存的信息，以及它的局部反向怎样把梯度送回两个父节点">
+  <Box x={30} y={30} w={130} h={56} label="a" sub="data=2, grad" tone="info" />
+  <Box x={30} y={120} w={130} h={56} label="b" sub="data=−3, grad" tone="info" />
+  <Region x={250} y={20} w={250} h={170} title="out = a * b" tone="accent" />
+  <Text x={270} y={70} label="data = −6" anchor="start" mono size="sm" />
+  <Text x={270} y={95} label="grad（由下游填入）" anchor="start" size="sm" />
+  <Text x={270} y={120} label="_parents = (a, b)" anchor="start" mono size="sm" />
+  <Text x={270} y={145} label="_backward:" anchor="start" mono size="sm" />
+  <Text x={290} y={167} label="a.grad += b.data·out.grad" anchor="start" mono size="sm" tone="accent2" />
+  <Arrow from={[160, 58]} to={[250, 80]} />
+  <Arrow from={[160, 148]} to={[250, 130]} />
+  <Box x={580} y={80} w={110} h={56} label="下游节点" tone="ghost" />
+  <Arrow from={[500, 108]} to={[580, 108]} />
+  <Arrow from={[580, 124]} via={[[540, 124], [540, 200], [95, 200]]} to={[95, 176]} tone="accent2" dashed />
+  <Fragment slot="caption">前向时 `out` 记录自己的值、父节点和一个闭包。反向时下游先把 `out.grad` 填好，再调用 `out._backward()`，闭包把 $b\cdot\overline{\mathrm{out}}$ 加到 `a.grad`、把 $a\cdot\overline{\mathrm{out}}$ 加到 `b.grad`（乘积的局部导数）。</Fragment>
+</Diagram>
+
+## 标量引擎：运算与局部反向
+
+每个运算都遵循同一个模式：算出结果，创建新节点并记下父节点，再定义一个闭包描述局部 VJP。加法的两个局部导数都是 1，乘法的局部导数是“另一个因子”：
+
+<CodeFile path="src/llms_from_scratch/math/micrograd.py" symbol={['Value.__add__', 'Value.__mul__']} />
+
+闭包里用的是 `+=` 而不是 `=`。原因是[多元链式法则的“路径相加”](/math/chain-rule/)：一个节点可能被多个下游节点使用，每个下游都会调用一次自己的 `_backward` 并贡献一份梯度，这些份额必须加起来。一个极端情形是 `a + a`：`self` 和 `other` 是同一个对象，两行 `+=` 一共给 `a.grad` 加了 2 次 `out.grad`，恰好是 $\frac{\mathrm d(2a)}{\mathrm da} = 2$；如果写成 `=`，第二行会覆盖第一行，得到错误的 1。
+
+非线性函数的局部导数正好可以用前向结果表示，这让闭包可以直接复用前向值：
+
+<CodeFile path="src/llms_from_scratch/math/micrograd.py" symbol={['Value.exp', 'Value.tanh']} />
+
+减法、除法、取负都由已有的运算组合而成（例如 $a/b = a\cdot b^{-1}$），不需要单独写反向：只要组合中的每个原语都有正确的局部 VJP，复合运算的梯度就自动正确。这是自动微分最实用的性质——**原语少，组合多**。
+
+## 拓扑排序与反向传递
+
+有了局部反向，还需要决定**调用顺序**。一个节点的 `_backward` 只能在它的 `grad` 已经完整（所有下游的贡献都已累加）之后调用，否则传给父节点的是不完整的梯度。满足这个条件的顺序是计算图的**逆拓扑序**：如果 $u$ 是 $v$ 的父节点（$u$ 参与计算 $v$），那么 $v$ 必须先于 $u$ 处理。
+
+拓扑序用深度优先搜索的后序遍历得到：先递归访问一个节点的所有父节点，再把它自己加入列表。这样每个节点都排在它的所有父节点之后。反向传递就是把这个列表倒过来逐个调用：
+
+<CodeFile path="src/llms_from_scratch/math/micrograd.py" symbol="Value.backward" />
+
+用一个具体的图走一遍。$a = 2$，$b = -3$，$c = ab$，$d = c + a$，$L = d^2$。注意 $a$ 被用了两次。
+
+<Diagram width={720} height={230} label="例子 L = (ab + a)² 的计算图、拓扑序与反向传递">
+  <Box x={20} y={40} w={110} h={56} label="① a" sub="2 · grad 16" tone="info" />
+  <Box x={20} y={140} w={110} h={56} label="② b" sub="−3 · grad −16" tone="info" />
+  <Box x={210} y={140} w={120} h={56} label="③ c = a·b" sub="−6 · grad −8" tone="accent" />
+  <Box x={400} y={90} w={120} h={56} label="④ d = c + a" sub="−4 · grad −8" tone="accent" />
+  <Box x={590} y={90} w={110} h={56} label="⑤ L = d²" sub="16 · grad 1" tone="strong" />
+  <Arrow from={[130, 80]} to={[210, 158]} />
+  <Arrow from={[130, 168]} to={[210, 168]} />
+  <Arrow from={[330, 168]} to={[400, 128]} />
+  <Arrow from={[130, 60]} via={[[360, 60]]} to={[400, 104]} />
+  <Arrow from={[520, 118]} to={[590, 118]} />
+  <Text x={360} y={215} label="拓扑序 ①②③④⑤；反向按 ⑤④③②① 调用 _backward" size="sm" tone="muted" />
+  <Fragment slot="caption">圈号是拓扑序。反向时 $\bar L = 1$，$\bar d = 2d = -8$；加法把 $-8$ 原样传给 $c$ 和 $a$；乘法给 $a$ 再加 $b\cdot\bar c = (-3)(-8) = 24$，于是 $\bar a = -8 + 24 = 16$，与解析结果 $2d\cdot(b+1) = 16$ 一致。</Fragment>
+</Diagram>
+
+关键在节点 $a$：它从 $d$ 收到 $-8$，又从 $c$ 收到 $24$。因为 $a$ 排在拓扑序的最前面，它在两份贡献都到齐之后才（在逆序中最后）被处理。测试 `test_reused_node_accumulates_gradient` 和 `test_expression_matches_torch` 分别检查了重用节点的累加，以及一个包含十几个运算的复杂表达式与 PyTorch 的梯度一致到 $10^{-9}$。
+
+<Callout tone="note" title="为什么用 id 判重">
+`visited` 集合存的是 `id(v)`，即对象身份，而不是值。两个值恰好相等的不同节点是图上的不同顶点，必须分别处理。PyTorch 的 C++ 引擎同样以节点身份组织图，并在反向前统计每个节点的“待到达梯度数”，用计数代替显式的拓扑排序。
+</Callout>
+
+## 训练一个小 MLP
+
+有了自动微分，搭建并训练网络只需要写前向。一个神经元计算 $\tanh(w\cdot x + b)$，一层是若干神经元，MLP 是若干层：
+
+<CodeFile path="src/llms_from_scratch/math/micrograd.py" region="mlp" />
+
+训练循环的三步与 PyTorch 完全对应：前向算损失、清零梯度后 `backward()`、沿负梯度更新参数。清零这一步不能省：`grad` 是累加的，不清零就会把上一步的梯度带进这一步。测试在 4 个样本上训练一个 $3\to4\to4\to1$ 的网络（41 个参数），200 步后均方误差从 0.94 降到 $4\times10^{-6}$。
+
+<Plot
+  label="micrograd MLP 的训练损失（对数纵轴）"
+  x={[0, 190]}
+  y={[1e-6, 2]}
+  logY
+  xLabel="迭代步数"
+  yLabel="均方误差"
+  series={[
+    { label: '训练损失', points: [[0, 0.936], [2, 0.829], [4, 0.688], [6, 0.513], [8, 0.329], [10, 0.179], [20, 0.0101], [30, 0.00435], [40, 0.00282], [50, 0.00204], [60, 0.00149], [70, 0.00108], [80, 0.000772], [90, 0.000538], [100, 0.000367], [110, 0.000245], [120, 0.00016], [130, 0.000103], [140, 6.56e-05], [150, 4.12e-05], [160, 2.56e-05], [170, 1.58e-05], [180, 9.67e-06], [190, 5.89e-06]] },
+  ]}
+>
+  <Fragment slot="caption">前 20 步损失快速下降（网络找到了把四个样本分开的方向），之后进入缓慢的指数收敛：$\tanh$ 输出逼近 $\pm1$ 时导数 $1 - a^2$ 变小，梯度也随之变小。</Fragment>
+</Plot>
+
+标量引擎的问题是效率。上面这个只有 41 个参数的网络，对一个样本做一次前向就要创建 116 个 `Value` 节点，每个都是 Python 对象，每次运算都要经过 Python 解释器。一个 $4096\times4096$ 的线性层有 1678 万个乘加，对应上千万个节点，完全不可行。解决办法是**把节点的粒度从标量提升到张量**：一个矩阵乘只是图中的一个节点，它的局部 VJP 是[上一章](/math/backprop/)推导的两次矩阵乘，由 NumPy 或 GPU 内核高效完成。
+
+## 从标量到张量
+
+张量版引擎的结构与标量版几乎相同，唯一的改变是局部反向不再是“乘以一个标量导数”，而是一个 VJP 函数：输入 `out.grad`（与输出同形状的数组），返回每个父节点的梯度（与父节点同形状）。
+
+<CodeFile path="src/llms_from_scratch/math/tensor_autograd.py" symbol={['Tensor.__matmul__', 'Tensor.relu']} />
+
+矩阵乘的 VJP 直接套用上一章的结论：对 $C = AB$，$\bar A = \bar CB^\top$，$\bar B = A^\top\bar C$。ReLU 保存了前向的掩码，反向时逐元素相乘。反向传递的主循环也与标量版一致，只是“累加”现在是数组相加：
+
+<CodeFile path="src/llms_from_scratch/math/tensor_autograd.py" symbol="Tensor.backward" />
+
+## 广播的反向：sum_to_shape
+
+张量版本新增的一个难点是广播。线性层的 $XW + b$ 中，$b$ 的形状是 $(d,)$，$XW$ 是 $(N, d)$，加法时 $b$ 被广播到每一行。反向时 `out.grad` 的形状是 $(N, d)$，而 $b$ 的梯度必须是 $(d,)$。怎么从前者得到后者？
+
+把广播看成一个线性映射 $\mathcal B$：它把 $b\in\mathbb R^d$ 复制成 $N$ 行，$\mathcal B(b)_{nk} = b_k$。$\mathcal B$ 是线性的，它的雅可比就是它自己，VJP 是它的**伴随**（转置）$\mathcal B^\top$。伴随由内积关系唯一确定：对任意 $b$ 和任意 $G\in\mathbb R^{N\times d}$，
+
+$$
+\langle\mathcal B(b), G\rangle = \sum_{n,k}b_kG_{nk} = \sum_k b_k\Bigl(\sum_n G_{nk}\Bigr) = \langle b, \mathcal B^\top(G)\rangle,
+$$
+
+所以 $\mathcal B^\top(G)_k = \sum_nG_{nk}$：**广播的伴随是沿被复制的维度求和**。一般地，广播可能在前面补维度（补出来的维度整个求和掉），也可能把大小为 1 的维度拉伸（沿该维求和并保留大小 1）。
+
+<Diagram width={720} height={200} label="广播的前向复制与反向求和">
+  <Matrix x={40} y={80} rows={1} cols={4} cell={[44, 32]} values={[['b₁', 'b₂', 'b₃', 'b₄']]} tone="info" title="b：(1, 4)" />
+  <Arrow from={[230, 96]} to={[300, 96]} label="广播：复制" />
+  <Matrix x={310} y={50} rows={3} cols={4} cell={[44, 32]} values={[['b₁', 'b₂', 'b₃', 'b₄'], ['b₁', 'b₂', 'b₃', 'b₄'], ['b₁', 'b₂', 'b₃', 'b₄']]} tone="info" title="(3, 4)" />
+  <Arrow from={[510, 96]} to={[580, 96]} label="反向：求和" tone="accent2" />
+  <Matrix x={590} y={80} rows={1} cols={4} cell={[28, 32]} values={[['Σ', 'Σ', 'Σ', 'Σ']]} tone="accent2" title="db：(1, 4)" />
+  <Fragment slot="caption">前向时 $b$ 的同一个元素被三行共用，每一行都会送回一份梯度；按多元链式法则，这三份梯度相加。`sum_to_shape` 把形状 (3, 4) 的梯度归约回 (1, 4)。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/math/tensor_autograd.py" region="sum-to-shape" />
+
+加法和乘法的 VJP 都先按普通规则算出与输出同形状的梯度，再用 `sum_to_shape` 归约到各自输入的形状。测试 `test_sum_to_shape_is_adjoint_of_broadcast` 对六种形状直接检验了上面的内积等式。
+
+## log_softmax 与交叉熵
+
+最后实现语言模型的损失。为了数值稳定，不单独实现 softmax 和 log，而是实现 $y = \operatorname{log\_softmax}(z) = z - \operatorname{logsumexp}(z)\mathbf 1$。它的雅可比：$\partial y_i/\partial z_j = \delta_{ij} - p_j$，其中 $p = \operatorname{softmax}(z)$（因为 $\operatorname{logsumexp}$ 的梯度是 $p$）。写成矩阵 $J = I - \mathbf 1p^\top$，VJP 为
+
+$$
+\bar z = J^\top\bar y = \bar y - p\,(\mathbf 1^\top\bar y) = \bar y - p\sum_i\bar y_i .
+$$
+
+交叉熵再由两个简单原语组合：`pick` 从每行取出正确类别的对数概率（反向时把梯度放回原位置，其余位置为 0），`mean` 求批平均，最后乘以 $-1$。组合后的梯度恰好是 $(p - e_y)/N$：`pick` 和 `mean` 送回的 $\bar y$ 在每行只有正确位置为 $-1/N$，代入上式得 $\bar z = -e_y/N + p/N$。
+
+<CodeFile path="src/llms_from_scratch/math/tensor_autograd.py" symbol="Tensor.log_softmax" />
+
+<CodeFile path="src/llms_from_scratch/math/tensor_autograd.py" region="cross-entropy" />
+
+## 与 PyTorch 逐项比对
+
+把所有部件拼起来：一个两层 MLP（$5\to16\to3$，ReLU）加交叉熵损失，批大小 8。测试在 NumPy 引擎和 PyTorch 中用相同的数据和权重各算一遍，比较损失和全部五个张量（输入与四个参数）的梯度：
+
+<CodeFile path="tests/math/test_tensor_autograd.py" symbol="test_mlp_cross_entropy_matches_torch" />
+
+所有梯度在 float64 下的差异小于 $10^{-12}$。这说明我们的引擎和 PyTorch 在数学上做的是同一件事。PyTorch 的 autograd 在工程上多做了很多：用 C++ 实现的图执行器、对就地修改（in-place）的版本检查、只保存反向真正需要的张量、`torch.no_grad()` 关闭记录、`retain_graph` 与高阶导数、以及把每个算子的 VJP 分派到 CPU/GPU 内核。这些机制在 [PyTorch autograd 的工作方式](/pytorch/autograd/)一章中展开，但核心思想不超出本章的一百多行代码。
+
+## 小结
+
+- 反向模式自动微分 = 前向时记录计算图 + 反向时按逆拓扑序调用每个节点的局部 VJP。
+- 每个节点保存值、梯度、父节点和局部反向闭包。梯度用 `+=` 累加，以正确处理一个节点被多处使用（路径相加）；因此每步训练前要清零。
+- 拓扑序由 DFS 后序得到，保证一个节点处理时它的梯度已经完整。
+- 标量引擎每个运算一个 Python 对象，太慢；张量引擎把一个矩阵运算作为一个节点，VJP 由数组运算完成。
+- 广播的反向是沿被复制的维度求和（`sum_to_shape`），这是广播映射的伴随。
+- log_softmax 的 VJP 为 $\bar y - p\sum\bar y$；与 `pick`、`mean` 组合后自动得到交叉熵梯度 $(p - e_y)/N$。
+
+到这里，第一部分关于“怎样求梯度”的内容已经完整。下一章转向另一个问题：损失函数本身从哪里来？为什么语言模型的损失偏偏是交叉熵？
+
+## 练习
+
+1. 给 `Value` 增加 `sigmoid` 方法，要求只用一个节点，并写出它的 `_backward`。
+
+<details>
+<summary>答案</summary>
+
+```python
+def sigmoid(self) -> Value:
+    s = 1 / (1 + math.exp(-self.data))
+    out = Value(s, (self,), "sigmoid")
+
+    def _backward() -> None:
+        self.grad += s * (1 - s) * out.grad
+
+    out._backward = _backward
+    return out
+```
+
+局部导数 $\sigma(1-\sigma)$ 用前向值 `s` 表达，不需要重算指数。也可以用已有原语组合 `1 / (1 + (-self).exp())`，结果相同但会创建 4 个节点。
+
+</details>
+
+2. 如果在 `Value.backward` 中忘了反转拓扑序，直接按 `order` 顺序调用 `_backward`，对 $L = (ab + a)^2$ 会得到什么？
+
+<details>
+<summary>答案</summary>
+
+顺序变成 $a, b, c, d, L$。处理 $a$、$b$ 时它们没有父节点；处理 $c$ 时 `c.grad` 还是 0，传给 $a, b$ 的都是 0；处理 $d$ 时 `d.grad` 也是 0；最后处理 $L$ 才把 $-8$ 送给 $d$，但 $d$ 已经处理过了。结果除了 `d.grad = -8` 外，所有叶子的梯度都是 0。
+
+</details>
+
+3. 两个形状为 `(2, 1, 3)` 与 `(4, 1)` 的张量相加，输出形状是什么？对两个输入，`sum_to_shape` 分别在哪些轴上求和？
+
+<details>
+<summary>答案</summary>
+
+输出为 `(2, 4, 3)`。第一个输入：第 1 轴（大小 1 被拉伸到 4）求和并保留，得 `(2, 1, 3)`。第二个输入：先把补出来的第 0 轴整体求和，得 `(4, 3)`；再对大小为 1、被拉伸到 3 的最后一轴求和并保留，得 `(4, 1)`。
+
+</details>
+
+4. 张量引擎中 `mean` 的 VJP 为什么是 `broadcast_to(g / n, shape)`？把它写成伴随的形式。
+
+<details>
+<summary>答案</summary>
+
+$\operatorname{mean}(X) = \frac1n\sum_iX_i$ 是线性映射 $X\mapsto\frac1n\mathbf 1^\top\operatorname{vec}(X)$，其伴随把标量 $g$ 映为 $\frac gn\mathbf 1$，即与 $X$ 同形状、每个元素都是 $g/n$ 的数组。“求和”与“广播”互为伴随，“求平均”的伴随是“广播再除以 $n$”。
+
+</details>
+
+5. 估算：用标量引擎做一次 $(64, 512)\times(512, 512)$ 的矩阵乘（含加法），大约创建多少个 `Value` 节点？如果每个节点在 Python 中需要 1 微秒，前向需要多久？
+
+<details>
+<summary>答案</summary>
+
+输出有 $64\times512 = 32768$ 个元素，每个需要 512 次乘法和约 512 次加法，共约 $3.4\times10^7$ 个节点，前向约 34 秒，反向更慢，内存也会达到数 GB。同样的计算由 NumPy 的一次 `@` 完成只需约 1 毫秒。
+
+</details>
+
+## 参考文献
+
+- Andrej Karpathy. micrograd: A tiny scalar-valued autograd engine. [github.com/karpathy/micrograd](https://github.com/karpathy/micrograd)
+- Adam Paszke et al. Automatic differentiation in PyTorch. NIPS 2017 Autodiff Workshop. [openreview.net/forum?id=BJJsrmfCZ](https://openreview.net/forum?id=BJJsrmfCZ)
+- PyTorch 文档：Autograd mechanics. [pytorch.org/docs/stable/notes/autograd.html](https://pytorch.org/docs/stable/notes/autograd.html)
+- Atılım Güneş Baydin et al. Automatic Differentiation in Machine Learning: a Survey. *JMLR* 18(153), 2018. [arXiv:1502.05767](https://arxiv.org/abs/1502.05767)
+- Roger Grosse. CSC321 Lecture 10: Automatic Differentiation（反向模式的实现与伴随记号）。[cs.toronto.edu/~rgrosse/courses/csc321_2018/slides/lec10.pdf](https://www.cs.toronto.edu/~rgrosse/courses/csc321_2018/slides/lec10.pdf)
+- Stanford CS336 Spring 2025, Lecture 2: PyTorch, resource accounting. [github.com/stanford-cs336/spring2025-lectures](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py)
