@@ -1,8 +1,267 @@
 ---
 title: 分布式推理：并行、PD 分离与大规模 MoE 服务
-description: 推理中的张量并行与专家并行，prefill/decode 分离部署，DeepSeek 式大规模专家并行推理系统。
+description: 推理中的张量并行为什么收益递减（环形 all-reduce 的延迟与带宽账），prefill/decode 分离部署的动机、KV 传输与容量规划，MoE 的专家并行与 all-to-all，以及 DeepSeek 式大规模专家并行推理系统的并行方案、通信重叠与负载均衡。
 order: 8
-draft: true
+code:
+  - src/llms_from_scratch/inference/capacity.py
+  - tests/inference/test_capacity.py
 ---
 
-本章正在撰写。
+前面几章都发生在一张 GPU 内部。但一个 70B 的模型 BF16 权重就有 141 GB，单卡 80 GB 放不下；DeepSeek-V3 有 671B 参数，一台 8 卡服务器也放不下。更重要的是，即使放得下，**延迟目标**也会推动我们使用更多的卡：TPOT 要求每一步在几十毫秒内完成，而 decode 的下界是 $\text{字节数}/\text{带宽}$，只有把权重分到多张卡上、并行读取，才能压低它。
+
+训练里的并行（数据、张量、流水线、专家并行，见[分布式训练](/distributed/tensor-parallel/)）为的是**吞吐**和**放得下**；推理多了一个约束：**每一步都有延迟预算**，而且 decode 的每一步计算量很小，通信的固定延迟因此显得格外昂贵。本章从三个层次回答“推理怎样用多张卡”：首先是张量并行在推理中的收益与代价，用一个可以算出来的通信模型；然后是把 prefill 和 decode 放到不同的 GPU 上（PD 分离），为什么要这样做，以及怎样估算每边需要多少卡；最后是 MoE 模型，它的专家并行和 all-to-all 通信，以及 DeepSeek 公开的大规模推理系统。本章的数字来自 `capacity.py`：一个粗糙但自洽的容量规划模型，其目的是让量与量之间的关系清楚，而不是替代压测。
+
+## 张量并行：延迟、带宽与收益递减
+
+### 切分与通信
+
+Megatron 式张量并行把每个 Transformer 层的矩阵乘法按列或行切到 $t$ 张卡上：注意力的 $W_Q,W_K,W_V$ 按头切分（列并行），输出投影 $W_O$ 按行切分；FFN 的 $W_1,W_3$ 列并行，$W_2$ 行并行。行并行之后每张卡只有部分和，需要一次 **all-reduce** 把它们加起来。因此每层有**两次** all-reduce（注意力一次，FFN 一次），每次的数据是整个批的激活 $\text{tokens}\times d_{model}$。
+
+环形 all-reduce 由 reduce-scatter 和 all-gather 两步组成，各 $t-1$ 个阶段，每个阶段每张卡发送并接收 $1/t$ 的数据。设数据量为 $S$ 字节，链路带宽 $\mathrm{BW}$，每次点对点传输的固定延迟为 $\alpha$，则
+
+<KeyEq label="环形 all-reduce 的时间">
+
+$$
+T_{\text{allreduce}}(S,t)=\underbrace{\frac{2(t-1)}{t}\cdot\frac{S}{\mathrm{BW}}}_{\text{带宽项}}+\underbrace{2(t-1)\,\alpha}_{\text{延迟项}} .
+$$
+
+</KeyEq>
+
+带宽项随 $t$ 增大趋于 $2S/\mathrm{BW}$（每个字节要被发送两次），**与卡数几乎无关**；延迟项随 $t$ **线性增长**。整个模型一步的通信时间为 $2L\cdot T_{\text{allreduce}}(S,t)$。
+
+<CodeFile path="src/llms_from_scratch/inference/capacity.py" region="allreduce" />
+
+测试 `test_ring_allreduce_formula` 手算过一例：4 卡、400 MB、100 GB/s、不计延迟，$2\cdot3/4\cdot4\times10^8/10^{11}=6$ ms。
+
+### decode 的通信由延迟主导
+
+Llama-3-70B 有 $L=80$ 层，$d_{model}=8192$。decode 批大小 32 时，每次 all-reduce 的数据仅 $32\times8192\times2=0.5$ MB。NVLink 4 每卡单向 450 GB/s 时，带宽项只有约 $2\cdot7/8\cdot0.5\text{MB}/450\text{GB/s}\approx2\ \mu$s，而延迟项按 $\alpha=5\ \mu$s 是 $2\cdot7\cdot5=70\ \mu$s：**延迟是带宽的几十倍**。所以 TP=8 时一步的通信时间
+
+$$
+2\times80\times(2+70)\ \mu\text{s}\approx 11.5\ \text{ms},
+$$
+
+几乎与批大小无关（测试 `test_ring_allreduce_formula` 用批大小 1 验证了延迟项公式 $2\cdot80\cdot2\cdot7\cdot5\ \mu$s）。与此同时，每张卡的权重读取时间随 $t$ 线性下降。把两者放在一起：
+
+<Bars
+  label="Llama-3-70B decode 一步的耗时构成（H100，批 32，上下文 2048）"
+  unit="ms"
+  max={40}
+  items={[
+    { label: 'TP = 2', segments: [{ value: 34.2, label: '访存（权重+KV）' }, { value: 1.8, label: '通信', tone: 'accent2' }] },
+    { label: 'TP = 4', segments: [{ value: 17.1, label: '访存（权重+KV）' }, { value: 5.1, label: '通信', tone: 'accent2' }] },
+    { label: 'TP = 8', segments: [{ value: 8.6, label: '访存（权重+KV）' }, { value: 11.5, label: '通信', tone: 'accent2' }] },
+  ]}
+>
+  <Fragment slot="caption">访存时间随 TP 度反比下降，通信时间随 TP 度增长。TP 从 2 到 4 把一步从 36.0 ms 降到 22.2 ms，从 4 到 8 只降到 20.1 ms：通信已经占了一半以上。数据由 `decode_step` 在 MBU 0.7 假设下计算，是容量规划量级的估计，而不是实测。</Fragment>
+</Bars>
+
+这就是“收益递减”：`test_tensor_parallel_has_diminishing_returns_for_decode` 要求每次翻倍 TP 度，加速比都小于 2。因此推理的 TP 度要选**够用的最小值**，而不是越大越好：先看权重加 KV Cache 放不放得下（70B 的 BF16 至少要 2 卡），再看延迟目标，剩下的卡用副本（数据并行）去扩展吞吐。TP 也最好限制在 NVLink 域内，跨节点的 InfiniBand 延迟（约 $\mu$s 到十几 $\mu$s、带宽 50 GB/s）会让 all-reduce 慢一个数量级。
+
+### KV 头与 TP 度
+
+GQA 模型的 KV 头数很少（Llama-3-70B 只有 8 个）。TP 按头切分时，每张卡拥有 $n_{kv}/t$ 个 KV 头；当 $t>n_{kv}$ 时，多张卡必须**复制**同一个 KV 头，KV Cache 的总占用随之膨胀。`capacity.py` 中的 `_kv_shards` 用 $\min(t,n_{kv})$ 表示这个效应：TP=16 对 70B 并不比 TP=8 更省 KV 显存。MLA（DeepSeek）的 KV 是一个没有头维度的低秩潜向量，根本无法按头切分，所以 TP 完全无法分摊 KV Cache，这也是 DeepSeek 的推理系统在注意力部分改用数据并行的原因（见后文）。
+
+### 流水线并行与上下文并行
+
+流水线并行把层分成若干段放在不同卡（或节点）上，通信量只有相邻两段之间的激活，适合跨节点、带宽较低的场景。推理里它的问题是**延迟不降**：一个 token 仍需依次经过所有段，每段的计算时间没有缩短。它只增加能同时在飞的批数（微批），提高吞吐。vLLM 中 `step_with_batch_queue` 就是为流水线并行准备的：调度器在第一个批次执行时就调度下一个批次，把流水线填满。对超长提示（几十万 token），prefill 的注意力计算量按序列长度平方增长，还可以沿序列维度切分（上下文并行/环形注意力），把一个提示的 prefill 分摊到多张卡上，缩短 TTFT。
+
+## PD 分离：把 prefill 和 decode 放到不同的卡上
+
+### 两种负载互相干扰
+
+[批处理与调度](/inference/batching-scheduling/)一章已经看到，把 prefill 和 decode 混在同一批里，会让 decode 的 TPOT 受长 prefill 影响；chunked prefill 缓解了这个问题，但没有消除：同一个批里，每步的耗时是被 prefill 块拉长的，decode 请求只能被动接受。而 prefill 阶段为了尽快完成，又希望占满整张卡。更深层的矛盾在于两个阶段**想要的并行方式不同**：
+
+| | prefill | decode |
+| --- | --- | --- |
+| 瓶颈 | 算力 | 显存带宽（和容量） |
+| 延迟指标 | TTFT | TPOT |
+| 批大小 | 靠 token 数，一个提示就能喂饱 GPU | 需要几十到几百个并发请求 |
+| 最优 TP 度 | 大，直接降低单个请求的 TTFT | 小，避免被通信延迟吞掉 |
+| 显存 | 权重为主，KV 随处理完即移交 | 权重 + 大量常驻 KV |
+
+DistServe（Zhong 等，OSDI 2024）正是据此提出：把两个阶段放到不同的 GPU 上，各自选择最优的并行度和批策略，从根本上消除干扰。它的评价指标是 **goodput**：在同时满足 TTFT 与 TPOT 两个 SLO 的前提下，每张 GPU 每秒能服务的请求数。DistServe 报告在同样的 SLO 达成率下，最多可多服务 7.4 倍的请求，或承受 12.6 倍更紧的 SLO。Splitwise（Patel 等，ISCA 2024）从功耗和硬件异构的角度得到了类似的结论；Mooncake（Moonshot AI，FAST 2025 最佳论文）则把整个系统围绕 KV Cache 重新设计，用集群的 CPU 内存和 SSD 构成分布式的 KV 缓存池。
+
+<Diagram width={720} height={320} label="PD 分离部署的架构">
+  <Region x={20} y={40} w={200} h={200} title="Prefill 集群" tone="accent" />
+  <Box x={40} y={80} w={160} h={50} label="实例 1（TP=2）" sub="算力受限，大 TP 降 TTFT" size="sm" tone="accent" />
+  <Box x={40} y={150} w={160} h={50} label="实例 2（TP=2）" sub="前缀缓存命中则少算" size="sm" tone="accent" />
+  <Region x={500} y={40} w={200} h={200} title="Decode 集群" tone="accent2" />
+  <Box x={520} y={80} w={160} h={50} label="实例 1（TP=4）" sub="带宽受限，大批量" size="sm" tone="accent2" />
+  <Box x={520} y={150} w={160} h={50} label="KV Cache 池" sub="分页块，常驻" size="sm" tone="info" />
+  <Box x={260} y={110} w={200} h={60} label="KV 传输" sub="每请求 ≈ 671 MB（2048 token）" tone="strong" size="sm" />
+  <Arrow from={[200, 105]} to={[260, 130]} tone="strong" />
+  <Arrow from={[460, 140]} to={[520, 105]} tone="strong" />
+  <Box x={20} y={268} w={120} h={36} label="请求入口" size="sm" />
+  <Arrow from={[80, 268]} to={[80, 240]} />
+  <Text x={300} y={268} label="首 token 由 prefill 集群产生，其余 token 在 decode 集群产生" anchor="start" size="sm" tone="muted" />
+  <Fragment slot="caption">请求先到 prefill 实例，处理完提示后，把得到的 KV Cache 经节点间网络（或 NVLink）送到 decode 实例，之后逐 token 生成。两个集群的卡数、TP 度、批策略可以分别优化，互不干扰。</Fragment>
+</Diagram>
+
+### 代价：KV 传输
+
+PD 分离的代价是 KV Cache 必须在两个集群之间搬运。Llama-3-70B 每 token 的 KV 是 $2\cdot80\cdot8\cdot128\cdot2=327{,}680$ B（320 KiB），一个 2048 token 的提示是 671 MB。通过 400 Gb/s InfiniBand（约 50 GB/s）传输需要 13.4 ms，相比 TTFT 的预算通常可以接受；但如果请求速率是 20 个/秒，prefill 集群要持续向外发送 13.4 GB/s，需要足够的网络带宽。工程上有几个关键手段：
+
+- **逐层流水**：prefill 每算完一层就把该层的 KV 发出去，传输与后续层的计算重叠，只有最后一层的传输暴露在关键路径上。
+- **专用的传输库**：NVIDIA 的 NIXL、Mooncake 的 Transfer Engine 等，使用 RDMA/NVLink 直接在 GPU 显存之间搬运，不经过 CPU。vLLM V1 通过 **KV connector** 抽象接入这些库：调度器在请求元数据中标记“KV 来自远端”，`allocate_slots` 的 `num_external_computed_tokens` 参数就是专为这种场景准备的。
+- **前缀缓存与传输结合**：只传输 decode 端没有的那部分 KV。
+
+PD 分离并不总是更好。对于提示很短、负载很低的场景，把两个集群拆开会让每个集群的利用率下降；DistServe 之后也有工作（如 *Prefill-Decode Aggregation or Disaggregation?*）讨论何时合并更优。经验法则：提示长、SLO 紧、规模大时，PD 分离划算。
+
+### 容量规划：每边需要多少卡
+
+`capacity.py` 把前面几章的量串成一个规划函数：给定模型、硬件、请求速率、提示/输出长度和 SLO，估计 prefill 和 decode 各需要多少卡。
+
+**prefill** 受算力限制：一个实例的吞吐（token/s）等于 TP 张卡的有效算力除以每 token 的 FLOPs，再扣除张量并行的通信时间。TTFT 的下界就是单个提示的处理时间；如果它已超过 SLO，这个 TP 度不可行。实例数由请求速率除以吞吐得到，并留出 30% 的余量控制排队。
+
+<CodeFile path="src/llms_from_scratch/inference/capacity.py" region="prefill" />
+
+**decode** 的限制有两个：显存容量决定了最大并发数，TPOT 决定了一步的上限。`max_decode_batch` 先用显存给出批的上界，再二分查找满足 `decode_step ≤ TPOT` 的最大批。需要的并发数由**利特尔法则**给出：稳态下系统中的平均请求数等于到达率乘以每个请求的停留时间，即 $N=\lambda\cdot n_{out}\cdot t_{step}$。
+
+<CodeFile path="src/llms_from_scratch/inference/capacity.py" region="decode" />
+
+最后，`plan_disaggregated` 对两边**独立地**挑选总卡数最少的 TP 度。Llama-3-70B、H100、每秒 20 个请求、提示 2048 个 token、输出 256 个 token、SLO 为 TTFT 1 s 与 TPOT 50 ms：
+
+<CodeFile path="src/llms_from_scratch/inference/capacity.py" region="plan" />
+
+| 阶段 | TP=1 | TP=2 | TP=4 | TP=8 |
+| --- | --- | --- | --- | --- |
+| prefill 实例数 × TP | 权重放不下 | 9 × 2 = 18 卡，TTFT 0.30 s | 5 × 4 = 20 卡，0.17 s | 3 × 8 = 24 卡，0.10 s |
+| decode 实例数 × TP | 权重放不下 | 41 × 2 = 82 卡（批仅 4） | 1 × 4 = **4 卡**（批 206，一步 37 ms） | 1 × 8 = 8 卡（批 609，48 ms） |
+
+prefill 偏好小 TP（总卡数最少：TP=2，18 卡），因为 TP 越大，通信占比越高、算力利用越差，TTFT 够用即可；decode 偏好 TP=4：TP=2 时权重占去大半显存，KV 只够 4 个并发，需要 41 个实例；TP=8 则被通信吃掉了收益。**两个阶段的最优 TP 度不同，这就是 PD 分离的好处**：合并部署时只能选一个折中的 TP 度。最终方案是 22 张卡，其中 prefill 18 张、decode 4 张，KV 传输 13.4 ms/请求、总计 13.4 GB/s。测试 `test_disaggregated_plan_for_llama3_70b` 检验了这些约束（SLO 被满足、70B 的两边 TP 度至少为 2、传输量与手算一致）。
+
+<Callout tone="warn" title="这是粗糙的模型">
+规划模型假设固定的 MFU 0.5 与 MBU 0.7，忽略了调度开销、请求长度的方差、排队的尾部行为和前缀缓存命中率的变化。它的用途是在动手压测前确定量级、判断某个设计是否有可能满足 SLO，而不能替代实测。
+</Callout>
+
+## MoE 推理：专家并行
+
+训练中的专家并行见[专家并行](/distributed/expert-parallel/)。推理里的专家并行原理相同，但约束不同：延迟预算更紧，每步的 token 数少得多。
+
+### 为什么 MoE 的 decode 特别难
+
+MoE 模型每个 token 只激活一小部分专家（DeepSeek-V3：256 个路由专家中取 8 个，另有 1 个共享专家），所以每 token 的 FLOPs 只相当于 37B 的稠密模型。但**权重必须全部驻留**，而且一个批里的 token 会把几乎所有专家都激活。这使 MoE 的 decode 比稠密模型更偏向带宽受限。
+
+用 DeepSeek-V3 的形状做一个推导：隐层 7168，每个专家的中间维 2048，SwiGLU 的 3 个矩阵共 $3\times7168\times2048\approx44$ M 参数，FP8 存储约 44 MB。设一步里总共有 $B$ 个 token，每个 token 选 8 个专家，均匀分布时每个专家看到 $n_e=8B/256=B/32$ 个 token。单个专家的算术强度为
+
+$$
+\frac{2\cdot n_e\cdot 44\text{M FLOPs}}{44\text{ MB}}=2n_e\ \text{FLOP/B}.
+$$
+
+要达到 H100 FP8 的算力拐点（$1979/3.35\approx590$ FLOP/B），需要 $n_e\approx295$，即**全局**同时有约 $295\times32\approx9400$ 个 token 在这一步里。单个节点放不下这么大的批——因为 KV Cache 容量有限——所以必须把批汇聚到**更大的专家并行（EP）域**：把专家分散到 $E$ 张卡上，每张卡只保存 $256/E$ 个专家的权重，各卡的批合并在一起，每个专家就能看到足够多的 token。这就是“大规模专家并行”的动机：**EP 度越大，每张卡为专家存放的权重越少，每个专家的批越大，两者同时改善**。
+
+### all-to-all
+
+专家并行的通信是 **all-to-all**：每一层 MoE 之前，每个 token 要被发送到它选中的专家所在的 GPU（dispatch）；专家算完之后，结果再发回 token 所在的 GPU 并加权求和（combine）。
+
+<Diagram width={720} height={300} label="专家并行的 dispatch 与 combine">
+  <Region x={20} y={30} w={680} h={110} title="GPU 上的 token（按序列分布，注意力部分用数据并行）" tone="info" />
+  <Box x={50} y={70} w={120} h={50} label="GPU 0" sub="token a, b" size="sm" />
+  <Box x={210} y={70} w={120} h={50} label="GPU 1" sub="token c, d" size="sm" />
+  <Box x={370} y={70} w={120} h={50} label="GPU 2" sub="token e, f" size="sm" />
+  <Box x={530} y={70} w={120} h={50} label="GPU 3" sub="token g, h" size="sm" />
+  <Region x={20} y={180} w={680} h={100} title="专家（每卡存放不同的专家权重）" tone="accent" />
+  <Box x={50} y={215} w={120} h={46} label="专家 0—63" size="sm" tone="accent" />
+  <Box x={210} y={215} w={120} h={46} label="专家 64—127" size="sm" tone="accent" />
+  <Box x={370} y={215} w={120} h={46} label="专家 128—191" size="sm" tone="accent" />
+  <Box x={530} y={215} w={120} h={46} label="专家 192—255" size="sm" tone="accent" />
+  <Arrow from={[110, 120]} to={[110, 215]} tone="accent" label="dispatch" />
+  <Arrow from={[110, 120]} to={[270, 215]} tone="accent" />
+  <Arrow from={[270, 120]} to={[430, 215]} tone="accent" />
+  <Arrow from={[430, 120]} to={[590, 215]} tone="accent" />
+  <Arrow from={[590, 120]} to={[110, 215]} tone="accent" />
+  <Arrow from={[650, 215]} to={[650, 120]} tone="accent2" dashed label="combine" />
+  <Fragment slot="caption">每个 token 在每个 MoE 层被发往它所选的 8 个专家所在的 GPU（图中只画出若干条）。dispatch 传 FP8 激活，combine 传 BF16 的专家输出。所有 GPU 对所有 GPU 互发数据，是 all-to-all 通信。</Fragment>
+</Diagram>
+
+通信量的估算（每 token、每 MoE 层）：dispatch 把 7168 维的 FP8 激活（7168 B）发给最多 8 个专家，combine 把 BF16 输出（14336 B）取回，共 $8\times(7168+14336)\approx172$ KB。假设每个 GPU 的批是 64 个 token、所有专家都在远端，则每层每卡约 11 MB；在 50 GB/s 的 InfiniBand 上是 0.22 ms，61 层中 58 层是 MoE，合计约 12.8 ms——与一步计算时间同量级。所以通信与计算**必须重叠**，否则吞吐只剩一半。
+
+### DeepSeek 的大规模专家并行推理系统
+
+DeepSeek 在 2025 年 2 月的开源周中公开了线上推理系统的设计和统计（*DeepSeek-V3/R1 Inference System Overview*）。要点如下：
+
+**并行方案。** prefill 与 decode 分离部署。prefill 的一个部署单元是 4 个节点（每节点 8 张 H800）：路由专家 EP32，MLA 与共享专家 DP32；每张 GPU 管理 9 个路由专家和 1 个共享专家。decode 的一个部署单元是 18 个节点：路由专家 EP144，MLA 与共享专家 DP144；每张 GPU 管理 2 个路由专家和 1 个共享专家。两边都带 32 个冗余专家，所以是 $(256+32)/32=9$ 与 $(256+32)/144=2$（`experts_per_gpu` 与测试 `test_deepseek_v3_expert_layout` 复现了这个算式）。
+
+<CodeFile path="src/llms_from_scratch/inference/capacity.py" region="ep" />
+
+**为什么注意力用数据并行。** 前文已经提到，MLA 的 KV 缓存没有头维度，张量并行无法分摊。如果注意力用 TP，每张卡都要存完整的 KV Cache，容量被浪费 $t$ 倍。改用数据并行，每张卡只负责自己那一批请求的 KV，容量利用率最高；代价是注意力的权重（相对较小）要在每张卡上复制。SGLang 的复现称之为 **DP attention**。
+
+**计算与通信的重叠。** prefill 阶段采用**双批次重叠**（dual-batch overlap）：把一个请求批切成两个微批，交替执行——一个微批在做 all-to-all 通信时，另一个微批在做计算。decode 阶段单步计算时间更短，DeepSeek 把注意力再细分成两个子步骤，构成 5 级流水线，让通信完全隐藏在计算之后。
+
+<Lanes
+  label="双批次重叠：一个微批通信时另一个微批计算"
+  lanes={['计算', '通信（all-to-all）']}
+  unit="相对时间"
+  span={12}
+  tick={1}
+  items={[
+    { lane: 0, start: 0, end: 2, label: 'A 注意力', tone: 'accent' },
+    { lane: 0, start: 2, end: 4, label: 'B 注意力', tone: 'info' },
+    { lane: 0, start: 4, end: 6, label: 'A 专家', tone: 'accent' },
+    { lane: 0, start: 6, end: 8, label: 'B 专家', tone: 'info' },
+    { lane: 0, start: 8, end: 10, label: 'A 注意力', tone: 'accent' },
+    { lane: 1, start: 2, end: 4, label: 'A dispatch', tone: 'accent' },
+    { lane: 1, start: 4, end: 6, label: 'B dispatch', tone: 'info' },
+    { lane: 1, start: 6, end: 8, label: 'A combine', tone: 'accent' },
+    { lane: 1, start: 8, end: 10, label: 'B combine', tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">A、B 是同一批请求切开的两个微批。A 的 dispatch 与 B 的注意力同时进行，A 的专家计算与 B 的 dispatch 同时进行……计算单元几乎没有空转。重叠的前提是计算时间和通信时间大致相当，这也是 EP 度与批大小需要精细调节的原因。</Fragment>
+</Lanes>
+
+**负载均衡。** 大规模 EP 下最慢的 GPU 决定一步的耗时，所以三类不均衡都要处理：prefill 的核心注意力计算量与 dispatch 发送量（按请求长度均衡）、decode 的 KV Cache 占用与请求数（按 token 数均衡）、专家的计算负载（尽量让每张卡接收的 dispatch 量均衡）。后者靠**冗余专家**（把热门专家复制到多张卡）和 EPLB 算法（专家并行负载均衡器）完成：根据历史统计的专家热度决定哪些专家需要副本、副本放在哪里。
+
+**通信库。** 通信使用 DeepEP：prefill 用高吞吐的 all-to-all kernel，decode 用纯 RDMA 的低延迟 kernel，并支持用 hook 的方式在后台完成传输而不占用 SM。
+
+**线上统计。** 2025 年 2 月 27—28 日 24 小时内，节点占用峰值 278、平均 226.75（每节点 8 张 H800）。输入 token 共 608B，其中 342B（56.3%）命中磁盘上的 KV 缓存；输出 168B。平均每个节点在 prefill 时约 73.7k token/s（含缓存命中），在 decode 时约 14.8k token/s。按每张 GPU 每小时 2 美元计，日成本 87,072 美元；若全部按 R1 的公开价格计费，理论日收入 562,027 美元，利润率 545%。DeepSeek 自己强调这是理论值：实际收入远低于它，因为 V3 定价更低、有免费服务、夜间有折扣。
+
+**SGLang 的复现。** LMSYS 在 12 个节点（96 张 H100）上复现了类似架构：prefill 用 EP32、decode 用 EP72，两批次重叠开启，2000 token 输入下达到每节点约 52.3k token/s 输入与 22.3k token/s 输出。其中 EPLB 使 prefill 提速 1.49 倍、decode 提速 2.54 倍；这说明专家负载均衡对大规模 EP 的作用相当可观。
+
+<Callout tone="deep" title="大规模 EP 的运维代价">
+EP144 意味着 144 张卡组成一个紧耦合的整体：任何一张卡故障都会拖垮整个 decode 单元，更新模型要同时重启 18 个节点，流量的昼夜波动要求系统在白天扩出推理单元、夜间把节点还给训练。DeepSeek 的统计里节点数在 226 与 278 之间波动，正是这种弹性调度的结果。小规模部署通常不值得追求如此大的 EP。
+</Callout>
+
+## 小结
+
+- 推理的并行受延迟预算约束：环形 all-reduce 的时间是带宽项加线性增长的延迟项，decode 的小消息由延迟主导，所以 TP 度要取够用的最小值，70B 的 decode 在 TP=4 到 8 之间已收益递减。
+- GQA 的 KV 头数限制了 TP 能切分的 KV；MLA 无法按头切分，注意力部分应改用数据并行。
+- prefill 受算力限制，decode 受带宽与容量限制，两者最优的 TP 度与批策略不同。PD 分离让它们独立优化，代价是 KV 传输（70B 每 2048 token 约 671 MB，逐层流水可隐藏）。
+- 容量规划由 roofline 时间、利特尔法则和显存约束组成：Llama-3-70B 在 20 请求/秒下需要 prefill 18 卡 + decode 4 卡，数量级与实际部署一致。
+- MoE 的 decode 要求每个专家看到几百个 token 才能摆脱带宽瓶颈，推动 EP 度做大；all-to-all 的通信量与计算同量级，必须用双批次重叠和流水线隐藏，并靠冗余专家与 EPLB 平衡负载。
+- 到这里，推理系统的每个部件都已经分开讲过。下一章[vLLM 架构剖析](/inference/vllm/)把它们放回一个真实引擎里，沿着一个请求的生命周期阅读源码。
+
+## 练习
+
+1. Llama-3-70B 用 TP=8、批大小 256 的 decode：每次 all-reduce 的数据量是多少？带宽项和延迟项各约多少微秒（NVLink 450 GB/s，延迟 5 µs）？批大小从 32 增加到 256 时，通信时间变化多少？
+2. 为什么 TP=16 的 Llama-3-70B（8 个 KV 头）不一定比 TP=8 更好？分别从 KV 显存和通信两个角度解释。
+3. 某 prefill 集群每秒处理 20 个提示，每个 2048 token，为了接上 decode 集群，它每秒要往外发送多少 KV？如果前缀缓存命中 50%，且 decode 端也知道这一点，传输量如何变化？
+4. 利特尔法则：每秒到达 20 个请求，每个请求输出 256 个 token，decode 每步 37 ms。稳态下 decode 集群中平均同时有多少个请求？
+5. DeepSeek-V3 的 EP144 decode 中，每张卡存 2 个路由专家 + 1 个共享专家 + MLA 的完整副本。如果改成 EP72，每张卡的专家权重多多少？每个专家看到的 token 数怎么变（设每卡批大小不变）？
+
+<details>
+<summary>答案</summary>
+
+1. 数据量 $256\times8192\times2=4.19$ MB。带宽项 $2\cdot\frac78\cdot4.19\text{ MB}/450\text{ GB/s}=16.3\ \mu$s；延迟项 $2\cdot7\cdot5=70\ \mu$s。每次 all-reduce 约 86 µs，160 次共 13.8 ms。批 32 时每次约 72 µs（11.5 ms），所以批大小翻 8 倍，通信时间只增加约 20%：延迟项占主导，通信几乎不随批大小变化。
+
+2. KV 角度：70B 只有 8 个 KV 头，TP=16 时每个 KV 头被复制到 2 张卡上，总 KV 显存占用翻倍，每张卡的 KV 并不比 TP=8 少。通信角度：TP=16 的环形 all-reduce 延迟项翻倍（$2\cdot15\alpha$ 对 $2\cdot7\alpha$），并且 16 张卡超出单个 NVLink 域（8 卡），需要跨节点，延迟与带宽都更差。权重读取只减半。所以得不偿失。
+
+3. $20\times2048\times327{,}680\ \text{B}\approx13.4$ GB/s。命中 50% 且 decode 端已有这部分 KV 时，只需传输另一半，约 6.7 GB/s。前提是 decode 端的前缀缓存确实持有这些块（需要两端的缓存状态同步，或者让路由层把相同前缀的请求发往同一个 decode 实例）。
+
+4. $N=\lambda\cdot n_{out}\cdot t_{step}=20\times256\times0.037\approx189$。与 `plan_decode` 的结果一致（批容量 206，1 个实例）。
+
+5. EP144 时每卡 $288/144=2$ 个路由专家，EP72 时 $288/72=4$ 个，每卡专家权重翻倍（约 $2\times44$ MB × 58 层）。每个专家看到的 token 数：全局批为 $72\times b$（$b$ 为每卡批大小），均摊到 256 个专家上，比 EP144 的 $144b$ 少一半，所以每个专家的批减半，权重读取更难被摊薄。这就是 EP 越大越好的原因，直到通信和故障域成为瓶颈。
+
+</details>
+
+## 参考文献
+
+- Shoeybi et al. *Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism*. 2019. [arXiv:1909.08053](https://arxiv.org/abs/1909.08053)
+- Zhong et al. *DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving*. OSDI 2024. [arXiv:2401.09670](https://arxiv.org/abs/2401.09670)
+- Patel et al. *Splitwise: Efficient Generative LLM Inference Using Phase Splitting*. ISCA 2024. [arXiv:2311.18677](https://arxiv.org/abs/2311.18677)
+- Qin et al. *Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving*. FAST 2025. [arXiv:2407.00079](https://arxiv.org/abs/2407.00079)
+- DeepSeek-AI. *DeepSeek-V3 Technical Report*. 2024. [arXiv:2412.19437](https://arxiv.org/abs/2412.19437)
+- DeepSeek. *DeepSeek-V3/R1 Inference System Overview*. 2025. [github.com/deepseek-ai/open-infra-index](https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md)
+- DeepSeek. *DeepEP: an efficient expert-parallel communication library*. [github.com/deepseek-ai/DeepEP](https://github.com/deepseek-ai/DeepEP)；*EPLB: Expert Parallelism Load Balancer*. [github.com/deepseek-ai/EPLB](https://github.com/deepseek-ai/EPLB)
+- LMSYS. *Deploying DeepSeek with PD Disaggregation and Large-Scale Expert Parallelism on 96 H100 GPUs*. 2025. [lmsys.org/blog/2025-05-05-large-scale-ep](https://lmsys.org/blog/2025-05-05-large-scale-ep/)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/v1/engine/core.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/core.py)（`step_with_batch_queue`、`DPEngineCoreProc`），[`vllm/v1/core/kv_cache_manager.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py)（`allocate_slots` 的 `num_external_computed_tokens`）

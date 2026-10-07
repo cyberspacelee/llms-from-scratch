@@ -1,8 +1,255 @@
 ---
 title: vLLM 架构剖析
-description: 沿一个请求的生命周期阅读 vLLM V1：引擎核心、调度器、KV Cache 管理器、模型执行器与采样器。
+description: 沿一个请求的生命周期阅读 vLLM V1 的源码：AsyncLLM 与 EngineCore 的进程划分，调度器的统一 token 预算，KVCacheManager 与块池的前缀缓存，GPUModelRunner 的持久批与输入准备，CUDA Graph 派发与采样器，异步调度如何隐藏 CPU 开销；并与 nano-vllm 和本部分的迷你引擎对照。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/inference/engine/llm_engine.py
+  - src/llms_from_scratch/inference/engine/model_runner.py
 ---
 
-本章正在撰写。
+前四章把推理系统拆成了互相独立的零件：成本模型告诉我们瓶颈在哪里，PagedAttention 管理显存，连续批处理与 chunked prefill 决定每一步算什么，CUDA Graph 消除启动开销。真实的推理引擎要把这些零件装在一起，并且处理一大堆教科书不会提的问题：多进程、流式输出、取消请求、结构化输出、LoRA、多模态、投机解码、KV 传输。vLLM 是目前使用最广的开源推理引擎，它的 V1 架构（2025 年起成为默认）在代码层面很清晰地体现了前面几章的分工。
+
+本章沿着一个请求的生命周期阅读 vLLM V1 的源码，逐站说明它做了什么，对应前面哪一章的哪个概念，以及我们的迷你引擎（[下一章](/inference/mini-engine/)）是怎样把它缩小的。所有源码引用都固定在提交 [`cbe1f97`](https://github.com/vllm-project/vllm/tree/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe)（2026 年 10 月），行号以该提交为准；vLLM 迭代很快，读者拿到的版本可能已经不同，请把本章当作一张地图，而不是一份规格书。
+
+<Callout tone="note" title="怎样读这样的源码">
+生产级引擎的核心函数往往有几百行，因为每一个新特性都要在主路径上留一个分支。读法是先找**主干**（不带任何分支就能走完的路径），再理解每个分支为什么存在。本章只讲主干；凡是涉及 LoRA、多模态编码器、Mamba/滑动窗口等多种 KV 组、KV connector、结构化输出等的分支，都跳过。
+</Callout>
+
+## 总览：两个进程，一个忙循环
+
+vLLM V1 把引擎拆成相互独立的进程，目的是让 CPU 密集的工作（分词、详细分词、HTTP、序列化）不拖慢 GPU 一侧的调度循环。
+
+<Diagram width={720} height={400} label="vLLM V1 的组件与数据流">
+  <Region x={10} y={30} w={330} h={210} title="前端进程（API server）" tone="info" />
+  <Box x={30} y={70} w={130} h={44} label="AsyncLLM" sub="generate()" size="sm" tone="info" />
+  <Box x={190} y={70} w={130} h={44} label="InputProcessor" sub="分词 / 多模态" size="sm" tone="info" />
+  <Box x={30} y={150} w={130} h={44} label="OutputProcessor" sub="反分词 / 流式" size="sm" tone="info" />
+  <Box x={190} y={150} w={130} h={44} label="EngineCoreClient" sub="ZMQ 收发" size="sm" tone="info" />
+  <Arrow from={[160, 92]} to={[190, 92]} />
+  <Arrow from={[255, 114]} to={[255, 150]} />
+  <Arrow from={[190, 172]} to={[160, 172]} />
+  <Region x={380} y={30} w={330} h={110} title="EngineCore 进程（忙循环）" tone="accent" />
+  <Box x={400} y={68} w={130} h={44} label="Scheduler" sub="schedule()" size="sm" tone="accent" />
+  <Box x={560} y={68} w={130} h={44} label="KVCacheManager" sub="块池 / 前缀缓存" size="sm" tone="accent" />
+  <Arrow from={[530, 90]} to={[560, 90]} head="both" />
+  <Region x={380} y={170} w={330} h={110} title="Worker 进程（每 GPU 一个）" tone="accent2" />
+  <Box x={400} y={208} w={130} h={44} label="GPUModelRunner" sub="持久批 / 输入准备" size="sm" tone="accent2" />
+  <Box x={560} y={208} w={130} h={44} label="模型 + Sampler" sub="CUDA Graph / 采样" size="sm" tone="accent2" />
+  <Arrow from={[530, 230]} to={[560, 230]} />
+  <Arrow from={[320, 172]} to={[380, 80]} label="EngineCoreRequest" curve />
+  <Arrow from={[465, 112]} to={[465, 208]} label="SchedulerOutput" labelSide="left" />
+  <Arrow from={[620, 252]} to={[620, 300]} tone="muted" />
+  <Box x={380} y={310} w={330} h={40} label="ModelRunnerOutput → EngineCoreOutputs" sub="新 token、结束原因" size="sm" tone="strong" />
+  <Arrow from={[380, 330]} to={[255, 330]} tone="strong" />
+  <Arrow from={[255, 330]} to={[255, 196]} tone="strong" />
+  <Fragment slot="caption">一个请求的路径：前端把提示分词，打包成 EngineCoreRequest 经 ZMQ 发给 EngineCore；EngineCore 在忙循环里反复执行“调度 → 执行 → 更新”；Worker 上的 GPUModelRunner 把 SchedulerOutput 变成张量并运行模型；新 token 沿原路返回，前端反分词后流式输出。多卡时每张 GPU 有一个 Worker，由 Executor 统一调度。</Fragment>
+</Diagram>
+
+这个划分对应 `vllm/v1/` 下的目录：`engine/`（前端与 EngineCore）、`core/`（调度器与 KV 管理）、`worker/`（模型运行器）、`sample/`（采样）、`spec_decode/`（投机解码）。`LLM` 类（离线推理）通过同步的 `LLMEngine` 访问 EngineCore（可以在进程内，也可以在独立进程），在线服务使用 `AsyncLLM`，两者共享同一个 EngineCore 实现。
+
+## 请求进入：AsyncLLM 与 EngineCore 的接口
+
+在线服务中，每个 HTTP 请求最终调用 [`AsyncLLM.generate`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/async_llm.py#L688)。它的文档字符串列出了四个步骤：为请求创建一个 `AsyncStream`；用 `InputProcessor` 处理输入（分词、处理多模态数据、生成 `EngineCoreRequest`）；把请求登记到 `OutputProcessor`（负责反分词）；最后把请求发给 EngineCore。`generate` 本身是一个异步生成器：它不断从该请求的 `AsyncStream` 中取出 `RequestOutput` 并 `yield`，调用者因此能拿到流式输出。
+
+结果是怎么送回来的？[`_run_output_handler`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/async_llm.py#L815) 启动一个后台协程，循环地：
+
+1. `await engine_core.get_output_async()` 从 EngineCore 取一批 `EngineCoreOutputs`；
+2. 切成最多 `VLLM_V1_OUTPUT_PROC_CHUNK_SIZE` 条一块交给 `output_processor.process_outputs`，处理完一块就 `await asyncio.sleep(0)` 让出事件循环，避免一次反分词成百上千条输出而阻塞 HTTP 服务；
+3. 因停止字符串而结束的请求，要通知 EngineCore 中止（因为 EngineCore 只认 token，不知道字符串停止词）。
+
+[`EngineCoreRequest`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/__init__.py#L109) 是跨进程传输的消息，一个用 `msgspec` 定义的轻量结构：请求号、提示 token ID、采样参数、到达时间、LoRA、缓存盐值（`cache_salt`，用来隔离不同租户之间的前缀缓存）等。它里面没有文本，也没有对分词器的依赖——**EngineCore 只处理 token ID**，这使得 GPU 侧的循环保持简单、快速。
+
+## EngineCore：调度、执行、更新
+
+EngineCore 是一个独立进程，运行 [`run_busy_loop`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/core.py#L1484)：
+
+```python
+while self._handle_shutdown():
+    self._process_input_queue()    # 1) 没有工作就阻塞等待；有工作就把新请求加入调度器
+    self._process_engine_step()    # 2) 执行一步，把输出放进输出队列
+```
+
+[`EngineCore.step`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/core.py#L630) 就是整个引擎的心跳，去掉日志之后只有五行：
+
+```python
+scheduler_output = self.scheduler.schedule(...)                    # 本步算什么
+future = self.model_executor.execute_model(scheduler_output, non_block=True)
+grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)   # 与 GPU 并行
+model_output = future.result() or self.model_executor.sample_tokens(grammar_output)
+outputs = self.scheduler.update_from_output(scheduler_output, model_output)
+```
+
+两个细节。第一，`execute_model` 是非阻塞的，返回 future；调度器趁 GPU 在跑前向的时候，在 CPU 上计算结构化输出所需的语法位掩码（`get_grammar_bitmask`），两者重叠。第二，`execute_model` 与 `sample_tokens` 被拆开：前向之后先返回 `None`，把 logits 暂存在运行器里，等位掩码就绪后再调用 `sample_tokens` 施加掩码并采样。
+
+我们的迷你引擎的 `step` 是它的直接缩影，同样是四个动作：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/llm_engine.py" region="step" />
+
+当有多个流水线阶段时，`step_with_batch_queue` 取而代之：只要批队列没满，就先调度新批次（不等前一批返回），把流水线填满。
+
+## 调度器：没有“prefill 阶段”和“decode 阶段”
+
+[`Scheduler.schedule`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/sched/scheduler.py#L571) 开头有一段注释，它是理解整个 V1 调度的钥匙（作者署名 woosuk）：
+
+> There's no "decoding phase" nor "prefill phase" in the scheduler. Each request just has the `num_computed_tokens` and `num_tokens_with_spec`. At each step, the scheduler tries to assign tokens to the requests so that each request's `num_computed_tokens` can catch up its `num_tokens_with_spec`. This is general enough to cover chunked prefills, prefix caching, speculative decoding, and the "jump decoding" optimization in the future.
+
+这与[批处理与调度](/inference/batching-scheduling/)一章的核心设计完全一致：每个请求只有“已计算的 token 数”和“需要计算到的 token 数”两个数，调度器每步为它分配一个落差内的 token 数，受 `max_num_batched_tokens` 预算约束。提示未处理完时落差是提示长度（chunked prefill 就是只填一部分落差）；处理完之后落差是 1（decode）；有草稿 token 时落差是 $1+k$（投机解码）；前缀缓存命中则是在 `num_computed_tokens` 一开始就加上命中的数目。
+
+`schedule` 的主干有两个循环：
+
+1. **先调度 RUNNING 请求**。对每个运行中的请求，计算 `num_new_tokens`（受 `long_prefill_token_threshold`、剩余 token 预算和 `max_model_len` 限制），然后调用 `kv_cache_manager.allocate_slots` 申请需要的新块。如果返回 `None`（块不足），就进入**抢占**循环：FCFS 策略下抢占 `self.running[-1]`，即最晚加入的请求；优先级策略下抢占优先级最低（数值最大）、到达最晚的请求。被抢占者调用 [`_preempt_request`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/sched/scheduler.py#L1538)：释放它所有的块、状态改为 `PREEMPTED`、`num_computed_tokens = 0`、`num_preemptions += 1`，并放回 `waiting` 队首。这是**重计算式抢占**（V1 的调度器只做重计算，不做换出）——它回来时若块仍在前缀缓存里，大部分提示会被命中，几乎不用重算。
+2. **再接纳 WAITING 请求**（只有本步没有发生抢占时）。对队首的请求，先调用 `get_computed_blocks` 查前缀缓存，得到已命中的 token 数；再调用 `allocate_slots` 为剩下的新 token 申请块；成功则从 `waiting` 移入 `running`。
+
+我们的调度器就是这个主干，去掉了所有特殊分支：
+
+<CodeFile path="src/llms_from_scratch/inference/scheduler.py" region="schedule" />
+
+另外值得注意：最终返回的 `SchedulerOutput` 记录了本步每个请求计算多少 token（`num_scheduled_tokens`）、新分配的块号、被抢占或完成的请求号。**它不包含 token ID 本身**——对已经在 Worker 缓存里的请求，Worker 自己记着 token，调度器只发增量，减少了进程间的序列化。
+
+## KV Cache 管理器与块池
+
+[`KVCacheManager`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py#L131) 向调度器暴露三个操作：
+
+- [`get_computed_blocks(request)`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py#L264)：返回请求前缀已缓存的块和命中的 token 数。一处细节：如果整个提示都命中了，**仍要重算最后一个 token**以得到 logits，所以 `max_cache_hit_length = request.num_tokens - 1`。注释还承认，由于 `allocate_slots` 要求 `num_computed_tokens` 与块大小对齐，这可能导致重算整个最后一块——这是一个已知的小浪费。
+- [`allocate_slots(request, num_new_tokens, ...)`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py#L371)：为新 token 分配块，必要时先“占用”刚命中的缓存块（增加引用计数）。块不够时返回 `None`，调度器据此抢占。参数里有 `num_lookahead_tokens`（给投机解码的草稿位预留块）、`num_external_computed_tokens`（KV connector 从远端加载的 token，PD 分离用）、`delay_cache_blocks` 等。
+- [`free(request)`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py#L620)：释放请求的块。
+
+底层是 [`BlockPool`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/block_pool.py#L136)：一个 `KVCacheBlock` 数组、一个按驱逐顺序排列的空闲块双向链表 [`FreeKVCacheBlockQueue`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_utils.py#L246)，以及从块哈希到块的映射。引用计数降到 0 的块并不立即销毁，而是放回空闲链表末尾，但**保留它的哈希**，以便之后命中；真正被分配给别人时才从映射中删除。链表的顺序决定驱逐：最近最少使用的块在前；同一个请求释放的块中，哈希链更长的（靠后的块）更靠前——因为靠后的块被命中的可能性更低。块池初始化时弹出第 0 块作为 `null_block`，永远不分配——这与我们引擎里的“空块”一致，CUDA Graph 的 padding 行把 KV 写进这个块。
+
+前缀缓存的哈希由 [`hash_block_tokens`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_utils.py#L684) 计算：$h_i=H(h_{i-1},\ \text{tokens}_i,\ \text{extra keys})$，其中额外的键包括 LoRA 名称、多模态输入的哈希、`cache_salt`。把上一块的哈希放进来，使得哈希代表“整个前缀”，而不仅是这一块的内容——这正是[前缀缓存](/inference/paged-attention/)一节里块哈希方案的实现。V1 的请求对象在每次追加 token 时增量更新自己的 `block_hashes` 列表（[`Request.update_block_hashes`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/request.py#L285)），查缓存时直接使用，不需要再次哈希整个提示。
+
+我们的 `KVCacheManager` 实现了同样的三个操作和同样的数据结构：
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" symbol="KVCacheManager" />
+
+## 模型运行器：持久批与输入准备
+
+调度器输出到达 Worker 后，由 [`GPUModelRunner`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py#L479) 处理。这个类有 7500 多行，主线是 [`execute_model`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py#L4136)：`_update_states` → `_prepare_inputs` → 派发 CUDA Graph 并运行模型 → 暂存 logits，等待 `sample_tokens`。
+
+### 持久批
+
+[`_update_states`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py#L1196) 维护一个**持久批**（persistent batch，[`InputBatch`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_input_batch.py#L90)）：它为每个在飞的请求保存 token ID、已计算 token 数、块表、采样参数等，以数组的“行”存放。每一步只根据调度器的增量输出修改这些行——删除已完成或本步未被调度的请求（注释特别指出：这一优化假设相邻两批的请求高度重合，如果两批交替调度完全不同的请求，它的效率会很差），添加新请求，为运行中的请求追加新分配的块号。这样每步的 CPU 开销正比于**变化**而非批大小。
+
+### 输入准备：把请求展平成 token 序列
+
+模型的输入是展平的：不同请求的 token 首尾相接，没有批维度。[`_prepare_inputs`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py#L1944) 里的注释用一个例子说明了索引的构造：三个请求本步分别调度 $[2,5,3]$ 个 token，则
+
+```text
+req_indices = [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]        # np.repeat：每个 token 属于哪个请求
+cu_num_tokens = [2, 7, 10]                           # 前缀和 → attention 的 query_start_loc
+query_pos     = [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]       # 每个 token 在本步内的序号
+positions     = num_computed_tokens[req_indices] + query_pos     # 绝对位置（RoPE 用）
+```
+
+再用位置从持久批的 `token_ids` 二维数组里取出 token ID，并由块表算出**槽位映射**（[`BlockTable.compute_slot_mapping`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/block_table.py#L201)）：$\text{slot}=\text{block\_table}[\lfloor p/b\rfloor]\cdot b+(p\bmod b)$，即 PagedAttention 一章里推导的公式。所有这些用 NumPy 向量化完成，并且**先启动块表向 GPU 的异步拷贝**（注释里写着 OPTIMIZATION），让拷贝与后面的 CPU 计算重叠。
+
+我们的 `prepare_inputs` 做同样的事情，用 Python 循环代替向量化，形式更直白：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/model_runner.py" region="prepare" />
+
+两者的区别也值得注意：我们把每个 token 当作独立的“行”，每行复制一份块表和可见长度（`seq_lens = p + 1` 隐含了因果掩码）；vLLM 则传给注意力 kernel 的是 `query_start_loc`（每个请求的 token 范围）、`seq_lens` 和 `block_table`（每个请求一份），由 FlashAttention/FlashInfer 的变长 kernel 自己处理因果关系。后者更节省内存带宽，是生产环境的做法。
+
+### CUDA Graph 派发与填充
+
+准备好输入之后，运行器调用 `_determine_batch_execution_and_padding`，内部通过 [`cudagraph_dispatcher.dispatch`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/cudagraph_dispatcher.py) 决定：本步的 token 数是否有对应的已捕获图？有，就把 token 数向上填充到最近的捕获尺寸，返回一个 `BatchDescriptor`，模型前向时把输入放进静态缓冲区的前缀，调用图重放；没有（例如 token 数超过最大捕获尺寸，或者有 prefill 的混合批无法被 FULL 图覆盖），回退到 eager 或 PIECEWISE 模式。这正是[CUDA Graph](/inference/cuda-graph/)一章里分桶与 padding 的真实实现。填充出来的行没有对应请求，它们的 KV 槽位指向空块，和我们的做法一致。
+
+### 采样
+
+[`sample_tokens`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py#L4517) 取回暂存的 logits，先施加结构化输出的位掩码，再调用 `Sampler`（[`vllm/v1/sample/sampler.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/sample/sampler.py#L22)）。`Sampler.forward` 的顺序是：（需要时）记录原始 logprobs → 转成 float32 → 应用 logits 处理器（重复惩罚、logit bias、禁用词）→ 采样（温度、top-$k$、top-$p$，每个请求有自己的随机数发生器）→ 转成 `int64`。开启投机解码时，改走 `RejectionSampler`，即[投机解码](/inference/speculative-decoding/)一章的接受-拒绝规则，用 Triton kernel 批量完成。
+
+我们的采样器同样只有几行，但逻辑一致——每个请求自己的温度、top-$k$ 与随机数种子：
+
+<CodeFile path="src/llms_from_scratch/inference/engine/sampler.py" region="sample" />
+
+## 更新状态：update_from_output
+
+采样得到的 token 回到 EngineCore 进程，[`Scheduler.update_from_output`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/sched/scheduler.py#L1992) 对每个被调度的请求：把新 token 追加到请求的输出（投机解码时先按接受数截断，并据此回滚 `num_computed_tokens`），检查停止条件（EOS、`max_tokens`、上下文长度、停止 token，由 `check_stop` 完成），若完成则释放块并将请求移出 `running`，最后构造 `EngineCoreOutputs` 送回前端。我们引擎里对应的是 `scheduler.update_from_output(batch, sampled)`，结构与之相同。
+
+## 异步调度：把 CPU 开销藏到 GPU 后面
+
+到这里，一步的时间线是串行的：CPU 调度 → GPU 前向 → CPU 更新状态 → 再调度。GPU 在 CPU 工作时是空闲的。对于 decode 来说，GPU 前向可能只有 10 ms，而调度、输入准备、`update_from_output` 加起来可能有几毫秒，浪费可观。
+
+**异步调度**（async scheduling）打破这个依赖：调度器在上一步的结果还没返回时，就**预先调度下一步**。关键技巧是占位符：对 decode 中的请求，下一步需要的输入 token 是上一步刚采样出来的，CPU 此时还不知道它的值，但知道它**会存在**。`schedule` 里的 `num_output_placeholders` 记录了这些在飞的 token；输入 token 的真实值留在 GPU 上，直接由上一步的采样结果张量接给下一步的输入（运行器里有专门的拷贝），不经过 CPU。
+
+<Lanes
+  label="同步与异步调度的时间线"
+  lanes={['同步：CPU', '同步：GPU', '异步：CPU', '异步：GPU']}
+  unit="ms"
+  span={36}
+  tick={4}
+  items={[
+    { lane: 0, start: 0, end: 4, label: '调度 1', tone: 'info' },
+    { lane: 1, start: 4, end: 14, label: '前向 1', tone: 'accent' },
+    { lane: 0, start: 14, end: 18, label: '更新+调度 2', tone: 'info' },
+    { lane: 1, start: 18, end: 28, label: '前向 2', tone: 'accent' },
+    { lane: 0, start: 28, end: 32, label: '更新+调度 3', tone: 'info' },
+    { lane: 2, start: 0, end: 4, label: '调度 1', tone: 'info' },
+    { lane: 2, start: 4, end: 8, label: '调度 2', tone: 'info' },
+    { lane: 2, start: 14, end: 18, label: '更新 1 + 调度 3', tone: 'info' },
+    { lane: 3, start: 4, end: 14, label: '前向 1', tone: 'accent' },
+    { lane: 3, start: 14, end: 24, label: '前向 2', tone: 'accent' },
+    { lane: 3, start: 24, end: 34, label: '前向 3', tone: 'accent' },
+  ]}
+>
+  <Fragment slot="caption">假设前向 10 ms，CPU 的调度与更新共 4 ms。同步模式下 GPU 每 14 ms 才执行一次前向，有 4 ms 空闲；异步模式下 CPU 在 GPU 执行前向 1 时已经调度了步 2，GPU 连续运行，34 ms 完成三步而不是 42 ms。代价是调度器看不到上一步的采样结果，所以不能在这一步就知道请求已经结束，可能多算一个 token 再丢弃。</Fragment>
+</Lanes>
+
+代价正如图注所说：因为调度器没有看到上一步的输出，无法在它结束时立即停下，会多调度一步，这一步的结果要被丢弃（源码中的 `num_stale_output_tokens`、`drop_stale_output` 就是处理这种“过期输出”的）。抢占与异步调度的组合尤其微妙——`_preempt_request` 的注释花了很大篇幅解释在途输出如何处理。这是生产引擎复杂性的典型来源：每一个优化都要和所有其他特性正确地交互。
+
+## 与 nano-vllm 对照
+
+nano-vllm 是一个约 1450 行 Python 的 vLLM 精简重写（仅支持 Qwen3；引擎部分 `engine/` 约 640 行），常被用来学习推理引擎。把它放在 vLLM 旁边，能看出哪些是引擎的“本质”，哪些是“生产代价”。
+
+| | nano-vllm | 本部分的迷你引擎 | vLLM V1 |
+| --- | --- | --- | --- |
+| 进程划分 | 主进程 + 张量并行 worker（共享内存通信） | 单进程 | 前端 / EngineCore / Worker 分进程（ZMQ） |
+| 调度 | `schedule()` 先尽量 prefill，凑不出再 decode，两者不混批；仅允许批里第一个序列 chunked prefill | 统一 token 预算，prefill、decode 与 chunked prefill 同批 | 统一 token 预算，同批，含优先级、投机 token、LoRA 限制 |
+| KV 管理 | 块 + 哈希前缀缓存 | 块 + 块哈希 + 写时复制 + Radix 树 | 块池 + 链式哈希 + 多种 KV 组（滑动窗口、Mamba） |
+| 抢占 | 重计算，弹出 `running` 末尾 | 重计算，同样的策略 | 重计算，支持优先级策略 |
+| CUDA Graph | 仅 decode，按批大小捕获 | 仅 decode，分桶 + padding | FULL / PIECEWISE，按 token 数分桶，`torch.compile` |
+| 采样 | 单一采样器 | 每请求温度 / top-$k$ / 种子 | 完整采样器 + 接受-拒绝 + 结构化输出 |
+| 异步调度 | 无 | 无 | 有 |
+
+nano-vllm 的 `Scheduler.schedule` 约 50 行，先看 `waiting` 队列：只要有可接纳的请求，就组成一个 prefill 批返回；否则对 `running` 里的每个序列做 decode，块不够时抢占队尾。这是 Orca 之后、Sarathi 之前的设计：简单，但长 prefill 会阻塞 decode。vLLM 与我们的迷你引擎则采用统一预算，把两者混在一批里。
+
+## 小结
+
+- vLLM V1 把引擎分成前端进程、EngineCore 进程（调度器 + KV 管理器）和每 GPU 一个的 Worker（模型运行器）。EngineCore 只处理 token ID，CPU 密集的分词和反分词留在前端。
+- EngineCore 的忙循环是 `schedule → execute_model → sample_tokens → update_from_output`；前向与结构化输出位掩码的计算重叠。
+- 调度器没有 prefill/decode 阶段之分：每个请求只有 `num_computed_tokens` 追赶 `num_tokens_with_spec`，每步分配一个落差内的 token 数。抢占是重计算式的，被抢占者回到 `waiting` 队首。
+- KVCacheManager 通过块池实现分页、前缀缓存（链式块哈希）和 LRU 驱逐；空块 0 永不分配。
+- GPUModelRunner 用持久批降低每步的 CPU 开销，用向量化索引把请求展平，由 CUDA Graph 派发器决定填充尺寸，再调用采样器或接受-拒绝采样器。
+- 异步调度用占位符让 CPU 的调度与 GPU 的前向重叠。我们的迷你引擎保留了主干，去掉了这些分支和优化，将在下一章从头实现。
+
+## 练习
+
+1. 在 `EngineCore.step` 里，为什么 `get_grammar_bitmask` 要放在 `execute_model(..., non_block=True)` 之后、`future.result()` 之前调用？
+2. 一个 100 token 的提示，其内容此前已被完整处理并缓存（块大小 16）。`get_computed_blocks` 最多返回多少个命中 token？为什么？
+3. 持久批的优化假设“相邻两批的请求高度重合”。举一个会破坏这个假设的调度场景，并说明后果。
+4. 同步调度下，decode 前向 10 ms，CPU 开销 4 ms。异步调度能把吞吐提升多少？如果前向只有 2 ms 呢？
+5. 把 vLLM 的 `_prepare_inputs` 中 `req_indices`、`query_pos`、`positions` 的构造过程，对批 $[3,1,2]$（本步 token 数）、已计算 token 数 $[10,20,0]$ 手算一遍。
+
+<details>
+<summary>答案</summary>
+
+1. 结构化输出的位掩码需要 CPU 计算（语法状态机），耗时可能不小。放在 GPU 开始前向之后，位掩码的计算就和前向重叠；如果放在 `future.result()` 之后，GPU 要空等。采样本身需要这个掩码，所以前向之后才调用 `sample_tokens`，此时位掩码已就绪。
+
+2. `max_cache_hit_length = request.num_tokens - 1 = 99`，且只有满块才会被缓存和命中：6 个满块 = 96 个 token，剩下 4 个 token 要重算（也要用它们来得到 logits）。若提示恰好是 96 个 token，上限是 95，向下取整为 5 个满块 = 80 个 token，需要重算整个最后一块的 16 个 token，这就是源码注释里提到的小浪费。
+
+3. 例如批大小限制很小，而 `running` 队列很长时，调度器每步轮流选择不同的子集（交替两组不相交的请求）。每步都要把上一批的请求从持久批移除、把另一组加入，每次都要重新搬运它们的块表和 token 到批的“行”里，CPU 开销接近每步重建整个批。
+
+4. 同步：每步 14 ms，吞吐 $1/14$。异步：每步 10 ms，GPU 连续工作，吞吐 $1/10$，提升 40%。前向只有 2 ms 时，同步每步 6 ms，异步受 CPU 限制，每步仍需 4 ms（GPU 只有 2 ms 在忙），吞吐提升 50%，但此时 CPU 成为瓶颈，需要进一步压缩调度开销（这也是 CUDA Graph 和持久批要做的事）。
+
+5. `req_indices = [0,0,0,1,2,2]`；`cu_num_tokens = [3,4,6]`；`query_pos = [0,1,2,0,0,1]`；`positions = num_computed[req_indices] + query_pos = [10,11,12,20,0,1]`。请求 2 是新请求（已计算为 0，正在 prefill 其前两个 token），请求 1 在 decode，请求 0 在 chunked prefill 的第 10 个 token 之后的 3 个 token。
+
+</details>
+
+## 参考文献
+
+- Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention*. SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- vLLM Team. *vLLM V1: A Major Upgrade to vLLM's Core Architecture*. 2025. [blog.vllm.ai](https://blog.vllm.ai/2025/01/27/v1-alpha-release.html)
+- vLLM 文档：*Architecture Overview* 与 *Automatic Prefix Caching* 设计文档. [docs.vllm.ai](https://docs.vllm.ai/en/latest/design/arch_overview.html)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/v1/engine/async_llm.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/async_llm.py)，[`vllm/v1/engine/core.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/engine/core.py)，[`vllm/v1/core/sched/scheduler.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/sched/scheduler.py)，[`vllm/v1/core/kv_cache_manager.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py)，[`vllm/v1/core/block_pool.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/block_pool.py)，[`vllm/v1/worker/gpu_model_runner.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/worker/gpu_model_runner.py)，[`vllm/v1/sample/sampler.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/sample/sampler.py)
+- nano-vllm（提交 `bb823b3`）：[`nanovllm/engine/`](https://github.com/GeeeekExplorer/nano-vllm/tree/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine)
+- Yu et al. *Orca: A Distributed Serving System for Transformer-Based Generative Models*. OSDI 2022. [USENIX](https://www.usenix.org/conference/osdi22/presentation/yu)
+- Agrawal et al. *Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve*. OSDI 2024. [arXiv:2403.02310](https://arxiv.org/abs/2403.02310)

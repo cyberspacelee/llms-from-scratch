@@ -1,10 +1,65 @@
 ---
 title: 推理系统
-description: 把训练好的模型高效地服务给用户：从单个请求的成本模型出发，一路走到 vLLM 式的推理引擎与大规模分布式部署。
+description: 把训练好的模型高效地服务给用户：从单个请求的成本模型出发，经过分页 KV Cache、连续批处理、CUDA Graph、量化与投机解码，读懂 vLLM，再到多卡、PD 分离与大规模专家并行，最后亲手实现一个迷你推理引擎。
 order: 0
-draft: true
 ---
 
-把训练好的模型高效地服务给用户：从单个请求的成本模型出发，一路走到 vLLM 式的推理引擎与大规模分布式部署。
+模型训练完成，只是故事的一半。一个 70B 的模型每天要回答几十万个请求，每个请求的提示长短不一，输出长度事先不知道，用户既要第一个字很快出现，又要后面的字匀速流出，而成本由租用的 GPU 小时数决定。推理系统要解决的就是这个问题：**在满足延迟约束的前提下，让每张 GPU 每秒服务尽可能多的 token。**
+
+这与训练是两种完全不同的负载。训练的批是自己选的、形状整齐，目标是最大化吞吐；推理的请求由用户到达的时刻决定，每个请求的生命周期里有一个算力受限的阶段（prefill）和一个带宽受限的阶段（decode），而 KV Cache 的显存占用随生成不断增长，批里每个序列的长度还各不相同。整个部分围绕三个问题展开：
+
+1. **瓶颈在哪里？** 用 FLOPs 与字节数的账本推出 prefill 与 decode 的代价、算术强度与最大批大小，知道一个优化“最多”能带来多少（[推理的成本模型](/inference/inference-cost/)）。
+2. **怎样不浪费显存与算力？** 分页 KV Cache 消除碎片并支持共享，连续批处理与 chunked prefill 让批始终是满的，CUDA Graph 消除小批量时的启动开销（[KV Cache 管理](/inference/paged-attention/)、[批处理与调度](/inference/batching-scheduling/)、[CUDA Graph](/inference/cuda-graph/)）。
+3. **怎样把每个字节用得更值？** 量化减少读取的字节，投机解码让每次读取产出更多 token，多卡并行与 PD 分离在延迟约束下扩大规模（[量化](/inference/quantization/)、[投机解码](/inference/speculative-decoding/)、[分布式推理](/inference/distributed-inference/)）。
+
+两章把这些放在一起：[vLLM 架构剖析](/inference/vllm/)沿着一个请求的生命周期阅读当前 vLLM V1 的源码；[从零实现一个推理引擎](/inference/mini-engine/)则用几百行 PyTorch 把核心机制搭起来，并用“并发批处理的贪心输出等于逐个生成”这条不变量验证它。
+
+## 知识脉络
+
+<Diagram width={700} height={420} label="第九部分各章的依赖关系">
+  <Region x={10} y={10} w={685} h={80} title="度量：一切优化的出发点" />
+  <Box x={200} y={38} w={300} h={44} label="成本模型" sub="prefill 算力受限 · decode 带宽受限" tone="info" />
+  <Region x={10} y={110} w={685} h={96} title="单卡引擎：不浪费显存与算力" />
+  <Box x={40} y={142} w={190} h={50} label="分页 KV Cache" sub="块表 · 前缀缓存" tone="accent" />
+  <Box x={270} y={142} w={190} h={50} label="批处理与调度" sub="连续批处理 · token 预算" tone="accent" />
+  <Box x={500} y={142} w={190} h={50} label="CUDA Graph" sub="消除启动开销" tone="accent" />
+  <Region x={10} y={226} w={685} h={96} title="把字节用得更值" />
+  <Box x={40} y={258} w={190} h={50} label="量化" sub="W4A16 · W8A8 · FP8" tone="accent2" />
+  <Box x={270} y={258} w={190} h={50} label="投机解码" sub="草稿 + 验证，分布不变" tone="accent2" />
+  <Box x={500} y={258} w={190} h={50} label="分布式推理" sub="TP · PD 分离 · 大规模 EP" tone="accent2" />
+  <Region x={10} y={342} w={685} h={70} title="综合" />
+  <Box x={140} y={366} w={190} h={38} label="vLLM 架构剖析" size="sm" tone="strong" />
+  <Box x={380} y={366} w={190} h={38} label="迷你推理引擎" size="sm" tone="strong" />
+  <Arrow from={[350, 82]} to={[350, 110]} />
+  <Arrow from={[230, 167]} to={[270, 167]} />
+  <Arrow from={[460, 167]} to={[500, 167]} />
+  <Arrow from={[135, 192]} to={[135, 258]} tone="muted" dashed />
+  <Arrow from={[365, 192]} to={[365, 258]} tone="muted" dashed />
+  <Arrow from={[595, 192]} to={[595, 258]} tone="muted" dashed />
+  <Arrow from={[235, 322]} to={[235, 366]} />
+  <Arrow from={[475, 322]} to={[475, 366]} />
+  <Arrow from={[330, 385]} to={[380, 385]} />
+  <Fragment slot="caption">成本模型给出度量与上界；单卡引擎的三章回答“怎样让一张卡满负荷地服务多个请求”；量化、投机解码与分布式推理在此基础上提高每字节的产出与总规模；vLLM 剖析与迷你引擎把全部机制装配起来。虚线表示这些优化都在单卡引擎之上叠加，而不是替代它。</Fragment>
+</Diagram>
+
+前三章是严格递进的：成本模型引出“批要尽可能大、KV Cache 要尽可能省”的需求，分页 KV Cache 回答“显存怎么管”，批处理与调度回答“每步算什么”，CUDA Graph 回答“小批量时 CPU 怎么跟上”。读到这里，一个单卡引擎的骨架就齐了，[vLLM 架构剖析](/inference/vllm/)正好把它们放在一个真实引擎里对照着读。量化、投机解码、分布式推理三章彼此相对独立，可以按兴趣先后阅读；它们共同依赖成本模型的 roofline 分析。
+
+## 与前后部分的关系
+
+这一部分是全书的最后一部分，它大量使用前面的内容。[生成](/transformer/generation/)已经实现了带 KV Cache 的 GPT 采样，这里把它放进服务场景；[注意力变体](/architecture/attention-variants/)讲的 GQA 与 MLA，直接决定每个 token 的 KV 字节数，也就决定了最大批大小；[混合专家](/architecture/moe/)的路由，是大规模专家并行推理的出发点；[多 token 预测](/architecture/multi-token-prediction/)训练出的 MTP 模块，在推理时正好充当投机解码的草稿。[GPU 与 CUDA 编程](/gpu/)一部分则是这里所有性能结论的硬件基础：decode 为什么受带宽限制，CUDA Graph 为什么消除启动开销，FlashAttention 与分页注意力 kernel 如何工作。[分布式训练](/distributed/)里的张量并行与专家并行在推理里换了一套约束：每一步有延迟预算，通信的固定延迟变得昂贵。
+
+推理系统也反过来服务训练：[大规模强化学习](/post-training/rl-at-scale/)中，每一轮 rollout 的生成占据了大部分时间，使用的正是这里的引擎。
+
+## 阅读与动手建议
+
+本部分的代码都在 `src/llms_from_scratch/inference/` 下，测试在 `tests/inference/`，全部可以在 CPU 上运行：
+
+```sh
+uv run pytest tests/inference          # 成本模型、分页 KV、调度器、量化、投机解码、迷你引擎
+```
+
+不需要 GPU，也不需要下载模型：成本模型是纯算术，量化用伪量化测量误差，CUDA Graph 有一个遵守同样静态地址契约的 CPU 模拟器，迷你引擎的所有测试都使用随机初始化的小 GPT，并以“与逐个 `generate` 的输出一致”为判据。有 GPU 的读者可以运行被跳过的 CUDA Graph 测试，观察真实的启动开销差别。
+
+建议先读前三章，并动手改一改[调度器](/inference/batching-scheduling/)中的 token 预算，观察 TTFT 与 TPOT 的变化；然后读[vLLM 架构剖析](/inference/vllm/)，对着 GitHub 上固定提交的源码走一遍请求的路径；最后做[迷你引擎](/inference/mini-engine/)中的练习。文中所有引用的 vLLM 源码都固定在某个提交上，读者拿到的版本可能已经不同，但章节标题和函数名通常足够找到对应位置。正文中的 GPU 性能数字来自论文与官方博客并注明出处，凡是“估算”都给出推导过程，书中没有任何虚构的实测结果。
 
 <ChapterList part="inference" />
