@@ -2,7 +2,272 @@
 title: FlashAttention：IO 感知的注意力
 description: 标准注意力的显存读写瓶颈，在线 softmax 与分块，FlashAttention 前向与反向的推导，用 Triton 实现 FlashAttention-2，以及 FA3 的改进。
 order: 8
-draft: true
+code:
+  - src/llms_from_scratch/gpu/flash_attention.py
+  - src/llms_from_scratch/gpu/flash_attention_triton.py
+  - tests/gpu/test_flash_attention.py
 ---
 
-本章正在撰写。
+[注意力机制](/transformer/attention/)中，我们把缩放点积注意力写成三行：$S = QK^\top/\sqrt{d}$，$P = \text{softmax}(S)$，$O = PV$。这三行在数学上无可挑剔，在 GPU 上却很浪费：$S$ 与 $P$ 都是 $T\times T$ 的矩阵，它们被完整地写回 HBM、再读出来，读写量随序列长度平方增长；它们占用的显存也随 $T^2$ 增长，限制了能训练的上下文长度。
+
+FlashAttention（Dao 等，2022）的出发点是一个 IO 的观察：如果能把三步融合成一个 kernel，$S$ 与 $P$ 只在片上存在，就既省时间又省显存。障碍在于 softmax 需要整行的信息——而这正是[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)中在线 softmax 已经解决的问题。本章把在线 softmax 推广到连同输出一起合并，完整推导 FlashAttention 的前向更新与重计算反向，比较 FlashAttention-1 与 -2 的循环次序，用 Triton 实现 FlashAttention-2 的前向（参照 CS336 作业 2 与 Triton 官方 fused attention 教程），最后介绍 FlashAttention-3 在 Hopper 上的改进。本章的 CPU 分块参考实现以与 GPU kernel 相同的顺序执行，测试验证它与标准注意力（含因果掩码）以及 PyTorch autograd 的梯度一致。
+
+## 标准注意力的 IO 成本
+
+### 读写量推导
+
+考虑单个头，$Q, K, V\in\mathbb R^{T\times d}$。标准实现是三个 kernel：
+
+| 步骤 | 读 HBM | 写 HBM |
+| --- | --- | --- |
+| $S = QK^\top$ | $Q, K$：$2Td$ | $S$：$T^2$ |
+| $P = \text{softmax}(S)$ | $S$：$T^2$ | $P$：$T^2$ |
+| $O = PV$ | $P, V$：$T^2 + Td$ | $O$：$Td$ |
+
+合计 $4Td + 4T^2$ 个元素（`standard_attention_hbm_elements`）。当 $T\gg d$ 时，$4T^2$ 项占绝对主导。而计算量是 $4T^2 d$ FLOPs（两个矩阵乘法各 $2T^2 d$），所以整体的算术强度约为
+
+$$
+I \approx \frac{4T^2 d}{4T^2\cdot e} = \frac{d}{e},
+$$
+
+BF16、$d=128$ 时约 64 FLOP/byte，远低于 H100 的脊点 295——**标准注意力是带宽受限的**，尽管它的主体是矩阵乘法。罪魁祸首是 $T\times T$ 的中间矩阵在 HBM 中的往返；如果去掉它，注意力的算术强度就只受 $Q$、$K$、$V$、$O$ 的读写限制，变成计算受限。
+
+显存同样是问题。训练时 $P$ 还要保存给反向使用：batch 8、32 个头、$T = 8192$ 时，BF16 的 $P$ 就需要 $8\times 32\times 8192^2\times 2 \approx 34$ GB，单是一层就超过了半张 H100。
+
+## 分块与在线 softmax
+
+### 难点：softmax 耦合了整行
+
+矩阵乘法可以随意分块，因为 $C$ 的每个子块只是若干部分积之和。注意力的困难在于 softmax：输出的第 $i$ 行 $O_i = \sum_j P_{ij} V_j$，而 $P_{ij} = e^{S_{ij}}/\sum_k e^{S_{ik}}$ 的分母依赖第 $i$ 行的 **全部** 分数。如果把 $K$、$V$ 分成若干块依次处理，处理第一块时还不知道分母。
+
+### 推广在线 softmax：连同输出一起合并
+
+在线 softmax 的思想是：维护相对当前最大值的部分和，最大值变化时重新缩放。输出 $O_i$ 是以 $e^{S_{ij}}$ 为权重的加权和，同样可以用 **未归一化** 的形式维护，在最大值变化时一起缩放。
+
+固定一个查询块 $Q_i$（$B_r$ 行），把 $K, V$ 按行分成块 $K_1, \dots, K_{T_c}$、$V_1,\dots,V_{T_c}$（每块 $B_c$ 行）。处理完前 $j$ 个块后，对查询块中的每一行维护三个量：
+
+- $m^{(j)}$：到目前为止见过的分数的最大值；
+- $\ell^{(j)}$：$\sum_{k\le j}\text{rowsum}\bigl(e^{S_{ik} - m^{(j)}}\bigr)$，相对 $m^{(j)}$ 的指数和；
+- $\tilde O^{(j)}$：$\sum_{k\le j} e^{S_{ik} - m^{(j)}} V_k$，相对 $m^{(j)}$ 的未归一化输出。
+
+读入第 $j$ 块，计算 $S_{ij} = Q_i K_j^\top/\sqrt d$（$B_r\times B_c$，只在片上），然后：
+
+<KeyEq label="FlashAttention 前向更新">
+
+$$
+\begin{aligned}
+m^{(j)} &= \max\bigl(m^{(j-1)},\ \text{rowmax}(S_{ij})\bigr), \\
+\tilde P_{ij} &= \exp\bigl(S_{ij} - m^{(j)}\bigr), \\
+\ell^{(j)} &= e^{m^{(j-1)} - m^{(j)}}\,\ell^{(j-1)} + \text{rowsum}(\tilde P_{ij}), \\
+\tilde O^{(j)} &= \text{diag}\bigl(e^{m^{(j-1)} - m^{(j)}}\bigr)\,\tilde O^{(j-1)} + \tilde P_{ij} V_j ,
+\end{aligned}
+$$
+
+</KeyEq>
+
+初值 $m^{(0)} = -\infty$、$\ell^{(0)} = 0$、$\tilde O^{(0)} = 0$。处理完全部 $T_c$ 块后：
+
+$$
+O_i = \text{diag}\bigl(\ell^{(T_c)}\bigr)^{-1}\tilde O^{(T_c)},\qquad L_i = m^{(T_c)} + \log \ell^{(T_c)} .
+$$
+
+**正确性**（对 $j$ 归纳）。假设 $\tilde O^{(j-1)} = \sum_{k<j} e^{S_{ik} - m^{(j-1)}}V_k$。乘以 $e^{m^{(j-1)} - m^{(j)}}$ 后每一项的指数变为 $S_{ik} - m^{(j)}$，再加上新块的 $e^{S_{ij} - m^{(j)}}V_j$，得到 $\sum_{k\le j} e^{S_{ik}-m^{(j)}}V_k$，即 $\tilde O^{(j)}$ 的定义。$\ell$ 的推导完全相同（这就是上一部分的在线 softmax）。最后
+
+$$
+\frac{\tilde O^{(T_c)}}{\ell^{(T_c)}} = \frac{\sum_k e^{S_{ik}-m}V_k}{\sum_k \text{rowsum}(e^{S_{ik}-m})} = \text{softmax}(S_i)\,V = O_i ,
+$$
+
+其中 $m = m^{(T_c)}$ 是整行最大值，分子分母中的 $e^{-m}$ 相互抵消。$L_i$ 是第 $i$ 行分数的 logsumexp，反向传播时要用到它。
+
+**手算一例**。一个查询、两个键块（各一个键），分数 $s = (1, 3)$，值为标量 $v = (10, 20)$。标准计算：权重 $(e^1, e^3)/(e^1+e^3) \approx (0.1192, 0.8808)$，输出 $0.1192\cdot 10 + 0.8808\cdot 20 = 18.808$。分块计算：
+
+- 第 1 块：$m = 1$，$\tilde P = e^0 = 1$，$\ell = 1$，$\tilde O = 10$；
+- 第 2 块：$m = 3$，缩放因子 $\alpha = e^{1-3}\approx 0.1353$，$\tilde P = e^{0} = 1$，$\ell = 0.1353 + 1 = 1.1353$，$\tilde O = 0.1353\cdot 10 + 20 = 21.353$；
+- 输出 $21.353/1.1353 = 18.808$，一致。
+
+### 分块参考实现
+
+<CodeFile path="src/llms_from_scratch/gpu/flash_attention.py" region="flash_forward" />
+
+代码与公式一一对应：`alpha` 是缩放因子 $e^{m^{(j-1)}-m^{(j)}}$，`acc` 是 $\tilde O$，`ell` 是 $\ell$。注意除以 $\ell$ 只在循环结束后做一次——这是 FlashAttention-2 相对第一版的改进之一：第一版在每一步都维护归一化后的输出，每步多做一次除法与缩放。
+
+**因果掩码**。对自回归模型，查询 $i$ 只能看到键 $j\le i$。分块后，K/V 块分为三类：完全在对角线左下方（不需要掩码）、跨越对角线（需要逐元素掩码）、完全在右上方（全部被掩码，**整块跳过**）。跳过的块不读、不算，因果注意力的计算量因此约减半。
+
+<Diagram width={660} height={290} label="因果注意力的分块：跳过对角线右上方的块">
+  <Matrix x={170} y={50} rows={4} cols={4} cell={[56, 48]} gap={4} values={[["计算", "跳过", "跳过", "跳过"], ["计算", "计算", "跳过", "跳过"], ["计算", "计算", "计算", "跳过"], ["计算", "计算", "计算", "计算"]]} rowLabels={['Q₁', 'Q₂', 'Q₃', 'Q₄']} colLabels={['K₁V₁', 'K₂V₂', 'K₃V₃', 'K₄V₄']} highlight={[{ upper: true, tone: 'muted' }, { cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent2' }]} />
+  <Legend x={440} y={80} items={[{ label: '整块计算', tone: 'neutral' }]} />
+  <Legend x={440} y={110} items={[{ label: '对角块：逐元素掩码', tone: 'accent2' }]} />
+  <Legend x={440} y={140} items={[{ label: '整块跳过', tone: 'muted' }]} />
+  <Text x={290} y={270} label="每行（一个 Q 块）是一个 program，沿 K/V 块循环" size="sm" tone="muted" />
+  <Fragment slot="caption">T = 64、B_r = B_c = 16 时有 4×4 个块对。对角线右上方的 6 个块被整块跳过，只有 10 个被读取与计算；对角块内部还需要逐元素的掩码。测试 test_causal_skips_upper_tiles 断言了 10 与 6。</Fragment>
+</Diagram>
+
+`test_forward_matches_naive` 对四种块大小组合（包括 $B_r = 7, B_c = 5$ 这种不整除的情形）、因果与非因果两种情形，验证输出与标准注意力一致，且返回的 $L$ 等于 `torch.logsumexp` 的结果。
+
+### IO 分析
+
+FlashAttention 前向读 $Q$ 一次、写 $O$ 一次；每个 Q 块都要把 $K$、$V$ 完整读一遍，共 $T/B_r$ 遍。读写量为
+
+$$
+2Td + 2Td\cdot\frac{T}{B_r}\quad\text{elements}.
+$$
+
+`flash_attention_hbm_elements` 实现了这个计数。它仍然随 $T^2$ 增长，但系数是 $2d/B_r$ 而不是 4：$B_r$ 越大（片上存储越大），重复读取越少。FlashAttention 论文证明了这一量级是最优的：设片上 SRAM 大小为 $M$，FlashAttention 的 HBM 访问量为 $\Theta(T^2 d^2/M)$，并且对于所有精确注意力算法、所有 $M$ 的取值，不存在渐近更少的算法。
+
+这个计数是悲观的：它假设每个 Q 块读 $K$、$V$ 都从 HBM 读取。实际上同一个头的多个 Q 块同时运行，它们读的是同一份 $K$、$V$，大量读取在 L2 中命中。更重要的收益是 **显存**：标准注意力为反向保存 $T\times T$ 的 $P$，FlashAttention 只保存每行一个 logsumexp。
+
+<Plot
+  label="每个头为反向保存的注意力中间量：标准注意力的 P 与 FlashAttention 的 L"
+  x={[512, 131072]}
+  y={[0.001, 100000]}
+  logX
+  logY
+  xLabel="序列长度 T"
+  yLabel="MB"
+  series={[
+    { fn: (t) => (2 * t * t) / 1e6, label: '标准：P（BF16）', tone: 'accent2' },
+    { fn: (t) => (4 * t) / 1e6, label: 'FlashAttention：L（FP32）', tone: 'accent' },
+  ]}
+>
+  <Fragment slot="caption">按定义推导：P 占 2T² 字节，L 占 4T 字节，均为单个头、单个样本。T = 131072 时 P 为 34 GB，L 只有 0.5 MB。FlashAttention 把注意力的额外显存从平方降到线性，是长上下文训练的前提。</Fragment>
+</Plot>
+
+## 反向传播：重计算而不是保存
+
+### 梯度公式
+
+记 $\tau = 1/\sqrt d$，前向为 $S = \tau QK^\top$，$P = \text{softmax}(S)$（按行），$O = PV$。给定上游梯度 $dO$，由[反向传播：从标量到矩阵](/math/backprop/)的矩阵求导规则：
+
+$$
+dV = P^\top dO,\qquad dP = dO\, V^\top .
+$$
+
+softmax 的反向：对第 $i$ 行，$dS_{ij} = P_{ij}\bigl(dP_{ij} - \sum_k P_{ik}\, dP_{ik}\bigr)$。其中的求和可以化简：
+
+$$
+\sum_k P_{ik}\,dP_{ik} = \sum_k P_{ik}\,(dO_i\cdot V_k) = dO_i\cdot\Bigl(\sum_k P_{ik}V_k\Bigr) = dO_i\cdot O_i \;=:\; D_i .
+$$
+
+于是
+
+<KeyEq label="注意力反向">
+
+$$
+dS = P\circ\bigl(dP - D\,\mathbf 1^\top\bigr),\qquad D = \text{rowsum}(dO\circ O),\qquad dQ = \tau\, dS\,K,\qquad dK = \tau\, dS^\top Q .
+$$
+
+</KeyEq>
+
+$D$ 只需要 $dO$ 与 $O$ 两个 $T\times d$ 矩阵的逐行点积，不涉及任何 $T\times T$ 的量。
+
+### 重计算 P
+
+反向需要 $P$。FlashAttention 不保存它，而是在反向中按块 **重新计算**：有了前向保存的 logsumexp $L_i$，
+
+$$
+P_{ij} = \exp\bigl(S_{ij} - L_i\bigr),
+$$
+
+不需要再求最大值与和，一步得到归一化的概率。重计算多花了一次 $QK^\top$ 的 FLOPs（约为反向总 FLOPs 的 20%），换来不读写 $T\times T$ 的 $P$——在带宽受限的旧实现上，这反而更快。
+
+<CodeFile path="src/llms_from_scratch/gpu/flash_attention.py" region="flash_backward" />
+
+反向的循环次序与前向相反：外层循环 K/V 块，$dK_j$、$dV_j$ 在片上累加，整块写回一次；内层循环 Q 块。$dQ_i$ 则由所有 K/V 块贡献，在 GPU 上需要用原子加累加到 HBM，或者像 CS336 作业建议的那样单独再跑一趟以 Q 块为外层的循环来计算 $dQ$，避免原子操作。`test_backward_matches_autograd` 用 FP64 验证三个梯度与 PyTorch autograd 对标准注意力的结果一致（因果与非因果）。
+
+## FlashAttention-2：并行与循环次序
+
+FlashAttention-2（Dao，2023）在算法不变的前提下重新组织了工作划分，论文报告相对第一版约 2 倍的加速，在 A100 上达到理论峰值 FLOPs 的 50%–73%：
+
+1. **交换循环次序**。第一版外层循环 K/V 块、内层循环 Q 块，每处理一个 K/V 块就要把所有 $O_i$、$\ell_i$、$m_i$ 从 HBM 读出、更新、写回。第二版外层循环 Q 块，一个 Q 块的 $\tilde O$、$\ell$、$m$ 在整个内层循环中留在寄存器里，只在最后写一次——就是上面的参考实现。
+2. **沿序列长度并行**。第一版按 batch × 头数划分线程块，长序列、小 batch 时线程块数不够填满 108 个 SM。第二版让每个 Q 块成为一个独立的线程块，网格为 $(\lceil T/B_r\rceil,\ B\cdot h)$。
+3. **减少非矩阵乘法运算**。延迟到最后才除以 $\ell$；只保存 $L = m + \log\ell$ 而不是分别保存 $m$ 与 $\ell$。在 Tensor Core 上，矩阵乘法与其他运算的吞吐相差一个数量级以上（[GPU 硬件：SM、warp 与内存层次](/gpu/gpu-architecture/)），每一个省下的标量运算都有意义。
+4. **warp 间按 Q 划分**。一个线程块内，第一版把 $K$、$V$ 分给不同的 warp（“split-K”），各 warp 的部分结果需要经共享内存合并；第二版把 $Q$ 分给不同的 warp，每个 warp 独立算自己那几行的输出，无需通信。
+
+## 用 Triton 实现 FlashAttention-2 前向
+
+### kernel
+
+网格的第一维是 Q 块编号，第二维是 (batch, head) 的合并下标。每个 program 读入自己的 Q 块，循环所有 K/V 块（因果时只到对角线），最后写出 $O$ 与 $L$：
+
+<CodeFile path="src/llms_from_scratch/gpu/flash_attention_triton.py" region="flash_fwd_kernel" />
+
+与 CPU 参考实现对照，几处 Triton 特有的写法：
+
+- **块指针**：`tl.make_block_ptr` 描述一个二维张量（形状、步长）中的一个块，`tl.advance` 沿 K 方向移动；`boundary_check` 与 `padding_option="zero"` 处理越界。在 Hopper 上，块指针可以被编译成 TMA 加载。
+- **两个 `tl.dot`**：$S = QK^\top$ 用 `tl.trans(k)`；$PV$ 之前把 `p` 转回输入精度（BF16/FP16），以便使用 Tensor Core，累加器 `acc` 保持 FP32。
+- **掩码**：`valid` 同时处理最后一个 K 块越界与因果掩码，被掩码的分数置为 $-\infty$，其指数为 0。因果时循环上界 `hi` 只到当前 Q 块的末尾，对角线右上方的块根本不进入循环。
+- **常量参数**：`D`、`Q_TILE`、`K_TILE`、`IS_CAUSAL` 是 `tl.constexpr`，每种组合编译一份 kernel，`if IS_CAUSAL` 在编译期消解。
+
+Triton 官方教程的版本还用了一个常见的小技巧：把 $1/\sqrt d$ 与 $\log_2 e$ 预先乘进 $Q$ 的缩放，用硬件更快的 `exp2` 代替 `exp`。
+
+### 启动与 autograd 封装
+
+<CodeFile path="src/llms_from_scratch/gpu/flash_attention_triton.py" region="flash_launch" />
+
+<CodeFile path="src/llms_from_scratch/gpu/flash_attention_triton.py" region="autograd_function" />
+
+`FlashAttentionTriton.apply(q, k, v, causal)` 前向调用 Triton kernel，只保存 $Q, K, V, O, L$；反向调用分块重计算的参考实现（纯 PyTorch 运算，在 GPU 上同样可用）。这正是 CS336 作业 2 的结构：先写 PyTorch 分块版本验证算法，再把前向换成 Triton kernel，最后（可选）把反向也写成 Triton kernel。GPU 测试比较 BF16 输出与 FP32 的标准注意力，并检查反向能运行；在没有 GPU 的环境中自动跳过。
+
+<Callout tone="tip" title="块大小的选择">
+$B_r$、$B_c$ 越大，K/V 的重复读取越少，但寄存器与共享内存压力越大：一个 program 要在寄存器中同时持有 $Q_i$（$B_r\times d$）、$\tilde O$（$B_r\times d$，FP32）和 $S$（$B_r\times B_c$，FP32）。常见的取值是 $B_r\in\{64, 128\}$、$B_c\in\{32, 64, 128\}$，`num_warps` 为 4 或 8，具体值应当用 `triton.autotune` 针对头维与 GPU 搜索。$d$ 越大，可用的块越小。
+</Callout>
+
+## FlashAttention-3：Hopper 上的异步与低精度
+
+在 H100 上，FlashAttention-2 只能达到约 35% 的峰值利用率（FlashAttention-3 论文的数字）。原因在于它没有利用 Hopper 的新特性：WGMMA 的异步执行、TMA，以及 FP8 Tensor Core。FlashAttention-3（Shah、Bikshandi、Zhang、Thakkar、Ramani、Dao，2024）的三项主要技术：
+
+1. **warp 专门化的生产者—消费者结构**。一个线程块中的 warp 分成生产者（只发 TMA 加载 $K_j$、$V_j$ 到共享内存中的环形缓冲区）与消费者（只发 WGMMA 并计算 softmax）。数据搬运与计算由不同的 warp 异步进行，通过 mbarrier 同步；生产者只需要很少的寄存器，Hopper 允许用 `setmaxnreg` 把寄存器重新分配给消费者。
+2. **让 softmax 与矩阵乘法重叠**。H100 上指数运算的吞吐只有 FP16 矩阵乘法的 1/256（3.9 vs 989 TFLOPS），softmax 的时间不可忽略。FA3 用两种调度把它藏在矩阵乘法后面：**乒乓调度**（ping-pong）让两个消费者 warpgroup 交替，一个做 softmax 时另一个做 GEMM；**warpgroup 内的两级流水**，在计算第 $j$ 块的 softmax 时，已经发出第 $j+1$ 块的 $QK^\top$ WGMMA。
+3. **FP8**。FP8 Tensor Core 的吞吐是 FP16 的两倍，但注意力的激活中存在离群值。FA3 使用 **分块量化**（每个块一个缩放因子）与 **非相干处理**（incoherent processing：对 $Q$、$K$ 乘以同一个随机正交矩阵，通常是带随机符号的 Hadamard 变换，$QK^\top$ 不变但离群值被“摊平”），论文报告其数值误差比朴素的逐张量 FP8 量化低 2.6 倍。此外 FP8 WGMMA 对操作数的内存布局有特定要求（$V$ 需要在共享内存中转置），FA3 在 kernel 内完成这一转置。
+
+论文报告：H100 上 FP16 前向最高约 740 TFLOPS（约 75% 利用率），比 FlashAttention-2 快 1.5–2.0 倍；FP8 接近 1.2 PFLOPS。这些都是论文中的测量值，本书没有复现。2025 年以后，FlashAttention 仓库又加入了面向 Blackwell 的实现（基于 CuTe 的 Python DSL），利用第五代 Tensor Core 与张量内存；其技术细节以官方仓库与后续论文为准，本书不展开。
+
+FlashAttention 的思想也延伸到了推理：decode 时只有一个查询，Q 方向没有并行度，FlashDecoding（Dao 等，2023）改为沿 K/V 方向切分，各段独立计算后用本章的 $(m, \ell, \tilde O)$ 合并公式归约——这又一次用到了在线 softmax 的结合律。[KV Cache 管理：PagedAttention 与前缀缓存](/inference/paged-attention/)会讨论推理中注意力 kernel 的另一面：K/V 不再连续存放。
+
+## 小结
+
+- 标准注意力把 $T\times T$ 的 $S$、$P$ 写回 HBM，读写量约 $4T^2$、算术强度约 $d/e$，是带宽受限的；为反向保存 $P$ 的显存也随 $T^2$ 增长。
+- 在线 softmax 推广到输出：维护 $(m, \ell, \tilde O)$，每读入一个 K/V 块就用 $e^{m_{\text{old}}-m_{\text{new}}}$ 缩放旧的 $\ell$ 与 $\tilde O$，最后除以 $\ell$；$S$、$P$ 只在片上存在。
+- HBM 访问量降为 $\Theta(T^2 d^2/M)$，额外显存从 $O(T^2)$ 降为 $O(T)$（只存 logsumexp）。因果掩码下整块跳过对角线右上方的块。
+- 反向用 $D = \text{rowsum}(dO\circ O)$ 化简 softmax 的梯度，用 $P = e^{S - L}$ 重计算概率；外层循环 K/V 块，在片上累加 $dK$、$dV$。
+- FlashAttention-2 交换循环次序、沿序列并行、减少非矩阵运算；FlashAttention-3 在 Hopper 上用 warp 专门化、softmax 与 WGMMA 重叠、FP8 分块量化进一步逼近峰值。
+
+最后一章[性能分析：Roofline 与 Profiler](/gpu/profiling/)给出衡量这一切的工具：怎样判断一个 kernel 离上限还有多远，怎样正确地计时，以及怎样读一个 Transformer 层的 profile。
+
+## 练习
+
+1. 对 $T = 4096$、$d = 128$、$B_r = 128$，计算标准注意力与 FlashAttention 前向（悲观计数）的 HBM 读写元素数之比。$B_r$ 需要多大，这个比值才能超过 4？这个要求现实吗？
+2. 在手算例子中把两个键块的顺序交换（先处理分数 3，再处理分数 1），重新计算 $(m, \ell, \tilde O)$ 的每一步，验证结果仍为 18.808。这说明了合并运算的什么性质？
+3. 推导 softmax 的反向公式 $dS_{ij} = P_{ij}(dP_{ij} - \sum_k P_{ik}dP_{ik})$（提示：写出 $\partial P_{ik}/\partial S_{ij}$）。
+4. 为什么 FlashAttention-2 的前向用“外层 Q、内层 K/V”，而反向用“外层 K/V、内层 Q”？如果反向也用外层 Q，哪些量需要原子加？
+5. 对 $T = 8192$ 的因果注意力，$B_r = B_c = 128$，有多少个块对被计算，多少个被跳过？计算量相对非因果注意力节省了多少？
+6. FlashDecoding 把一个查询对 $T$ 个键的注意力分成 $s$ 段并行计算，每段得到 $(m_k, \ell_k, \tilde O_k)$。写出把 $s$ 段合并成最终输出的公式。
+
+<details>
+<summary>答案</summary>
+
+1. 标准：$4Td + 4T^2 = 2.10\times 10^6 + 6.71\times 10^7 \approx 6.92\times 10^7$；FlashAttention：$2Td(1 + T/B_r) = 1.05\times 10^6\times 33 \approx 3.46\times 10^7$；比值约 2.0。要超过 4，需要 $2d/B_r < 1$ 左右，即 $B_r > 2d = 256$ 以上（还要扣除 $Td$ 项），对 $d=128$ 意味着一个 program 在寄存器中持有 $256\times 128$ 的 $Q$ 与 FP32 的 $\tilde O$，超出单个 SM 的寄存器容量。现实中收益主要来自 L2 命中与显存节省，而非这个悲观计数。
+
+2. 第 1 步（分数 3）：$m=3$，$\ell=1$，$\tilde O=20$。第 2 步（分数 1）：$m = \max(3,1) = 3$，$\alpha = e^0 = 1$，$\tilde P = e^{1-3} = 0.1353$，$\ell = 1.1353$，$\tilde O = 20 + 0.1353\cdot 10 = 21.353$，输出 18.808。顺序无关，说明 $(m,\ell,\tilde O)$ 的合并满足交换律（结合律同理），所以 K/V 块可以按任意顺序、甚至并行处理后再合并。
+
+3. $P_{ik} = e^{S_{ik}}/Z_i$，$\partial P_{ik}/\partial S_{ij} = P_{ik}(\delta_{kj} - P_{ij})$。于是 $dS_{ij} = \sum_k dP_{ik}\,P_{ik}(\delta_{kj} - P_{ij}) = P_{ij}dP_{ij} - P_{ij}\sum_k P_{ik}dP_{ik}$。
+
+4. 前向的输出 $O_i$ 只依赖 Q 块 $i$，外层 Q 使每个 program 独占自己的输出，无需跨 program 累加。反向中 $dK_j$、$dV_j$ 是对所有 Q 块求和，$dQ_i$ 是对所有 K/V 块求和；外层 K/V 让 $dK_j$、$dV_j$ 在片上累加（两个量），只有 $dQ$ 需要原子加；若外层 Q，则 $dK$、$dV$ 两个量都需要原子加，冲突更多。
+
+5. $8192/128 = 64$ 个块，共 $64^2 = 4096$ 个块对；对角线及左下方 $64\cdot 65/2 = 2080$ 个被计算（其中 64 个对角块需要逐元素掩码），2016 个被跳过。计算量约为非因果的 $2080/4096 \approx 50.8\%$。
+
+6. $m = \max_k m_k$，$\ell = \sum_k e^{m_k - m}\ell_k$，$\tilde O = \sum_k e^{m_k - m}\tilde O_k$，输出 $O = \tilde O/\ell$。等价地，若各段已归一化 $O_k = \tilde O_k/\ell_k$ 并保存 $L_k = m_k + \log\ell_k$，则 $O = \sum_k e^{L_k - L} O_k$，其中 $L = \log\sum_k e^{L_k}$。
+
+</details>
+
+## 参考文献
+
+- T. Dao, D. Fu, S. Ermon, A. Rudra, C. Ré. [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135), NeurIPS 2022.
+- T. Dao. [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691), 2023.
+- J. Shah, G. Bikshandi, Y. Zhang, V. Thakkar, P. Ramani, T. Dao. [FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision](https://arxiv.org/abs/2407.08608), 2024.
+- T. Dao, D. Haziza, F. Massa, G. Sizov. [Flash-Decoding for long-context inference](https://pytorch.org/blog/flash-decoding/), PyTorch Blog, 2023.
+- M. Milakov, N. Gimelshein. [Online normalizer calculation for softmax](https://arxiv.org/abs/1805.02867), 2018.
+- M. Rabe, C. Staats. [Self-attention Does Not Need O(n²) Memory](https://arxiv.org/abs/2112.05682), 2021.
+- Dao-AILab. [flash-attention 源码仓库](https://github.com/Dao-AILab/flash-attention).
+- Triton. [Fused Attention tutorial](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html).
+- Stanford CS336, Spring 2025. [Assignment 2: Systems](https://github.com/stanford-cs336/assignment2-systems)（Triton FlashAttention-2）。

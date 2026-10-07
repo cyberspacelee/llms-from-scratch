@@ -2,7 +2,316 @@
 title: GPU 硬件：SM、warp 与内存层次
 description: 从 CPU 与 GPU 的设计取舍出发，认识 SM、warp、寄存器、共享内存、L2 与 HBM，Tensor Core，以及从 A100、H100 到 B200 的演进。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/gpu/hardware.py
+  - tests/gpu/test_hardware.py
 ---
 
-本章正在撰写。
+在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中，我们把一次训练步的成本写成 $6ND$ 个浮点运算，再除以 GPU 的峰值算力得到时间的下界。这个下界在实践中很少能达到：同样的 FLOPs，换一种写法可能慢十倍。要理解差距从哪里来，必须先知道 GPU 这台机器长什么样——它有多少个计算单元、数据存在哪里、从一处搬到另一处要多久。
+
+本章不写代码，只建立一个足够精确的硬件心智模型：GPU 为什么用几万个“慢”线程而不是几个快核心；SM、warp、SIMT 是什么；寄存器、共享内存、L2、HBM 各有多大、多快；Tensor Core 在不同精度下的峰值；以及贯穿本部分的核心矛盾——算力增长远快于带宽增长。读完本章，读者应当能拿到一张 GPU 的规格表，估算出一个算子在它上面最快能跑多快。
+
+## 两种设计哲学：延迟与吞吐
+
+### CPU 为单线程延迟而优化
+
+CPU 的目标是让 **一个** 指令流尽快结束。为此它把芯片面积花在“让单个线程少等待”上：几十 MB 的多级缓存让大部分访存在几纳秒内命中；乱序执行（out-of-order execution）在一条指令等待内存时先执行后面不相关的指令；分支预测器猜测 `if` 的走向，提前取指。一颗服务器 CPU 有几十个这样的核心，每个核心都是一台精巧而昂贵的小机器。
+
+### GPU 为总吞吐量而优化
+
+GPU 的目标是让 **一大批** 相似的计算尽快全部结束，单个计算花多久并不重要。它把芯片面积花在计算单元上：一张 H100 有 132 个流式多处理器（Streaming Multiprocessor，SM），每个 SM 有 128 个 FP32 单元和 4 个 Tensor Core，合计近 1.7 万个 FP32 单元。缓存小、没有复杂的乱序执行，等待内存时怎么办？答案是 **换一批线程来跑**：每个 SM 同时驻留多达 2048 个线程，一批线程在等数据时，调度器在下一个时钟周期切到另一批已经就绪的线程。只要就绪的线程足够多，计算单元就永远不闲。
+
+<Diagram width={700} height={250} label="CPU 与 GPU 芯片面积分配示意">
+  <Region x={20} y={20} w={320} h={210} title="CPU：少数复杂核心" />
+  <Box x={40} y={50} w={130} h={70} label="核心" sub="乱序 · 分支预测" tone="accent" />
+  <Box x={190} y={50} w={130} h={70} label="核心" sub="乱序 · 分支预测" tone="accent" />
+  <Box x={40} y={130} w={280} h={44} label="大容量多级缓存" tone="info" />
+  <Box x={40} y={182} w={280} h={34} label="DRAM 控制器" tone="muted" size="sm" />
+  <Region x={375} y={20} w={315} h={210} title="GPU：大量简单计算单元" />
+  <Matrix x={400} y={50} rows={5} cols={14} cell={18} gap={2} tone="accent" />
+  <Box x={400} y={158} w={278} h={26} label="L2 缓存" tone="info" size="sm" />
+  <Box x={400} y={190} w={278} h={26} label="HBM 控制器（高带宽）" tone="muted" size="sm" />
+  <Fragment slot="caption">示意图，不按比例。CPU 把面积花在缓存与控制逻辑上，以降低单个线程的延迟；GPU 把面积花在成千上万个计算单元上，用大量线程的切换来掩盖延迟，并配以高带宽的 HBM。</Fragment>
+</Diagram>
+
+这种设计对工作负载有明确的要求：计算必须能拆成成千上万个 **独立的、做同样事情** 的小任务。矩阵乘法、逐元素激活、按行 softmax 恰好如此——这正是深度学习跑在 GPU 上的根本原因。反过来，分支繁多、强依赖顺序的代码（比如分词器的合并循环）在 GPU 上并不快。
+
+### 用利特尔定律理解“需要多少线程”
+
+“线程足够多才能掩盖延迟”可以量化。排队论中的利特尔定律（Little's law）说：系统中平均在途的请求数等于到达速率乘以平均停留时间。应用到内存系统上：
+
+<KeyEq label="利特尔定律">
+
+$$
+\text{bytes in flight} = \text{bandwidth} \times \text{latency}
+$$
+
+</KeyEq>
+
+要跑满带宽，任意时刻必须有“带宽 × 延迟”这么多字节的读请求已经发出、尚未返回。HBM 的访问延迟在数百纳秒量级（微基准测试论文对 Volta 测得全局内存延迟约 400 个时钟周期以上，见 Jia 等人 2018）。以 H100 的 3.35 TB/s、假设延迟 500 ns 估算：
+
+$$
+3.35\times 10^{12}\,\text{B/s} \times 500\times 10^{-9}\,\text{s} \approx 1.7\,\text{MB}.
+$$
+
+平摊到 132 个 SM，每个 SM 需要约 12.7 KB 的在途请求。如果每个线程一次只读一个 4 字节的 `float`，就需要约 3200 个线程同时在等待——超过了一个 SM 最多驻留的 2048 个线程。这个估算解释了两件后面会反复出现的事：GPU 需要极高的并行度；以及仅有线程级并行还不够，每个线程最好一次读更多字节（向量化加载）、或同时发出多个独立的读（指令级并行）。
+
+## SM、warp 与 SIMT
+
+### SM 的内部
+
+GPU 由若干个 SM 组成，SM 是调度与执行的基本单位。以 Hopper 架构的 H100 为例（NVIDIA H100 白皮书），每个 SM 被分成 4 个处理块（processing block，也叫 SM 子分区），每个处理块有自己的 warp 调度器、16K 个 32 位寄存器（64 KB）、32 个 FP32 单元和 1 个第四代 Tensor Core。4 个处理块共享一块 256 KB 的片上 SRAM，它可以在 L1 数据缓存与共享内存（shared memory）之间按需划分，共享内存最多 228 KB。
+
+<Diagram width={720} height={300} label="H100 SM 的结构">
+  <Region x={20} y={14} w={680} h={276} title="一个 SM（H100）" />
+  <Box x={40} y={46} w={150} h={150} label="处理块 0" title tone="neutral" />
+  <Box x={50} y={78} w={130} h={28} label="warp 调度器" size="sm" tone="accent2" />
+  <Box x={50} y={112} w={130} h={28} label="寄存器 64 KB" size="sm" tone="info" />
+  <Box x={50} y={146} w={62} h={40} label="32×FP32" size="sm" tone="accent" />
+  <Box x={118} y={146} w={62} h={40} label={"Tensor\nCore"} size="sm" tone="strong" />
+  <Box x={205} y={46} w={150} h={150} label="处理块 1" title tone="neutral" />
+  <Box x={215} y={78} w={130} h={28} label="warp 调度器" size="sm" tone="accent2" />
+  <Box x={215} y={112} w={130} h={28} label="寄存器 64 KB" size="sm" tone="info" />
+  <Box x={215} y={146} w={62} h={40} label="32×FP32" size="sm" tone="accent" />
+  <Box x={283} y={146} w={62} h={40} label={"Tensor\nCore"} size="sm" tone="strong" />
+  <Box x={370} y={46} w={150} h={150} label="处理块 2" title tone="neutral" />
+  <Box x={380} y={78} w={130} h={28} label="warp 调度器" size="sm" tone="accent2" />
+  <Box x={380} y={112} w={130} h={28} label="寄存器 64 KB" size="sm" tone="info" />
+  <Box x={380} y={146} w={62} h={40} label="32×FP32" size="sm" tone="accent" />
+  <Box x={448} y={146} w={62} h={40} label={"Tensor\nCore"} size="sm" tone="strong" />
+  <Box x={535} y={46} w={150} h={150} label="处理块 3" title tone="neutral" />
+  <Box x={545} y={78} w={130} h={28} label="warp 调度器" size="sm" tone="accent2" />
+  <Box x={545} y={112} w={130} h={28} label="寄存器 64 KB" size="sm" tone="info" />
+  <Box x={545} y={146} w={62} h={40} label="32×FP32" size="sm" tone="accent" />
+  <Box x={613} y={146} w={62} h={40} label={"Tensor\nCore"} size="sm" tone="strong" />
+  <Box x={40} y={212} w={645} h={30} label="L1 数据缓存 / 共享内存：共 256 KB，共享内存最多 228 KB" tone="info" size="sm" />
+  <Box x={40} y={250} w={645} h={28} label="TMA（张量内存加速器）· 加载/存储单元 · 纹理单元" tone="muted" size="sm" />
+  <Fragment slot="caption">四个处理块各自调度 warp、各有一份寄存器堆与计算单元；它们共享 L1/共享内存。一个线程块（block）的所有线程驻留在同一个 SM 上，因此能通过共享内存协作。数字取自 NVIDIA H100 白皮书。</Fragment>
+</Diagram>
+
+整张 H100 SXM5 有 132 个 SM，它们共享 50 MB 的 L2 缓存和 80 GB 的 HBM3 显存。程序员写的 kernel 会被拆成许多 **线程块**（thread block），硬件把线程块分配到各个 SM 上执行；一个线程块从开始到结束都待在同一个 SM 上，这是它能使用该 SM 共享内存的前提。
+
+### warp 与 SIMT
+
+SM 并不逐个调度线程，而是以 32 个线程为一组调度，这一组叫 **warp**。一个 warp 的 32 个线程在同一时刻执行同一条指令，但各自使用自己的寄存器、处理各自的数据——NVIDIA 称之为 SIMT（Single Instruction, Multiple Threads，单指令多线程）。从程序员的角度看，每个线程都在执行一段普通的标量代码；从硬件的角度看，一条指令同时作用于 32 个数据。
+
+SIMT 有两个直接后果，后面每一章都会用到：
+
+- **分支发散**（branch divergence）。如果一个 warp 内的线程走了 `if` 的不同分支，硬件只能先让走 A 分支的线程执行（其余线程被屏蔽），再让走 B 分支的执行，两段时间相加。因此分支条件最好在 warp 粒度上一致，例如边界检查 `if (i < n)` 只会让最后一个 warp 发散，代价可以忽略。
+- **访存以 warp 为单位合并**。一个 warp 的 32 个线程同时发出读请求，硬件把这些地址合并成尽量少的内存事务。32 个线程读连续的 128 字节，只需要 4 个 32 字节扇区；读 32 个分散的地址，则需要 32 个扇区。[访存优化：合并访问与共享内存](/gpu/memory-optimization/)会详细讨论。
+
+从 Volta 架构开始，每个线程有独立的程序计数器（independent thread scheduling），发散的分支可以交错执行，warp 内线程之间也可以有更细的同步；但性能模型并没有变：一个 warp 的线程越一致，效率越高。
+
+## 内存层次
+
+### 从寄存器到 HBM
+
+GPU 的内存是一个层次结构，越靠近计算单元越快、越小。下表以 H100 SXM5 为例，容量取自白皮书，带宽中的 HBM 数字取自数据手册；共享内存带宽是按“每个 SM 每周期 128 字节”推导的估算（32 个 bank，每个 bank 每周期 4 字节）。
+
+| 层级 | 作用域 | H100 容量 | 带宽（量级） | 由谁管理 |
+| --- | --- | --- | --- | --- |
+| 寄存器 | 单个线程 | 每 SM 256 KB，全卡约 33 MB | 每周期每个操作数都能读到 | 编译器 |
+| 共享内存 / L1 | 线程块（同一 SM） | 每 SM 256 KB（共享内存至多 228 KB） | 全卡数十 TB/s（估算） | 程序员 / 硬件 |
+| L2 缓存 | 全卡 | 50 MB | 约为 HBM 的数倍 | 硬件 |
+| HBM（全局内存） | 全卡 | 80 GB | 3.35 TB/s | 程序员 |
+
+共享内存的估算：132 个 SM × 128 B/周期 × 约 1.7 GHz ≈ 29 TB/s，约为 HBM 的 9 倍。寄存器的带宽更高——一条 FMA 指令每周期为 32 个线程各读 3 个操作数，所有处理块同时进行。值得注意的是，**全卡寄存器的总容量（约 33 MB）与 L2（50 MB）在同一量级**，远大于 CPU 的寄存器；高性能 kernel 正是把大量数据放在寄存器里反复使用。
+
+<Diagram width={700} height={270} label="GPU 内存层次：容量与速度">
+  <Box x={250} y={20} w={220} h={40} label="寄存器" sub="每线程私有 · 最快" tone="strong" />
+  <Box x={190} y={74} w={340} h={40} label="共享内存 / L1" sub="每 SM 256 KB · 块内共享" tone="accent" />
+  <Box x={130} y={128} w={460} h={40} label="L2 缓存" sub="全卡 50 MB · 所有 SM 共享" tone="info" />
+  <Box x={70} y={182} w={580} h={40} label="HBM（全局内存）" sub="80 GB · 3.35 TB/s" tone="neutral" />
+  <Arrow from={[675, 222]} to={[675, 24]} tone="accent" label="更快" labelSide="left" />
+  <Arrow from={[40, 24]} to={[40, 222]} tone="info" label="更大" labelSide="left" />
+  <Text x={360} y={246} label="主机内存经 PCIe / NVLink-C2C 连接，不在此图中" size="sm" tone="muted" />
+  <Fragment slot="caption">越往上越快、越小、作用域越窄。kernel 优化的大部分工作，是让数据尽量待在上层：从 HBM 读一次进共享内存或寄存器，然后被多次使用。H100 的数字取自白皮书与数据手册。</Fragment>
+</Diagram>
+
+### A100、H100、B200 对照
+
+下表汇总三代数据中心 GPU 的关键参数。张量核心峰值一律取 **稠密**（dense）数值——数据手册中标注“with sparsity”的数字是利用 2:4 结构化稀疏得到的两倍值，训练中一般用不到。
+
+| 参数 | A100 SXM4 80GB | H100 SXM5 80GB | B200（HGX） |
+| --- | --- | --- | --- |
+| 架构 | Ampere | Hopper | Blackwell（双 die） |
+| SM 数 | 108 | 132 | 未在技术简报中给出 |
+| 每 SM 共享内存上限 | 164 KB | 228 KB | 228 KB |
+| L2 | 40 MB | 50 MB | — |
+| 显存 | 80 GB HBM2e | 80 GB HBM3 | 180 GB HBM3e |
+| 显存带宽 | 2.039 TB/s | 3.35 TB/s | 8 TB/s |
+| FP32（非张量） | 19.5 TFLOPS | 67 TFLOPS | — |
+| TF32 Tensor | 156 TFLOPS | 495 TFLOPS | 1.1 PFLOPS |
+| BF16/FP16 Tensor | 312 TFLOPS | 989 TFLOPS | 2.25 PFLOPS |
+| FP8 Tensor | — | 1979 TFLOPS | 4.5 PFLOPS |
+| FP4 Tensor | — | — | 9 PFLOPS |
+| NVLink（单卡双向） | 600 GB/s | 900 GB/s | 1.8 TB/s |
+
+出处：A100 来自 NVIDIA A100 架构白皮书与数据手册；H100 来自 H100 架构白皮书与 H100 数据手册（SXM5 版本）；B200 来自 NVIDIA HGX B200 规格页（每卡数值为 8 卡系统除以 8，稠密）。表中“—”表示官方资料未以同样口径给出，我们不去猜测。这些数字是 **峰值**：实际可达的矩阵乘法吞吐通常低于峰值，原因包括时钟在功耗墙下降频、kernel 本身的效率等。
+
+`hardware.py` 把这些参数整理成数据类，后面的章节会用它做估算：
+
+<CodeFile path="src/llms_from_scratch/gpu/hardware.py" symbol="GPUSpec" />
+
+## Tensor Core 与数值精度
+
+### 矩阵乘法专用单元
+
+FP32 单元一次做一个乘加（FMA）。Tensor Core 是专门的矩阵乘加单元：一条指令完成一个小矩阵块的 $D = AB + C$。以 Ampere 为例，一个 warp 协作执行 `mma.sync.m16n8k16`，即 $16\times 16$ 的 $A$ 乘 $16\times 8$ 的 $B$，共 $16\cdot 8\cdot 16 = 2048$ 次乘加。由于矩阵乘法的数据复用天然很高，把它固化成硬件可以在同样的面积和功耗下获得一个数量级的吞吐提升：对比 H100 的 67 TFLOPS（FP32 标量）和 989 TFLOPS（BF16 Tensor Core），差了约 15 倍。
+
+这带来一个重要的推论：**在现代 GPU 上，凡是不能写成矩阵乘法的计算都相对“昂贵”**。softmax 里的 `exp`、LayerNorm 里的归约，用的是普通的 FP32 单元甚至更慢的特殊函数单元（SFU）。FlashAttention-3 论文专门指出，H100 SXM5 的 FP16 矩阵乘法吞吐是 989 TFLOPS，而指数运算的吞吐只有 3.9 TFLOPS，两者相差 256 倍——这就是为什么注意力 kernel 要想办法让 softmax 与矩阵乘法重叠执行。
+
+### 精度越低，峰值越高
+
+Tensor Core 的吞吐随输入精度降低而成倍增加：从表中看，H100 的 TF32 → BF16 → FP8 分别是 495、989、1979 TFLOPS，每降一档翻一倍；Blackwell 又加入了 FP4。这些格式的数值特性在[浮点数与数值稳定性](/math/numerics/)和[混合精度训练：从 FP16 到 FP8](/pretraining/mixed-precision/)中已经讨论过。在 kernel 层面需要记住的是：Tensor Core 的输入可以是低精度，但累加器通常是 FP32，这是低精度训练能稳定的关键之一。
+
+<Bars
+  label="三代 GPU 的 BF16 稠密 Tensor Core 峰值"
+  unit="TFLOPS"
+  items={[
+    { label: 'V100（FP16）', value: 125, tone: 'muted' },
+    { label: 'A100', value: 312, tone: 'info' },
+    { label: 'H100', value: 989, tone: 'accent' },
+    { label: 'B200', value: 2250, tone: 'strong' },
+  ]}
+>
+  <Fragment slot="caption">V100 没有 BF16，取其 FP16 Tensor Core 峰值。数字取自各代白皮书与数据手册（稠密）。六年间，16 位矩阵乘法的峰值增长了约 18 倍。</Fragment>
+</Bars>
+
+## 内存墙：算力跑得比带宽快
+
+### 两条增长曲线
+
+把同样四代 GPU 的峰值算力与 HBM 带宽都归一化到 V100，就能看到本部分最重要的一个事实：
+
+<Bars
+  label="相对 V100 的增长倍数：16 位 Tensor 峰值与 HBM 带宽"
+  items={[
+    { label: 'A100 算力', value: 2.5, tone: 'accent' },
+    { label: 'A100 带宽', value: 2.27, tone: 'info' },
+    { label: 'H100 算力', value: 7.9, tone: 'accent' },
+    { label: 'H100 带宽', value: 3.72, tone: 'info' },
+    { label: 'B200 算力', value: 18, tone: 'accent' },
+    { label: 'B200 带宽', value: 8.9, tone: 'info' },
+  ]}
+>
+  <Fragment slot="caption">V100：125 TFLOPS（FP16 Tensor）、0.9 TB/s；其余数字同上表。算力的增长倍数大约是带宽的两倍：同样一个字节，要“配”的运算越来越多，才能让计算单元不闲着。</Fragment>
+</Bars>
+
+这种趋势被称为 **内存墙**（memory wall）。它的直接度量是 **脊点**（ridge point）：峰值算力除以带宽，单位是 FLOP/byte，表示一个 kernel 每从 HBM 读写一个字节，至少要做多少次浮点运算，才能让算力成为瓶颈。
+
+<KeyEq label="脊点">
+
+$$
+I^\ast = \frac{P_{\text{peak}}}{B_{\text{HBM}}}
+$$
+
+</KeyEq>
+
+代入 BF16：A100 为 $312/2.039 \approx 153$，H100 为 $989/3.35\approx 295$，B200 为 $2250/8\approx 281$ FLOP/byte。也就是说，在 H100 上，一个 BF16 算子每读写 1 字节（半个元素）要做近 300 次运算才“喂得饱”。逐元素加法每个元素读 2 个、写 1 个（6 字节），只做 1 次运算，算术强度约 0.17，比脊点低了三个数量级——它的速度只取决于带宽。[性能分析：Roofline 与 Profiler](/gpu/profiling/)会把这一观察发展成完整的 roofline 模型。
+
+`GPUSpec.ridge_point` 计算的就是这个比值，测试中核对了上面三个数字：
+
+```python
+from llms_from_scratch.gpu.hardware import A100, H100, B200
+[round(s.ridge_point("bf16")) for s in (A100, H100, B200)]   # [153, 295, 281]
+```
+
+### 内存墙对模型设计的影响
+
+内存墙不只是 kernel 作者的问题，它也塑造了模型架构。逐元素操作和归一化在 FLOPs 上几乎可以忽略，但在时间上却占可观的比例，这推动了算子融合与 FlashAttention；推理时的 decode 阶段每生成一个 token 都要把全部权重从 HBM 读一遍，算术强度极低，这推动了 GQA/MLA 这类减少 KV Cache 的结构（见[注意力变体：MQA、GQA 与 MLA](/architecture/attention-variants/)）、量化与投机解码。
+
+## warp 调度、延迟隐藏与占用率
+
+### 延迟是怎样被隐藏的
+
+每个处理块的 warp 调度器每个周期从它管理的若干 warp 中挑一个 **就绪** 的（下一条指令的操作数都已到位）发射。一个 warp 发出全局内存读之后，在数据返回前的几百个周期里都不就绪；只要还有别的 warp 就绪，计算单元就不会空闲。
+
+<Lanes
+  label="一个调度器上四个 warp 交替执行以隐藏访存延迟"
+  width={660}
+  lanes={['warp 0', 'warp 1', 'warp 2', 'warp 3']}
+  unit="时钟周期（示意）"
+  tick={2}
+  span={16}
+  items={[
+    { lane: 0, start: 0, end: 2, label: '计算' },
+    { lane: 0, start: 2, end: 10, label: '等待 HBM', tone: 'muted' },
+    { lane: 0, start: 10, end: 12, label: '计算' },
+    { lane: 1, start: 2, end: 4, label: '计算' },
+    { lane: 1, start: 4, end: 12, label: '等待 HBM', tone: 'muted' },
+    { lane: 1, start: 12, end: 14, label: '计算' },
+    { lane: 2, start: 4, end: 6, label: '计算' },
+    { lane: 2, start: 6, end: 14, label: '等待 HBM', tone: 'muted' },
+    { lane: 2, start: 14, end: 16, label: '计算' },
+    { lane: 3, start: 6, end: 8, label: '计算' },
+    { lane: 3, start: 8, end: 16, label: '等待 HBM', tone: 'muted' },
+  ]}
+>
+  <Fragment slot="caption">时间轴为示意。任一时刻只有一个 warp 在发射指令（深色块），其他 warp 在等内存。warp 0 发出读请求后，调度器依次切到 warp 1、2、3；等 warp 0 的数据返回，它又可以继续。warp 的切换没有开销，因为每个 warp 的寄存器一直驻留在寄存器堆中。</Fragment>
+</Lanes>
+
+与 CPU 的线程切换不同，GPU 的 warp 切换是 **零开销** 的：所有驻留 warp 的寄存器同时存在于寄存器堆中，不需要保存和恢复上下文。这正是 GPU 寄存器堆那么大的原因。
+
+### 占用率与它的三种限制
+
+一个 SM 上同时驻留的 warp 数除以硬件上限（Hopper 为 64 个 warp，即 2048 个线程），叫做 **占用率**（occupancy）。驻留多少 warp 受三种资源约束，取其中最紧的一个：
+
+1. **线程数**：每 SM 最多 64 个 warp、32 个线程块。
+2. **寄存器**：每 SM 65536 个 32 位寄存器，按 warp 以 256 个为单位分配。每个线程用 $r$ 个寄存器时，最多驻留 $\lfloor 65536 / (32r) \rfloor$ 个 warp（向上取整到分配粒度后）。
+3. **共享内存**：每 SM 至多 228 KB，Ampere 之后每个线程块还额外保留 1 KB。
+
+手算一个例子：一个 kernel 每线程用 128 个寄存器，每块 128 个线程（4 个 warp）。每个 warp 需要 $128\times 32 = 4096$ 个寄存器，一个块需要 16384 个，65536 个寄存器只够 4 个块，即 16 个 warp，占用率 $16/64 = 25\%$。如果每块再用 48 KB 共享内存，加上 1 KB 保留共 49 KB，228 KB 只放得下 4 个块——两种限制恰好同时生效。
+
+<CodeFile path="src/llms_from_scratch/gpu/hardware.py" region="occupancy" />
+
+<Callout tone="warn" title="占用率不是越高越好">
+高占用率意味着有更多 warp 可以切换，但它只是隐藏延迟的一种手段。高性能 GEMM 与 FlashAttention 常常故意只跑 1–2 个 warp 组/SM 的低占用率：每个线程用大量寄存器缓存数据（寄存器分块），靠每个线程内部大量独立的指令（指令级并行）与异步拷贝来隐藏延迟。Vasily Volkov 在 2010 年的报告 “Better Performance at Lower Occupancy” 中系统阐述了这一点。占用率是一个诊断量，不是优化目标。
+</Callout>
+
+## 小结
+
+- GPU 为吞吐量设计：把面积给计算单元，用大量线程的零开销切换隐藏访存延迟；利特尔定律告诉我们需要的在途数据量是“带宽 × 延迟”。
+- 执行层次是 GPU → SM → 处理块；调度单位是 32 个线程组成的 warp，按 SIMT 方式执行，分支发散与访存合并都以 warp 为单位发生。
+- 内存层次从寄存器、共享内存/L1、L2 到 HBM，越近越快越小；kernel 优化的核心是让数据从 HBM 读一次后在上层被多次使用。
+- Tensor Core 让矩阵乘法比其他运算快一个数量级以上，且精度每降一档峰值翻倍；非矩阵运算（如 `exp`）因此相对昂贵。
+- 算力增长快于带宽增长，H100 的 BF16 脊点约 295 FLOP/byte；低于它的算子受带宽限制。
+- 占用率受线程数、寄存器、共享内存三者约束；它服务于延迟隐藏，但不是优化的目标本身。
+
+下一章开始写代码：[CUDA 编程模型：第一个 kernel](/gpu/cuda-basics/)把本章的 SM、warp、线程块落实成 `blockIdx`、`threadIdx` 与一次 kernel 启动。
+
+## 练习
+
+1. A100 80GB 的 BF16 脊点是多少？对一个 $4096\times 4096\times 4096$ 的 BF16 矩阵乘法，假设三个矩阵各读写 HBM 一次，它的算术强度是多少？它在 A100 上是计算受限还是带宽受限？
+2. 用利特尔定律估算：A100 的带宽为 2.039 TB/s，假设 HBM 延迟为 500 ns，108 个 SM 平均每个需要多少在途字节？若每个线程一次读 16 字节（`float4`），需要多少个线程？
+3. 某 kernel 每块 256 个线程、每线程 64 个寄存器、每块 32 KB 共享内存。在 H100 上，三种资源分别允许多少个块驻留？占用率是多少？
+4. 为什么 GPU 的 warp 切换不需要保存寄存器，而 CPU 的线程切换需要？这种设计在芯片面积上付出了什么代价？
+5. FlashAttention-3 论文指出 H100 上指数运算吞吐只有矩阵乘法的 1/256。对注意力中 $T\times T$ 的分数矩阵，每个元素要做一次 `exp`、$2d$ 次矩阵乘法 FLOPs（$QK^\top$ 与 $PV$ 各 $d$ 次乘加）。当 $d=64$ 时，`exp` 所需时间与矩阵乘法所需时间之比约为多少？
+
+<details>
+<summary>答案</summary>
+
+1. 脊点 $312/2.039\approx 153$ FLOP/byte。FLOPs $= 2\cdot 4096^3\approx 1.37\times 10^{11}$；字节 $=3\times 4096^2\times 2\approx 1.0\times 10^{8}$；强度约 $1365$ FLOP/byte，远高于 153，计算受限。
+
+2. 在途字节 $=2.039\times 10^{12}\times 5\times 10^{-7}\approx 1.02$ MB，平摊每个 SM 约 9.4 KB；每线程 16 字节，需要约 590 个线程同时等待——远低于 2048 的上限，说明向量化加载显著降低了对占用率的需求。
+
+3. 线程：每块 8 个 warp，64/8 = 8 块。寄存器：每 warp $64\times 32=2048$ 个，每块 16384 个，65536/16384 = 4 块。共享内存：$228/(32+1)\approx 6.9$，即 6 块。取最小值 4 块 = 32 个 warp，占用率 50%，受寄存器限制。
+
+4. GPU 上所有驻留 warp 的寄存器同时存放在寄存器堆中，切换只是调度器换一个 warp 发射，没有数据移动；CPU 一个核心只有一套架构寄存器，切换线程必须把它保存到内存。代价是 GPU 每个 SM 需要 256 KB 的寄存器堆，全卡寄存器容量与 L2 相当。
+
+5. 每个分数元素：`exp` 1 次，矩阵乘法 $2\times 2d=4d=256$ FLOPs（每次乘加计 2 FLOPs）。时间比 $=(1/3.9)/(256/989)\approx 0.256/0.259\approx 1$。也就是说 `exp` 与矩阵乘法耗时相当，这正是 FA3 要让二者重叠的原因。
+
+</details>
+
+## 参考文献
+
+- NVIDIA. [NVIDIA A100 Tensor Core GPU Architecture](https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf), 2020.
+- NVIDIA. [NVIDIA H100 Tensor Core GPU Architecture](https://resources.nvidia.com/en-us-tensor-core/gtc22-whitepaper-hopper), 2022；[H100 数据手册](https://www.nvidia.com/en-us/data-center/h100/)。
+- NVIDIA. [NVIDIA Blackwell Architecture Technical Brief](https://resources.nvidia.com/en-us-blackwell-architecture)；[HGX 平台规格](https://www.nvidia.com/en-us/data-center/hgx/)。
+- NVIDIA. [Tesla V100 GPU Architecture](https://images.nvidia.com/content/volta-architecture/pdf/volta-architecture-whitepaper.pdf), 2017.
+- NVIDIA. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：SIMT 架构、计算能力表（各架构的线程、寄存器、共享内存上限）。
+- Z. Jia, M. Maggioni, B. Staiger, D. Scarpazza. [Dissecting the NVIDIA Volta GPU Architecture via Microbenchmarking](https://arxiv.org/abs/1804.06826), 2018.
+- V. Volkov. [Better Performance at Lower Occupancy](https://www.nvidia.com/content/GTC-2010/pdfs/2238_GTC2010.pdf), GTC 2010.
+- J. Shah 等. [FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision](https://arxiv.org/abs/2407.08608), 2024.
+- Llama Team. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783), 2024（训练 MFU）。
+- Stanford CS336, Spring 2025. [Lecture 5: GPUs](https://github.com/stanford-cs336/spring2025-lectures).

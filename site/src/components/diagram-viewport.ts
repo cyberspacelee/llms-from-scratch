@@ -1,4 +1,4 @@
-// Static figures and Mermaid use the same actual-pixel threshold as React SvgCanvas.
+// Figures keep their smallest label at ≥10 CSS px; narrower screens scroll the figure instead of shrinking it.
 const registeredViewports = new WeakSet<Element>()
 const registeredSvgs = new WeakSet<Element>()
 
@@ -49,7 +49,7 @@ const register = () => {
         })
         const smallest = Math.min(...sizes)
         if (width > 0 && smallest > 0 && Number.isFinite(smallest)) {
-          svg.style.minWidth = `${Math.max(requestedMinimum, Math.ceil(width * 12 / smallest))}px`
+          svg.style.minWidth = `${Math.max(requestedMinimum, Math.ceil(width * 10 / smallest))}px`
         }
         measureOverflow(owner)
       }

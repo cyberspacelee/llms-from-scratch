@@ -82,6 +82,9 @@ const paths = series.map((item, index) => {
   return { d, tone: item.tone ?? tones[index % tones.length], dashed: item.dashed, label: item.label }
 })
 const legend = paths.filter((p) => p.label)
+const labelWidth = (label: string) => [...label].reduce((sum, ch) => sum + (/[\u2E80-\uFFFF]/.test(ch) ? 13 : 7.8), 0)
+const legendX: number[] = []
+legend.reduce((cursor, p) => { legendX.push(cursor); return cursor + 28 + labelWidth(p.label!) + 24 }, pad.left)
 const clip = `plot-${crypto.randomUUID()}`
 ---
 <FigureShell label={label}>
@@ -108,8 +111,8 @@ const clip = `plot-${crypto.randomUUID()}`
     {xLabel && <text x={(pad.left + width - pad.right) / 2} y={height - 10} text-anchor="middle" font-size={sizes.sm} class="fill-muted">{xLabel}</text>}
     {yLabel && <text x={14} y={(pad.top + height - pad.bottom) / 2} text-anchor="middle" dominant-baseline="central" transform={`rotate(-90 14 ${(pad.top + height - pad.bottom) / 2})`} font-size={sizes.sm} class="fill-muted">{yLabel}</text>}
     {legend.map((p, index) => <g>
-      <line x1={pad.left + index * 130} x2={pad.left + index * 130 + 22} y1={height + 12} y2={height + 12} stroke-width="2.5" class:list={[lineTones[p.tone].stroke, p.dashed && '[stroke-dasharray:6_5]']} />
-      <text x={pad.left + index * 130 + 28} y={height + 12} dominant-baseline="central" font-size={sizes.sm} class="fill-ink">{p.label}</text>
+      <line x1={legendX[index]} x2={legendX[index] + 22} y1={height + 12} y2={height + 12} stroke-width="2.5" class:list={[lineTones[p.tone].stroke, p.dashed && '[stroke-dasharray:6_5]']} />
+      <text x={legendX[index] + 28} y={height + 12} dominant-baseline="central" font-size={sizes.sm} class="fill-ink">{p.label}</text>
     </g>)}
   </svg>
   {Astro.slots.has('caption') && <Fragment slot="caption"><slot name="caption" /></Fragment>}

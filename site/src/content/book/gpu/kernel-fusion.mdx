@@ -2,7 +2,258 @@
 title: 算子融合与 torch.compile
 description: 为什么融合能提速：内存带宽与 kernel 启动开销，逐元素融合、epilogue 融合，torch.compile 的 Dynamo 与 Inductor 如何自动融合。
 order: 7
-draft: true
+code:
+  - src/llms_from_scratch/gpu/fusion.py
+  - tests/gpu/test_fusion.py
 ---
 
-本章正在撰写。
+前面几章的 kernel 各自只做一件事。而真实模型的前向是一长串算子：矩阵乘法之后加偏置，过激活函数，再 dropout，再与残差相加，再归一化。PyTorch 的 eager 模式把每个算子作为一个独立的 kernel 执行，每个 kernel 都从 HBM 读入完整的输入、把完整的输出写回 HBM，下一个 kernel 再读回来。对带宽受限的算子来说，这些往返就是全部的成本。
+
+**算子融合**（operator fusion）把多个算子合并进一个 kernel，中间结果留在寄存器里，不落地到 HBM。本章先建立一个简单的成本模型，算清楚 `dropout(gelu(x + b))` 融合前后的字节数；然后分类讨论逐元素融合、归约融合与 epilogue 融合；最后看 PyTorch 2 的 `torch.compile` 怎样自动完成这一切：Dynamo 捕获计算图，Inductor 做融合并生成 Triton（GPU）或 C++（CPU）代码。由于写作环境只有 CPU，我们在 CPU 上真的调用一次 Inductor，读它生成的融合 kernel。
+
+## 时间花在哪里：计算、带宽与开销
+
+Horace He 在 “Making Deep Learning Go Brrrr From First Principles” 中把 GPU 上的时间分成三类：
+
+1. **计算**（compute）：花在浮点运算上的时间，主要是 Tensor Core 上的矩阵乘法。
+2. **带宽**（memory bandwidth）：在 HBM 与片上之间搬运数据的时间。
+3. **开销**（overhead）：其他一切——Python 解释器、PyTorch 的分发逻辑、kernel 启动的固定成本。
+
+[GPU 硬件：SM、warp 与内存层次](/gpu/gpu-architecture/)中的脊点告诉我们：在 H100 上，一个 BF16 算子每读写一个字节要做约 300 次运算，才能让计算而不是带宽成为瓶颈。逐元素算子每个元素只做几次到几十次运算，算术强度在 1 FLOP/byte 量级，远在脊点之下——它们的时间几乎完全由字节数决定，与运算是 `+` 还是 `erf` 无关。这是融合的全部理论依据：**对带宽受限的算子，减少 HBM 字节数就是减少时间**。
+
+开销则在另一个方向上起作用：每个 kernel 启动有微秒量级的固定成本（CPU 侧的分发与启动、GPU 侧的调度）。当张量很小（例如推理 decode 时 batch 很小），一个 kernel 的实际工作只需几微秒，开销便占主导。融合减少 kernel 数，也就同时减少了开销；[CUDA Graph：消除启动开销](/inference/cuda-graph/)从另一个角度处理同一个问题。
+
+## 一个例子的字节账
+
+### bias + GELU + dropout
+
+Transformer 的 FFN 中（以及很多旧模型的注意力输出中）常见这样一段：线性层之后加偏置、过 GELU、再 dropout。设激活张量有 $n$ 个元素，偏置有 $d$ 个元素（$d\ll n$），BF16 每元素 2 字节，dropout 的掩码每元素 1 字节。
+
+**未融合**：三个 kernel，每个都把整个张量读一遍、写一遍。
+
+| kernel | 读 | 写 |
+| --- | --- | --- |
+| `y = x + b` | $2n$（加上可忽略的 $2d$） | $2n$ |
+| `g = gelu(y)` | $2n$ | $2n$ |
+| `out = dropout(g)` | $2n$ | $2n + n$（输出 + 掩码） |
+| 合计 | | $13n$ 字节 |
+
+**融合**：一个 kernel 读 $x$（$2n$）、写结果（$2n$）与掩码（$n$），共 $5n$ 字节。更进一步，掩码可以不存：dropout 的随机数由计数器式生成器（Philox）根据 (seed, offset) 确定性地产生，反向时用同一个 seed 重新生成即可，于是只需 $4n$ 字节。
+
+<CodeFile path="src/llms_from_scratch/gpu/fusion.py" region="cost_model" />
+
+代入一个真实规模：batch 8、序列 2048、宽度 4096，$n = 8\times 2048\times 4096 \approx 6.7\times 10^7$。在 H100（3.35 TB/s）上，只按带宽估算的时间下界为：
+
+<Bars
+  label="dropout(gelu(x + b)) 前向的时间下界（H100，BF16，n ≈ 6.7×10⁷）"
+  unit="μs"
+  items={[
+    { label: '未融合（3 个 kernel）', value: 260, tone: 'accent2' },
+    { label: '融合，存掩码', value: 100, tone: 'accent' },
+    { label: '融合，不存掩码', value: 80, tone: 'strong' },
+  ]}
+>
+  <Fragment slot="caption">按“总字节 / 3.35 TB/s”推导的估算值，不计启动开销，也不是实测。作为对照，产生 x 的那个线性层 [16384×4096]·[4096×4096] 需要 5.5×10¹¹ FLOPs，按 989 TFLOPS 的峰值约 556 μs：未融合的三个逐元素 kernel 就要花掉其近一半的时间。</Fragment>
+</Bars>
+
+`test_cost_model` 断言了 $13n$、$5n$、$4n$ 三个字节数，以及按带宽估算的加速比大于 2.5。
+
+### 融合在 CPU 上的样子
+
+为了让“中间结果留在寄存器里”这句话具体化，`bias_gelu_dropout_fused` 在 CPU 上模拟一个融合 kernel：按块处理输入，每块的加偏置、GELU、dropout 都在局部变量上完成，最后只写一次。
+
+<CodeFile path="src/llms_from_scratch/gpu/fusion.py" region="eager_vs_fused" />
+
+测试验证它与逐算子执行的结果一致。真实的融合 kernel 中，每个 GPU 线程处理几个元素，`v` 就在寄存器里；随机数在 kernel 内部按元素下标生成，而不是读一张预先生成的表。
+
+## 融合的几种形态
+
+<Diagram width={700} height={280} label="未融合与融合的数据流">
+  <Region x={15} y={14} w={330} h={262} title="未融合：中间结果往返 HBM" />
+  <Box x={40} y={50} w={90} h={40} label="add" tone="accent" />
+  <Box x={40} y={130} w={90} h={40} label="gelu" tone="accent" />
+  <Box x={40} y={210} w={90} h={40} label="dropout" tone="accent" />
+  <Box x={220} y={50} w={110} h={200} label="HBM" sub="x、y、g、out" tone="info" />
+  <Arrow from={[220, 60]} to={[130, 60]} label="读 x" />
+  <Arrow from={[130, 80]} to={[220, 80]} tone="accent2" label="写 y" labelSide="below" />
+  <Arrow from={[220, 140]} to={[130, 140]} label="读 y" />
+  <Arrow from={[130, 160]} to={[220, 160]} tone="accent2" label="写 g" labelSide="below" />
+  <Arrow from={[220, 220]} to={[130, 220]} label="读 g" />
+  <Arrow from={[130, 240]} to={[220, 240]} tone="accent2" label="写 out" labelSide="below" />
+  <Region x={360} y={14} w={325} h={262} title="融合：中间结果留在寄存器" />
+  <Box x={390} y={60} w={130} h={180} label="一个 kernel" title tone="accent" />
+  <Box x={405} y={100} w={100} h={30} label="v = x + b" size="sm" mono tone="neutral" />
+  <Box x={405} y={145} w={100} h={30} label="v = gelu(v)" size="sm" mono tone="neutral" />
+  <Box x={405} y={190} w={100} h={30} label="v = drop(v)" size="sm" mono tone="neutral" />
+  <Box x={560} y={60} w={110} h={180} label="HBM" sub="x、out" tone="info" />
+  <Arrow from={[560, 100]} to={[520, 100]} label="读 x" />
+  <Arrow from={[520, 205]} to={[560, 205]} tone="accent2" label="写" />
+  <Fragment slot="caption">左：三个 kernel 之间的中间结果 y、g 都要写回并读出 HBM（橙色为写）。右：一个 kernel 读一次 x、写一次结果，中间值 v 只存在于寄存器中。</Fragment>
+</Diagram>
+
+### 逐元素融合
+
+一串逐元素算子（加减乘除、激活函数、类型转换、缩放）是最容易融合的：每个输出元素只依赖同一位置的输入元素，任意长的链都可以合成一个循环。广播（如偏置 $b$ 沿 batch 维广播）也不妨碍融合，只是索引稍复杂。
+
+### 归约融合
+
+softmax、LayerNorm、RMSNorm、交叉熵包含归约。归约之前的逐元素算子可以融合进归约 kernel 的“读”阶段，归约之后的逐元素算子可以融合进“写”阶段。[Triton 编程](/gpu/triton/)中的融合 softmax 就是一个例子：减最大值、指数、求和、除法合成一个 kernel。RMSNorm 也是如此：平方、求均值、开方、缩放、乘权重本是五个 kernel，融合后读一次写一次。
+
+### epilogue 融合
+
+矩阵乘法是计算受限的，但它的 **输出** 写回 HBM 后往往马上被一个逐元素算子读回来（加偏置、激活、残差相加、量化）。**epilogue 融合** 把这些逐元素运算放在 GEMM kernel 的最后：累加器还在寄存器里时就做完，然后只写一次最终结果。这省掉了一次完整的读写，而 GEMM 的主循环完全不受影响。cuBLASLt 与 CUTLASS 提供了常见 epilogue（bias、ReLU、GELU）的融合版本；在 Triton 中，只需在 `tl.store` 之前对 `acc` 多写几行代码。
+
+反方向也成立：**prologue 融合** 把输入上的逐元素运算（例如反量化、归一化后的缩放）放进 GEMM 加载操作数之后、`tl.dot` 之前。
+
+### 不能（或不该）融合的情形
+
+- **全局依赖**：一个算子需要另一个算子的 **全部** 输出才能开始（例如矩阵乘法依赖完整的 softmax 输出），就无法简单地逐元素融合。FlashAttention 通过在线 softmax 重新组织计算，才把这种依赖化解。
+- **寄存器与共享内存压力**：融合过多会让一个 kernel 的寄存器用量膨胀，占用率下降甚至溢出；把带宽受限的算子融合进一个精心调优的 GEMM 也可能破坏它的流水。
+- **反向传播需要中间结果**：训练时 GELU 的反向需要 GELU 的输入 $y$。融合前向后 $y$ 不再写回 HBM，要么在前向中额外保存它，要么在反向中重新计算——对逐元素算子，重计算几乎免费（又是带宽的账：重算 $y = x + b$ 只需读已经保存的 $x$）。这与[FlashAttention：IO 感知的注意力](/gpu/flash-attention/)的反向思路一致。
+
+## torch.compile：自动融合
+
+手写融合 kernel 能拿到最好的性能，但每种算子组合都写一个 kernel 显然不现实。PyTorch 2 的 `torch.compile` 把这件事自动化：
+
+```python
+model = torch.compile(model)          # 默认 mode="default"
+```
+
+它由三个组件构成：
+
+<Diagram width={700} height={220} label="torch.compile 的组件">
+  <Box x={10} y={40} w={110} h={70} label="Python 函数" sub="eager 代码" tone="neutral" />
+  <Box x={145} y={40} w={170} h={70} label="Dynamo" sub="字节码 → FX 图 + guard" tone="info" />
+  <Box x={340} y={40} w={150} h={70} label="AOTAutograd" sub="前向 + 反向联合图" tone="info" />
+  <Box x={515} y={40} w={170} h={70} label="Inductor" sub="融合 · 代码生成" tone="accent" />
+  <Arrow from={[120, 75]} to={[145, 75]} />
+  <Arrow from={[315, 75]} to={[340, 75]} />
+  <Arrow from={[490, 75]} to={[515, 75]} />
+  <Box x={505} y={150} w={85} h={50} label="Triton" sub="GPU" tone="strong" />
+  <Box x={600} y={150} w={95} h={50} label="C++" sub="CPU" tone="strong" />
+  <Arrow from={[570, 110]} to={[550, 150]} />
+  <Arrow from={[630, 110]} to={[645, 150]} />
+  <Arrow from={[230, 110]} via={[[230, 170]]} to={[65, 170]} tone="accent2" dashed />
+  <Arrow from={[65, 170]} to={[65, 110]} tone="accent2" dashed />
+  <Text x={148} y={190} label="graph break：回到 Python 执行" size="sm" tone="accent2" />
+  <Fragment slot="caption">Dynamo 在 Python 字节码层面捕获张量运算，生成 FX 图与 guard；遇到无法捕获的代码时发生 graph break，那段代码照常由 Python 执行。AOTAutograd 生成反向图；Inductor 对图做融合与调度，GPU 上生成 Triton kernel，CPU 上生成 C++/OpenMP 代码。</Fragment>
+</Diagram>
+
+### Dynamo：图捕获、guard 与 graph break
+
+**Dynamo** 通过 CPython 的帧求值钩子（PEP 523）在函数执行前截获它的字节码，符号化地执行这些字节码，把其中的 PyTorch 运算记录成一张 FX 图。与 TorchScript 等早期方案不同，Dynamo 不要求用户改写代码：遇到它理解的 Python 结构（循环、条件、函数调用、`nn.Module` 属性访问）就展开，遇到无法放进图的东西（`print`、调用未知的 C 扩展、依赖张量 **数值** 的 Python 控制流）就在那里 **断开**（graph break），把前半段编译成一张图，那段代码交给 Python 正常执行，之后再开始新的一张图。
+
+每张图都附带一组 **guard**：编译时所依赖的假设，例如输入张量的形状、dtype、设备、是否需要梯度，以及被读取的 Python 全局变量的值。下一次调用时先检查 guard，全部满足才复用编译结果，否则重新编译。形状变化是最常见的重编译原因：默认情况下，第一次遇到某个维度变化时 Dynamo 会把它标记为动态，用符号形状重新编译一次，之后不同大小共享同一份代码。
+
+graph break 的代价是：图被切碎，跨越断点的算子无法融合，每段图之间还要回到 Python。`fusion.graph_break_report` 用 `torch._dynamo.explain` 列出图的数量与断点原因，它不调用 Inductor，因此很快：
+
+<CodeFile path="src/llms_from_scratch/gpu/fusion.py" region="compile_tools" />
+
+```python
+def f(x):
+    y = torch.sin(x)
+    print("side effect")      # Python 副作用：Dynamo 无法放进图里
+    return torch.cos(y)
+
+report = graph_break_report(f, torch.randn(8))
+report.graph_count, report.graph_break_count     # (2, 1)
+report.break_reasons[0].reason                    # "Failed to trace builtin operator ... print ..."
+```
+
+`test_graph_break_is_reported` 断言了这两个数字。实际工作中，查看 graph break 最方便的方法是设置环境变量 `TORCH_LOGS="graph_breaks"`，或用 `tlparse` 工具分析编译日志。
+
+### AOTAutograd 与分解
+
+**AOTAutograd** 拿到前向图后，提前（ahead of time）追踪出对应的反向图，把前向与反向作为一个联合图交给后端。这一步还做两件事：**函数化**（functionalization），把原地操作与视图改写成纯函数形式，方便后续变换；**分解**（decomposition），把上千个 ATen 算子分解成约两百多个基本算子（如把 `gelu` 分解成 `erf` 与乘加），使后端只需支持一个小的算子集合。联合图还让编译器可以自动决定哪些中间结果保存给反向、哪些在反向中重算（min-cut 重物化），这正是上一节“重计算逐元素算子”的自动化版本。
+
+### Inductor：融合与代码生成
+
+**Inductor** 是默认后端。它把图降低为一个循环级的中间表示，每个节点描述“对每个输出下标怎样计算”，然后由调度器贪心地把可以融合的节点合并：逐元素节点与逐元素节点、逐元素与归约、归约与其后的逐元素。融合后的每一组生成一个 kernel：GPU 上是 Triton，CPU 上是带 OpenMP 与 SIMD 向量化的 C++。矩阵乘法与卷积默认调用 cuBLAS/cuDNN（或 oneDNN），在 `mode="max-autotune"` 下 Inductor 还会生成 Triton 模板 GEMM 并与库函数比较计时，选更快的那个，同时可以把 epilogue 融合进模板。
+
+### 在 CPU 上读 Inductor 生成的代码
+
+`inductor_source` 用 `torch._inductor.utils.run_and_get_code` 编译一个函数并返回 Inductor 生成的全部代码。对 `gelu(x + b)`（`x` 形状 `[64, 128]`），在本书的 CPU 环境中生成的 kernel 如下（PyTorch 2.14；节选，略去了 `static_cast`、边界判断与错误标志，常量向量的构造合并到了同一行）：
+
+```cpp
+cpp_fused_add_gelu_0 = async_compile.cpp_pybinding(['const float*', 'const float*', 'float*'], r'''
+extern "C" void kernel(const float* in_ptr0, const float* in_ptr1, float* out_ptr0)
+{
+    #pragma omp parallel
+    {
+        #pragma omp for
+        for(int64_t x0=0L; x0<64L; x0+=1L)
+        {
+            for(int64_t x1=0L; x1<128L; x1+=8L)
+            {
+                auto tmp0 = at::vec::Vectorized<float>::loadu(in_ptr0 + (x1 + 128L*x0), 8);
+                auto tmp1 = at::vec::Vectorized<float>::loadu(in_ptr1 + x1, 8);
+                auto tmp2 = tmp0 + tmp1;                       // x + b
+                auto tmp5 = tmp2 * at::vec::Vectorized<float>(0.5);
+                auto tmp8 = tmp2 * at::vec::Vectorized<float>(0.7071067811865476);
+                auto tmp9 = tmp8.erf();
+                auto tmp12 = tmp9 + at::vec::Vectorized<float>(1.0);
+                auto tmp13 = tmp5 * tmp12;                     // 0.5·y·(1 + erf(y/√2))
+                tmp13.store(out_ptr0 + (x1 + 128L*x0));
+            }
+        }
+    }
+}
+''')
+```
+
+可以读出几件事：kernel 名 `cpp_fused_add_gelu_0` 表明 `add` 与 `gelu` 被融合成了一个 kernel；`gelu` 被分解成了 `erf` 的公式；外层循环用 OpenMP 并行，内层循环用 8 路 SIMD（AVX2 的 256 位向量）向量化；偏置 `in_ptr1` 按 `x1` 广播；中间值 `tmp2` 等都只是局部变量，只有一次 `store`。在 GPU 上，同一个函数会生成一个名为 `triton_poi_fused_add_gelu_0` 的 Triton kernel（`poi` 表示 pointwise），结构与上一章的向量加法如出一辙。
+
+测试 `test_inductor_fuses_bias_gelu_on_cpu` 真的调用一次 Inductor（在本书的 CPU 环境中约 10 秒，主要是 C++ 编译），并断言生成代码中存在 `cpp_fused_add_gelu`。读者可以用 `TORCH_LOGS="output_code"` 在任何程序中打印生成的代码。
+
+### 使用建议
+
+- 先在 eager 下保证正确，再 `torch.compile`；用 `torch._dynamo.explain` 或 `TORCH_LOGS` 检查 graph break，把热点路径上的断点消除（常见原因：`.item()`、`print`、数据相关的 Python 分支、不支持的第三方调用）。
+- 输入形状频繁变化时，用 `torch._dynamo.mark_dynamic` 或 `dynamic=True` 避免反复重编译；注意编译缓存与重编译次数上限。
+- `mode="reduce-overhead"` 使用 CUDA Graph 消除启动开销，适合小 batch 推理；`mode="max-autotune"` 编译更慢、运行更快。
+- 编译时间是真实成本：大模型首次编译可能需要分钟级，可用缓存（`TORCHINDUCTOR_CACHE_DIR`、区域编译 `compile` 单个重复的 block）缓解。
+
+## 小结
+
+- 逐元素与归一化算子远低于脊点，时间由 HBM 字节数决定；kernel 启动还有微秒级的固定开销。融合同时减少两者。
+- `dropout(gelu(x + b))` 未融合需 $13n$ 字节（BF16 + 1 字节掩码），融合后 $5n$，不存掩码时 $4n$；在大张量上可省下与相邻 GEMM 同量级的时间。
+- 融合的形态包括逐元素融合、归约融合、GEMM 的 epilogue/prologue 融合；全局依赖、寄存器压力与反向所需的中间结果限制了融合的范围，重计算常常是更便宜的选择。
+- `torch.compile` = Dynamo（字节码级图捕获、guard、graph break）+ AOTAutograd（联合前反向图、函数化、分解、重物化）+ Inductor（融合调度，生成 Triton 或 C++）。
+
+## 练习
+
+1. 对 RMSNorm $y = x / \sqrt{\text{mean}(x^2) + \epsilon}\cdot g$（BF16，$x$ 有 $n$ 个元素），写出 eager 模式下按“平方、求均值、加 ε 开方、除法、乘权重”五个 kernel 执行时的 HBM 字节数（均值结果的大小可忽略），以及融合后的字节数。
+2. 在本章的例子中，若训练时 GELU 的反向需要 $y = x+b$，比较两种做法的 HBM 字节数：(a) 前向额外保存 $y$；(b) 反向时从已保存的 $x$ 重算 $y$。
+3. 下面的函数在 `torch.compile` 下会产生几张图？为什么？
+   ```python
+   def f(x):
+       x = x * 2
+       if x.sum() > 0:
+           x = x + 1
+       return x.relu()
+   ```
+4. 解释为什么 epilogue 融合不会降低 GEMM 主循环的性能，而把一个归约（例如对 GEMM 输出按行求 LayerNorm）融合进 GEMM 要困难得多。
+5. 用 `inductor_source` 编译 `lambda x: torch.softmax(x, -1)`（`x` 形状 `[32, 1000]`），阅读生成的 C++ 代码：它对每一行扫描了几遍？与[归约、softmax 与 warp 原语](/gpu/reduction-softmax/)中的哪种算法对应？
+
+<details>
+<summary>答案</summary>
+
+1. 未融合：平方读 $2n$ 写 $2n$；求均值读 $2n$；开方的输入输出可忽略；除法读 $2n$ 写 $2n$（加读均值，可忽略）；乘权重读 $2n$ 写 $2n$。合计约 $14n$ 字节。融合后读 $x$ 一次、写 $y$ 一次，共 $4n$（若一行放得下片上存储；否则需两次读取，$6n$）。
+
+2. (a) 前向多写 $2n$，反向读 $2n$，共 $4n$ 额外字节。(b) 反向读 $x$（$2n$，但若 $x$ 本来就要为线性层的反向保存，则不增加存储）并重算加法，几乎不增加额外的写，额外流量约 $2n$ 甚至更少（可与反向的其他逐元素运算融合）。重算更省。
+
+3. 两张图。`x.sum() > 0` 的结果决定 Python 的分支走向，Dynamo 需要具体的布尔值，因此在条件处 graph break：第一张图计算 `x * 2` 与 `x.sum() > 0`，取出布尔值后由 Python 决定分支，之后从分支开始捕获第二张图（`x + 1` 与 `relu`，或只有 `relu`，取决于走向，各自编译）。可以用 `torch.where` 或 `torch.cond` 改写来避免断开。
+
+4. epilogue 只作用于每个线程寄存器中已经算好的输出元素，与主循环的数据流无关，只在最后多几条指令。行归约则需要整行的输出：一行的 $N$ 个元素分布在多个线程、多个 warp 甚至多个线程块中，必须在块间协作或让一个块覆盖整行（$B_N = N$），这会改变 GEMM 的分块方案，降低并行度或增加同步。
+
+5. 在本书环境（PyTorch 2.14，CPU）中，生成的 `cpp_fused__softmax_0` 对每一行有三个内层循环：第一个向量化地求最大值；第二个计算 `exp(x - m)` 并求和，同时把指数值存进每个线程私有的局部缓冲区 `local_buffer_data_0`（长度 1000）；第三个从局部缓冲区读出指数值、除以和并写出。这对应“三遍”算法，但第三遍读的是刚写入、仍在 CPU 缓存中的局部缓冲区，而不是重新读输入；三个循环都在一个 kernel 内，中间结果不写回主存。不同版本的代码可能不同，读者应以自己生成的代码为准。
+
+</details>
+
+## 参考文献
+
+- H. He. [Making Deep Learning Go Brrrr From First Principles](https://horace.io/brrr_intro.html), 2022.
+- J. Ansel 等. [PyTorch 2: Faster Machine Learning Through Dynamic Python Bytecode Transformation and Graph Compilation](https://doi.org/10.1145/3620665.3640366), ASPLOS 2024.
+- PyTorch. [torch.compile 文档](https://pytorch.org/docs/stable/torch.compiler.html)；[Dynamo 深入](https://pytorch.org/docs/stable/torch.compiler_dynamo_deepdive.html)；[torch.compile 故障排查](https://pytorch.org/docs/stable/torch.compiler_troubleshooting.html)。
+- J. Salmon 等. [Random123: Parallel Random Numbers: As Easy as 1, 2, 3](https://doi.org/10.1145/2063384.2063405), SC 2011（Philox 计数器式随机数生成器）。
+- NVIDIA. [cuBLASLt epilogue](https://docs.nvidia.com/cuda/cublas/#cublasltepilogue-t)。
+- Stanford CS336, Spring 2025. [Lecture 6: Kernels, Triton](https://github.com/stanford-cs336/spring2025-lectures).
