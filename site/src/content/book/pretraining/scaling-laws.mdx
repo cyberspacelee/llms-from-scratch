@@ -2,7 +2,305 @@
 title: 缩放定律与计算最优
 description: Kaplan 与 Chinchilla 缩放定律、IsoFLOP 拟合、μP 超参数迁移，以及“过度训练”小模型的推理经济学。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/scaling.py
+  - tests/pretraining/test_scaling.py
 ---
 
-本章正在撰写。
+假设你有 $10^{24}$ FLOPs 的训练预算——大约是 1000 张 H100 训练一个月的量。你应该训练一个 100 亿参数的模型看 16T token，还是一个 1000 亿参数的模型看 1.6T token？学习率、批量大小应该设成多少？这些决定只能做一次：没有人会把一个月的训练重复十遍来调参。
+
+缩放定律（scaling laws）给出的回答是：**在小规模上做大量便宜的实验，拟合出损失随参数量、数据量、计算量变化的规律，再外推到目标规模**。令人意外的是，语言模型的预训练损失在跨越七八个数量级的范围内都非常好地服从简单的幂律，使这种外推成为可能。本章先介绍幂律的形式与 $C\approx6ND$ 的计算约束，然后对比 Kaplan（2020）与 Chinchilla（2022）两套结论及其分歧的原因，完整推导 Chinchilla 第三种方法的解析解，并实现拟合代码；之后讨论超参数如何随规模迁移（μP），以及为什么 Llama 3 8B 要“过度训练”到 15T token、数据不够时重复训练的价值如何衰减。
+
+## 幂律与计算约束
+
+### 损失的幂律形式
+
+缩放定律的经验观察是：在其他因素不成为瓶颈时，测试损失 $L$ 与参数量 $N$、训练 token 数 $D$、训练计算量 $C$ 之间近似满足幂律，例如
+
+$$
+L(N)\approx\left(\frac{N_c}{N}\right)^{\alpha_N}.
+$$
+
+幂律在双对数坐标下是一条直线：$\log L=\alpha_N\log N_c-\alpha_N\log N$，斜率是 $-\alpha_N$。这给了我们一个最简单的拟合方法：对 $(\log x,\log y)$ 做线性最小二乘。
+
+<CodeFile path="src/llms_from_scratch/pretraining/scaling.py" region="power_law" />
+
+但纯幂律意味着损失可以趋于 0，这不合理：自然语言本身有不可约的熵。更准确的形式要加一个常数项 $E$，表示无限大模型、无限多数据时仍然无法消除的损失。这时就不能直接取对数做线性回归了，需要非线性拟合，下面的 Chinchilla 方法 3 会处理它。
+
+### C ≈ 6ND
+
+在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中我们推导过：一个 $N$ 参数的稠密 Transformer，每个 token 的前向约需 $2N$ 次浮点运算（每个参数一次乘加），反向约是前向的两倍，所以训练 $D$ 个 token 的总计算量是
+
+<KeyEq label="训练计算量">
+
+$$
+C\approx6ND .
+$$
+
+</KeyEq>
+
+这个近似忽略了注意力中与序列长度二次相关的部分（在上下文长度远小于 $12d$ 时可以忽略）和嵌入层的查表。有了它，“给定计算量 $C$ 怎样分配 $N$ 与 $D$”就是一个约束优化问题：$N$ 和 $D$ 此消彼长，乘积固定。
+
+## Kaplan 2020：模型越大越好
+
+OpenAI 的 [Kaplan et al. 2020](https://arxiv.org/abs/2001.08361) 是第一篇系统研究语言模型缩放的论文。他们训练了从 768 到 15 亿（非嵌入）参数的模型，得到三条单变量幂律：
+
+$$
+L(N)=\left(\frac{N_c}{N}\right)^{0.076},\qquad
+L(D)=\left(\frac{D_c}{D}\right)^{0.095},\qquad
+L(C_{\min})=\left(\frac{C_c}{C_{\min}}\right)^{0.050},
+$$
+
+其中 $N$ 是**不含嵌入**的参数量。它们的核心结论是：在计算预算增长时，最优的模型参数量应该随 $C^{0.73}$ 增长，而数据量只需随约 $C^{0.27}$ 增长。换言之，**多出来的计算应该主要用来增大模型**。GPT-3（175B 参数、仅 300B token）就是这一结论的产物。
+
+## Chinchilla 2022：参数与数据同等重要
+
+DeepMind 的 [Hoffmann et al. 2022](https://arxiv.org/abs/2203.15556) 用更大的范围重新研究了这个问题：训练了 400 多个模型，参数量从 7000 万到 160 亿，数据量从 50 亿到 5000 亿 token。他们用三种独立的方法估计计算最优的 $N^\ast(C)$ 与 $D^\ast(C)$，都写成 $N^\ast\propto C^a$、$D^\ast\propto C^b$。
+
+**方法 1：固定模型、改变训练长度**。对每个模型大小训练多个不同长度的运行（每个运行的余弦调度都对应它自己的训练长度），在每个 FLOP 水平上取所有运行中损失最低的那个，记录它的 $N$ 与 $D$。得到 $a=0.50$。
+
+**方法 2：IsoFLOP 曲线**。选定若干个计算预算 $C$，对每个预算训练一系列不同大小的模型（数据量由 $D=C/6N$ 决定）。在每个预算下，损失随 $\log N$ 呈 U 形：模型太小则能力不足，模型太大则数据太少。对 U 形曲线拟合抛物线，顶点就是该预算下的最优 $N^\ast$。再把各预算的 $N^\ast$ 对 $C$ 拟合幂律。得到 $a=0.49$。
+
+**方法 3：参数化拟合**。直接用所有实验点拟合一个双变量函数
+
+<KeyEq label="Chinchilla 参数化损失">
+
+$$
+L(N,D)=E+\frac{A}{N^{\alpha}}+\frac{B}{D^{\beta}} ,
+$$
+
+</KeyEq>
+
+再在 $6ND=C$ 的约束下求最小值。得到 $a=0.46$。
+
+三种方法都给出了 $a\approx b\approx0.5$：**参数量与数据量应该等比例增长**。按他们的拟合，计算最优的训练大约是**每个参数 20 个 token**。用同样的计算预算（约 $5.76\times10^{23}$ FLOPs），他们训练了 70B 参数、1.4T token 的 Chinchilla，在几乎所有基准上超过了 280B 参数、300B token 的 Gopher。
+
+### IsoFLOP 曲线
+
+<Plot label="IsoFLOP 曲线：固定计算量下损失随模型大小的变化" x={[10000000, 100000000000]} y={[2, 4.2]} logX xLabel="参数量 N" yLabel="损失 L"
+  series={[
+    { fn: (n) => 1.8172 + 482.01 / n ** 0.3478 + 2085.43 / (1e19 / (6 * n)) ** 0.3658, label: 'C = 1e19' },
+    { fn: (n) => 1.8172 + 482.01 / n ** 0.3478 + 2085.43 / (1e20 / (6 * n)) ** 0.3658, label: 'C = 1e20', tone: 'info' },
+    { fn: (n) => 1.8172 + 482.01 / n ** 0.3478 + 2085.43 / (1e21 / (6 * n)) ** 0.3658, label: 'C = 1e21', tone: 'accent2' },
+    { fn: (n) => 1.8172 + 482.01 / n ** 0.3478 + 2085.43 / (1e22 / (6 * n)) ** 0.3658, label: 'C = 1e22', tone: 'muted' },
+  ]}
+  markers={[{ at: [2.622e8, 2.927], tone: 'accent' }, { at: [8.535e8, 2.553], tone: 'info' }, { at: [2.778e9, 2.306], tone: 'accent2' }, { at: [9.045e9, 2.141], label: 'N* 随 C 右移', tone: 'muted' }]}>
+  <Fragment slot="caption">用 Besiroglu et al. 2024 重新拟合的 Chinchilla 参数（E = 1.82，A = 482，B = 2085，α = 0.348，β = 0.366）画出的四条 IsoFLOP 曲线。每条曲线左侧模型太小、右侧数据太少；圆点是解析最优点 N*。计算量每增加 10 倍，N* 约增加 10^0.51 ≈ 3.3 倍，最低损失持续下降。</Fragment>
+</Plot>
+
+`isoflop_minimum` 实现方法 2 的抛物线拟合，`isoflop_analysis` 在每个预算附近的对数网格上“训练”模型（用参数化损失加噪声代替真实训练），找出每条曲线的最低点并拟合幂律：
+
+<CodeFile path="src/llms_from_scratch/pretraining/scaling.py" region="isoflop" />
+
+测试 `test_isoflop_recovers_exponent` 在 $10^{18}$ 到 $10^{22}$ 的五个预算上运行这一流程，加入 0.002 的损失噪声，拟合出的指数（约 0.511）与解析值 $\beta/(\alpha+\beta)=0.513$ 相差不到 0.03。
+
+### 推导方法 3 的解析解
+
+给定 $L(N,D)=E+AN^{-\alpha}+BD^{-\beta}$ 和约束 $D=C/(6N)$，把约束代入：
+
+$$
+L(N)=E+AN^{-\alpha}+B\left(\frac{C}{6}\right)^{-\beta}N^{\beta}.
+$$
+
+对 $N$ 求导并令其为 0：
+
+$$
+-\alpha AN^{-\alpha-1}+\beta B\left(\frac{C}{6}\right)^{-\beta}N^{\beta-1}=0
+\quad\Longrightarrow\quad
+\alpha AN^{-\alpha}=\beta B\left(\frac{C}{6}\right)^{-\beta}N^{\beta}.
+$$
+
+整理得 $N^{\alpha+\beta}=\dfrac{\alpha A}{\beta B}\left(\dfrac{C}{6}\right)^{\beta}$。令 $G=\left(\dfrac{\alpha A}{\beta B}\right)^{1/(\alpha+\beta)}$，则
+
+<KeyEq label="计算最优分配">
+
+$$
+N^\ast(C)=G\left(\frac{C}{6}\right)^{\frac{\beta}{\alpha+\beta}},\qquad
+D^\ast(C)=\frac{C}{6N^\ast}=G^{-1}\left(\frac{C}{6}\right)^{\frac{\alpha}{\alpha+\beta}} .
+$$
+
+</KeyEq>
+
+所以 $a=\beta/(\alpha+\beta)$、$b=\alpha/(\alpha+\beta)$，$a+b=1$。指数只取决于两个幂律指数的相对大小：数据项衰减得越快（$\beta$ 越大），越应该把计算花在参数上。在二阶导数上，$L''(N)>0$ 恒成立（两项都是凸函数），所以这个驻点是唯一的最小值。
+
+手算一个例子。用 Besiroglu et al. 的参数，$G=(0.3478\times482.01/(0.3658\times2085.43))^{1/0.7136}\approx0.120$，$a=0.513$。对 Chinchilla 的预算 $C=5.76\times10^{23}$：$C/6=9.6\times10^{22}$，$N^\ast=0.120\times(9.6\times10^{22})^{0.513}\approx7.2\times10^{10}$，$D^\ast=C/(6N^\ast)\approx1.33\times10^{12}$，每参数约 18 个 token——与 Chinchilla 实际的 70B、1.4T 吻合。
+
+<CodeFile path="src/llms_from_scratch/pretraining/scaling.py" region="chinchilla" />
+
+### 一个拟合中的错误
+
+上面用的不是 Chinchilla 原文的参数。原文给出的方法 3 参数是 $E=1.69$、$A=406.4$、$B=410.7$、$\alpha=0.34$、$\beta=0.28$。把它们代入同一个公式，$C=5.76\times10^{23}$ 时得到 $N^\ast\approx32$B、$D^\ast\approx3.0$T，每参数约 93 个 token——与“每参数 20 个 token”和 Chinchilla 本身的设计都矛盾。测试 `test_hoffmann_fit_implies_more_tokens_per_param` 验证了这一点。
+
+[Besiroglu et al. 2024](https://arxiv.org/abs/2404.10102)（Epoch AI）从原论文的图中重建了数据并重新拟合，发现原文的优化因为损失函数尺度选择不当而提前终止，得到的参数不是最优解，报告的置信区间也窄得不合理。重新拟合得到 $E=1.82$、$A=482$、$B=2085$、$\alpha=0.348$、$\beta=0.366$，隐含约每参数 20 个 token，与方法 1、2 一致。这是一个关于“拟合细节决定结论”的好例子。
+
+拟合本身的做法是：在对数空间中最小化 Huber 损失（对离群点稳健），用 L-BFGS 从一组网格初值出发分别优化，取目标最小的结果。为了数值稳定，把 $A=e^a$、$B=e^b$、$E=e^e$，模型的对数损失写成 $\operatorname{LSE}(a-\alpha\log N,\ b-\beta\log D,\ e)$，代码就是本章开头摘录的 `fit_chinchilla`。
+
+测试 `test_fit_chinchilla_recovers_known_parameters` 在 6×6 的 $(N,D)$ 网格上用已知参数生成损失，验证 `fit_chinchilla`（见上方 `power_law` 区段）能恢复 $\alpha$、$\beta$（误差小于 0.02）与 $E$（误差小于 0.05）。
+
+### Kaplan 与 Chinchilla 为什么不同
+
+两篇论文的结论差别很大：Kaplan 的 $a=0.73$ 对 Chinchilla 的 $a\approx0.5$。外推到 $10^{26}$ FLOPs，Kaplan 建议约 35T 参数，Chinchilla 建议约 1T 参数。
+
+<Plot label="Kaplan 与 Chinchilla 对计算最优参数量的预测" x={[1e18, 1e26]} y={[1e7, 1e14]} logX logY xLabel="训练计算量 C（FLOPs）" yLabel="计算最优参数量 N*"
+  series={[
+    { fn: (c) => 1.3e9 * (c / 8.64e19) ** 0.73, label: 'Kaplan', tone: 'accent2' },
+    { fn: (c) => 0.1196 * (c / 6) ** 0.5126, label: 'Chinchilla' },
+  ]}
+  markers={[{ at: [3.15e23, 1.75e11], label: 'GPT-3', tone: 'accent2' }, { at: [5.76e23, 7e10], label: 'Chinchilla', tone: 'accent' }]}>
+  <Fragment slot="caption">Kaplan 的曲线按其论文的 N ≈ 1.3×10⁹ · C^0.73（C 以 PF-day 计，1 PF-day ≈ 8.64×10¹⁹ FLOPs）；Chinchilla 曲线用 Besiroglu et al. 的重新拟合。两条线在约 10¹⁹ FLOPs 附近接近，之后差距随计算量迅速扩大。GPT-3（175B）位于两条线之间，约为 Chinchilla 建议值的 3 倍；Chinchilla 模型落在自己的线上。</Fragment>
+</Plot>
+
+后续研究找到了几个原因。Chinchilla 论文本身指出，Kaplan 对所有模型使用了固定长度的学习率调度，然后用中间检查点估计“训练了较少 token 的模型”的损失；而正如上一章所述，一个调度还没走完的中间检查点的损失比同样 token 数下“完整衰减”的模型要高，这会系统性地低估小数据量的价值。[Pearce & Song 2024](https://arxiv.org/abs/2406.12907) 发现，Kaplan 只计非嵌入参数、而且实验集中在较小的规模，在小模型上嵌入参数占比大，这一计数方式本身就会把指数推高。[Porian et al. 2024](https://arxiv.org/abs/2406.19146) 进一步定位了三个因素：输出层的计算量、预热时长，以及没有随规模调整的优化器超参数（尤其是小批量时 AdamW 的 $\beta_2$）；修正之后，Kaplan 的实验设置也能复现 Chinchilla 的结论。
+
+一个教训是：缩放定律的结论对实验细节极其敏感——参数怎么计、学习率怎么调、什么时候读损失。所以每个团队都要在自己的架构、数据和训练配方上重新拟合，而不是直接套用别人的系数。Llama 3 就重新做了 IsoFLOP 实验，对 $3.8\times10^{25}$ FLOPs 的旗舰预算预测出 402B 参数、16.55T token 的最优配置，最终选择了 405B。
+
+## 超参数如何随规模迁移
+
+缩放定律预测的是“调好超参数后”的损失。但最优学习率本身会随模型大小变化：在标准参数化（SP）下，模型越宽，最优学习率越小。如果每个规模都要单独搜索学习率，“用小实验预测大模型”就失去了意义。
+
+### 经验规律
+
+一种做法是把最优超参数也拟合成规模的函数。DeepSeek LLM（[2024](https://arxiv.org/abs/2401.02954)）在一系列小规模实验上网格搜索最优批量与学习率，拟合出
+
+$$
+\eta_{\text{opt}}=0.3118\cdot C^{-0.125},\qquad B_{\text{opt}}=0.2920\cdot C^{0.3271},
+$$
+
+（$B$ 以 token 计）：计算量越大，最优学习率越小、最优批量越大。他们还发现，用“每 token 的非嵌入 FLOPs”$M$ 代替 $6N$ 来表示模型规模，拟合会更准确，因为 $6N$ 忽略了注意力的计算。
+
+### μP：让最优超参数与宽度无关
+
+另一种做法是从理论上改造参数化，使最优超参数**不随宽度变化**。这就是 μP（Maximal Update Parametrization，[Yang et al. 2022, Tensor Programs V](https://arxiv.org/abs/2203.03466)）。
+
+直觉可以从一个线性层看出。设隐藏层 $y=Wx$，$x\in\mathbb R^d$ 的每个分量是 $\Theta(1)$。用 Adam 训练时，梯度 $G=\delta x^\top$ 是一个与 $x$ 对齐的外积，Adam 的更新近似 $\Delta W\approx-\eta\operatorname{sign}(\delta x^\top)$，每个元素的大小约为 $\eta$。这一更新对输出的影响是
+
+$$
+(\Delta W x)_i=\sum_{j=1}^{d}\Delta W_{ij}x_j\approx-\eta\operatorname{sign}(\delta_i)\sum_{j=1}^{d}|x_j|=\Theta(\eta\,d).
+$$
+
+关键在于 $\Delta W$ 的行与 $x$ **相关**（它本来就是由 $x$ 构造的），所以 $d$ 项是同号累加，而不是随机游走式的 $\sqrt d$。要让一步更新对输出的影响不随宽度增长，必须取 $\eta\propto1/d$。而对于初始化，$W$ 与 $x$ 无关，$Wx$ 的方差是 $d\sigma_W^2$，所以初始化标准差要取 $\propto1/\sqrt d$。**初始化与学习率需要不同的缩放**——标准参数化只处理了前者。
+
+μP 把这类分析系统化，对每一类参数（输入嵌入、隐藏矩阵、输出层）给出初始化与学习率随宽度的缩放规则，例如对 Adam：隐藏矩阵的学习率按 $1/\text{宽度}$ 缩放，输出 logit 乘以 $1/\text{宽度}$，注意力分数用 $1/d_h$ 而不是 $1/\sqrt{d_h}$。在 μP 下，在小宽度上搜索到的最优学习率可以直接用于大宽度。Tensor Programs V 在 4000 万参数的代理模型上调参，迁移到 GPT-3 6.7B，得到的模型优于原 GPT-3 6.7B，调参成本只相当于一次预训练的 7%。Cerebras-GPT 与 MiniCPM 都使用了 μP。μP 处理的是宽度，后续工作（如 depth-μP、CompleteP）把类似的思想推广到深度。
+
+值得一提的是，上一章 Muon 的 RMS 匹配与 μP 有相通之处：两者都在显式地控制“每一步更新对层输出的影响”有多大，并让它不随矩阵形状变化。
+
+## 超越计算最优：推理成本与过度训练
+
+### 为什么要“过度训练”
+
+Chinchilla 的问题是：**给定训练计算量，怎样得到损失最低的模型**？但模型训练好之后要部署，推理的成本与参数量成正比（每个 token 约 $2N$ FLOPs），而且推理的总 token 数可能远超训练。如果一个模型要服务数万亿甚至更多 token 的请求，更合理的问题是：**给定目标效果，怎样让训练加推理的总成本最低**？答案是训练一个比计算最优小得多的模型，并用多得多的数据训练它。
+
+Llama 3 8B 在 15T token 上训练，约每参数 1900 个 token，是 Chinchilla 比例的近 100 倍。Meta 报告，8B 与 70B 模型的效果在训练到 15T token 时仍在按对数线性提升。我们可以用重新拟合的 Chinchilla 参数粗略估算这个选择的代价与收益（注意这只是示意：这组参数来自 Chinchilla 的数据与架构，不能精确描述 Llama 3）：
+
+- 8B 模型训练 15T token：$C=6\times8\times10^9\times1.5\times10^{13}=7.2\times10^{23}$ FLOPs，预测损失 $L\approx2.022$。
+- 同样的 $C$ 下计算最优的是约 81B 参数、1.5T token 的模型，预测损失约 1.968：8B 模型在同等训练计算下损失高了约 0.05。
+- 反过来问：要达到 $L=2.022$，计算最优的模型需要多少计算？解得约 $1.3\times10^{23}$ FLOPs，对应约 34B 参数、0.65T token。
+
+<Bars label="达到相同预测损失（2.02）的两种方案" unit="×10²³ FLOPs" items={[
+  { label: '34B · 0.65T（计算最优）', value: 1.31, tone: 'info', note: '推理 6.8×10¹⁰ FLOPs/token' },
+  { label: '8B · 15T（过度训练）', value: 7.2, tone: 'accent2', note: '推理 1.6×10¹⁰ FLOPs/token' },
+]}>
+  <Fragment slot="caption">训练计算量的比较（按 Besiroglu et al. 的 Chinchilla 参数估算）。过度训练的 8B 模型多花了约 5.9×10²³ FLOPs 的训练，但每个推理 token 的计算量只有 34B 模型的约 1/4。</Fragment>
+</Bars>
+
+两者每生成一个 token 的推理计算相差 $2\times(34-8)\times10^9\approx5.2\times10^{10}$ FLOPs，多花的训练计算 $5.9\times10^{23}$ FLOPs 在推理约 $5.9\times10^{23}/5.2\times10^{10}\approx1.1\times10^{13}$ 个 token 之后就收回了，即 11T token。对一个被广泛使用的开源模型，这个量很快就会被超过。何况小模型还有计算之外的优势：显存更小、可以部署在更便宜的硬件和端侧设备上、延迟更低。[Sardana et al. 2024](https://arxiv.org/abs/2401.00448) 把推理需求纳入缩放定律，系统地分析了这一权衡。
+
+过度训练也有代价：同一份计算换来的效果更差，而且需要大量高质量数据。这就引出了下一个问题。
+
+### 数据不够时：重复的价值
+
+如果高质量数据只有 $U$ 个独特 token，而计算预算要求训练 $D>U$ 个 token，只能重复使用数据。[Muennighoff et al. 2023](https://arxiv.org/abs/2305.16264) 系统地研究了重复训练，提出用“等效独特数据量”替代 $D$：
+
+$$
+D'=U+U\,R^\ast\left(1-e^{-R/R^\ast}\right),\qquad R=\text{轮数}-1,
+$$
+
+其中 $R^\ast\approx15.4$ 是拟合出的衰减常数。$R$ 很小时，$1-e^{-R/R^\ast}\approx R/R^\ast$，$D'\approx U(1+R)$，重复数据和新数据几乎一样有价值；$R$ 很大时，$D'\to U(1+R^\ast)$，再多的重复也不会让等效数据量超过约 16 倍的独特数据。
+
+<Plot label="重复训练的等效数据量" x={[1, 60]} y={[0, 18]} xLabel="训练轮数（epoch）" yLabel="等效独特数据量 / U"
+  series={[
+    { fn: (e) => 1 + 15.4 * (1 - Math.exp(-(e - 1) / 15.4)), label: '重复数据' },
+    { fn: (e) => e, label: '全是新数据', tone: 'muted', dashed: true },
+    { fn: () => 16.4, label: '上限 1 + R*', tone: 'accent2', dashed: true },
+  ]}
+  markers={[{ at: [4, 3.73], label: '4 轮 ≈ 3.7 倍' }]}>
+  <Fragment slot="caption">按 Muennighoff et al. 2023 的拟合（R* = 15.4）。前 4 轮的重复几乎和新数据一样有效（4 轮相当于 3.7 倍独特数据）；16 轮约 10.6 倍；之后收益迅速递减，趋近 16.4 倍的上限。</Fragment>
+</Plot>
+
+<CodeFile path="src/llms_from_scratch/pretraining/scaling.py" region="data_constrained" />
+
+这一结论的实用含义是：在数据受限时，把高质量数据重复 2～4 轮几乎没有损失，比混入大量低质量数据更好；但重复几十轮就不值得了。[预训练数据：采集、过滤、去重与配比](/pretraining/data/)中讨论的改写式合成数据，正是为了在不简单重复的情况下增加高质量数据的“有效轮数”。
+
+## 缩放定律预测的是什么
+
+最后需要强调缩放定律的边界。它们预测的是**预训练损失**（或困惑度），而不是下游任务的能力。某些任务的准确率随规模呈现“涌现”式的跳变，但 [Schaeffer et al. 2023](https://arxiv.org/abs/2304.15004) 指出，这种跳变很大程度上来自不连续的评估指标（如精确匹配）；换成连续指标后，能力的提升往往也是平滑的。把损失与下游指标联系起来，是下一章评估要讨论的内容之一。
+
+另外，缩放定律都是在固定的数据分布、架构和训练配方下拟合的。数据质量的提升（如 FineWeb-Edu、DCLM）相当于把整条曲线向下平移；架构改进（如 MoE）改变了“参数量”与“计算量”的关系——对 MoE 而言，$C\approx6N_{\text{active}}D$，总参数与激活参数需要分开处理。
+
+## 小结
+
+- 预训练损失近似服从幂律，加上不可约项后写成 $L(N,D)=E+A/N^\alpha+B/D^\beta$；训练计算量 $C\approx6ND$。
+- Kaplan 2020 得出 $N^\ast\propto C^{0.73}$，主张优先增大模型；Chinchilla 2022 用三种方法得出 $N^\ast\propto C^{\approx0.5}$，约每参数 20 个 token。差异来自学习率调度、参数计数方式与超参数随规模的调整。
+- 方法 3 的解析解：$N^\ast=G(C/6)^{\beta/(\alpha+\beta)}$，$D^\ast=G^{-1}(C/6)^{\alpha/(\alpha+\beta)}$，$G=(\alpha A/\beta B)^{1/(\alpha+\beta)}$。原文参数拟合有误，重新拟合后与方法 1、2 一致。
+- 最优超参数随规模变化：可以拟合经验规律（DeepSeek LLM），也可以用 μP 让学习率与宽度无关；核心是 Adam 下 $\Delta W x$ 随宽度线性增长，学习率需按 $1/d$ 缩放。
+- 考虑推理成本时应“过度训练”小模型（Llama 3 8B 用 15T token）；数据受限时重复 4 轮以内几乎无损，等效数据量的上限约为独特数据的 16 倍。
+
+缩放定律告诉我们损失会降到多少，但损失低不等于模型好用。下一章讨论怎样评估一个预训练模型。
+
+## 练习
+
+1. 用 Hoffmann 原文的参数（$\alpha=0.34$，$\beta=0.28$）计算 $a$ 与 $b$，并与原文报告的方法 3 结果 $a=0.46$ 比较。
+2. 证明：在 $L=E+AN^{-\alpha}+BD^{-\beta}$ 的最优分配下，两个可约项之比 $\dfrac{AN^{-\alpha}}{BD^{-\beta}}=\dfrac{\beta}{\alpha}$。这说明了什么？
+3. 一个 MoE 模型总参数 671B、每 token 激活 37B，训练 14.8T token。用 $6N_{\text{active}}D$ 估计训练计算量，与同等计算量下 Chinchilla 计算最优的稠密模型规模比较。
+4. 某团队有 2T token 的高质量独特数据，计算预算要求训练 10T token。按 Muennighoff 的公式，等效数据量是多少？如果改为混入 8T token 价值只有高质量数据一半的普通数据，等效数据量又是多少（假设价值可以线性相加）？
+5. 根据 μP 的分析，把模型宽度从 1024 增加到 8192 时，隐藏矩阵的 Adam 学习率应如何调整？初始化标准差呢？
+
+<details>
+<summary>练习 1 答案</summary>
+
+$a=\beta/(\alpha+\beta)=0.28/0.62\approx0.452$，$b=0.548$，与原文报告的 $a=0.46$、$b=0.54$ 一致（Besiroglu et al. 用更精确的 $\alpha=0.3392$、$\beta=0.2849$ 得到 $a=0.454$）。问题不在于这个换算，而在于 $G$：原文参数给出的 $G$ 让每参数 token 数约为 70～90，与 20 矛盾，说明 $A$、$B$ 的估计有误。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+最优性条件是 $\alpha AN^{-\alpha}=\beta B(C/6)^{-\beta}N^{\beta}=\beta BD^{-\beta}$（因为 $D=C/6N$）。所以 $AN^{-\alpha}/BD^{-\beta}=\beta/\alpha$。在最优点，“模型太小”造成的损失与“数据太少”造成的损失之比是一个常数（重新拟合的参数下约为 1.05），两种不足被平衡地分担。如果当前配置下某一项明显更大，就应该把计算转移到它对应的那一侧。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+$C\approx6\times37\times10^9\times14.8\times10^{12}\approx3.3\times10^{24}$ FLOPs。代入重新拟合的参数，$N^\ast=0.1196\times(5.5\times10^{23})^{0.513}\approx1.7\times10^{11}$，即约 170B 的稠密模型、约 3.2T token。DeepSeek-V3 的激活参数（37B）远小于这个值，而训练 token（14.8T）远多于它——相对于计算最优，它在激活参数意义上是“过度训练”的，这与降低推理成本的目标一致。注意 MoE 的总参数提供了额外的容量，稠密模型的缩放定律不能直接套用。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+10T token 相当于 5 轮，$R=4$：$D'=2\times(1+15.4\times(1-e^{-4/15.4}))=2\times(1+15.4\times0.229)\approx2\times4.53=9.05$T。混合方案：2T 高质量 + 8T 普通数据（等效 4T），共约 6T。重复高质量数据更好。当然，这个比较取决于“普通数据价值一半”的假设，而这正是需要通过实验确定的。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+宽度变为 8 倍。按 μP，隐藏矩阵的 Adam 学习率按 $1/d$ 缩放，变为原来的 1/8；初始化标准差按 $1/\sqrt d$ 缩放，变为原来的 $1/\sqrt8\approx0.354$。在标准参数化下通常只调整了初始化（例如固定 0.02 或按 $1/\sqrt{d}$），学习率不变，于是更宽的模型实际上在用“过大”的学习率训练，需要重新搜索。
+
+</details>
+
+## 参考文献
+
+- Kaplan et al. 2020. [Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361).
+- Hoffmann et al. 2022. [Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)（Chinchilla）。
+- Besiroglu et al. 2024. [Chinchilla Scaling: A replication attempt](https://arxiv.org/abs/2404.10102).
+- Pearce & Song 2024. [Reconciling Kaplan and Chinchilla Scaling Laws](https://arxiv.org/abs/2406.12907).
+- Porian et al. 2024. [Resolving Discrepancies in Compute-Optimal Scaling of Language Models](https://arxiv.org/abs/2406.19146).
+- Yang et al. 2022. [Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer](https://arxiv.org/abs/2203.03466)（μP）。
+- DeepSeek-AI 2024. [DeepSeek LLM: Scaling Open-Source Language Models with Longtermism](https://arxiv.org/abs/2401.02954)（超参数的缩放规律）。
+- Muennighoff et al. 2023. [Scaling Data-Constrained Language Models](https://arxiv.org/abs/2305.16264).
+- Sardana et al. 2024. [Beyond Chinchilla-Optimal: Accounting for Inference in Language Model Scaling Laws](https://arxiv.org/abs/2401.00448).
+- Llama Team 2024. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)，第 3.2.1 节（缩放定律）。
+- Schaeffer et al. 2023. [Are Emergent Abilities of Large Language Models a Mirage?](https://arxiv.org/abs/2304.15004).
+- Stanford CS336 Spring 2025，[Lecture 9 与 11（Scaling laws）、Assignment 3](https://cs336.stanford.edu/spring2025/)。

@@ -2,7 +2,374 @@
 title: 预训练数据：采集、过滤、去重与配比
 description: 从 Common Crawl 到训练语料：文本抽取、语言识别、质量过滤、MinHash 去重、数据配比与合成数据。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/dedup.py
+  - src/llms_from_scratch/pretraining/filters.py
+  - tests/pretraining/test_dedup.py
+  - tests/pretraining/test_filters.py
 ---
 
-本章正在撰写。
+在[训练 GPT：从零训练一个小模型](/transformer/training-gpt/)里，训练数据是一个现成的文本文件：读进来、分词、切成定长片段，就可以开始训练。真实的预训练没有这样的文件。Llama 3 用了约 15T token，DeepSeek-V3 用了 14.8T，DeepSeek-V4 超过 32T；这些 token 绝大部分来自公开网页，而原始网页里充满导航栏、广告、乱码、机器生成的垃圾、成千上万份互相复制的页面和个人隐私。从原始抓取到“可以训练的 token”，中间是一条处理几百 TB 数据的流水线，它对最终模型质量的影响往往超过架构上的改动。
+
+本章沿着这条流水线走一遍：先看网页数据长什么样、怎样把正文抽出来；然后是三类过滤——语言识别、启发式规则、基于模型的质量分类器；接着用一整节推导并实现 MinHash 与局部敏感哈希（LSH）的近似去重；最后讨论隐私与有害内容、数据配比、多阶段训练（退火）和合成数据。CS336 的第 13、14 讲和作业 4 覆盖的正是这些内容。读完本章，你会知道 FineWeb、DCLM 这类公开数据集的每一步在做什么、为什么这样做，并拥有一个可运行、经过测试的去重与过滤实现。
+
+## 从网页到文本：Common Crawl 与正文抽取
+
+几乎所有开放预训练语料的起点都是 [Common Crawl](https://commoncrawl.org/)：一个非营利组织自 2008 年起定期抓取公开网页，每个快照（snapshot）包含数十亿个网页，以三种格式发布。**WARC**（Web ARChive）保存完整的 HTTP 响应，包括原始 HTML；**WAT** 保存从中提取的元数据与链接；**WET** 是 Common Crawl 自己从 HTML 中抽出的纯文本。
+
+WET 拿来就能用，但它的抽取很粗糙：导航菜单、页脚版权声明、“相关文章”列表、Cookie 提示都会混进正文。RefinedWeb 与 FineWeb 都选择从 WARC 的原始 HTML 重新抽取，使用 [trafilatura](https://trafilatura.readthedocs.io/) 这类基于 DOM 结构与文本密度判断正文区域的工具。FineWeb 的消融实验显示，在同样的后续过滤下，用 trafilatura 从 WARC 抽取的数据训练出的模型明显优于直接用 WET 的模型——正文抽取虽然是流水线中最“工程”的一步，对质量的影响却不小。
+
+抽取后还会做 URL 层面的过滤：用公开的成人网站黑名单（如 UT1 blocklist）和 URL 关键词去掉大部分色情与恶意站点。这一步非常便宜，在昂贵的模型打分之前先砍掉一批数据。
+
+<Diagram width={680} height={300} label="预训练数据处理流水线">
+  <Box x={15} y={40} w={140} h={64} label="Common Crawl" sub="WARC 原始 HTML" tone="info" />
+  <Box x={185} y={40} w={140} h={64} label="正文抽取" sub="trafilatura" />
+  <Box x={355} y={40} w={140} h={64} label="语言识别" sub="fastText ≥ 0.65" />
+  <Box x={525} y={40} w={140} h={64} label="启发式过滤" sub="Gopher / C4" />
+  <Box x={525} y={180} w={140} h={64} label="质量分类器" sub="FineWeb-Edu/DCLM" tone="accent" />
+  <Box x={355} y={180} w={140} h={64} label="近似去重" sub="MinHash 14×8" tone="accent" />
+  <Box x={185} y={180} w={140} h={64} label="PII 与有害内容" sub="正则 + 分类器" />
+  <Box x={15} y={180} w={140} h={64} label="配比与分词" sub="多阶段 / 退火" tone="strong" />
+  <Arrow from={[155, 72]} to={[185, 72]} />
+  <Arrow from={[325, 72]} to={[355, 72]} />
+  <Arrow from={[495, 72]} to={[525, 72]} />
+  <Arrow from={[595, 104]} to={[595, 180]} />
+  <Arrow from={[525, 212]} to={[495, 212]} />
+  <Arrow from={[355, 212]} to={[325, 212]} />
+  <Arrow from={[185, 212]} to={[155, 212]} />
+  <Text x={300} y={142} label="越往后的步骤越贵，所以便宜的规则放在前面先砍掉大部分数据" size="sm" tone="muted" />
+  <Text x={340} y={275} label="每一步都只保留一部分文档；最终留下的通常只占原始抓取的一小部分" size="sm" tone="muted" />
+  <Fragment slot="caption">一条典型的网页数据流水线（参照 FineWeb、DCLM 与 Dolma）。从左上沿箭头阅读：先做按文档独立、计算便宜的步骤，再做需要模型推理或跨文档比较的步骤。各家的顺序略有不同，例如 FineWeb 先应用 Gopher 规则，再在每个快照内做 MinHash 去重，最后才应用 C4 与自定义规则。</Fragment>
+</Diagram>
+
+流水线的排列有一个朴素的原则：**按单位成本从低到高**。URL 过滤只看一个字符串；语言识别和启发式规则对每篇文档做一次线性扫描；质量分类器要跑一次模型推理；去重需要跨文档比较。把便宜的步骤放在前面，昂贵的步骤只处理剩下的数据。
+
+## 语言识别：fastText 式的线性分类器
+
+网页是多语言的。即使目标是多语言模型，也需要知道每篇文档的语言，以便按语言分别过滤、分别配比。实践中几乎所有数据管线都使用 [fastText](https://fasttext.cc/docs/en/language-identification.html) 的语言识别模型（`lid.176`，支持 176 种语言）。FineWeb 保留英语置信度不低于 0.65 的文档；CCNet、Dolma 也使用类似的阈值。
+
+fastText 之所以被广泛采用，是因为它在 CPU 上每秒能处理数十万篇文档，而准确率接近更大的模型。它的结构简单到可以一句话说完：把文本切成字符 n-gram 与词 n-gram，每个 n-gram 哈希到一个固定大小的嵌入表中取出向量，**对所有向量求平均**，再接一个线性层和 softmax。
+
+<Definition term="fastText 分类器" kind="定义" source="https://arxiv.org/abs/1607.01759">
+设文本的 n-gram 哈希编号为 $i_1,\dots,i_m$，嵌入表 $E\in\mathbb R^{H\times d}$，输出层 $W\in\mathbb R^{K\times d}$。模型为
+$$
+h=\frac1m\sum_{j=1}^m E_{i_j},\qquad P(y=k\mid \text{text})=\operatorname{softmax}(Wh+b)_k .
+$$
+它是一个“词袋 + 线性模型”：没有非线性隐藏层，n-gram 的顺序信息只体现在 n-gram 本身之中。
+</Definition>
+
+字符 n-gram 对语言识别特别有效：德语的 `sch`、`ß`，法语的 `eau`，英语的 `th`、`ing` 都是强信号，而且对拼写错误和未登录词稳健。哈希技巧（hashing trick）把无限多的 n-gram 映射到 $H$ 个桶里，偶尔的冲突对结果影响很小，却省去了维护词表。
+
+下面是我们的实现。`hashed_ngrams` 给文本两端加上边界符 `<`、`>`（这样“词首的 th”和“词中的 th”能区分开），抽取 1 到 3 阶字符 n-gram 并用确定性的多项式哈希映射到桶；`FastTextClassifier` 用 `nn.EmbeddingBag(mode="mean")` 一次完成查表与求平均。
+
+<CodeFile path="src/llms_from_scratch/pretraining/filters.py" region="fasttext" />
+
+测试 `test_fasttext_language_id` 只用 6 句英语和 6 句德语训练，就能正确识别另外 4 句没见过的句子。真实的 `lid.176` 在维基百科、Tatoeba 和 SETimes 上训练，原理与此相同。
+
+语言识别有两个常见的陷阱。第一，**短文本不可靠**：一行十几个字符的文本，n-gram 太少，置信度波动很大，所以通常对整篇文档而不是逐行判断。第二，**低资源语言的精度差**：对于训练数据稀少的语言，分类器容易把相近的高资源语言或乱码误判为它。多语言语料（如 FineWeb-2）需要为每种语言单独校准阈值。
+
+## 启发式过滤：Gopher 与 C4 的规则
+
+通过了语言识别的文档仍然大量是低质量的：关键词堆砌的 SEO 页面、只有一串链接的目录页、商品列表、自动生成的乱码、重复的模板文字。启发式规则用一些简单的统计量把它们筛掉。最常被引用的是 DeepMind 训练 Gopher 时使用的 MassiveWeb 规则（[Rae et al. 2021](https://arxiv.org/abs/2112.11446) 附录 A）和 Google 构建 C4 时的规则（[Raffel et al. 2020](https://arxiv.org/abs/1910.10683)）。
+
+**Gopher 质量规则**针对“不像正常文章”的文档：
+
+| 规则 | 保留条件 | 想去掉的东西 |
+| --- | --- | --- |
+| 词数 | 50 ≤ 词数 ≤ 100 000 | 过短的碎片、超长的数据转储 |
+| 平均词长 | 3 ≤ 平均字符数 ≤ 10 | 乱码、URL 串、无空格的长串 |
+| 符号比 | `#` 与省略号数 / 词数 ≤ 0.1 | 话题标签堆砌、截断的摘要列表 |
+| 列表行 | 以项目符号开头的行 ≤ 90% | 纯列表页 |
+| 省略号行 | 以省略号结尾的行 ≤ 30% | 只有摘要的聚合页 |
+| 字母词 | 含字母的词 ≥ 80% | 表格、数字转储 |
+| 停用词 | 至少含 the、be、to、of、and、that、have、with 中的 2 个 | 不成句的关键词列表 |
+
+**Gopher 重复规则**针对机器生成或模板化的内容：重复行占比超过 30%、出现最多的 2/3/4-gram 覆盖的字符占比分别超过 20%/18%/16%、重复出现的 5～10-gram 覆盖的字符占比超过 15%～10% 时，整篇文档被丢弃。
+
+**C4 规则**更激进，而且部分是逐行操作的：只保留以终止标点结尾、且至少有 5 个词的行；丢弃包含 “javascript” 的行（通常是“请启用 JavaScript”）；整篇文档如果含有 “lorem ipsum”（排版占位文字）或花括号 `{`（代码），或清洗后少于 3 个句子，就整篇丢弃。
+
+<CodeFile path="src/llms_from_scratch/pretraining/filters.py" region="gopher" />
+
+<CodeFile path="src/llms_from_scratch/pretraining/filters.py" region="c4" />
+
+规则看起来琐碎，但每一条背后都有消融实验。也正因如此，**规则不能盲目照搬**。FineWeb 的作者发现 C4 的“行必须以终止标点结尾”这一条会删掉约 30% 的 token，代价远大于收益，于是没有采用；“含花括号即丢弃”会把所有包含代码的网页一起删掉，这对需要代码能力的模型是灾难性的。FineWeb 又补充了三条自己的规则：以标点结尾的行少于 12% 的文档、重复行中的字符占比不低于 10% 的文档、67% 以上的行短于 30 个字符的文档被丢弃。这些阈值是通过“训练 1.7B 的小模型、比较下游基准”逐条确定的。
+
+<Callout tone="warn" title="启发式规则的偏差">
+规则是按英语网页调出来的。“平均词长 3 到 10”对德语长复合词、对不用空格分词的中文和日文完全不适用；“停用词”规则天然只对英语有意义。对其他语言要么重新设计规则，要么像 FineWeb-2 那样按语言重新校准阈值。规则还会系统性地删掉某些方言、非标准拼写和少数群体的书写风格，这是数据过滤中常被讨论的公平性问题。
+</Callout>
+
+## 基于模型的质量过滤：FineWeb-Edu 与 DCLM
+
+规则只能识别“明显的坏”，却无法识别“好”。一篇语法通顺但毫无信息量的营销软文能通过所有 Gopher 规则。2024 年以来最有效的做法是训练一个**质量分类器**，给每篇文档打分，只保留分数高的部分。这个思路并不新（GPT-3 就用过一个以 WebText 为正例的分类器），但 FineWeb-Edu 与 DCLM 把它推到了新的效果。
+
+**FineWeb-Edu**（[Penedo et al. 2024](https://arxiv.org/abs/2406.17557)）的做法分三步。首先，用 Llama-3-70B-Instruct 给约 46 万篇 FineWeb 文档按“对小学到中学阶段的教育价值”打 0～5 分；然后，在一个冻结的文本嵌入模型（Snowflake-arctic-embed）上训练一个线性回归头，去拟合这些分数；最后，用这个便宜的小分类器给全部 15T token 打分，保留分数不低于 3 的文档，得到 1.3T token。在相同训练量下，用 FineWeb-Edu 训练的模型在 MMLU 和 ARC 这类知识与推理基准上有显著提升。
+
+**DCLM**（DataComp for Language Models，[Li et al. 2024](https://arxiv.org/abs/2406.11794)）把数据筛选变成了一个可控的基准：固定模型、训练代码和计算量，只比较数据。它从 240T token 的 Common Crawl 池出发，比较了几十种过滤方法，发现最好的是一个极其简单的 fastText 二分类器：正例是 OpenHermes-2.5 指令数据和 Reddit 的 ELI5（Explain Like I'm Five）社区中的高赞回答，负例是随机的 RefinedWeb 网页，保留得分最高的约 10%。用由此得到的 DCLM-Baseline 训练的 7B 模型，以 2.6T token 达到了 64% 的 MMLU（5-shot），与 Llama 3 8B 的 66% 相近，而后者的训练计算量是它的 6.6 倍。
+
+<Panels>
+  <Panel title="FineWeb-Edu" tone="accent">
+  大模型（Llama-3-70B）按“教育价值”打分 → 在嵌入上训练回归头 → 阈值 3 → 1.3T token。分类器的标准是一段人写的评分说明，可解释、可修改。
+  </Panel>
+  <Panel title="DCLM-Baseline" tone="accent2">
+  以指令数据和高质量问答为正例、随机网页为负例训练 fastText → 取前 10%。不需要大模型标注，分类器每秒处理大量文档。
+  </Panel>
+</Panels>
+
+这两种做法的共同点是：**用一个能代表“我们希望模型学会的东西”的小数据集来定义质量**，再用便宜的分类器把这个定义推广到整个网页池。它们的风险也相同：质量分类器会把语料推向正例的风格。以“教育价值”为标准会减少小说、论坛闲聊和代码，以指令数据为正例会偏向问答体。这正是后面讨论的**配比**要解决的问题——单一的质量分数不能决定整个语料的组成。
+
+<Callout tone="note" title="分类器筛选的效果为什么这么好？">
+一种解释是：语言模型的预训练损失对所有 token 一视同仁，而下游基准只关心其中一小部分能力（事实知识、推理、阅读理解）。质量分类器相当于在数据层面做“重要性采样”，把计算量集中到与这些能力相关的 token 上。代价是数据的多样性下降、可用 token 变少——当训练 token 数超过高质量数据的总量时，就要面对重复训练的问题，这在[缩放定律与计算最优](/pretraining/scaling-laws/)中讨论。
+</Callout>
+
+## 精确去重
+
+网页中重复极其普遍：同一篇新闻被几十个网站转载，同一份许可证、Cookie 声明、模板页脚出现在数百万个页面上，Common Crawl 的不同快照之间又会重复抓取同一个 URL。重复数据有三个坏处：浪费计算（同样的内容学了多遍）；让模型更倾向于逐字背诵训练数据（[Lee et al. 2022](https://arxiv.org/abs/2107.06499) 发现，去重后模型逐字输出训练文本的频率降低了约 10 倍）；以及让评估集更可能混进训练集。
+
+最简单的去重是**精确去重**：对每篇文档的规范化文本计算一个哈希值（如 SHA-1），哈希相同的文档只保留一篇。规范化（统一 Unicode 形式、小写、去标点、合并空白）让只差格式的文档也能被识别为重复。
+
+<CodeFile path="src/llms_from_scratch/pretraining/dedup.py" region="normalize" />
+
+精确去重可以在更细的粒度上做：Dolma 和 C4 都做了**段落级或行级**的精确去重，把出现在大量文档中的相同段落（页脚、免责声明）删掉，而保留文档的其余部分。Lee et al. 还提出了**精确子串去重**：用后缀数组找出在语料中出现多次、长度超过 50 个 token 的子串并删除。
+
+但精确匹配对“几乎相同”无能为力。同一篇文章被转载时，往往换了标题、加了一行来源说明、改了几个词，SHA-1 就完全不同了。我们需要一种度量“相似程度”的方法，以及一种能在数十亿文档上高效找出相似对的算法。
+
+## 近似去重：Jaccard 相似度与 MinHash
+
+### 用集合表示文档
+
+先把文档变成集合。把规范化后的文本切成连续 $n$ 个词组成的片段，称为 **shingle**（也就是词级 n-gram）。例如 $n=3$ 时，“a b c d e f” 的 shingle 集合是 `{a b c, b c d, c d e, d e f}`。两篇文档的相似度定义为它们 shingle 集合的 **Jaccard 相似度**：
+
+$$
+J(A,B)=\frac{|A\cap B|}{|A\cup B|}\in[0,1].
+$$
+
+手算一个例子：“a b c d e f” 与 “a b c d e g” 的 3-gram 集合分别是 $\{abc, bcd, cde, def\}$ 与 $\{abc, bcd, cde, deg\}$，交集 3 个，并集 5 个，$J=3/5=0.6$。只改了一个词，相似度就从 1 降到 0.6，因为一个词会影响包含它的 $n$ 个 shingle。$n$ 越大，相似度对局部修改越敏感；FineWeb 用 $n=5$。
+
+直接计算所有文档对的 Jaccard 相似度是不可能的：$10^9$ 篇文档有约 $5\times10^{17}$ 对。我们需要两样东西：一个**定长的、能估计 Jaccard 的摘要**（MinHash），和一个**只比较可能相似的文档对**的索引（LSH）。
+
+### MinHash：最小值相等的概率就是 Jaccard
+
+<Definition term="MinHash" kind="定理" source="https://doi.org/10.1109/SEQUEN.1997.666900">
+设 $h$ 是元素全集上的一个均匀随机置换（或近似为随机的哈希函数），定义 $m_h(A)=\min_{x\in A}h(x)$。则
+$$
+P\big[m_h(A)=m_h(B)\big]=J(A,B).
+$$
+</Definition>
+
+证明只需一个观察。考虑并集 $A\cup B$ 中哈希值最小的那个元素 $x^\ast$。因为 $h$ 是随机置换，$A\cup B$ 中每个元素成为 $x^\ast$ 的概率相同，都是 $1/|A\cup B|$。现在分两种情况：
+
+- 如果 $x^\ast\in A\cap B$，那么 $x^\ast$ 同时是 $A$ 的最小值和 $B$ 的最小值，于是 $m_h(A)=m_h(B)$；
+- 如果 $x^\ast$ 只属于 $A$（或只属于 $B$），那么它是 $A$ 的最小值，却不在 $B$ 中，$B$ 的最小值必然比它大，于是 $m_h(A)\ne m_h(B)$。
+
+所以两者相等当且仅当 $x^\ast$ 落在交集中，概率为 $|A\cap B|/|A\cup B|=J(A,B)$。证毕。
+
+取 $k$ 个独立的哈希函数 $h_1,\dots,h_k$，把 $\big(m_{h_1}(A),\dots,m_{h_k}(A)\big)$ 称为 $A$ 的 **MinHash 签名**。两个签名中相等位置的比例 $\hat J$ 是 $J$ 的无偏估计；每一位是否相等是一个成功概率为 $J$ 的伯努利变量，所以
+
+$$
+\mathbb E[\hat J]=J,\qquad \operatorname{Var}[\hat J]=\frac{J(1-J)}{k}.
+$$
+
+取 $k=112$、$J=0.8$，标准差约为 $\sqrt{0.16/112}\approx0.038$。无论文档多长，签名都是固定的 $k$ 个整数，比较两个签名只需 $O(k)$ 时间。
+
+实现上，“随机置换”用通用哈希族 $h_i(x)=(a_i x+b_i)\bmod p$ 近似，其中 $p=2^{61}-1$ 是梅森素数，$a_i,b_i$ 随机选取。每个 shingle 先用 BLAKE2 哈希成 32 位整数 $x$，再对所有 $k$ 个哈希函数并行求值、取最小值。用 NumPy 的外积一次算出 $k\times|A|$ 的哈希矩阵：
+
+<CodeFile path="src/llms_from_scratch/pretraining/dedup.py" region="minhash" />
+
+测试 `test_collision_probability_is_jaccard_per_row` 直接检验定理：两个 Jaccard 为 0.5 的集合，在 4000 个哈希函数下最小值相等的比例在 $0.5\pm0.03$ 以内。
+
+## 局部敏感哈希：分桶与 S 曲线
+
+有了签名，比较一对文档的代价从“集合运算”降到了“比较 $k$ 个整数”，但对数仍然是 $O(n^2)$。**局部敏感哈希**（Locality-Sensitive Hashing，LSH）的思路是：设计一种哈希，让相似的文档以高概率落进同一个桶，不相似的文档以高概率落进不同的桶；然后只比较同一个桶里的文档。
+
+对 MinHash 签名，标准的做法是**分段**（banding）：把长度 $k=b\cdot r$ 的签名切成 $b$ 段，每段 $r$ 个整数。每一段整体作为一个桶的键：两篇文档只要**有任意一段的 $r$ 个值完全相同**，就成为候选对。
+
+<Diagram width={640} height={260} label="MinHash 签名分段与 LSH 分桶">
+  <Matrix x={110} y={50} rows={3} cols={12} cell={[34, 30]} gap={2}
+    values={[[17, 4, 88, 23, 5, 61, 9, 42, 73, 30, 12, 55], [17, 4, 88, 91, 5, 61, 9, 42, 73, 30, 12, 55], [8, 66, 3, 23, 50, 19, 77, 2, 41, 30, 64, 13]]}
+    rowLabels={['文档 A', '文档 B', '文档 C']}
+    highlight={[{ cells: [[0, 0], [0, 1], [0, 2], [1, 0], [1, 1], [1, 2]], tone: 'accent' }, { cells: [[0, 6], [0, 7], [0, 8], [1, 6], [1, 7], [1, 8], [0, 9], [0, 10], [0, 11], [1, 9], [1, 10], [1, 11]], tone: 'accent' }, { cells: [[0, 3], [1, 3]], tone: 'accent2' }]} />
+  <Text x={162} y={32} label="段 1" size="sm" tone="muted" />
+  <Text x={270} y={32} label="段 2" size="sm" tone="muted" />
+  <Text x={378} y={32} label="段 3" size="sm" tone="muted" />
+  <Text x={486} y={32} label="段 4" size="sm" tone="muted" />
+  <Box x={100} y={170} w={120} h={56} label="桶" sub="键 (17,4,88)" tone="accent" />
+  <Box x={316} y={170} w={120} h={56} label="桶" sub="键 (9,42,73)" tone="accent" />
+  <Box x={480} y={170} w={160} h={56} label="候选对 (A, B)" sub="至少一段完全相同" tone="strong" />
+  <Arrow from={[160, 146]} to={[160, 170]} tone="accent" />
+  <Arrow from={[376, 146]} to={[376, 170]} tone="accent" />
+  <Arrow from={[436, 198]} to={[480, 198]} tone="accent" />
+  <Fragment slot="caption">长度 12 的签名切成 b = 4 段、每段 r = 3 个值。A 与 B 在段 1、3、4 上完全相同（蓝色），任何一段相同就足以让它们落入同一个桶、成为候选对；段 2 只有一个值不同（橙色）就整段不匹配。C 与 A 虽有两个位置的值相同，但没有任何一整段相同，因此不会被比较。</Fragment>
+</Diagram>
+
+### 推导碰撞概率
+
+设两篇文档的 Jaccard 相似度为 $s$。由 MinHash 定理，签名的每一位相等的概率是 $s$，且各位相互独立。于是：
+
+1. 某一段的 $r$ 位**全部**相等的概率是 $s^r$；
+2. 某一段**不**完全相等的概率是 $1-s^r$；
+3. $b$ 段**全都**不完全相等的概率是 $(1-s^r)^b$；
+4. 至少有一段完全相等，即成为候选对的概率是
+
+<KeyEq label="LSH 的候选概率">
+
+$$
+P_{\text{cand}}(s)=1-\left(1-s^{r}\right)^{b}.
+$$
+
+</KeyEq>
+
+把它当作 $s$ 的函数画出来，是一条 **S 形曲线**：$s$ 小时 $s^r$ 极小，$P_{\text{cand}}\approx b\,s^r\approx0$；$s$ 接近 1 时 $s^r\approx1$，$P_{\text{cand}}\approx1$；中间有一段陡峭的上升。曲线的陡峭位置可以这样估计：令 $s^r=1/b$，此时 $P_{\text{cand}}=1-(1-1/b)^b\approx1-e^{-1}\approx0.63$，所以
+
+$$
+s_{\text{thr}}\approx\left(\frac1b\right)^{1/r}.
+$$
+
+手算 FineWeb 的配置 $b=14,\ r=8$（共 112 个哈希）：$s_{\text{thr}}\approx14^{-1/8}=e^{-\ln 14/8}=e^{-0.330}\approx0.72$。再算两个点。$s=0.8$ 时，$0.8^8\approx0.168$，$(1-0.168)^{14}=e^{14\ln0.832}\approx e^{-2.57}\approx0.076$，所以 $P_{\text{cand}}\approx0.92$；$s=0.5$ 时，$0.5^8\approx0.0039$，$(1-0.0039)^{14}\approx0.947$，$P_{\text{cand}}\approx0.053$。也就是说，Jaccard 0.8 的近似重复有 92% 的概率被找到，而 Jaccard 0.5 的“部分相似”只有 5% 的概率被误当成候选。
+
+<Plot label="LSH 候选概率随 Jaccard 相似度变化的 S 曲线" x={[0, 1]} y={[0, 1]} xLabel="Jaccard 相似度 s" yLabel="成为候选对的概率"
+  series={[
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 8), 14), label: 'b=14, r=8' },
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 4), 28), label: 'b=28, r=4', tone: 'info' },
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 16), 7), label: 'b=7, r=16', tone: 'accent2' },
+    { fn: (s) => (s >= 0.75 ? 1 : 0), label: '理想阶跃', tone: 'muted', dashed: true, samples: 800 },
+  ]}
+  markers={[{ at: [0.72, 0.63], label: '(1/b)^(1/r) ≈ 0.72' }]}>
+  <Fragment slot="caption">三种总哈希数都是 112 的分段方式。r 越大（每段越长），曲线越靠右、越陡：要求越严，误报越少但漏报越多；b 越大（段越多），曲线越靠左。理想的去重器是阈值处的阶跃函数（虚线），增加哈希总数 k 可以让 S 曲线逼近它，代价是更多的计算与存储。</Fragment>
+</Plot>
+
+选择 $(b,r)$ 就是在**漏报**（相似度高于阈值却没成为候选，阈值右侧曲线与 1 的差距）和**误报**（相似度低于阈值却成为候选，阈值左侧曲线下方的面积）之间权衡。误报可以事后用真实的 Jaccard 复核去掉，只多花一些计算；漏报则无法挽回。因此实践中常把阈值设得略低于目标，再对候选对复核。
+
+<CodeFile path="src/llms_from_scratch/pretraining/dedup.py" region="lsh" />
+
+### 从候选对到重复簇
+
+候选对只是“两两相似”的关系。如果 A 与 B 相似、B 与 C 相似，它们应当属于同一个重复簇，即使 A 与 C 的直接相似度较低（例如三个版本依次修改）。用**并查集**（union–find）把所有候选对合并成连通分量，每个分量只保留一篇文档：
+
+<CodeFile path="src/llms_from_scratch/pretraining/dedup.py" region="dedup" />
+
+`minhash_dedup` 的默认参数就是 FineWeb 的配置：5-gram、14 段 × 每段 8 个哈希，并对候选对用真实 Jaccard ≥ 0.75 复核。测试 `test_minhash_dedup_clusters_near_duplicates` 构造了一篇文档、它只改一个词的版本和全大写版本，三者被合并为一个簇，另一篇无关文档被保留。
+
+### 去重的粒度与范围
+
+去重并不总是越彻底越好。FineWeb 的一个反直觉发现是：对全部 96 个快照做**全局**去重，效果反而不如在**每个快照内部**分别去重。原因是，越旧的快照中，能“幸存”到全局去重之后的文档越可能是低质量的长尾内容——高质量页面往往在多个快照中被重复抓取，全局去重只保留其中一份，相当于把低质量内容的比例抬高了。这提醒我们：重复次数本身也是一种质量信号（被大量转载的内容通常更有价值），去重改变的不仅是数据量，还有数据分布。
+
+在规模上，MinHash 去重的计算量与文档数成线性关系：每篇文档计算一次签名，每段做一次哈希表插入。分布式实现（如 [datatrove](https://github.com/huggingface/datatrove)）把签名计算、按桶分片、合并簇分成几个 MapReduce 阶段。
+
+## 隐私、有害内容与其他过滤
+
+网页中有大量**个人可识别信息**（PII）：邮箱、电话、IP 地址、住址、身份证号。主流管线用正则表达式匹配结构化的 PII，并替换为占位符而非删除整篇文档（删除会带来不必要的偏差）。Dolma 和 CS336 作业 4 使用的占位符形如 `|||EMAIL_ADDRESS|||`：
+
+<CodeFile path="src/llms_from_scratch/pretraining/filters.py" region="pii" />
+
+正则只能处理格式固定的信息，召回率和精度都有限：电话号码的格式因国家而异，邮箱的正则会误伤代码中的 `user@host` 字符串。更复杂的 PII（姓名与住址的组合）需要命名实体识别模型，但在万亿 token 规模上成本很高，所以大多数开源管线只做正则级别的处理。
+
+**有害内容**（色情、仇恨言论、暴力）通常用 URL 黑名单加 fastText 分类器处理。Dolma 的毒性分类器在 Jigsaw 有毒评论数据集上训练。这里同样存在权衡：过度过滤会删掉讨论这些话题的正常内容（新闻、医学、性教育），并让模型在后训练阶段更难学会识别和拒绝有害请求。一些研究发现保留适量“有害”数据、在后训练中处理，反而得到更可控的模型。
+
+最后，还有一类过滤针对的是**训练稳定性**而非内容质量。OLMo 2 删除了包含 32 次以上重复 n-gram 序列的文档，因为这类高度重复的片段会引起梯度范数的尖峰——我们会在[训练稳定性](/pretraining/stability/)中再看到它。
+
+## 数据配比与多阶段训练
+
+过滤与去重之后，我们得到若干个“域”（domain）：网页、代码、数学、学术论文、书籍、百科、多语言文本。训练时按什么比例从各个域采样，称为**数据配比**（data mixture）。它对模型能力的影响巨大，却是公开信息最少的部分——大多数技术报告只给出粗略比例。
+
+Llama 3 报告给出的最终配比大致是：约 50% 通用知识、25% 数学与推理、17% 代码、8% 多语言。
+
+<Bars label="Llama 3 预训练数据配比（约数）" unit="%" items={[
+  { label: '通用知识', value: 50, tone: 'accent' },
+  { label: '数学与推理', value: 25, tone: 'info' },
+  { label: '代码', value: 17, tone: 'accent2' },
+  { label: '多语言', value: 8, tone: 'muted' },
+]}>
+  <Fragment slot="caption">Llama 3 报告第 3.1.2 节给出的 token 比例（约数）。数学、推理与代码合计超过 40%，远高于它们在网页中的自然比例，这是有意的上采样。</Fragment>
+</Bars>
+
+配比是怎样确定的？最朴素的方法是**小模型消融**：用不同配比训练一批小模型，在下游基准上比较，再外推到大模型。更系统的方法把配比本身当作优化对象：DoReMi 训练一个小代理模型，用分布鲁棒优化自动调整各域权重；RegMix 训练大量极小模型，拟合“配比 → 损失”的回归模型后搜索最优配比。这些方法的共同假设是：配比的优劣在小规模上的排序能迁移到大规模。这个假设大体成立但并不完美，这也是[缩放定律与计算最优](/pretraining/scaling-laws/)中讨论的“用小实验预测大模型”的一个具体实例。
+
+### 退火与多阶段训练
+
+现代预训练几乎都不是“一个配比训练到底”的。一个常见的模式是：在大部分训练中使用多样的、规模大的数据；在最后的学习率衰减阶段（称为**退火**，annealing，或 **mid-training**）换成规模小、质量高的数据——高质量网页、数学、代码、指令风格的数据，甚至部分合成数据。
+
+- **Llama 3** 在最后约 4000 万 token 的训练中把学习率线性降到 0，同时上采样高质量数据源。报告还把退火当成**评估数据质量**的工具：在一个已经训练了一半的 8B 模型上，用 30% 的新数据加 70% 的默认配比退火 400 亿 token，看下游基准的变化，比从头训练小模型便宜得多。
+- **OLMo 2** 把训练明确分为两阶段：第一阶段用约 4T token 的网页为主的 OLMo-Mix；第二阶段用约 500 亿～3000 亿 token 的 Dolmino-Mix（高质量网页、数学、指令数据）把学习率线性降到 0，并对多次退火的结果做权重平均（model soup）。
+- **MiniCPM** 与 DeepSeek 的 WSD 调度天然适合这种做法：稳定阶段的检查点可以分叉出多个不同配比的衰减阶段。
+
+为什么高质量数据放在最后效果更好？一个直觉是：学习率高时，参数在损失地形上大幅移动，近期看到的数据很快被后续更新“冲淡”；学习率降低时，模型逐渐收敛到一个局部区域，最后看到的数据对最终参数的影响最大。我们会在[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)中更仔细地讨论学习率衰减阶段的作用。
+
+### 合成数据
+
+当高质量的自然数据不够时，可以用已有的模型生成数据。合成数据在预训练中的用法大致分三类：
+
+1. **从头生成**：Phi-1 用 GPT-3.5 生成“教科书质量”的编程教材与练习；Hugging Face 的 Cosmopedia 用 Mixtral 生成了约 250 亿 token 的教科书、博客与故事。
+2. **改写**（rephrasing）：保持原文信息，用模型重写成更清晰的形式。Nemotron-CC 用这种方法把低质量网页改写为维基百科风格、问答对等多种形式；Kimi K2 对知识类与数学类数据做了多风格改写，以在不简单重复的情况下增加高质量 token 的“有效轮数”。
+3. **可验证的生成**：数学题与代码的解答可以通过执行或答案比对来验证，生成后只保留正确的部分。这在后训练中更常用（见[GRPO 与推理模型](/post-training/grpo/)）。
+
+合成数据的主要风险是**分布收窄**：模型生成的文本比自然文本更“平均”，长期只用合成数据训练会丢失分布尾部，这一现象被称为模型坍缩（model collapse）。实践中合成数据只占配比的一部分，并且与自然数据混合使用。
+
+## 小结
+
+- 网页是预训练数据的主体。从 Common Crawl 的 WARC 中用 trafilatura 等工具重新抽取正文，比直接使用 WET 质量更高。流水线按单位成本从低到高排列：URL 过滤、语言识别、启发式规则、质量分类器、去重。
+- 语言识别用 fastText：字符 n-gram 哈希嵌入取平均后接线性层。启发式规则（Gopher、C4、FineWeb 自定义规则）去掉明显的坏文档，但阈值必须通过消融验证，不能照搬。
+- 基于模型的质量分类器（FineWeb-Edu、DCLM）是 2024 年以来数据质量提升的主要来源：用小而精的正例定义“质量”，用便宜的分类器推广到整个网页池。
+- MinHash 签名每一位相等的概率等于 Jaccard 相似度；LSH 把签名切成 $b$ 段、每段 $r$ 位，候选概率 $1-(1-s^r)^b$ 是一条阈值约在 $(1/b)^{1/r}$ 的 S 曲线。并查集把候选对合并成重复簇。
+- 数据配比与多阶段训练（在学习率衰减阶段换用高质量数据）对最终能力影响很大；合成数据通过生成与改写补充高质量 token，但不能取代自然数据。
+
+下一章转向训练本身：有了数据，用什么规则更新参数？我们从 SGD 出发，一路推导到 AdamW 和 2025 年开始在大模型上取代它的 Muon。
+
+## 练习
+
+1. 对 $b=20,\ r=5$（共 100 个哈希），估计 S 曲线的阈值位置，并计算 $s=0.5$ 与 $s=0.8$ 时的候选概率。与本章 $b=14,\ r=8$ 的结果比较，哪个配置误报更多？
+2. 证明：若 MinHash 签名长度为 $k$，两个 Jaccard 为 $J$ 的集合的估计 $\hat J$ 落在 $[J-\varepsilon,J+\varepsilon]$ 之外的概率不超过 $2e^{-2k\varepsilon^2}$。要求 $\varepsilon=0.05$ 时这一概率不超过 1%，$k$ 至少需要多大？
+3. 用 `shingles` 计算两篇文档的 Jaccard 相似度时，$n=1$、$n=5$、$n=13$ 各有什么问题？为什么 FineWeb 选 5，而评估集污染检测常用 13？
+4. C4 的“丢弃包含花括号的文档”规则会对代码数据造成什么影响？如果你的目标是训练一个代码能力强的模型，你会怎样修改这条规则？
+5. 修改 `minhash_dedup`，让它在每个簇中保留**最长**的文档而不是下标最小的文档。这样做的利弊是什么？
+
+<details>
+<summary>练习 1 答案</summary>
+
+阈值 $s_{\text{thr}}\approx(1/20)^{1/5}=e^{-\ln20/5}=e^{-0.599}\approx0.55$。$s=0.5$：$0.5^5=0.03125$，$(1-0.03125)^{20}=e^{20\ln0.96875}\approx e^{-0.635}\approx0.53$，候选概率约 0.47。$s=0.8$：$0.8^5\approx0.328$，$(0.672)^{20}\approx e^{-7.95}\approx0.00035$，候选概率约 0.9996。与 $(14,8)$ 相比，$(20,5)$ 的阈值低得多（0.55 对 0.72），Jaccard 0.5 的文档对有近一半成为候选，误报多得多；好处是 0.8 的近似重复几乎不会漏掉。如果后面有真实 Jaccard 复核，误报只增加计算量。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+$\hat J=\frac1k\sum_{i=1}^k X_i$，其中 $X_i\in\{0,1\}$ 独立、均值为 $J$。由 Hoeffding 不等式，$P(|\hat J-J|\ge\varepsilon)\le2\exp(-2k\varepsilon^2)$。令 $2e^{-2k\cdot0.0025}\le0.01$，得 $k\ge\ln200/0.005\approx1060$。这是一个相当保守的界；实践中更常见的是 $k\approx100\sim250$，再配合真实 Jaccard 复核。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+$n=1$ 时集合就是词表，任何两篇同主题的英文文章都共享大量常用词，Jaccard 很高，误把“话题相似”当成“内容重复”。$n$ 过大（如 13）时，一处修改会破坏 13 个 shingle，轻度改写后的近似重复的 Jaccard 会急剧下降，导致漏报。$n=5$ 在两者之间取得平衡。污染检测的目标不同：它要找的是评估题目的**逐字**出现，13 个词连续相同几乎不可能是巧合，误报很低；而轻度改写的题目本来就难以用 n-gram 发现。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+几乎所有包含代码片段的网页（教程、Stack Overflow 风格的问答、技术博客）都会被整篇删除，模型的代码能力会显著下降。可以改为：只对非技术网页启用这条规则（用 URL 或分类器判断）；或把它改为“花括号字符占比超过某个阈值时丢弃”，以去掉 JSON 转储和压缩后的 JS，而保留正常的代码讲解；代码数据本身则从 GitHub 等专门来源单独收集、单独过滤。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+把 `keep = sorted(clusters)` 改为 `keep = sorted(max(members, key=lambda i: len(docs[i])) for members in clusters.values())`。好处是保留信息最完整的版本（例如完整原文而不是截断的转载）。坏处是最长的版本可能包含更多的模板文字或拼接进来的无关内容，而且结果依赖于文档长度这一可能有噪声的指标；另一个常见的选择是保留最早抓取的版本或来自最权威域名的版本。
+
+</details>
+
+## 参考文献
+
+- Penedo et al. 2024. [The FineWeb Datasets: Decanting the Web for the Finest Text Data at Scale](https://arxiv.org/abs/2406.17557). 以及 [FineWeb 技术博客](https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1)。
+- Li et al. 2024. [DataComp-LM: In search of the next generation of training sets for language models](https://arxiv.org/abs/2406.11794).
+- Soldaini et al. 2024. [Dolma: an Open Corpus of Three Trillion Tokens for Language Model Pretraining Research](https://arxiv.org/abs/2402.00159).
+- Penedo et al. 2023. [The RefinedWeb Dataset for Falcon LLM](https://arxiv.org/abs/2306.01116).
+- Rae et al. 2021. [Scaling Language Models: Methods, Analysis & Insights from Training Gopher](https://arxiv.org/abs/2112.11446)，附录 A（MassiveWeb 过滤规则）。
+- Raffel et al. 2020. [Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer](https://arxiv.org/abs/1910.10683)，第 2.2 节（C4）。
+- Joulin et al. 2016. [Bag of Tricks for Efficient Text Classification](https://arxiv.org/abs/1607.01759)（fastText）。
+- Broder 1997. [On the resemblance and containment of documents](https://doi.org/10.1109/SEQUEN.1997.666900)（MinHash）。Leskovec, Rajaraman, Ullman. [Mining of Massive Datasets](http://www.mmds.org/)，第 3 章（LSH 分段推导）。
+- Lee et al. 2022. [Deduplicating Training Data Makes Language Models Better](https://arxiv.org/abs/2107.06499).
+- Llama Team 2024. [The Llama 3 Herd of Models](https://arxiv.org/abs/2407.21783)，第 3.1 节（数据配比与退火）。
+- OLMo Team 2024. [2 OLMo 2 Furious](https://arxiv.org/abs/2501.00656)（两阶段训练与 Dolmino-Mix）。
+- Xie et al. 2023. [DoReMi: Optimizing Data Mixtures Speeds Up Language Model Pretraining](https://arxiv.org/abs/2305.10429)；Liu et al. 2024. [RegMix: Data Mixture as Regression for Language Model Pre-training](https://arxiv.org/abs/2407.01492).
+- Su et al. 2024. [Nemotron-CC: Transforming Common Crawl into a Refined Long-Horizon Pretraining Dataset](https://arxiv.org/abs/2412.02595)；Gunasekar et al. 2023. [Textbooks Are All You Need](https://arxiv.org/abs/2306.11644).
+- Stanford CS336 Spring 2025，[Lecture 13–14（Data）与 Assignment 4](https://cs336.stanford.edu/spring2025/)；[datatrove](https://github.com/huggingface/datatrove)。

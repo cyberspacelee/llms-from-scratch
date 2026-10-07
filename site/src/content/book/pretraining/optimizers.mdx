@@ -2,7 +2,389 @@
 title: 优化器：从 SGD、Adam 到 Muon
 description: 动量、自适应学习率与解耦权重衰减的推导；学习率预热、余弦与 WSD 调度；Muon 的正交化更新与 Newton–Schulz 迭代。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/pretraining/optimizers.py
+  - src/llms_from_scratch/pretraining/schedules.py
+  - tests/pretraining/test_optimizers.py
+  - tests/pretraining/test_schedules.py
 ---
 
-本章正在撰写。
+[训练 GPT：从零训练一个小模型](/transformer/training-gpt/)把 `torch.optim.AdamW` 加上“线性预热 + 余弦衰减”当作现成的工具来用，它确实能工作。但当模型变大、训练变长时，优化器的每个细节都会变成需要做决定的地方：$\beta_2$ 取 0.999 还是 0.95？权重衰减为什么要“解耦”？学习率为什么要先升后降，降的时候又为什么损失会突然下降一截？2024 年之后，Kimi K2 和 DeepSeek-V4 这样的万亿参数模型干脆不再用 AdamW 训练大部分参数，而改用一个叫 Muon 的优化器——它对矩阵做了什么？
+
+本章从最简单的梯度下降出发，一步一步加上动量、逐坐标的自适应缩放、偏差修正、解耦权重衰减，推导出 AdamW 的每一行；然后讨论学习率调度，用一个带噪声的二次函数解释“衰减阶段损失骤降”的现象；最后用一整节推导 Muon：为什么要把更新矩阵正交化，Newton–Schulz 迭代为什么能只用矩阵乘法近似 $UV^\top$，那组奇怪的系数 $(3.4445, -4.7750, 2.0315)$ 从哪里来。每个优化器都从零实现，并与 PyTorch 的参考实现或数学性质对照测试。先修知识是[导数、偏导数与梯度](/math/derivatives/)和[特征分解、SVD 与低秩近似](/math/linear-algebra-advanced/)。
+
+## 梯度下降与病态曲率
+
+梯度下降（gradient descent）的更新是 $\theta_{t+1}=\theta_t-\eta\,g_t$，其中 $g_t=\nabla\mathcal L(\theta_t)$。用小批量估计梯度时称为随机梯度下降（SGD）。它的问题在一个二次函数上就能看清楚。
+
+考虑 $\mathcal L(x,y)=\tfrac12\left(h_1x^2+h_2y^2\right)$，曲率 $h_1=1$、$h_2=20$。梯度是 $(h_1x,h_2y)$，一步更新后
+
+$$
+x_{t+1}=(1-\eta h_1)\,x_t,\qquad y_{t+1}=(1-\eta h_2)\,y_t .
+$$
+
+每个坐标独立地按因子 $|1-\eta h_i|$ 收缩。要让陡峭方向 $y$ 不发散，需要 $|1-\eta h_2|<1$，即 $\eta<2/h_2=0.1$；而平坦方向 $x$ 每步只收缩 $1-\eta h_1>1-2h_1/h_2=0.9$。一般地，收敛速度由**条件数** $\kappa=h_{\max}/h_{\min}$ 决定：最快每步只能把误差缩小到 $1-2/\kappa$ 左右。学习率被最陡的方向限制住，平坦方向却因此走得极慢。
+
+神经网络的损失地形高度病态：不同参数、不同方向的曲率可以相差几个数量级。下面讨论的所有改进——动量、自适应学习率、正交化——本质上都在对付这个问题。
+
+## 动量：梯度的指数滑动平均
+
+动量（momentum）维护一个“速度” $v$，每步把新梯度累加进去：
+
+$$
+v_t=\beta\,v_{t-1}+g_t,\qquad \theta_{t+1}=\theta_t-\eta\,v_t .
+$$
+
+把递推展开，$v_t=\sum_{s=1}^{t}\beta^{\,t-s}g_s$：它是过去所有梯度的加权和，权重按 $\beta$ 几何衰减。两个数字刻画了它：
+
+- **有效窗口**：权重 $\beta^k$ 衰减到 $1/e$ 需要 $k\approx1/(1-\beta)$ 步，所以 $\beta=0.9$ 大约平均了最近 10 步的梯度，$\beta=0.95$ 大约 20 步。
+- **有效学习率**：如果梯度长时间保持不变（$g_s=g$），$v_t\to g\sum_{k\ge0}\beta^k=g/(1-\beta)$。也就是说在一致的方向上，动量把步长放大 $1/(1-\beta)$ 倍。
+
+而在来回振荡的方向上（梯度符号交替），相邻梯度互相抵消，$v$ 很小。于是动量自动做到了我们想要的事：在平坦但方向一致的 $x$ 方向上加速，在陡峭振荡的 $y$ 方向上减速。在二次函数上可以证明，选择合适的 $(\eta,\beta)$ 时，收敛因子从 $1-2/\kappa$ 改进到 $(\sqrt\kappa-1)/(\sqrt\kappa+1)$。对 $\kappa=20$，前者约 0.90，后者约 0.63。
+
+<Plot label="病态二次函数上的梯度下降与动量" x={[-10, 1]} y={[-4, 4]} xLabel="x（平坦方向，曲率 1）" yLabel="y（陡峭方向，曲率 20）"
+  series={[
+    { points: [[-9.0,2.0],[-8.19,-1.6],[-7.45,1.28],[-6.78,-1.02],[-6.17,0.82],[-5.62,-0.66],[-5.11,0.52],[-4.65,-0.42],[-4.23,0.34],[-3.85,-0.27],[-3.5,0.21],[-3.19,-0.17],[-2.9,0.14],[-2.64,-0.11],[-2.4,0.09],[-2.19,-0.07],[-1.99,0.06],[-1.81,-0.05],[-1.65,0.04],[-1.5,-0.03],[-1.36,0.02],[-1.24,-0.02],[-1.13,0.01],[-1.03,-0.01],[-0.94,0.01],[-0.85,-0.01]], label: '梯度下降', tone: 'accent2' },
+    { points: [[-9.0,2.0],[-7.79,-3.36],[-6.27,3.5],[-4.82,-3.14],[-3.59,2.62],[-2.62,-2.09],[-1.88,1.63],[-1.33,-1.25],[-0.93,0.95],[-0.65,-0.72],[-0.45,0.54],[-0.31,-0.4],[-0.21,0.3],[-0.14,-0.22],[-0.1,0.16],[-0.07,-0.12],[-0.04,0.09],[-0.03,-0.07],[-0.02,0.05],[-0.01,-0.04],[-0.01,0.03],[-0.01,-0.02],[0,0.01],[0,-0.01],[0,0.01],[0,-0.01]], label: '动量', tone: 'accent' },
+  ]}
+  markers={[{ at: [-9, 2], label: '起点', tone: 'muted' }, { at: [0, 0], label: '最优点', tone: 'accent' }]}>
+  <Fragment slot="caption">两条轨迹各走 25 步。梯度下降（η = 0.09，接近稳定上限 0.1）在 y 方向几乎不振荡，但在 x 方向每步只前进 9%，25 步后仍停在 x ≈ −0.85。动量（η = 0.134，β = 0.4，按二次函数的最优公式选取）在 y 方向振荡得更厉害，却在 x 方向持续加速，约 15 步就到达最优点附近。</Fragment>
+</Plot>
+
+PyTorch 的 `SGD(momentum=β)` 就是上面的形式。**Nesterov 动量**做了一个小修改：用“沿动量方向向前看一步”位置的梯度来更新，实现上等价于把更新改为 $g_t+\beta v_t$。Muon 默认使用 Nesterov 形式。
+
+## 自适应学习率：RMSProp 与 Adam
+
+动量对所有坐标使用同一个学习率。另一个思路是**按坐标缩放**：梯度一直很大的坐标走小步，梯度一直很小的坐标走大步。RMSProp 用梯度平方的滑动平均估计每个坐标的梯度尺度：
+
+$$
+v_t=\beta_2 v_{t-1}+(1-\beta_2)\,g_t\odot g_t,\qquad
+\theta_{t+1}=\theta_t-\eta\,\frac{g_t}{\sqrt{v_t}+\epsilon}.
+$$
+
+在上面的二次函数中，如果 $v$ 恰好估计出了 $h_i^2x_i^2$ 的尺度，更新就变成 $\eta\cdot\operatorname{sign}(g)$ 的量级，与曲率无关。这并不等于真正的牛顿法（牛顿法除以的是曲率 $h_i$ 而不是梯度大小 $|h_ix_i|$），但它确实消除了不同坐标之间梯度尺度的差异。在语言模型中这一点尤其重要：嵌入矩阵中常见 token 的行每步都有梯度，罕见 token 的行几乎从来没有；不同层、不同类型的参数梯度尺度也相差很大。
+
+**Adam**（[Kingma & Ba 2015](https://arxiv.org/abs/1412.6980)）把动量和 RMSProp 结合起来，用梯度的一阶矩 $m$ 代替梯度本身：
+
+$$
+m_t=\beta_1 m_{t-1}+(1-\beta_1)g_t,\qquad
+v_t=\beta_2 v_{t-1}+(1-\beta_2)g_t\odot g_t .
+$$
+
+注意这里的动量写法多了因子 $(1-\beta_1)$，于是 $m$ 是梯度的**加权平均**而不是加权和，量纲与 $g$ 相同。
+
+### 偏差修正的推导
+
+$m$ 和 $v$ 都从 0 开始。在训练初期，它们被这个初值拉向 0。展开递推：
+
+$$
+m_t=(1-\beta_1)\sum_{s=1}^{t}\beta_1^{\,t-s}g_s .
+$$
+
+假设梯度是平稳的，$\mathbb E[g_s]=\mu$ 对所有 $s$ 成立，那么
+
+$$
+\mathbb E[m_t]=(1-\beta_1)\,\mu\sum_{k=0}^{t-1}\beta_1^{k}=(1-\beta_1)\,\mu\,\frac{1-\beta_1^{t}}{1-\beta_1}=\left(1-\beta_1^{t}\right)\mu .
+$$
+
+所以 $m_t$ 是 $\mu$ 的一个有偏估计，偏差因子是 $1-\beta_1^t$。除掉它就得到无偏估计 $\hat m_t=m_t/(1-\beta_1^t)$；对 $v$ 同理，$\hat v_t=v_t/(1-\beta_2^t)$。这个修正在 $t$ 小时很重要：$\beta_2=0.999$ 时，第 1 步 $v_1=0.001\,g_1^2$，如果不修正，分母 $\sqrt{v_1}$ 只有 $|g_1|$ 的 3%，第一步更新会被放大约 30 倍。
+
+手算第一步：$\hat m_1=g_1$，$\hat v_1=g_1^2$，于是在 $\epsilon$ 可忽略时更新恰好是 $-\eta\operatorname{sign}(g_1)$——**每个坐标都移动 $\eta$**，与梯度大小无关。这揭示了 Adam 的一个重要性质：它的更新尺度主要由学习率决定，对梯度的整体缩放不敏感（把损失乘以 1000，Adam 的更新几乎不变，SGD 的更新放大 1000 倍）。这正是 Adam 的学习率可以在很多任务间通用（如 $3\times10^{-4}$）的原因。
+
+### 大模型中的超参数
+
+PyTorch 的默认值 $\beta_2=0.999$ 对应约 1000 步的窗口。大语言模型几乎都用 $\beta_2=0.95$（GPT-3、Llama、DeepSeek 系列）：窗口约 20 步，$v$ 能更快地跟上梯度尺度的变化。如果某个参数的梯度长时间很小，又突然出现一个大梯度，$\beta_2=0.999$ 的 $v$ 来不及增大，更新会被放大很多倍，引发损失尖峰——这是[训练稳定性](/pretraining/stability/)要讨论的一类典型问题。$\epsilon$ 通常取 $10^{-8}$；OLMo 2 发现把它从 $10^{-5}$ 降到 $10^{-8}$ 能让早期训练更快，因为过大的 $\epsilon$ 会让梯度小的参数几乎不更新。
+
+## AdamW：为什么权重衰减要解耦
+
+权重衰减（weight decay）把参数向 0 拉：$\theta\leftarrow(1-\eta\lambda)\theta$。对 SGD，它等价于在损失中加 L2 正则 $\frac\lambda2\|\theta\|^2$：L2 项的梯度是 $\lambda\theta$，SGD 一步就是 $\theta-\eta(g+\lambda\theta)=(1-\eta\lambda)\theta-\eta g$。
+
+但对 Adam，两者不再等价。如果把 $\lambda\theta$ 加进梯度（“Adam + L2”），它会进入 $m$ 和 $v$，然后**和数据梯度一起被除以 $\sqrt{\hat v}$**：
+
+$$
+\theta_{t+1}=\theta_t-\eta\,\frac{\hat m_t^{\text{data}}+\lambda\theta_t}{\sqrt{\hat v_t}+\epsilon}\quad(\text{近似}).
+$$
+
+后果是：梯度大的参数（$\hat v$ 大）受到的衰减小，梯度小的参数受到的衰减大。正则化的强度被优化器的自适应缩放扭曲了，而这通常不是我们想要的。[Loshchilov & Hutter 2019](https://arxiv.org/abs/1711.05101) 提出把衰减从梯度中**解耦**出来，直接作用在参数上：
+
+<KeyEq label="AdamW 的一步更新">
+
+$$
+\theta_{t+1}=(1-\eta_t\lambda)\,\theta_t-\eta_t\,\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon},\qquad
+\hat m_t=\frac{m_t}{1-\beta_1^t},\quad \hat v_t=\frac{v_t}{1-\beta_2^t}.
+$$
+
+</KeyEq>
+
+所有参数按同样的比例 $\eta\lambda$ 衰减，与梯度历史无关。注意衰减项仍然乘以学习率 $\eta_t$，所以它随学习率调度一起变化。
+
+AdamW 有一个有用的解读（[Wang & Aitchison 2024](https://arxiv.org/abs/2405.13698)）：把更新 $\theta_{t+1}=(1-\eta\lambda)\theta_t+\eta\lambda\cdot u_t/\lambda$ 看成指数滑动平均，参数就是最近约 $\tau=1/(\eta\lambda)$ 步更新的加权平均。以 $\eta=3\times10^{-4}$、$\lambda=0.1$ 为例，$\tau\approx3.3\times10^4$ 步。这给出了一个调参直觉：当训练步数改变时，保持 $\tau$ 与总步数的比例大致不变。
+
+下面是从零实现。`decoupled=False` 时实现的是“Adam + L2”，用来对照：
+
+<CodeFile path="src/llms_from_scratch/pretraining/optimizers.py" region="adamw" />
+
+测试 `test_adamw_matches_torch` 验证解耦版本与 `torch.optim.AdamW` 逐元素一致，`test_l2_variant_matches_torch_adam_weight_decay` 验证 L2 版本与 `torch.optim.Adam(weight_decay=λ)` 一致——PyTorch 的 `Adam` 的 `weight_decay` 参数正是 L2 形式，这是一个常见的误用来源。
+
+实践中并不对所有参数做权重衰减。RMSNorm 的增益和偏置通常不衰减（把它们拉向 0 没有意义）；OLMo 2 还取消了嵌入矩阵的权重衰减，因为它会让嵌入的范数不断缩小，配合后面的归一化层使训练不稳定。
+
+### 优化器状态的显存
+
+AdamW 为每个参数保存 $m$ 和 $v$ 两份状态。在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)中我们算过，BF16 混合精度训练时每个参数大约占用 16 字节：BF16 参数 2 字节、BF16 梯度 2 字节、FP32 主权重 4 字节，再加上 FP32 的 $m$ 与 $v$ 各 4 字节。优化器状态占了一半。
+
+<Bars label="每个参数的训练状态字节数（BF16 混合精度）" unit="字节" items={[
+  { label: 'SGD', segments: [{ value: 2, label: 'BF16 参数', tone: 'info' }, { value: 2, label: 'BF16 梯度', tone: 'muted' }, { value: 4, label: 'FP32 主权重', tone: 'neutral' }] },
+  { label: 'SGD + 动量 / Muon', segments: [{ value: 2, label: 'BF16 参数', tone: 'info' }, { value: 2, label: 'BF16 梯度', tone: 'muted' }, { value: 4, label: 'FP32 主权重', tone: 'neutral' }, { value: 4, label: '优化器状态', tone: 'accent2' }] },
+  { label: 'AdamW', segments: [{ value: 2, label: 'BF16 参数', tone: 'info' }, { value: 2, label: 'BF16 梯度', tone: 'muted' }, { value: 4, label: 'FP32 主权重', tone: 'neutral' }, { value: 8, label: '优化器状态', tone: 'accent2' }] },
+]}>
+  <Fragment slot="caption">不含激活值。7B 模型用 AdamW 时约 7×10⁹ × 16 B = 112 GB，其中 56 GB 是 m 与 v。Muon 只保存一份动量，每个参数省 4 字节；DeepSeek-V3 把 AdamW 的 m、v 存成 BF16，也是为了压缩这一部分。分布式训练中的 ZeRO 把这些状态切分到多张卡上，见第六部分。</Fragment>
+</Bars>
+
+`optimizer_state_bytes` 给出了这一核算的代码形式。这一显存构成也是第六部分[数据并行、ZeRO 与 FSDP](/distributed/data-parallel/)的出发点。
+
+## 学习率调度：预热、余弦与 WSD
+
+### 为什么要预热
+
+几乎所有大模型训练都以**学习率预热**（warmup）开始：在前几百到几千步里把学习率从接近 0 线性升到峰值。原因有几层：
+
+1. **Adam 的二阶矩估计在早期不可靠**。偏差修正只修正了均值，没有修正方差：前几步的 $\hat v$ 只基于很少的样本，可能偶然很小，导致更新过大。RAdam（[Liu et al. 2020](https://arxiv.org/abs/1908.03265)）对此做了定量分析，预热是一种简单的补救。
+2. **初始化附近的地形很陡**。随机初始化的网络在训练最初几步的梯度范数通常很大，损失地形的曲率也最大。按二次函数的分析，稳定学习率上限是 $2/h_{\max}$，而 $h_{\max}$ 在训练早期往往最大，之后逐渐减小，所以可用的学习率是逐渐“打开”的。
+3. **注意力 logit 的增长**。我们在[训练稳定性](/pretraining/stability/)中会用实验看到：没有预热的高学习率会让注意力 logit 在几十步内增长到上百，而同样峰值学习率加上预热就不会。
+
+### 余弦衰减
+
+预热之后，经典的选择是**余弦衰减**：在剩余的训练中按半个余弦周期把学习率从 $\eta_{\max}$ 降到 $\eta_{\min}$（通常是峰值的 10%）：
+
+$$
+\eta_t=\eta_{\min}+\tfrac12(\eta_{\max}-\eta_{\min})\left(1+\cos\frac{\pi\,(t-t_w)}{T-t_w}\right).
+$$
+
+余弦调度的主要缺点是**必须事先知道总步数 $T$**。如果训练到一半想多训一些，或者想比较不同训练长度的效果，就必须从头重新训练：一个按 $T=10^5$ 设计的余弦调度，在第 $5\times10^4$ 步的检查点并不等于一个“训练了 $5\times10^4$ 步的完整模型”，因为它的学习率还停在中间。Chinchilla 的缩放实验因此需要为每个训练长度单独训练一个模型。
+
+### WSD：预热—稳定—衰减
+
+**WSD**（Warmup–Stable–Decay）调度由 MiniCPM（[Hu et al. 2024](https://arxiv.org/abs/2404.06395)）系统提出：预热后学习率**保持常数**，直到最后约 10%～20% 的步数才快速衰减。DeepSeek LLM 用的多阶梯调度（在 80% 与 90% 的训练进度处把学习率分别降到峰值的 31.6% 和 10%）是同一思路的离散版本。
+
+<CodeFile path="src/llms_from_scratch/pretraining/schedules.py" region="wsd" />
+
+<Plot label="三种学习率调度" x={[0, 1000]} y={[0, 1.1]} xLabel="训练步数" yLabel="学习率 / 峰值"
+  series={[
+    { fn: (t) => (t < 50 ? (t + 1) / 50 : 0.1 + 0.45 * (1 + Math.cos(Math.PI * (t - 50) / 950))), label: '余弦' },
+    { fn: (t) => (t < 50 ? (t + 1) / 50 : t < 800 ? 1 : 0.1 + 0.9 * (1 - (t - 800) / 200)), label: 'WSD', tone: 'accent2' },
+    { fn: (t) => (t < 50 ? (t + 1) / 50 : t < 800 ? 1 : t < 900 ? 0.316 : 0.1), label: '多阶梯', tone: 'info', dashed: true, samples: 1000 },
+  ]}>
+  <Fragment slot="caption">总步数 1000，预热 50 步。余弦调度从预热结束就开始下降；WSD 在 80% 之前保持峰值，最后 20% 线性降到 10%；多阶梯调度（DeepSeek LLM）在 80% 与 90% 处两次跳降。WSD 稳定段内的任何检查点都可以接上一段短衰减，得到一个“训练完成”的模型。</Fragment>
+</Plot>
+
+WSD 的价值在于**稳定阶段的检查点是可复用的**。想知道训练 $1\times10^{12}$、$2\times10^{12}$、$4\times10^{12}$ 个 token 的效果，只需一次长训练，从相应位置分叉出几段短衰减即可，而不必训练三个独立的模型。这大大降低了缩放实验的成本，也方便在训练中途决定延长训练或在衰减阶段更换数据（即[预训练数据：采集、过滤、去重与配比](/pretraining/data/)中讨论的退火）。
+
+近年的大模型几乎都采用了 WSD 或它的变体。DeepSeek-V3 在 2K 步内预热到 $2.2\times10^{-4}$，保持常数直到 10T token，然后在 4.3T token 内按余弦降到 $2.2\times10^{-5}$，最后两段分别以 $2.2\times10^{-5}$ 和 $7.3\times10^{-6}$ 训练 333B 与 167B token。DeepSeek-V4-Flash 预热 2000 步后在“大部分训练中”保持 $2.7\times10^{-4}$，在接近结束时按余弦降到 $2.7\times10^{-5}$。
+
+### 为什么衰减时损失会骤降
+
+用 WSD 训练时可以观察到一个现象：稳定阶段损失下降缓慢，一进入衰减阶段，损失在很短时间内下降一大截。一个带噪声的二次函数就能解释它。
+
+设损失在某个方向上是 $\tfrac12hx^2$，SGD 的梯度带有方差为 $\sigma^2$ 的噪声 $\xi$：
+
+$$
+x_{t+1}=x_t-\eta\,(hx_t+\xi_t)=(1-\eta h)\,x_t-\eta\,\xi_t .
+$$
+
+令 $s_t=\mathbb E[x_t^2]$。由于噪声与 $x_t$ 独立，$s_{t+1}=(1-\eta h)^2s_t+\eta^2\sigma^2$。达到稳态时 $s=(1-\eta h)^2s+\eta^2\sigma^2$，解得
+
+$$
+s^\ast=\frac{\eta^2\sigma^2}{1-(1-\eta h)^2}=\frac{\eta\,\sigma^2}{h\,(2-\eta h)}\approx\frac{\eta\,\sigma^2}{2h},
+\qquad
+\mathbb E\!\left[\tfrac12hx^2\right]\approx\frac{\eta\,\sigma^2}{4}.
+$$
+
+也就是说，**常数学习率下损失停在一个与 $\eta$ 成正比的“噪声底”上**：参数在谷底附近随机晃动，晃动幅度由学习率和梯度噪声决定。学习率降低时，这个噪声底随之下降，而且下降的时间尺度是 $1/(\eta h)$ 步——在高曲率方向上非常快。这就是衰减阶段损失骤降的来源。
+
+这个模型也解释了 WSD 的合理性：稳定阶段的高学习率负责沿着平坦方向（“河谷”的方向）快速前进，此时陡峭方向上的晃动只是暂时的代价；衰减阶段再消除这些晃动。[Wen et al. 2024](https://arxiv.org/abs/2410.05192) 把这一图景称为“河谷”（river valley）地形。
+
+## Muon：把更新正交化
+
+### 矩阵参数的问题
+
+Adam 把每个参数当作独立的标量，逐坐标缩放。但 Transformer 中绝大多数参数是矩阵：注意力的 $W_Q,W_K,W_V,W_O$ 和 FFN 的 $W_1,W_2,W_3$。对线性层 $y=Wx$，一个批次的梯度是
+
+$$
+G=\sum_{n}\delta_n x_n^\top ,
+$$
+
+其中 $\delta_n=\partial\ell/\partial y_n$。这是许多外积之和，实践中它的奇异值分布极不均匀：少数几个方向占了绝大部分能量，其余方向的奇异值很小。用 $G$（或它的动量）直接更新，几乎全部更新都落在这几个主方向上；那些奇异值小、但对学习可能同样重要的“罕见方向”几乎得不到更新。
+
+Muon（MomentUm Orthogonalized by Newton–Schulz，[Jordan et al. 2024](https://kellerjordan.github.io/posts/muon/)）的做法是：对动量矩阵 $M=U\Sigma V^\top$ 做**正交化**，用 $O=UV^\top$ 代替它作为更新方向。$O$ 保留了 $M$ 的全部奇异向量（更新的“方向”），但把所有奇异值都设为 1，于是每个方向得到同样大小的更新。
+
+### 谱范数下的最速下降
+
+这个看起来随意的操作有一个干净的解释。对线性层，权重的变化 $\Delta W$ 对输出的影响满足 $\|\Delta W x\|\le\|\Delta W\|_2\|x\|$，其中 $\|\cdot\|_2$ 是谱范数（最大奇异值）。所以“这一步更新最多让输出改变多少”由 $\|\Delta W\|_2$ 控制。如果我们问：在谱范数不超过 $\eta$ 的约束下，哪个 $\Delta W$ 让损失的一阶近似下降最多？
+
+$$
+\min_{\|\Delta W\|_2\le\eta}\ \langle G,\Delta W\rangle,\qquad \langle G,\Delta W\rangle=\operatorname{tr}(G^\top\Delta W).
+$$
+
+把 $G=\sum_i\sigma_iu_iv_i^\top$ 代入，$\langle G,\Delta W\rangle=\sum_i\sigma_i\,u_i^\top\Delta W\,v_i$。由于 $u_i,v_i$ 是单位向量，$u_i^\top\Delta W v_i\ge-\|\Delta W\|_2\ge-\eta$，所以
+
+$$
+\langle G,\Delta W\rangle\ \ge\ -\eta\sum_i\sigma_i ,
+$$
+
+而取 $\Delta W=-\eta\,UV^\top$ 时 $u_i^\top\Delta Wv_i=-\eta$ 对每个 $i$ 成立，等号达到。于是：
+
+<KeyEq label="谱范数约束下的最速下降方向">
+
+$$
+\arg\min_{\|\Delta W\|_2\le\eta}\langle G,\Delta W\rangle=-\eta\,UV^\top,\qquad G=U\Sigma V^\top .
+$$
+
+</KeyEq>
+
+对比一下：在逐坐标的 $\ell_\infty$ 范数约束下，同样的问题的解是 $-\eta\operatorname{sign}(G)$——这正是 Adam 第一步的更新。Adam 可以看作 $\ell_\infty$ 几何下的最速下降，Muon 是谱范数几何下的最速下降（[Bernstein & Newhouse 2024](https://arxiv.org/abs/2409.20325)）。对矩阵参数而言，谱范数是更自然的度量，因为它直接对应层输出的变化量。
+
+### 用 Newton–Schulz 迭代近似 UVᵀ
+
+精确计算 $UV^\top$ 需要 SVD，在 GPU 上又慢又不适合低精度。Muon 的关键工程技巧是用只包含矩阵乘法的迭代来近似它。
+
+观察：若 $X=U\Sigma V^\top$，则 $XX^\top X=U\Sigma^3V^\top$，$(XX^\top)^2X=U\Sigma^5V^\top$。所以对任意奇多项式
+
+$$
+p(X)=aX+b\,(XX^\top)X+c\,(XX^\top)^2X=U\,\varphi(\Sigma)\,V^\top,\qquad \varphi(\sigma)=a\sigma+b\sigma^3+c\sigma^5 .
+$$
+
+**矩阵多项式只作用在奇异值上，奇异向量不变**。反复应用 $p$，就是对每个奇异值反复应用标量函数 $\varphi$。只要 $\varphi$ 的迭代把 $(0,1]$ 中的所有值都推向 1，$X$ 就收敛到 $UV^\top$。迭代前先把 $X$ 除以 Frobenius 范数，因为 $\|X\|_2\le\|X\|_F$，这保证所有奇异值都落在 $(0,1]$ 中。
+
+经典的三次 Newton–Schulz 迭代取 $\varphi(\sigma)=\tfrac32\sigma-\tfrac12\sigma^3$。它满足 $\varphi(1)=1$、$\varphi'(1)=0$，在 1 附近二次收敛；但 $\varphi'(0)=1.5$，很小的奇异值每步只放大 1.5 倍——从 $10^{-3}$ 增长到 1 附近需要约 17 步。
+
+Keller Jordan 的做法是放弃“精确收敛到 1”，换取“小奇异值增长得快”。他选择五次多项式的系数，使 $\varphi'(0)=a$ 尽可能大，同时要求迭代后的奇异值落在 1 附近的一个区间内。得到的系数是
+
+$$
+(a,b,c)=(3.4445,\,-4.7750,\,2.0315).
+$$
+
+验证两点。第一，斜率 $a=3.4445$，五步后很小的奇异值被放大约 $3.4445^5\approx480$ 倍：$\sigma_0=10^{-3}$ 依次变为 0.003、0.012、0.041、0.14、0.47。第二，$\varphi(1)=a+b+c=0.701$，并不等于 1：迭代不会收敛到 1，而是在 1 附近振荡。用 `ns_scalar_map` 数值扫描可以得到，对 $\sigma_0\in[0.01,1]$，五步后的值都落在 $[0.68,1.13]$ 中。
+
+<Plot label="五步迭代后奇异值的映射" x={[0.001, 1]} y={[0, 1.3]} logX xLabel="初始奇异值 σ（对数轴）" yLabel="五步后的奇异值"
+  series={[
+    { fn: (s) => { let x = s; for (let i = 0; i < 5; i++) x = 3.4445 * x - 4.775 * x ** 3 + 2.0315 * x ** 5; return x }, label: 'Muon 五次', samples: 600 },
+    { fn: (s) => { let x = s; for (let i = 0; i < 5; i++) x = 1.5 * x - 0.5 * x ** 3; return x }, label: '经典三次', tone: 'accent2', samples: 600 },
+    { fn: () => 1, label: '理想 UVᵀ', tone: 'muted', dashed: true },
+  ]}>
+  <Fragment slot="caption">横轴是迭代前（已除以 Frobenius 范数）的奇异值，纵轴是五步迭代后的值。经典三次迭代在 σ 接近 1 时精确收敛，但 σ < 0.1 的奇异值五步后几乎没有长大；Muon 的五次系数让 σ ≥ 0.01 的奇异值全部进入 0.68～1.13 的带状区域，代价是不再精确等于 1。</Fragment>
+</Plot>
+
+为什么不精确也可以？因为我们需要的是一个“方向大致正确、各方向尺度大致相同”的更新，而不是精确的极分解。奇异值在 0.7 和 1.1 之间的误差，相当于对不同方向的学习率有 ±30% 的扰动，对训练几乎没有影响；而让小奇异值方向得到充分更新，才是 Muon 有效的关键。DeepSeek-V4 用了一个折中：先用上述系数迭代 8 步快速拉起小奇异值，再用 $(2,-1.5,0.5)$ 迭代 2 步——这个多项式满足 $\varphi(1)=1$、$\varphi'(1)=0$，把奇异值稳定地收拢到 1。
+
+<CodeFile path="src/llms_from_scratch/pretraining/optimizers.py" region="newton_schulz" />
+
+实现中有一个小优化：如果矩阵是“高”的（行数多于列数），先转置，让 $XX^\top$ 取较小的维度。测试 `test_newton_schulz_approximates_polar_factor` 检查五步迭代后奇异值落在 $(0.6,1.25)$ 内，且结果与 SVD 算出的 $UV^\top$ 方向一致（余弦相似度大于 0.97）；`test_cubic_newton_schulz_converges_exactly_but_slowly` 验证三次迭代 60 步后误差小于 $10^{-3}$，而 5 步时远未收敛。
+
+### 更新的尺度：RMS 匹配
+
+正交矩阵的元素有固定的尺度。设 $O\in\mathbb R^{m\times n}$、$m\le n$ 的行正交，则 $\|O\|_F^2=m$，元素的均方根（RMS）是
+
+$$
+\operatorname{RMS}(O)=\sqrt{\frac{\|O\|_F^2}{mn}}=\frac{1}{\sqrt n}=\frac1{\sqrt{\max(m,n)}} .
+$$
+
+矩阵越大，正交化后的更新元素越小。Moonshot 的 [Muon is Scalable for LLM Training](https://arxiv.org/abs/2502.16982)（Liu et al. 2025）观察到 AdamW 的更新 RMS 通常在 0.2～0.4 之间，于是把 Muon 的更新乘以 $0.2\sqrt{\max(m,n)}$，使其 RMS 约为 0.2。这样做有两个好处：不同形状的矩阵得到一致的更新尺度；更重要的是，**Muon 参数和 AdamW 参数可以共享同一个学习率和权重衰减**，直接复用为 AdamW 调好的超参数。Kimi K2 沿用了这一做法；DeepSeek-V4 把目标 RMS 设为 0.18（动量 0.95，权重衰减 0.1）。Keller Jordan 的原始实现用的是另一种缩放 $\sqrt{\max(1,m/n)}$，需要为 Muon 单独设置一个大得多的学习率（约 0.02）。
+
+Moonshot 的另一个发现是**权重衰减对 Muon 至关重要**。没有权重衰减时，Muon 训练的权重和层输出的 RMS 会持续增长，在长时间训练中超出 BF16 的有效精度范围并损害效果；加上与 AdamW 相同形式的解耦权重衰减后问题消失。
+
+<CodeFile path="src/llms_from_scratch/pretraining/optimizers.py" region="muon" />
+
+`test_muon_rejects_vectors_and_matches_rms` 验证：对一个 128×64 的矩阵，学习率取 1 时一步更新的 RMS 落在 0.14～0.26 之间，即 $0.2$ 乘以 Newton–Schulz 的奇异值误差范围。
+
+### 哪些参数用 Muon
+
+Muon 只适用于“隐藏层的二维矩阵”。其余参数交给 AdamW：
+
+- **嵌入矩阵**：它的“矩阵”结构没有线性映射的含义——前向只是按 token 查表，每一行独立。一个批次的梯度只在出现过的 token 行上非零，正交化会把更新扩散到所有行，包括完全没出现的 token。
+- **输出头**（LM head）：经验上用 AdamW 更好。Keller Jordan 的实验与 Moonshot、DeepSeek 都采用这一划分。
+- **一维参数**：RMSNorm 增益、偏置、标量门控，没有矩阵结构可言。
+
+DeepSeek-V4 的划分完全一致：嵌入、预测头、mHC 模块的静态偏置与门控因子、所有 RMSNorm 权重用 AdamW，其余都用 Muon。我们的 `split_muon_params` 实现这一规则，`HybridOptimizer` 把两个优化器包装成一个对象：
+
+<CodeFile path="src/llms_from_scratch/pretraining/optimizers.py" region="hybrid" />
+
+`test_hybrid_muon_trains_small_gpt` 用它训练全书共用的 GPT（`transformer/model.py`）40 步，验证损失明显下降。在本章的小实验里（2 层、宽度 64、马尔可夫链合成数据、300 步、学习率 $10^{-2}$），混合 Muon 与 AdamW 的最终损失几乎相同（3.24 对 3.25）。这个结果说明的是 RMS 匹配有效——同一个学习率对两者都合适——而不是 Muon 的效率优势；后者需要在大得多的规模上才能可靠地测出来。Moonshot 报告在计算最优设置下 Muon 达到相同损失只需 AdamW 约 52% 的训练 FLOPs；Keller Jordan 在 NanoGPT 速通中测得约 1.35 倍的加速。
+
+### 代价与大规模部署
+
+Newton–Schulz 的额外计算量很小。对一个 $m\times n$（$m\le n$）的矩阵，每步迭代计算 $XX^\top$、$A^2$ 与 $BX$，约 $4m^2n+2m^3$ 次浮点运算，而该层一个批次 $B$ 个 token 的前向与反向约 $6mnB$ 次。当 $m\approx n$ 时比值约为 $T\,m/B$（$T$ 是迭代步数）。Keller Jordan 估算 NanoGPT（$m=768$，每批约 52 万 token）的开销约 0.7%，Llama 405B 规模约 0.5%。
+
+真正的困难在分布式训练中。AdamW 是逐元素的，ZeRO/FSDP 可以把参数和状态任意切片到各张卡上分别更新；Muon 需要**完整的矩阵**才能做正交化，被切分的动量必须先聚集起来，正交化之后再分发回去。Moonshot、Kimi K2 和 DeepSeek-V4 都为此设计了专门的分布式实现。这也提醒我们：一个优化器能否在大模型上使用，取决于它与第六部分[分布式训练](/distributed/)中各种并行方式的兼容性。
+
+到 2026 年，Muon 已经在万亿参数规模上得到验证：Kimi K2（1T 参数的 MoE）用 MuonClip 训练了 15.5T token 且没有出现损失尖峰；DeepSeek-V4 用 Muon 训练了 32T～33T token。MuonClip 中的 QK-Clip 是为了解决 Muon 在大规模训练中暴露出的注意力 logit 爆炸问题，我们在下一章讨论。
+
+## 小结
+
+- 梯度下降的收敛速度受条件数限制；动量是梯度的指数滑动平均，有效窗口 $1/(1-\beta)$，在一致方向上加速、在振荡方向上抵消。
+- Adam 用二阶矩做逐坐标缩放，偏差修正因子 $1-\beta^t$ 来自零初始化；第一步更新等于 $-\eta\operatorname{sign}(g)$，所以 Adam 的步长主要由学习率决定。大模型通常取 $\beta_2=0.95$。
+- AdamW 把权重衰减从梯度中解耦，避免衰减被 $1/\sqrt{\hat v}$ 扭曲；PyTorch 的 `Adam(weight_decay=…)` 是 L2 形式而不是 AdamW。AdamW 每参数需要 8 字节的 FP32 状态。
+- 预热应对早期不可靠的二阶矩与陡峭地形；WSD 调度让稳定阶段的检查点可复用。带噪声二次函数的稳态损失 $\approx\eta\sigma^2/4$ 解释了衰减阶段的损失骤降。
+- Muon 是谱范数下的最速下降：用 Newton–Schulz 五次迭代 $(3.4445,-4.7750,2.0315)$ 近似 $UV^\top$，乘以 $0.2\sqrt{\max(m,n)}$ 与 AdamW 的更新尺度对齐；只用于隐藏层矩阵，嵌入、输出头与一维参数仍用 AdamW。
+
+优化器决定了每一步往哪里走、走多远。但在大规模训练中，一步走错可能让几周的训练前功尽弃。下一章讨论训练为什么会崩溃，以及怎样预防。
+
+## 练习
+
+1. 对二次函数 $\tfrac12(x^2+20y^2)$，证明梯度下降的最优固定学习率是 $\eta^\ast=2/(h_{\min}+h_{\max})=2/21$，并求此时的收敛因子。与正文中 $\eta=0.09$ 的因子 0.91 比较。
+2. 设 Adam 的 $\beta_2=0.999$、不做偏差修正，梯度恒为 $g$。第 $t$ 步的更新大小是多少？$t=1$ 和 $t=100$ 时分别是 $\eta$ 的多少倍？
+3. 证明在 $\ell_\infty$ 约束 $\max_{ij}|\Delta W_{ij}|\le\eta$ 下，$\arg\min\langle G,\Delta W\rangle=-\eta\operatorname{sign}(G)$。在什么情况下 $\operatorname{sign}(G)$ 与 $UV^\top$ 相同？
+4. 验证 DeepSeek-V4 收尾用的多项式 $\varphi(\sigma)=2\sigma-1.5\sigma^3+0.5\sigma^5$ 满足 $\varphi(1)=1$、$\varphi'(1)=0$，并计算 $\varphi(0.7)$ 与 $\varphi(\varphi(0.7))$。
+5. 一个 4096×14336 的 FFN 矩阵，正交化后元素的 RMS 是多少？要让它的 RMS 为 0.2，应乘以什么系数？用 Keller Jordan 的缩放 $\sqrt{\max(1,m/n)}$ 时 RMS 又是多少？
+
+<details>
+<summary>练习 1 答案</summary>
+
+收敛因子是 $\max_i|1-\eta h_i|$。它关于 $\eta$ 的最小值在两个方向的因子相等时取得：$1-\eta h_{\min}=\eta h_{\max}-1$，即 $\eta^\ast=2/(h_{\min}+h_{\max})=2/21\approx0.095$。此时因子为 $(h_{\max}-h_{\min})/(h_{\max}+h_{\min})=(\kappa-1)/(\kappa+1)=19/21\approx0.905$，只比 0.91 略好。这说明对病态问题，单纯调学习率的收益很有限，而动量把因子降到 $(\sqrt{20}-1)/(\sqrt{20}+1)\approx0.635$。
+
+</details>
+
+<details>
+<summary>练习 2 答案</summary>
+
+不做修正时 $m_t=(1-\beta_1^t)g$，$v_t=(1-\beta_2^t)g^2$，更新为 $\eta\,(1-\beta_1^t)/\sqrt{1-\beta_2^t}$。取 $\beta_1=0.9$：$t=1$ 时为 $0.1/\sqrt{0.001}\approx3.16$ 倍；$t=100$ 时 $1-0.9^{100}\approx1$，$1-0.999^{100}\approx0.095$，约 $1/\sqrt{0.095}\approx3.24$ 倍。前几百步的更新都比预期大 3 倍以上，这正是偏差修正要消除的。
+
+</details>
+
+<details>
+<summary>练习 3 答案</summary>
+
+$\langle G,\Delta W\rangle=\sum_{ij}G_{ij}\Delta W_{ij}\ge-\eta\sum_{ij}|G_{ij}|$，当 $\Delta W_{ij}=-\eta\operatorname{sign}(G_{ij})$ 时取等。当 $G$ 本身的奇异值全相等时（例如 $G$ 是正交矩阵的倍数），$UV^\top=G/\sigma$；若此时 $G$ 的元素绝对值也全相等（如 Hadamard 矩阵的倍数），$\operatorname{sign}(G)$ 与 $UV^\top$ 只差一个常数因子。一般情况下二者不同：符号函数逐元素操作，忽略了矩阵的奇异结构。
+
+</details>
+
+<details>
+<summary>练习 4 答案</summary>
+
+$\varphi(1)=2-1.5+0.5=1$；$\varphi'(\sigma)=2-4.5\sigma^2+2.5\sigma^4$，$\varphi'(1)=0$。$\varphi(0.7)=1.4-1.5\times0.343+0.5\times0.16807\approx1.4-0.5145+0.0840=0.9695$；再迭代一次，$\varphi(0.9695)\approx1.939-1.367+0.4285\approx0.9999$。从 0.7 出发两步就几乎精确到 1。它的缺点是 $\varphi'(0)=2$，单独使用时小奇异值增长不够快，所以 DeepSeek-V4 只在最后两步使用它。
+
+</details>
+
+<details>
+<summary>练习 5 答案</summary>
+
+$\max(m,n)=14336$，正交化后 RMS 为 $1/\sqrt{14336}\approx0.00835$。乘以 $0.2\sqrt{14336}\approx23.9$ 后 RMS 为 0.2。用 $\sqrt{\max(1,4096/14336)}=1$ 缩放时 RMS 仍是 0.00835，比 AdamW 的典型更新小约 25 倍，这就是 Keller 的实现需要约 0.02 的大学习率（而 AdamW 常用约 $3\times10^{-4}$）的原因。
+
+</details>
+
+## 参考文献
+
+- Kingma & Ba 2015. [Adam: A Method for Stochastic Optimization](https://arxiv.org/abs/1412.6980).
+- Loshchilov & Hutter 2019. [Decoupled Weight Decay Regularization](https://arxiv.org/abs/1711.05101).
+- Liu et al. 2020. [On the Variance of the Adaptive Learning Rate and Beyond](https://arxiv.org/abs/1908.03265)（RAdam，预热的分析）。
+- Wang & Aitchison 2024. [How to set AdamW's weight decay as you scale model and dataset size](https://arxiv.org/abs/2405.13698).
+- Hu et al. 2024. [MiniCPM: Unveiling the Potential of Small Language Models with Scalable Training Strategies](https://arxiv.org/abs/2404.06395)（WSD 调度）。
+- DeepSeek-AI 2024. [DeepSeek LLM: Scaling Open-Source Language Models with Longtermism](https://arxiv.org/abs/2401.02954)（多阶梯调度）。
+- Wen et al. 2024. [Understanding Warmup-Stable-Decay Learning Rates: A River Valley Loss Landscape Perspective](https://arxiv.org/abs/2410.05192).
+- Jordan et al. 2024. [Muon: An optimizer for hidden layers in neural networks](https://kellerjordan.github.io/posts/muon/)，以及 [GitHub: KellerJordan/Muon](https://github.com/KellerJordan/Muon).
+- Bernstein & Newhouse 2024. [Old Optimizer, New Norm: An Anthology](https://arxiv.org/abs/2409.20325).
+- Liu et al. 2025. [Muon is Scalable for LLM Training](https://arxiv.org/abs/2502.16982)（Moonlight，RMS 匹配与权重衰减）。
+- Kimi Team 2025. [Kimi K2: Open Agentic Intelligence](https://arxiv.org/abs/2507.20534)（MuonClip）。
+- DeepSeek-AI 2024. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437)，第 4.2 节（超参数）。
+- DeepSeek-AI 2026. [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348)（Muon 的使用、混合 Newton–Schulz 迭代与超参数）。
+- OLMo Team 2024. [2 OLMo 2 Furious](https://arxiv.org/abs/2501.00656).
+- Stanford CS336 Spring 2025，[Lecture 3（Architectures & hyperparameters）与 Assignment 1](https://cs336.stanford.edu/spring2025/)。
