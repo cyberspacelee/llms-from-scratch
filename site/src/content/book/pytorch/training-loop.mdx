@@ -2,7 +2,268 @@
 title: 训练循环：数据、优化器与检查点
 description: 从 Dataset 到 DataLoader，loss.backward 与 optimizer.step 的分工，梯度累加、裁剪，以及可精确恢复的 checkpoint。
 order: 4
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/training.py
+  - tests/pytorch/test_training.py
 ---
 
-本章正在撰写。
+有了张量、autograd 与模块，就可以把它们组装成一个训练循环。最简单的训练循环只有五行：取一批数据、前向、算损失、反向、更新。但一个能用于真实训练的循环还要回答很多问题：数据按什么顺序读、怎样保证两次运行结果相同；批太大放不进显存时怎样把它拆开；梯度偶尔爆炸时怎么办；学习率怎样随时间变化；训练跑了三天后机器宕机，怎样从最近的检查点**精确地**接着跑，而不是“差不多地”接着跑。
+
+本章逐一实现这些部件，并用一个测试证明：训练 5 步、保存、在“新进程”中恢复、再训练 7 步，得到的每一步损失与最终参数，和不中断地训练 12 步**逐位相同**。这个性质看似苛刻，实际上是调试大规模训练的基本保障：只有恢复是精确的，才能区分“损失尖峰是数据或模型的问题”还是“恢复过程引入了扰动”。
+
+## 一步训练里谁负责什么
+
+一个训练步涉及三类状态：模型参数（`Parameter`）、参数的梯度（`.grad`）、优化器状态（如动量）。四个调用各自只碰其中一部分：
+
+<Diagram width={720} height={270} label="训练一步中各调用读写的状态">
+  <Box x={20} y={30} w={160} h={56} label="optimizer.zero_grad()" sub="把 .grad 置为 None" size="sm" mono />
+  <Box x={200} y={30} w={160} h={56} label="loss = f(model(x), y)" sub="读参数、建图" size="sm" mono />
+  <Box x={380} y={30} w={150} h={56} label="loss.backward()" sub="释放图" size="sm" mono />
+  <Box x={550} y={30} w={160} h={56} label="optimizer.step()" size="sm" mono />
+  <Arrow from={[180, 58]} to={[200, 58]} />
+  <Arrow from={[360, 58]} to={[380, 58]} />
+  <Arrow from={[530, 58]} to={[550, 58]} />
+  <Box x={200} y={150} w={160} h={56} label="参数 θ" sub="Parameter" tone="accent" />
+  <Box x={380} y={150} w={150} h={56} label="梯度 θ.grad" sub="与 θ 同形状" tone="accent2" />
+  <Box x={550} y={150} w={160} h={56} label="优化器状态" sub="optimizer.state[θ]" tone="info" />
+  <Arrow from={[280, 86]} to={[280, 150]} tone="muted" label="读" labelSide="right" />
+  <Arrow from={[455, 86]} to={[455, 150]} tone="accent2" label="累加" labelSide="right" />
+  <Arrow from={[630, 86]} to={[630, 150]} tone="info" label="读写" labelSide="right" />
+  <Arrow from={[630, 206]} via={[[630, 236], [280, 236]]} to={[280, 206]} tone="accent" label="原地更新参数" labelSide="below" />
+  <Fragment slot="caption">zero_grad 只清空梯度；前向只读参数并建图；backward 只把梯度累加进 .grad；step 读梯度、更新优化器状态，再原地更新参数。四者解耦，使得梯度累加、裁剪、钩子都可以插在 backward 与 step 之间。</Fragment>
+</Diagram>
+
+这种解耦是很多技巧的基础：在 backward 与 step 之间可以裁剪梯度、检查 NaN、做分布式的梯度同步；多次 backward 再一次 step 就是梯度累加；step 之后调用学习率调度器修改优化器的超参数。本章最后的完整循环把这些部件串起来：
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="loop" />
+
+下面逐个讲其中的部件。
+
+## 数据：Dataset、Sampler 与 DataLoader
+
+### 语言模型的数据是滑动窗口
+
+语言模型的训练数据是一条很长的 token 序列。一个样本取其中长度为 $T+1$ 的一段：前 $T$ 个作为输入 $x$，后 $T$ 个作为目标 $y$，即 $y_t = x_{t+1}$，模型在每个位置预测下一个 token。`Dataset` 只需要实现 `__len__` 和 `__getitem__`：
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="dataset" />
+
+切片 `self.tokens[i : i + T + 1]` 是视图，不复制数据；`chunk[:-1]` 与 `chunk[1:]` 也是视图，二者共享同一块内存，只是 offset 相差 1。这正是[张量：形状、步长与视图](/pytorch/tensors/)中 offset 的用法。
+
+### DataLoader 的三个角色
+
+`DataLoader` 把三件事组合在一起：**Sampler** 决定读哪些下标、按什么顺序；**Dataset** 根据下标取出样本；**collate 函数** 把一组样本堆叠成批张量。`num_workers > 0` 时，取样本与堆叠在子进程里并行进行，主进程只负责训练。`pin_memory=True` 把批数据放进页锁定内存，使之后 `.to("cuda", non_blocking=True)` 的拷贝可以与计算重叠。
+
+对于预训练，数据集往往大到不能随机访问，通常把语料预先分词成一个巨大的 `uint16` 数组存在磁盘上，用 `np.memmap` 映射，再随机取窗口起点——CS336 的作业与 nanoGPT 都这样做。第五部分讲数据管线时会回到这个话题。
+
+## 随机数与可复现
+
+### 训练中的随机性来源
+
+一次训练用到的随机数来自四处：参数初始化、数据顺序、dropout 掩码、（生成时的）采样。PyTorch 有一个全局默认生成器，`torch.manual_seed(s)` 设置它的种子；任何不显式传入 `generator=` 的随机操作都从它取数。Python 的 `random` 与 NumPy 各有自己的全局状态，需要分别设置。
+
+“设了种子就可复现”只在**完全相同的调用序列**下成立：全局生成器是一个流，任何一处多取或少取一个随机数，后面所有的随机数都会错位。这正是恢复训练最隐蔽的陷阱。本章实现检查点时就踩到了一个：
+
+<Callout tone="warn" title="DataLoader 会悄悄消耗全局随机数">
+每次 `iter(loader)` 创建迭代器时，DataLoader 都会从生成器中抽一个 `base_seed`（用于给 worker 派生种子）。若没有给 DataLoader 传 `generator=`，它抽的是**全局**生成器。不中断的训练只创建一次迭代器；恢复时在加载 RNG 状态之后又创建一次，于是全局随机流比原来多走了一步，此后每个 dropout 掩码都不同。我们的测试最初正是在恢复后的第一步出现了损失差异。修复方法是给 DataLoader 一个独立的 `torch.Generator()`，让数据管线与模型的随机流互不干扰。
+</Callout>
+
+这个例子说明了一条更一般的原则：**为不同用途使用独立的随机数生成器**。数据顺序用一个以 `(seed, epoch)` 决定的生成器，模型的 dropout 用全局生成器，生成时的采样再用一个——这样改动其中一处不会扰乱其他部分。
+
+### GPU 上的确定性
+
+即使随机数完全一致，GPU 上的结果也可能不可复现：一些 kernel 用原子加法做归约，浮点加法不满足结合律，累加顺序不同就会有最后几位的差异（[浮点数与数值稳定性](/math/numerics/)解释过原因）。`torch.use_deterministic_algorithms(True)` 会让 PyTorch 选择确定性的实现，没有确定性实现的算子则报错；cuBLAS 还需要设置环境变量 `CUBLAS_WORKSPACE_CONFIG=:4096:8`。确定性通常会损失一些速度，大规模训练中一般只在排查问题时打开。本书的测试在 CPU 上运行，单线程的累加顺序是固定的。
+
+## 优化器：手写 SGD 与动量
+
+### 更新式
+
+随机梯度下降（SGD）用一个小批次上的梯度估计 $g_t = \nabla_\theta \mathcal L_{B_t}(\theta_t)$ 代替全数据梯度，更新 $\theta_{t+1} = \theta_t - \eta g_t$。**动量**（momentum）维护一个速度 $v$，把历史梯度做指数加权累积：
+
+$$
+v_t = \mu\, v_{t-1} + g_t,\qquad \theta_{t+1} = \theta_t - \eta\, v_t .
+$$
+
+展开得 $v_t = \sum_{k\ge0}\mu^k g_{t-k}$。若梯度在一段时间内大致不变为 $g$，则 $v \to g/(1-\mu)$，相当于有效学习率放大到 $\eta/(1-\mu)$——$\mu = 0.9$ 时是 10 倍；若梯度方向来回振荡，正负项相互抵消。所以动量在一致的方向上加速、在振荡的方向上减速。PyTorch 的约定是第一步令 $v_1 = g_1$（而不是 $\mu\cdot 0 + g_1$，两者相同），权重衰减则把 $\lambda\theta$ 加进梯度。
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="sgd" />
+
+继承 `torch.optim.Optimizer` 可以免费获得 `param_groups`（不同参数组用不同超参数，例如不对偏置与归一化增益做权重衰减）、`zero_grad`，以及 `state_dict`/`load_state_dict`——后者会把按参数存放的 `self.state[p]` 转换成按序号索引的字典，与参数对象的身份脱钩，这是检查点能跨进程加载的前提。`step` 必须在 `torch.no_grad()` 下执行，因为它原地修改需要梯度的叶子张量（上一章讲过，这在记录模式下会报错）。
+
+测试 `test_handwritten_sgd_matches_torch` 让手写版本与 `torch.optim.SGD` 从相同参数出发、在相同数据上训练 5 步，参数完全一致。Adam 及其后继者（AdamW、Muon）在第五部分的[优化器：从 SGD、Adam 到 Muon](/pretraining/optimizers/)中讨论；它们的状态更多（Adam 每个参数两个矩估计），这直接决定了下一章的显存公式。
+
+## 梯度累加
+
+### 为什么要除以 k
+
+目标批大小 $B$ 放不进显存时，把它拆成 $k$ 个大小为 $b = B/k$ 的微批次，依次前向、反向，最后统一 step。整批的平均损失是
+
+$$
+\mathcal L_B = \frac{1}{B}\sum_{i=1}^{B}\ell_i
+= \frac{1}{k}\sum_{j=1}^{k}\underbrace{\frac{1}{b}\sum_{i\in \text{micro}_j}\ell_i}_{\mathcal L_j} .
+$$
+
+梯度是线性的，所以 $\nabla\mathcal L_B = \frac1k\sum_j\nabla\mathcal L_j$。每个微批次的损失函数（如 `cross_entropy`）默认已经在微批内取平均，得到 $\mathcal L_j$；只要再除以 $k$ 后 backward，`.grad` 中累加的就恰好是 $\frac1k\sum_j\nabla\mathcal L_j = \nabla\mathcal L_B$。忘了除以 $k$，梯度就放大 $k$ 倍，等效于把学习率乘以 $k$。
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="accumulate" />
+
+测试 `test_gradient_accumulation_equals_full_batch` 把 8 个样本拆成 4 个微批次累加，与一次处理 8 个样本相比，更新后的参数在浮点误差内相同。
+
+<Callout tone="warn" title="微批次大小不等时">
+上面的推导假设每个微批次的样本数（对语言模型而言是**参与损失的 token 数**）相同。SFT 中各序列长度不同、还有被掩码的 token，若每个微批次各自对自己的有效 token 取平均再除以 $k$，短序列的 token 会被赋予更大的权重。正确做法是对 token 求和，再除以整个累加批次的有效 token 总数。这个 bug 曾广泛存在于主流训练框架中，2024 年才被系统地修复。BatchNorm 之类依赖批统计量的层也无法通过梯度累加精确模拟大批次，好在 Transformer 不用它们。
+</Callout>
+
+## 梯度裁剪
+
+训练大模型时，偶尔会有某一批数据产生异常大的梯度，一步更新就把参数推到很远的地方，表现为损失尖峰甚至发散。**全局范数裁剪**（global norm clipping）把所有参数的梯度拼成一个大向量 $g$，若其范数超过阈值 $c$，就整体等比例缩小：
+
+$$
+g \leftarrow g\cdot\min\!\left(1,\ \frac{c}{\lVert g\rVert_2}\right),\qquad
+\lVert g\rVert_2 = \sqrt{\sum_{p}\lVert g_p\rVert_2^2} .
+$$
+
+等比例缩放不改变更新方向，只限制步长。全局范数可以先算每个参数的范数，再对这些范数求范数，避免真的拼接一个巨大向量：
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="clip" />
+
+返回值是裁剪**前**的范数，值得每步记录下来：梯度范数的走势是诊断训练稳定性的重要信号。裁剪必须放在梯度累加完成之后、`step` 之前；使用 FP16 损失缩放时，还要先把梯度反缩放（`scaler.unscale_(optimizer)`）再裁剪，否则阈值的含义就错了。大模型预训练普遍取 $c = 1.0$。测试 `test_clip_grad_norm_matches_torch` 与 `torch.nn.utils.clip_grad_norm_` 对照了范数与裁剪后的梯度。
+
+## 学习率调度
+
+### 调度器接口
+
+PyTorch 的学习率调度器持有优化器的引用，每次 `scheduler.step()` 时计算新的学习率并写进 `optimizer.param_groups[i]["lr"]`。最灵活的是 `LambdaLR(optimizer, lr_lambda)`：学习率等于初始学习率乘以 `lr_lambda(step)`。调用顺序必须是先 `optimizer.step()` 再 `scheduler.step()`，否则第一步的学习率会被跳过（PyTorch 会对此给出警告）。
+
+### 预热加余弦衰减
+
+现代 LLM 预训练最常见的调度是**线性预热 + 余弦衰减**：前 $W$ 步学习率从接近 0 线性升到峰值，之后在 $S$ 步内按余弦曲线降到峰值的一个比例 $r$（常取 0.1）：
+
+$$
+\eta(t) = \eta_{\max}\cdot
+\begin{cases}
+\dfrac{t+1}{W}, & t < W,\\[2mm]
+r + (1-r)\cdot\dfrac{1}{2}\left(1 + \cos\dfrac{\pi\,(t-W)}{S-W}\right), & W \le t \le S .
+\end{cases}
+$$
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="schedule" />
+
+<Plot label="线性预热 + 余弦衰减（W = 10，S = 100，r = 0.1）" x={[0, 120]} y={[0, 1.1]} xLabel="步数 t" yLabel="学习率倍率" series={[
+  { fn: (t) => (t < 10 ? (Math.floor(t) + 1) / 10 : 0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * Math.min(1, (t - 10) / 90)))), label: 'warmup_cosine' },
+]} markers={[{ at: [9, 1], label: '预热结束' }, { at: [100, 0.1], label: '衰减到 r' }]}>
+  <Fragment slot="caption">预热阶段 Adam 的二阶矩估计还不可靠、参数刚离开初始化，小学习率可以避免早期的大幅震荡；之后余弦衰减让学习率平滑地下降，训练后期的小步长帮助损失进一步降低。超过 S 步后保持在 r。</Fragment>
+</Plot>
+
+预热的必要性与 Adam 早期二阶矩估计方差大有关，Liu 等人（RAdam）对此做过分析。近年来另一种流行的选择是 **WSD**（warmup–stable–decay）：预热后长时间保持恒定学习率，最后一小段快速衰减。它的好处是不必预先确定总步数，可以从稳定阶段的任一检查点分叉出去做衰减；第五部分讨论缩放定律实验时会用到这个性质。
+
+## 检查点与精确恢复
+
+### 需要保存什么
+
+一个检查点要保存的不只是模型参数。下表列出精确恢复所需的全部状态，以及缺少它时会发生什么：
+
+| 状态 | 保存方式 | 缺少时的后果 |
+| --- | --- | --- |
+| 模型参数与 buffer | `model.state_dict()` | 从头训练 |
+| 优化器状态 | `optimizer.state_dict()` | 动量/Adam 矩估计归零，恢复后出现损失尖峰 |
+| 调度器 | `scheduler.state_dict()` | 学习率回到预热起点 |
+| 数据位置 | 采样器的 (seed, epoch, cursor) | 重复或跳过数据 |
+| 随机数状态 | `torch.get_rng_state()`、`random.getstate()`、CUDA 的 RNG | dropout 掩码不同，轨迹偏离 |
+| 步数 | 整数 | 日志、调度错位 |
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="checkpoint" />
+
+### 可恢复的数据位置
+
+数据位置最难保存，因为 DataLoader 的迭代器内部状态（尤其是多进程 worker 的预取队列）不能直接序列化。我们的办法是让采样器自己成为唯一的状态持有者：每个 epoch 的顺序完全由 `(seed, epoch)` 决定，采样器只需记住“当前 epoch”与“本 epoch 已产出多少样本”这两个整数。恢复时用同样的 `(seed, epoch)` 重新生成排列，从 `cursor` 处继续。
+
+<CodeFile path="src/llms_from_scratch/pytorch/training.py" region="sampler" />
+
+这个设计要求 `num_workers=0`：多进程时 worker 会预取若干批，采样器的 `cursor` 会跑到训练进度前面。生产环境中可以使用 `torchdata` 的 `StatefulDataLoader`，它会跟踪每个 worker 的进度；对于用 memmap 随机取窗口的预训练数据管线，保存“取窗口用的生成器状态”即可。
+
+### 用测试证明恢复是精确的
+
+<Lanes label="不中断训练与中断后恢复的对比" lanes={['不中断', '中断并恢复']} unit="训练步" span={12} tick={1} items={[
+  { lane: 0, start: 0, end: 12, label: '训练 12 步', tone: 'accent' },
+  { lane: 1, start: 0, end: 5, label: '训练 5 步', tone: 'accent' },
+  { lane: 1, start: 5, end: 5.6, label: '存', tone: 'accent2' },
+  { lane: 1, start: 5.6, end: 12, label: '新进程：加载后训练 7 步', tone: 'info' },
+]}>
+  <Fragment slot="caption">测试的两条路径。下方路径在第 5 步保存检查点，然后用另一个随机种子重建模型、优化器、调度器和采样器（模拟新进程），加载检查点后继续训练到第 12 步。断言两条路径每一步的损失列表与最终 state_dict 逐位相等。</Fragment>
+</Lanes>
+
+<CodeFile path="tests/pytorch/test_training.py" symbol="test_resume_reproduces_uninterrupted_run" />
+
+测试中的模型带有 dropout，使 RNG 状态直接影响轨迹；每步做 2 个微批次的梯度累加并裁剪；数据 192 个窗口、每步消耗 32 个，12 步跨越了一个 epoch 边界，从而覆盖了采样器换 epoch 的逻辑；调度器包含预热与余弦衰减。断言用 `==` 而不是近似比较：任何遗漏的状态都会导致不相等。你可以试着注释掉 `load_checkpoint` 中的任意一行，或者去掉 DataLoader 的 `generator=` 参数，观察测试在哪一步开始失败。
+
+<Callout tone="tip" title="写检查点的工程细节">
+真实训练中还要注意：先写入临时文件再 `os.replace` 原子地改名，防止写到一半宕机留下损坏的检查点；保留最近几个检查点而不是覆盖唯一一个；分布式训练中每个进程只保存自己的分片（`torch.distributed.checkpoint`），第六部分会讨论。`torch.load` 默认 `weights_only=True`，只能加载张量；我们的检查点包含 Python 的 RNG 状态元组，所以显式传 `weights_only=False`——只对自己写的文件这样做。
+</Callout>
+
+## 小结
+
+- 一个训练步中 `zero_grad`、前向、`backward`、`step` 分别只碰梯度、计算图、梯度、参数与优化器状态；它们的解耦让累加、裁剪、同步都能插在 backward 与 step 之间。
+- 可复现要求完全相同的随机数调用序列；为数据、模型、采样使用独立的生成器，并注意 DataLoader 创建迭代器时会抽取随机种子。
+- 动量 $v \leftarrow \mu v + g$ 在一致方向上把有效学习率放大到 $\eta/(1-\mu)$；手写 SGD 与 `torch.optim.SGD` 逐位一致。
+- 梯度累加时每个微批次的平均损失要除以微批次数 $k$；微批次 token 数不等时应按 token 总数归一化。
+- 全局范数裁剪等比例缩小梯度、不改变方向；学习率调度在 `optimizer.step()` 之后调用。
+- 精确恢复需要保存模型、优化器、调度器、数据位置与 RNG 状态，并可以用“中断恢复 = 不中断”的逐位测试来验证。
+
+## 练习
+
+1. 用动量 $\mu$ 训练时，若某个参数的梯度恒为 $g$，求 $v_t$ 的闭式解，并说明需要多少步 $v_t$ 才达到稳态值的 $1-e^{-1}$。
+
+<details>
+<summary>答案</summary>
+
+$v_1 = g$，$v_t = \mu v_{t-1} + g$，解得 $v_t = g\,(1-\mu^t)/(1-\mu)$。达到稳态 $g/(1-\mu)$ 的 $1-e^{-1}$ 需要 $\mu^t = e^{-1}$，即 $t = -1/\ln\mu$。$\mu = 0.9$ 时约 9.5 步，$\mu=0.99$ 时约 99.5 步——动量的“记忆长度”约为 $1/(1-\mu)$ 步。
+
+</details>
+
+2. 一个 SFT 批次有两个微批次：第一个包含 100 个有效 token、平均损失 2.0；第二个包含 900 个有效 token、平均损失 1.0。分别计算“各自平均再除以 2”与“按 token 总数归一化”得到的损失，哪一个等于不拆分时的值？
+
+<details>
+<summary>答案</summary>
+
+各自平均再除以 2：$(2.0 + 1.0)/2 = 1.5$。按 token 归一化：$(100\times2.0 + 900\times1.0)/1000 = 1.1$。不拆分时整批平均就是每个 token 损失的均值 1.1，所以后者正确。前者让第一个微批次的每个 token 权重放大了 $\frac{1/200}{1/1000} = 5$ 倍。
+
+</details>
+
+3. 若把 `scheduler.step()` 放在 `optimizer.step()` 之前，对 `warmup_cosine` 调度意味着什么？
+
+<details>
+<summary>答案</summary>
+
+第一次 `optimizer.step()` 时学习率已经是 `lr_lambda(1)` 而不是 `lr_lambda(0)`，整个调度提前一步：预热少一步，第 0 步的学习率永远不会被使用。对于很长的训练影响很小，但会破坏与参考实现的逐位对照，PyTorch 也会给出警告。
+
+</details>
+
+4. 恢复训练后损失出现一个尖峰，随后恢复正常。列出三种可能的原因，并说明如何用本章的测试思路排查。
+
+<details>
+<summary>答案</summary>
+
+常见原因：优化器状态没有保存或没有加载（Adam 的二阶矩归零使第一步的有效步长极大）；调度器没有恢复，学习率回到了预热前或峰值；数据位置没有恢复，重新读到了一段已经见过或分布不同的数据。排查方法是在小规模上复现“训练 N 步 → 保存 → 恢复 → 再训练 M 步”与“训练 N+M 步”，逐步比较损失，第一处不一致的步骤会指向缺失的状态；再逐项注释检查点中的字段，确认每一项都被测试覆盖。
+
+</details>
+
+5. 为什么梯度裁剪要在梯度累加完成之后进行，而不是对每个微批次的梯度分别裁剪？
+
+<details>
+<summary>答案</summary>
+
+裁剪的对象应该是本次更新实际使用的梯度，即整批平均梯度 $\frac1k\sum_j\nabla\mathcal L_j$。对每个微批次分别裁剪是一个非线性操作，结果一般不等于对平均梯度裁剪：例如两个微批次梯度方向相反、各自范数很大，平均后范数很小本不需要裁剪，分别裁剪却会改变它们的相对权重。此外，分别裁剪会让结果依赖于微批次的划分方式，破坏“梯度累加等价于大批次”的性质。
+
+</details>
+
+## 参考文献
+
+- PyTorch 文档：[`torch.utils.data`](https://pytorch.org/docs/stable/data.html)、[Reproducibility](https://pytorch.org/docs/stable/notes/randomness.html)、[`torch.optim`](https://pytorch.org/docs/stable/optim.html)。
+- PyTorch 源码：[`torch/optim/sgd.py`](https://github.com/pytorch/pytorch/blob/main/torch/optim/sgd.py)（动量与权重衰减的约定）。
+- B. T. Polyak, Some methods of speeding up the convergence of iteration methods, *USSR Computational Mathematics and Mathematical Physics*, 1964（动量法）。
+- R. Pascanu, T. Mikolov, Y. Bengio, [On the difficulty of training Recurrent Neural Networks](https://arxiv.org/abs/1211.5063)，ICML 2013（梯度范数裁剪）。
+- I. Loshchilov, F. Hutter, [SGDR: Stochastic Gradient Descent with Warm Restarts](https://arxiv.org/abs/1608.03983)，ICLR 2017（余弦调度）。
+- L. Liu et al., [On the Variance of the Adaptive Learning Rate and Beyond](https://arxiv.org/abs/1908.03265)，ICLR 2020（预热的分析，RAdam）。
+- S. Hu et al., [MiniCPM: Unveiling the Potential of Small Language Models with Scalable Training Strategies](https://arxiv.org/abs/2404.06395)，2024（WSD 调度）。
+- Hugging Face, [Fixing Gradient Accumulation](https://huggingface.co/blog/gradient_accumulation)，2024（变长序列下梯度累加的归一化问题）。
+- PyTorch torchdata：[StatefulDataLoader](https://github.com/pytorch/data/tree/main/torchdata/stateful_dataloader)。
+- Stanford CS336 (Spring 2025), [Lecture 2](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py) 与 [Assignment 1](https://github.com/stanford-cs336/assignment1-basics)（数据加载、检查点与学习率调度）。

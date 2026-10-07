@@ -2,7 +2,298 @@
 title: 资源核算：FLOPs、显存与 MFU
 description: 数清一次矩阵乘法与一次训练步的 FLOPs（6N 法则），估算参数、梯度、优化器状态与激活的显存，并计算 MFU。
 order: 5
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/accounting.py
+  - tests/pytorch/test_accounting.py
 ---
 
-本章正在撰写。
+前面四章教会了我们怎样写出一个训练程序。这一章要回答写程序之前就应该回答的问题：**它要花多少算力、多少显存、多长时间？** 训练大模型的每一次决策——模型多大、用多少数据、需要几张 GPU、批大小取多少、要不要激活重计算——都建立在这些数字之上。一个 70B 参数的模型在 15T token 上训练，需要多少 GPU·天？一个 7B 模型能不能在一张 80 GB 的卡上做全参数微调？这些问题都可以在纸上用几行算术得出数量级正确的答案，而不必先写代码、再撞上显存溢出。
+
+Stanford CS336 把这种能力称为“资源核算”（resource accounting），并在第二讲用它作为整门课的出发点。本章沿同样的路线推导：先数一次矩阵乘法的浮点运算，推出训练的“6N 法则”；再把全书 GPT 的参数量与每 token FLOPs 写成公式，用 PyTorch 的 FLOP 计数器逐项核对；然后列出训练显存的四个组成部分；最后定义 MFU，并在本机 CPU 上实测矩阵乘的吞吐。
+
+## 矩阵乘法：2mkn
+
+### 推导
+
+$A\in\mathbb R^{m\times k}$ 与 $B\in\mathbb R^{k\times n}$ 相乘，输出 $C = AB$ 有 $mn$ 个元素，每个元素是一个长度为 $k$ 的内积 $C_{ij} = \sum_{l=1}^{k} A_{il}B_{lj}$，需要 $k$ 次乘法和 $k$ 次加法（把第一次乘积加到初值 0 上也算一次，这与硬件的乘加指令 FMA 一致）。所以
+
+<KeyEq label="矩阵乘法的浮点运算数">
+
+$$
+\text{FLOPs}(A_{m\times k}B_{k\times n}) = 2\,m\,k\,n .
+$$
+
+</KeyEq>
+
+手算一个小例子：$(2\times3)(3\times2)$ 输出 4 个元素，每个是 3 次乘法加 3 次加法，共 $2\cdot2\cdot3\cdot2 = 24$ 次。严格地数，每个内积只需要 2 次加法（共 20 次），但对于 $k$ 成千上万的大矩阵，这点差别可以忽略，而 $2mkn$ 与 FMA 的计数方式一致，所以全行业都采用它。
+
+注意区分两个容易混淆的写法：**FLOPs**（floating-point operations，运算次数，一个量）与 **FLOP/s**（每秒运算次数，一个速率）。本书用 FLOP/s 表示速率，不写容易混淆的 “FLOPS”。
+
+与矩阵乘相比，逐元素运算（加偏置、激活函数、归一化）对 $m\times n$ 的张量只需 $O(mn)$ 次运算，比 $2mkn$ 小 $k$ 倍。在 Transformer 中 $k$ 是模型宽度 $d$（几千），所以 FLOPs 核算只数矩阵乘。逐元素运算的代价不在 FLOPs 而在**内存带宽**，那是第八部分的话题。
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="matmul" />
+
+PyTorch 自带的 `torch.utils.flop_counter.FlopCounterMode` 会拦截每个算子并按公式累计矩阵乘类算子的 FLOPs。测试 `test_matmul_flops_counted_by_torch` 用它验证了 $(8\times16)(16\times4)$ 的计数正是 $2\cdot8\cdot16\cdot4 = 1024$。下文我们用它来核对每一个手推的公式。
+
+## 前向 2N，反向 4N
+
+### 一个线性层的反向是前向的两倍
+
+考虑线性层 $Y = XW^\top$，其中 $X\in\mathbb R^{m\times k}$ 是 $m$ 个 token 的输入，$W\in\mathbb R^{n\times k}$，$Y\in\mathbb R^{m\times n}$。前向是一次矩阵乘，$2mkn$ FLOPs。
+
+反向传播收到上游梯度 $G = \partial\mathcal L/\partial Y\in\mathbb R^{m\times n}$，要计算两个梯度（[反向传播：从标量到矩阵](/math/backprop/)推导过它们）：
+
+$$
+\frac{\partial\mathcal L}{\partial X} = G\,W \quad (m\times n \cdot n\times k),\qquad
+\frac{\partial\mathcal L}{\partial W} = G^\top X \quad (n\times m \cdot m\times k).
+$$
+
+两者都是与前向同样规模的矩阵乘，各 $2mkn$ FLOPs。对输入的梯度要继续传给更早的层，对权重的梯度交给优化器——两者缺一不可（只有网络的第一层可以省掉对输入的梯度）。因此反向是前向的两倍。
+
+<Diagram width={720} height={250} label="线性层前向一次矩阵乘、反向两次矩阵乘">
+  <Region x={10} y={10} w={220} h={230} title="前向：2mkn" tone="accent" />
+  <Box x={30} y={60} w={180} h={50} label="Y = X Wᵀ" sub="(m×k)(k×n)" tone="accent" mono />
+  <Text x={120} y={150} label="每个 token 每个权重" size="sm" tone="muted" />
+  <Text x={120} y={172} label="1 次乘 + 1 次加" size="sm" tone="muted" />
+  <Region x={250} y={10} w={460} h={230} title="反向：4mkn" tone="accent2" />
+  <Box x={270} y={60} w={200} h={50} label="dX = G W" sub="(m×n)(n×k)" tone="accent2" mono />
+  <Box x={490} y={60} w={200} h={50} label="dW = Gᵀ X" sub="(n×m)(m×k)" tone="accent2" mono />
+  <Text x={370} y={150} label="传给前一层" size="sm" tone="muted" />
+  <Text x={590} y={150} label="交给优化器" size="sm" tone="muted" />
+  <Arrow from={[370, 110]} to={[370, 135]} />
+  <Arrow from={[590, 110]} to={[590, 135]} />
+  <Text x={480} y={200} label="两次矩阵乘，各与前向等大" size="sm" tone="accent2" />
+  <Fragment slot="caption">G 是 ∂ℒ/∂Y。反向需要对输入和对权重各求一次梯度，各是一个与前向同规模的矩阵乘，因此反向 FLOPs 恰为前向的两倍。</Fragment>
+</Diagram>
+
+测试 `test_linear_backward_is_twice_forward` 用 `FlopCounterMode` 分别统计 `nn.Linear(32, 16)` 对 10 个 token 的前向与反向，得到 10240 与 20480。`test_gpt_linear_flops_match_flop_counter` 对整个 GPT 也验证了“反向 = 2 × 前向”。
+
+### 6N 法则
+
+把上面的结论按参数计。对每个 token（$m = 1$），一个 $n\times k$ 的权重矩阵前向需要 $2kn$ FLOPs，即**每个参数 2 FLOPs**；反向每个参数 4 FLOPs。一个由矩阵乘组成、共 $N$ 个参数的模型，处理 $D$ 个 token 的训练计算量为
+
+<KeyEq label="训练计算量的 6N 法则">
+
+$$
+C_\text{train} \approx 6\,N\,D, \qquad C_\text{forward} \approx 2\,N\,D .
+$$
+
+</KeyEq>
+
+这个公式由 Kaplan 等人（2020）在缩放定律的研究中系统使用，成为估算训练成本的通用工具。它忽略了三项：逐元素运算（$O(d)$ 每 token，远小于 $O(d^2)$）、嵌入查表（没有乘法）、注意力分数的计算（与序列长度有关，下一节单独算）。用它可以立刻回答引言中的问题：70B 参数、15T token 的训练需要
+
+$$
+C = 6 \times 70\times10^{9}\times 15\times10^{12} = 6.3\times10^{24}\ \text{FLOPs}.
+$$
+
+## Transformer 的参数量与每 token FLOPs
+
+### 参数量
+
+把全书 GPT（`transformer/model.py`）的每个权重矩阵列出来。记模型宽度 $d$、层数 $L$、查询头数 $h$、键值头数 $h_{kv}$、头维 $d_h = d/h$、前馈宽度 $d_{ff}$、词表 $V$。每层：
+
+- 注意力：$W_Q, W_O$ 各 $d\times hd_h = d^2$，$W_K, W_V$ 各 $d\times h_{kv}d_h$；
+- SwiGLU 前馈：$W_1, W_3$ 为 $d\times d_{ff}$，$W_2$ 为 $d_{ff}\times d$，共 $3dd_{ff}$；
+- 两个 RMSNorm 的增益：$2d$。
+
+再加上嵌入 $Vd$、最后的 RMSNorm $d$，以及（不共享时）输出头 $Vd$：
+
+$$
+N = L\bigl(2d^2 + 2d\,h_{kv}d_h + 3d\,d_{ff} + 2d\bigr) + Vd + d + [\text{untied}]\,Vd .
+$$
+
+标准多头注意力（$h_{kv} = h$）且 $d_{ff} = \tfrac83 d$ 时，每层约 $4d^2 + 8d^2 = 12d^2$，这就是常见的近似 $N \approx 12Ld^2$。
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="params" />
+
+测试 `test_param_formula_matches_model` 对共享/不共享嵌入、多头/GQA/MQA 三种配置构建真实的 `GPT`，比较公式与 `sum(p.numel())`，全部精确相等。作为更大的例子，取 LLaMA-7B 的配置（$d = 4096$，$L = 32$，$h = 32$，$d_{ff} = 11008$，$V = 32000$，不共享嵌入），公式给出 $N = 6{,}738{,}415{,}616$，与 LLaMA 论文报告的 6.7B 一致。
+
+### 每 token FLOPs：权重矩阵乘加注意力
+
+前向的 FLOPs 分两部分。**权重矩阵乘**：每个 token 对每个参与矩阵乘的权重做一次乘加，即 $2N_\text{matmul}$，其中 $N_\text{matmul}$ 是各层投影与输出头的权重数（嵌入不算，输出头即使与嵌入共享也要算，因为它确实做了 $d\times V$ 的矩阵乘）。**注意力**：每层每个头计算 $QK^\top$（$[T, d_h]\times[d_h, T]$）与 $PV$（$[T,T]\times[T,d_h]$），各 $2T^2d_h$；$h$ 个头、两个矩阵乘合计 $4T^2d$，摊到每个 token 是 $4Td$。
+
+$$
+C_\text{forward}/\text{token} = 2N_\text{matmul} + 4\,L\,T\,d \quad(\text{因果掩码下可减半为 } 2LTd).
+$$
+
+这与 Kaplan 等人给出的 $C_\text{forward}\approx 2N + 2n_\text{layer}n_\text{ctx}d_\text{attn}$ 一致——他们只计因果的一半。注意力项与 $N$ 的比值约为 $\frac{2LTd}{2\cdot12Ld^2} = \frac{T}{12d}$：当序列长度 $T$ 远小于 $12d$ 时可以忽略，长上下文训练则不能。
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="flops" />
+
+`test_gpt_linear_flops_match_flop_counter` 显示 `FlopCounterMode` 统计到的 GPT 前向 FLOPs 恰好等于公式的“权重矩阵乘”部分。注意力部分没有被计入，是因为在 CPU 上 `scaled_dot_product_attention` 调用的是一个融合内核，计数器没有为它注册公式；`test_attention_flops_formula` 改用显式的 `q @ k.transpose(-2, -1)` 与 `@ v` 单独验证了 $4BT^2d$。这也提醒我们：工具的计数是否完整，同样需要验证。
+
+<Bars label="LLaMA-7B 配置每 token 前向 FLOPs 的构成（T = 4096，因果）" unit="GFLOP" items={[
+  { label: '注意力投影 QKVO', value: 4.29 },
+  { label: 'SwiGLU 前馈', value: 8.66, tone: 'accent' },
+  { label: '输出头', value: 0.26 },
+  { label: '注意力分数与加权', value: 1.07, tone: 'accent2' },
+]}>
+  <Fragment slot="caption">由 gpt_forward_flops 计算，合计 14.29 GFLOP/token，其中权重矩阵乘 13.21 GFLOP（= 2 × 6.61B 个参与矩阵乘的权重），注意力项占 7.5%。前馈层是 FLOPs 的大头。训练时每 token 再乘以 3。</Fragment>
+</Bars>
+
+## 训练显存
+
+训练时显存里有四类东西：参数、梯度、优化器状态、激活。前三者与参数量成正比，称为**模型状态**；激活与批大小、序列长度成正比。
+
+### 模型状态：每参数 16 字节
+
+**FP32 训练 + Adam**：参数 4 字节，梯度 4 字节，Adam 的一阶矩 $m$ 与二阶矩 $v$ 各 4 字节，共
+
+$$
+4 + 4 + (4 + 4) = 16\ \text{字节/参数}.
+$$
+
+**混合精度 + Adam**（Micikevicius 等人 2018 提出、ZeRO 论文（Rajbhandari 等人 2020）中的记法）：前向与反向用 BF16/FP16 的参数副本（2 字节）和梯度（2 字节），优化器维护一份 FP32 的主权重（4 字节）和 FP32 的 $m$、$v$（8 字节）：
+
+<KeyEq label="混合精度 Adam 训练的模型状态">
+
+$$
+\underbrace{2}_{\text{bf16 参数}} + \underbrace{2}_{\text{bf16 梯度}} + \underbrace{4}_{\text{fp32 主权重}} + \underbrace{4 + 4}_{\text{fp32 } m,\,v} = 16\ \text{字节/参数}.
+$$
+
+</KeyEq>
+
+混合精度并没有减少模型状态的显存，甚至因为多了一份主权重而与 FP32 持平。它省下的是**激活**（减半）和**带宽**，并且让矩阵乘可以使用快得多的 Tensor Core。
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="memory" />
+
+<Bars label="6.74B 参数模型的模型状态显存（不含激活）" unit="GB" items={[
+  { label: 'FP32 + Adam', segments: [{ value: 26.95, label: '参数' }, { value: 26.95, label: '梯度' }, { value: 53.91, label: 'Adam m, v' }, { value: 0, label: 'FP32 主权重' }] },
+  { label: '混合精度 + Adam', segments: [{ value: 13.48, label: '参数' }, { value: 13.48, label: '梯度' }, { value: 53.91, label: 'Adam m, v' }, { value: 26.95, label: 'FP32 主权重' }] },
+  { label: 'BF16 推理', segments: [{ value: 13.48, label: '参数' }] },
+]}>
+  <Fragment slot="caption">按 1 GB = 10⁹ 字节计。两种训练方式都是 16 字节/参数、约 108 GB，超过一张 80 GB 的 H100；推理只需参数本身的 13.5 GB。这就是“7B 模型能推理却不能在单卡上全参数训练”的原因，也是第六部分 ZeRO/FSDP 把模型状态切分到多卡上的动机。</Fragment>
+</Bars>
+
+### 激活
+
+激活是为反向保存的中间张量（[PyTorch autograd 的工作方式](/pytorch/autograd/)中的“saved tensors”）。它与 token 数 $BT$、层数 $L$ 成正比，与参数量无直接关系。逐项数本书 GPT 一层保存的张量（以元素计，每 token）：两个 RMSNorm 的输入与输出约 $4d$；Q、K、V 在 RoPE 前后各一份约 $2(d + 2h_{kv}d_h)$；注意力输出 $d$；SwiGLU 的 $W_1x$、$W_3x$ 与 SiLU 结果 $3d_{ff}$。用 `saved_tensor_bytes` 在一个 $d = 128$、$L = 4$、$d_{ff} = 384$ 的 GPT 上实测，每层每 token 保存约 2951 个 float32，粗估公式给出 2560——差额来自 softmax、交叉熵等未计入的项。数量级估计足够用来做决策，精确值应该实测。
+
+Korthikanti 等人（2022）对标准 GPT 结构（4d 的 GELU 前馈、带 dropout、16 位激活）推导出每层激活约
+
+$$
+s\,b\,h\left(34 + 5\,\frac{a\,s}{h}\right)\ \text{字节},
+$$
+
+其中 $s$ 是序列长度、$b$ 批大小、$h$ 宽度、$a$ 头数。$5as/h$ 一项来自 $s\times s$ 的注意力矩阵；FlashAttention 不保存这个矩阵，它就消失了。代入 7B 规模（$h = 4096$，$s = 4096$，$b = 1$，32 层），仅 $34sbh$ 一项就是 $32\times 34\times4096^2 \approx 18$ GB——批大小加到 8 就是 146 GB，远超模型状态。这正是激活重计算存在的理由：只保存每层输入（$2sbh$ 字节），反向时重算，激活降到约原来的 1/17，代价是多一次前向，训练 FLOPs 从 $6N$ 增加到约 $8N$。
+
+测试 `test_activation_memory_scales_with_batch` 验证了实测激活是批大小的仿射函数：批大小从 1 增到 2 与从 2 增到 4，增量严格成 1:2。
+
+## MFU：硬件用得怎么样
+
+### 定义
+
+有了 FLOPs，就能衡量训练效率。**模型 FLOPs 利用率**（Model FLOPs Utilization，MFU）由 PaLM 论文（Chowdhery 等人 2022）提出：
+
+<KeyEq label="模型 FLOPs 利用率">
+
+$$
+\text{MFU} = \frac{\text{实测吞吐（token/s）}\times\text{每 token 的模型 FLOPs}}{\text{硬件峰值 FLOP/s}} .
+$$
+
+</KeyEq>
+
+分子只计模型“本该”做的计算（$6N$ 加注意力项），不计激活重计算等额外开销；把重计算也算进去的版本叫硬件 FLOPs 利用率（HFU）。用 MFU 比较不同系统更公平：靠重计算“刷高”的利用率不会让训练更快。
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="mfu" />
+
+### 硬件峰值
+
+峰值必须查数据手册，并注意两点。第一，看对精度：H100 SXM 的 FP32（非 Tensor Core）峰值约 67 TFLOP/s，而 BF16 Tensor Core 是它的约 15 倍。第二，手册中带星号的 Tensor Core 数字是 **2:4 结构化稀疏** 下的值，稠密矩阵乘要除以 2：
+
+<CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="peaks" />
+
+H100 SXM 手册上 BF16 Tensor Core 为 1979 TFLOP/s（稀疏），稠密即 989.5 TFLOP/s；A100 为 312 TFLOP/s。实际大规模训练的 MFU 通常在 35%–55% 之间，CS336 把 50% 以上视为相当好的水平。
+
+### 一次完整的估算
+
+回到引言的问题：70B 模型、15T token，需要 $6.3\times10^{24}$ FLOPs。用 1024 张 H100、MFU 为 50%：
+
+$$
+t = \frac{6.3\times10^{24}}{1024 \times 989.5\times10^{12}\times 0.5} \approx 1.24\times10^{7}\ \text{s} \approx 144\ \text{天}.
+$$
+
+这种量级的估算决定了项目是否可行，比任何代码都要先做。
+
+### 在本机测一测
+
+`measure_matmul_flops_per_s` 在 CPU 上计时 $n\times n$ 矩阵乘：先预热两次（第一次调用要分配内存、选择内核），再取多次计时的中位数（避开被操作系统打断的离群值）。在 GPU 上计时还必须在前后调用 `torch.cuda.synchronize()`，因为 kernel 是异步启动的，不同步只会测到启动时间。
+
+<Plot label="单线程 FP32 矩阵乘的实测吞吐（Intel N100，作者机器上的一次测量）" x={[32, 1024]} y={[0, 60]} logX xLabel="矩阵边长 n" yLabel="GFLOP/s" xTicks={[32, 64, 128, 256, 512, 1024]} series={[
+  { points: [[32, 6.9], [64, 19.5], [128, 29.5], [256, 30.0], [512, 22.6], [1024, 18.7]], label: '实测（单线程）' },
+  { fn: () => 54.4, label: '理论峰值（估计）', tone: 'muted', dashed: true },
+]} markers={[{ at: [256, 30.0], label: '≈ 55% 峰值' }]}>
+  <Fragment slot="caption">小矩阵受函数调用与数据搬运开销限制，吞吐很低；中等尺寸时达到约 30 GFLOP/s。理论峰值按每周期 16 次 FP32 运算（两条 128 位 FMA 流水线）× 3.4 GHz 睿频估计，仅作量级参考。测量时机器上还有其他负载，大矩阵的下降部分来自缓存与内存争用，数字会随环境波动；请在你自己的机器上运行同样的函数。</Fragment>
+</Plot>
+
+曲线说明了一个在 GPU 上同样成立的规律：**矩阵太小时硬件吃不饱**。小矩阵的计算量 $2n^3$ 相对于读写 $3n^2$ 个元素的开销太小，时间花在了搬数据和调度上。用第八部分的语言说，算术强度（每字节内存访问对应的 FLOPs）太低，处于 roofline 的带宽受限区。这就是训练时要用足够大的批次与足够宽的模型的原因之一。作为对照，同样的芯片在 4 线程下测到约 34 GFLOP/s，而一张 H100 的 BF16 稠密峰值是它的约三万倍。
+
+## 小结
+
+- 矩阵乘 $(m\times k)(k\times n)$ 需要 $2mkn$ FLOPs；逐元素运算相比之下可以忽略，它们的代价在带宽。
+- 线性层的反向要算对输入和对权重的两个梯度，各与前向等大，所以反向是前向的两倍：前向每参数每 token 2 FLOPs，训练 6 FLOPs，$C\approx 6ND$。
+- Transformer 每 token 前向 FLOPs 为 $2N_\text{matmul} + 4LTd$（因果减半），注意力项与参数项之比约 $T/(12d)$。
+- 混合精度 + Adam 的模型状态是每参数 16 字节；激活与 $BTL$ 成正比，长序列大批次时往往超过模型状态。
+- MFU = 实测吞吐 × 每 token 模型 FLOPs ÷ 硬件峰值；峰值要查准精度，并把稀疏峰值除以 2。所有公式都应该用计数器或实测核对。
+
+下一章把这些工具用起来：训练第一个神经语言模型，并看看它的参数量和计算量如何决定它能学到什么。
+
+## 练习
+
+1. 一个 $L = 24$、$d = 2048$、$V = 50304$、标准多头注意力、$d_{ff} = \tfrac83 d$（对齐到 64 的倍数）、共享嵌入的 GPT，参数量是多少？用 `gpt_param_count` 验证你的手算。
+
+<details>
+<summary>答案</summary>
+
+$d_{ff} = 64\lceil 8\cdot2048/3/64\rceil = 5504$。每层：注意力 $4d^2 = 16{,}777{,}216$，前馈 $3\cdot2048\cdot5504 = 33{,}816{,}576$，归一化 $4096$，合计 $50{,}597{,}888$；24 层为 $1{,}214{,}349{,}312$。嵌入 $50304\times2048 = 103{,}022{,}592$，加最后的 RMSNorm 2048，总计约 $1.317\times10^9$。
+
+</details>
+
+2. 为什么网络第一层（嵌入之后的第一个线性层）的反向 FLOPs 理论上只有前向的 1 倍？对一个 32 层的模型，这能省下多少比例的总训练 FLOPs？
+
+<details>
+<summary>答案</summary>
+
+第一层的输入是嵌入查表的结果，如果嵌入表需要训练，梯度确实要传回去；但对于输入本身是数据、不需要梯度的层，可以省略 $\partial\mathcal L/\partial X$ 这一次矩阵乘。在 Transformer 中嵌入需要梯度，所以实际上不能省；即使能省，也只是 32 层中一层的一个投影的反向的一半，占总训练 FLOPs 远不到 1%，因此 6N 法则不必修正。
+
+</details>
+
+3. 用 6N 法则估算：在 8 张 A100（BF16 稠密 312 TFLOP/s）上、MFU 40%，训练一个 1.3B 参数的模型 26B token（约 20 token/参数）需要多长时间？
+
+<details>
+<summary>答案</summary>
+
+$C = 6\times1.3\times10^9\times26\times10^9 = 2.03\times10^{20}$ FLOPs。有效算力 $8\times312\times10^{12}\times0.4 = 9.98\times10^{14}$ FLOP/s。时间 $2.03\times10^{20}/9.98\times10^{14}\approx 2.03\times10^5$ 秒，约 2.3 天。
+
+</details>
+
+4. 一个 7B 模型（6.74B 参数）用 LoRA 微调：冻结全部原参数（BF16 存放），只训练 20M 个 LoRA 参数（混合精度 + Adam）。估算模型状态显存。
+
+<details>
+<summary>答案</summary>
+
+冻结参数只需 BF16 权重本身：$6.74\times10^9\times2 \approx 13.5$ GB，没有梯度和优化器状态。LoRA 参数 $20\times10^6\times16 = 0.32$ GB。合计约 13.8 GB，加上激活即可放进一张 24 GB 的显卡。注意激活仍要为反向保存——冻结的层也必须把梯度传过去。
+
+</details>
+
+5. 某训练任务在 64 张 H100 上训练 7B 模型（序列长度 4096），观测到每张卡每秒处理 3000 个 token。计算 MFU（计入因果注意力项）。
+
+<details>
+<summary>答案</summary>
+
+每 token 训练 FLOPs = $3\times$ 前向 = $3\times14.29\times10^9 \approx 4.29\times10^{10}$（前向数字取自本章的柱状图）。每卡实测 $3000\times4.29\times10^{10} = 1.29\times10^{14}$ FLOP/s，除以 $989.5\times10^{12}$ 得 MFU ≈ 13%——偏低，提示存在通信、数据加载或小批次带来的瓶颈。若只用 $6N$（$6\times6.74\times10^9$）计算，MFU 约 12%。
+
+</details>
+
+## 参考文献
+
+- Stanford CS336 (Spring 2025), [Lecture 2: PyTorch, resource accounting](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py)。
+- J. Kaplan et al., [Scaling Laws for Neural Language Models](https://arxiv.org/abs/2001.08361)，2020（表 1：参数量与每 token FLOPs）。
+- J. Hoffmann et al., [Training Compute-Optimal Large Language Models](https://arxiv.org/abs/2203.15556)，2022（附录 F：FLOPs 计算）。
+- A. Chowdhery et al., [PaLM: Scaling Language Modeling with Pathways](https://arxiv.org/abs/2204.02311)，2022（附录 B：MFU 的定义）。
+- S. Rajbhandari et al., [ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054)，SC 2020（混合精度 Adam 每参数 16 字节）。
+- P. Micikevicius et al., [Mixed Precision Training](https://arxiv.org/abs/1710.03740)，ICLR 2018。
+- V. Korthikanti et al., [Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198)，2022（每层激活公式）。
+- H. Touvron et al., [LLaMA: Open and Efficient Foundation Language Models](https://arxiv.org/abs/2302.13971)，2023（7B 配置）。
+- NVIDIA, [H100 Tensor Core GPU Datasheet](https://resources.nvidia.com/en-us-tensor-core/nvidia-tensor-core-gpu-datasheet)；[A100 Tensor Core GPU Datasheet](https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf)。
+- PyTorch 源码：[`torch/utils/flop_counter.py`](https://github.com/pytorch/pytorch/blob/main/torch/utils/flop_counter.py)。

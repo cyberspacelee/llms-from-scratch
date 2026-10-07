@@ -2,7 +2,319 @@
 title: 张量：形状、步长与视图
 description: 张量的 shape、stride 与 storage；view、reshape、transpose 与 contiguous 的区别，广播规则，以及 einsum/einops 写法。
 order: 1
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/tensors.py
+  - tests/pytorch/test_tensors.py
 ---
 
-本章正在撰写。
+第一部分用纸和笔推导了矩阵乘法、链式法则和反向传播，并在[从零实现自动微分](/math/autodiff/)中用几十行 Python 搭起了一个能求梯度的小引擎。那个引擎足以说明原理，却离真正的训练很远：它不知道数据在内存里怎样摆放，不会在 GPU 上运行，也没有办法告诉我们一次运算要花多少时间和显存。从这一章开始，我们换用 PyTorch，并且始终带着一个问题读代码——**这一行在内存里做了什么？**
+
+张量（tensor）是 PyTorch 的基本对象。初学者常把它当成“多维数组”，这个说法只对了一半。一个张量其实由两部分组成：一块一维的连续内存（storage），以及一份“如何把多维下标翻译成内存位置”的说明（shape、stride、offset）。理解了这一点，`view`、`transpose`、`reshape`、`contiguous` 这些看似相近的操作就各自有了清楚的含义，许多“形状对了但结果错了”的 bug 也就有了解释。本章依次讲内存布局、视图、索引、广播和轴的命名写法，最后讨论 dtype 与 device。
+
+阅读本章需要熟悉[向量、矩阵与张量](/math/vectors-matrices/)中的矩阵记号。所有结论都在 `tests/pytorch/test_tensors.py` 中有对应的断言，建议边读边在 Python 里试。
+
+## 张量是一块内存加一份解释
+
+### storage、shape、stride 与 offset
+
+创建 `x = torch.arange(12.0).reshape(3, 4)` 时，PyTorch 申请了一块能放 12 个 `float32` 的内存，依次写入 0 到 11。我们看到的 $3\times 4$ 矩阵只是对这块内存的一种解释：第 $i$ 行第 $j$ 列的元素，存放在第 $4i + j$ 个位置。这里的 4 和 1 就是 **步长**（stride）：沿第 0 维走一步，内存地址前进 4 个元素；沿第 1 维走一步，前进 1 个元素。
+
+<Definition term="张量的内存布局" kind="定义">
+一个张量由一维存储 `storage` 和三项元数据描述：形状 $(n_0,\dots,n_{k-1})$、步长 $(s_0,\dots,s_{k-1})$ 与起始偏移 $o$。下标 $(i_0,\dots,i_{k-1})$（$0\le i_j<n_j$）处的元素位于 storage 的第
+
+$$
+\operatorname{pos}(i_0,\dots,i_{k-1}) = o + \sum_{j=0}^{k-1} i_j\, s_j
+$$
+
+个位置。stride 以**元素**为单位（NumPy 的 `strides` 以字节为单位，两者相差 `element_size()` 倍）。
+</Definition>
+
+这个公式就是张量的全部秘密。下面用纯 Python 把它写出来：`element_offset` 计算一个下标对应的内存位置，`as_strided_reference` 则遍历所有下标、逐个从一维存储里取数，拼出一个新张量。PyTorch 的 `torch.as_strided` 做的是同一件事，只是它不复制，而是返回一个共享 storage 的新“解释”。
+
+<CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="offset" />
+
+<Diagram width={720} height={370} label="同一块 12 元素的存储被解释为 3×4 矩阵 x 和它的转置 xᵀ">
+  <Matrix x={60} y={60} rows={3} cols={4} cell={36} values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]} rowLabels={['0', '1', '2']} colLabels={['0', '1', '2', '3']} title="x：shape (3, 4)，stride (4, 1)" highlight={[{ rows: [1], tone: 'accent' }, { cells: [[1, 2]], tone: 'strong' }]} />
+  <Matrix x={520} y={40} rows={4} cols={3} cell={36} values={[[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7, 11]]} rowLabels={['0', '1', '2', '3']} colLabels={['0', '1', '2']} title="xᵀ：shape (4, 3)，stride (1, 4)" highlight={[{ cols: [1], tone: 'accent' }, { cells: [[2, 1]], tone: 'strong' }]} />
+  <Matrix x={74} y={290} rows={1} cols={12} cell={[44, 34]} values={[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]} colLabels={['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']} highlight={[{ cells: [[0, 4], [0, 5], [0, 7]], tone: 'accent' }, { cells: [[0, 6]], tone: 'strong' }]} />
+  <Arrow from={[154, 174]} to={[358, 270]} tone="accent" />
+  <Arrow from={[576, 194]} to={[386, 270]} tone="accent" />
+  <Text x={40} y={236} label="x[1, 2]：0 + 1·4 + 2·1 = 6" size="sm" anchor="start" mono />
+  <Text x={700} y={236} label="xᵀ[2, 1]：0 + 2·1 + 1·4 = 6" size="sm" anchor="end" mono />
+  <Text x={360} y={350} label="storage：一维连续内存（上方数字是位置）" size="sm" tone="muted" />
+  <Fragment slot="caption">上方两个矩阵共享下方同一块存储。x 的第 1 行（浅色）与 xᵀ 的第 1 列是同样四个内存位置 4–7；深色格子 x[1, 2] 与 xᵀ[2, 1] 都按“偏移 + Σ 下标 × 步长”算到位置 6。转置没有搬动任何数据，只是交换了 shape 与 stride。</Fragment>
+</Diagram>
+
+### 手算：转置为什么不复制
+
+按定义算一遍。`x` 的 stride 是 $(4,1)$，元素 `x[1, 2]` 的位置是 $0 + 1\cdot 4 + 2\cdot 1 = 6$，值为 6。`x.T` 的形状是 $(4,3)$，PyTorch 把两个 stride 也交换，得到 $(1,4)$；于是 `x.T[2, 1]` 的位置是 $0 + 2\cdot 1 + 1\cdot 4 = 6$，读到的正是同一个数。转置只改了元数据，代价是 $O(1)$，与张量大小无关。
+
+切片也一样。`x[1:, ::2]` 的含义是“从第 1 行开始、每隔一列取一个”：起始偏移变为 $o = 1\cdot 4 = 4$，第 0 维 stride 仍是 4，第 1 维 stride 变成 $2\cdot 1 = 2$，形状为 $(2, 2)$。它的四个元素位于 $4, 6, 8, 10$。测试 `test_offset_matches_torch_layout` 对转置、切片、`permute` 三种视图逐一验证了这条公式，并用 `torch.as_strided` 从同一块 storage 重建出这些视图。
+
+```python
+x = torch.arange(12.0).reshape(3, 4)
+y = x[1:, ::2]
+y.shape, y.stride(), y.storage_offset()   # (torch.Size([2, 2]), (4, 2), 4)
+y.untyped_storage().data_ptr() == x.untyped_storage().data_ptr()   # True
+```
+
+## 视图：改变解释，不改变数据
+
+### 哪些操作返回视图
+
+能够只靠修改 shape/stride/offset 完成的操作，PyTorch 都返回 **视图**（view）：新张量与原张量共享 storage，写入其中一个，另一个也会变。常见的视图操作有：
+
+- `view` / `reshape`（在可行时）：把若干相邻维合并或拆分；
+- `transpose`、`permute`、`.T`、`.mT`：交换维度，即交换 stride；
+- 基本切片 `x[a:b:c]`、整数下标 `x[i]`、`narrow`、`select`：改 offset 与 stride；
+- `unsqueeze`、`squeeze`：增删长度为 1 的维；
+- `expand`：把长度为 1 的维“拉长”，做法是把这一维的 stride 设为 0——所有下标都读同一个元素；
+- `unfold`：滑动窗口，[第一个神经语言模型](/pytorch/first-language-model/)构造上下文窗口时会用到。
+
+视图的好处是零成本，风险是“牵一发而动全身”。下面这段代码通过转置视图写入，原张量也随之改变：
+
+```python
+x = torch.arange(12.0).reshape(3, 4)
+y = x.T
+y[0, 1] = -1.0
+x[1, 0]          # tensor(-1.)  —— y[0, 1] 与 x[1, 0] 是同一个内存位置
+```
+
+在训练代码里，这种共享通常是期望的行为（例如把一个大缓冲区切成若干块分别使用）；但如果你想保存某个中间结果的快照，就必须显式地 `clone()`。
+
+### 连续性
+
+**连续**（contiguous）指元素在 storage 中恰好按行优先（C 顺序）紧密排列：最后一维 stride 为 1，每往前一维，stride 乘上后面那一维的长度。对形状 $(n_0,\dots,n_{k-1})$，连续张量的 stride 是
+
+$$
+s_{k-1} = 1,\qquad s_j = s_{j+1}\, n_{j+1}\quad (j = k-2,\dots,0).
+$$
+
+`x` 是连续的；`x.T` 的 stride $(1,4)$ 不满足这个递推，所以不连续。长度为 1 的维度无论 stride 是多少都不会被访问到第二个位置，因此判定时可以跳过——这也是 `x.unsqueeze(1)` 仍然连续的原因。
+
+<CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="contiguous" />
+
+连续性之所以重要，是因为很多算子（尤其是 GPU kernel）假设输入连续，才能用最简单的方式按顺序读内存；遇到不连续的输入，它们要么内部先复制一份，要么直接报错。第八部分会讲到，连续访问还决定了 GPU 上的访存能否合并（coalesced），从而影响带宽利用率。
+
+### view、reshape 与 contiguous
+
+`view` 只做一件事：在**不复制**的前提下重新解释形状。它要求新形状能用一组 stride 表达在原 storage 上。对连续张量，任意合并、拆分都可以；对 `x.T` 这样的不连续张量，想把它展平成长度 12 的一维向量，就需要按 $0,4,8,1,5,9,\dots$ 的顺序读内存——这不是任何一个固定 stride 能表达的，于是 `x.T.view(-1)` 报错：
+
+```text
+RuntimeError: view size is not compatible with input tensor's size and stride
+(at least one dimension spans across two contiguous subspaces). Use .reshape(...) instead.
+```
+
+`reshape` 是“能 view 就 view，不能就复制”：对连续输入它和 `view` 相同，返回共享 storage 的视图；对不连续输入，它先调用 `contiguous()` 把数据按新的逻辑顺序复制到一块新内存。`contiguous()` 本身在输入已经连续时直接返回自己，否则复制。三者的关系如下图。
+
+<Diagram width={720} height={250} label="view、reshape 与 contiguous 的决策过程">
+  <Box x={20} y={95} w={160} h={56} label="x.reshape(shape)" mono />
+  <Box x={240} y={95} w={200} h={56} label={'能否用新的 stride\n表达同一块内存？'} size="sm" />
+  <Box x={520} y={20} w={180} h={56} label="返回视图" sub="共享 storage，O(1)" tone="accent" />
+  <Box x={520} y={170} w={180} h={56} label="contiguous() 复制" sub="新 storage，O(n)" tone="accent2" />
+  <Arrow from={[180, 123]} to={[240, 123]} />
+  <Arrow from={[440, 110]} via={[[480, 110], [480, 48]]} to={[520, 48]} tone="accent" label="能" labelSide="left" />
+  <Arrow from={[440, 136]} via={[[480, 136], [480, 198]]} to={[520, 198]} tone="accent2" label="不能" labelSide="left" />
+  <Text x={610} y={123} label="x.view(shape) 在“不能”时直接报错" size="xs" tone="muted" />
+  <Fragment slot="caption">reshape 先尝试 view，失败时退化为复制；view 从不复制，失败就报错。因此 view 可以当作“我断言这里不复制”的检查，reshape 则是“形状对就行”。</Fragment>
+</Diagram>
+
+实践中，在性能敏感的代码里写 `view` 可以让意外的复制以报错的形式暴露出来；在不关心是否复制的地方写 `reshape` 更省心。测试 `test_views_share_storage_and_copies_do_not` 用 `untyped_storage().data_ptr()` 判断两个张量是否共享内存，把上面每一条都核对了一遍。
+
+<Callout tone="warn" title="is_contiguous() 为 True 不代表与原张量无关">
+`x[1:]` 是连续的，但它仍然是 `x` 的视图（offset 为 4）。连续性描述“排列方式”，共享与否描述“是不是同一块内存”，两者是独立的问题。要判断共享，比较 storage 指针；要切断联系，用 `clone()`。
+</Callout>
+
+## 索引：基本切片与高级索引
+
+PyTorch 沿用 NumPy 的索引语义，分两类，规则可以概括为一句话：**能用 offset 和 stride 描述的结果就返回视图，否则复制**。
+
+基本索引（basic indexing）由整数、切片 `a:b:c`、`None`（新增维）和 `...` 组成。整数下标让那一维消失、offset 前移；切片改变 offset、长度和 stride。它们的结果一定能用一组新的 (shape, stride, offset) 描述，所以总是视图。
+
+高级索引（advanced indexing）用整数张量或布尔张量作下标，例如 `x[[0, 2]]`、`x[torch.tensor([2, 0, 1])]`、`x[x > 3]`。选出来的行可以任意重复、任意排序，布尔掩码选出的元素个数还取决于数据，一般无法用固定步长描述，所以结果总是新内存。嵌入层的 `weight[idx]` 就是高级索引——下一章的 `Embedding` 正是这样实现的，它返回的是复制出来的行，梯度通过索引的反向（把梯度“散射”回被选中的行）传回参数。
+
+两类索引还有一个容易混淆的地方：**写入**。`x[[0, 2]] = 0` 这种出现在赋值左侧的高级索引不会先复制再写，而是直接调用 `index_put_` 原地写回 `x`；但 `y = x[[0, 2]]; y[:] = 0` 写的是副本，不影响 `x`。原地累加时还要注意重复下标：`x[idx] += 1` 对重复的下标只会加一次，需要累加语义时用 `x.index_put_((idx,), ones, accumulate=True)` 或 `index_add_`。[第一个神经语言模型](/pytorch/first-language-model/)统计 bigram 次数时用的就是带 `accumulate=True` 的写法。
+
+## 广播：形状不同的张量怎样相加
+
+### 广播规则
+
+给 $(B, d)$ 的激活加上 $(d,)$ 的偏置，或者把 $(B, T, V)$ 的 logits 减去 $(B, T, 1)$ 的最大值，形状并不相同，PyTorch 却能直接计算。这就是 **广播**（broadcasting）。
+
+<Definition term="广播规则" kind="定义" source="https://pytorch.org/docs/stable/notes/broadcasting.html">
+两个张量可以广播，当且仅当把它们的形状**右对齐**后，每一维满足以下之一：长度相等；其中一个长度为 1；其中一个缺失（视为 1）。结果每一维取两者中较大的长度。长度为 1 的维度在计算时被“复制”到目标长度——实现上是 stride 为 0 的 `expand` 视图，并不真的复制数据。
+</Definition>
+
+<CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="broadcast" />
+
+手算一个例子：$(3,1)$ 与 $(1,4)$ 右对齐后逐维比较，第 0 维 $3$ 与 $1$ 取 3，第 1 维 $1$ 与 $4$ 取 4，结果为 $(3,4)$。$(2,3,4)$ 与 $(4,)$ 补齐成 $(1,1,4)$ 后结果为 $(2,3,4)$——偏置被加到每个批、每个位置上。$(3,4)$ 与 $(3,)$ 则失败：右对齐后最后一维是 $4$ 对 $3$，既不相等也没有 1。
+
+<Diagram width={720} height={210} label="(3,1) 与 (1,4) 广播为 (3,4) 的外加">
+  <Matrix x={40} y={50} rows={3} cols={1} cell={34} values={[[0], [10], [20]]} title="a：(3, 1)" tone="info" />
+  <Text x={110} y={102} label="+" size="lg" />
+  <Matrix x={140} y={84} rows={1} cols={4} cell={34} values={[[0, 1, 2, 3]]} title="b：(1, 4)" tone="accent" />
+  <Text x={300} y={102} label="=" size="lg" />
+  <Matrix x={340} y={50} rows={3} cols={4} cell={34} values={[[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]} title="a + b：(3, 4)" highlight={[{ cells: [[2, 1]], tone: 'strong' }]} />
+  <Text x={520} y={70} label="a 沿列方向 expand" size="sm" tone="info" anchor="start" />
+  <Text x={520} y={92} label="（第 1 维 stride = 0）" size="sm" tone="muted" anchor="start" mono />
+  <Text x={520} y={124} label="b 沿行方向 expand" size="sm" tone="accent" anchor="start" />
+  <Text x={520} y={146} label="（第 0 维 stride = 0）" size="sm" tone="muted" anchor="start" mono />
+  <Fragment slot="caption">列向量与行向量相加得到“外加表”。结果的 [2, 1] = a[2, 0] + b[0, 1] = 20 + 1。两个输入都没有被真正复制：广播在读数时把长度为 1 的维度的步长当作 0。</Fragment>
+</Diagram>
+
+### 广播造成的常见 bug
+
+广播让代码简洁，也让一类错误悄无声息：形状“碰巧能广播”时，不会有任何报错。
+
+最经典的一个：回归模型输出 `pred` 形状为 $(N,1)$，标签 `y` 形状为 $(N,)$。`pred - y` 右对齐后是 $(N,1)$ 对 $(1,N)$，结果是 $(N,N)$ 的矩阵，第 $(i,j)$ 项是 $\hat y_i - y_j$。再取 `.pow(2).mean()`，得到的是所有预测与所有标签两两之差的均方——一个数值合理、能够反向传播、却完全错误的损失。修复方法是在相减前让形状一致（`pred.squeeze(-1)`），或者更好地，在关键位置写 `assert pred.shape == y.shape`。
+
+另外两个常见陷阱：
+
+- **归约后忘记 `keepdim=True`。** softmax 的数值稳定写法要减去每行最大值。`x.max(dim=-1).values` 形状为 $(B,)$，直接 `x - m` 会把 $m$ 当作沿**最后一维**广播，即第 $j$ 列减去第 $j$ 个样本的最大值（当 $B$ 恰好等于列数时不会报错）。应写 `x.max(dim=-1, keepdim=True).values`，形状 $(B,1)$。
+- **原地运算不能广播被写入的一方。** `a.add_(b)` 要求结果形状等于 `a` 的形状；`a` 为 $(1,4)$、`b` 为 $(3,4)$ 时会报错，因为结果放不进 `a`。
+
+<Callout tone="tip" title="形状断言是最便宜的测试">
+在模型的 `forward` 里给关键张量写注释形状（如 `# [B, T, d]`），在损失函数入口写 `assert logits.shape[:-1] == targets.shape`。这些断言几乎没有开销，却能在第一步就拦下广播 bug，而不是在训练两小时后发现损失曲线不对。
+</Callout>
+
+## 给轴起名字：einsum 与 rearrange
+
+### einsum
+
+矩阵乘写作 `a @ b` 很简洁，但一旦涉及四维张量和转置，就很难一眼看出“哪个轴和哪个轴相乘”。爱因斯坦求和约定（Einstein summation）把每个轴写成一个字母：出现在输入但不出现在输出的字母被求和，其余字母按输出中的顺序排列。注意力分数
+
+$$
+S_{bhij} = \sum_{d} Q_{bhid}\, K_{bhjd}
+$$
+
+直接写成 `torch.einsum("bhid,bhjd->bhij", q, k)`，与 `q @ k.transpose(-2, -1)` 等价。`einsum` 在内部会把它翻译成 `permute + reshape + bmm`，性能与手写的矩阵乘相当。写法的价值在于**可读与可检查**：读者不用追踪 `transpose(-2, -1)` 交换了哪两个维度。
+
+### rearrange：拆分、合并与重排
+
+多头注意力需要把 $(B,T,d)$ 拆成 $(B,h,T,d_h)$，其中 $d = h\cdot d_h$。用 PyTorch 原语要两步：`view(B, T, h, d_h)` 把最后一维拆开，再 `transpose(1, 2)` 交换 $T$ 与 $h$。einops 库把这两步写成一个模式串：
+
+```python
+from einops import rearrange   # pip install einops
+heads = rearrange(x, "b t (h d) -> b h t d", h=4)
+```
+
+括号表示“这一维由括号里的几个轴组合而成”。为了不引入新依赖，本书在 `tensors.py` 中写了一个只支持拆分、合并、重排的最小版本，它恰好揭示了 rearrange 的实现：**reshape 拆开 → permute 重排 → reshape 合并**。
+
+<CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="rearrange" />
+
+第 ② 步的 `permute` 总是视图；第 ③ 步的 `reshape` 在需要把不相邻的轴合并时会复制。下图追踪拆头与合头时 shape 和 stride 的变化，取 $B=1,\ T=3,\ h=2,\ d_h=4$。
+
+<Diagram width={720} height={250} label="拆分注意力头时 shape 与 stride 的变化">
+  <Box x={20} y={40} w={150} h={64} label="x" sub="(1, 3, 8) · (24, 8, 1)" />
+  <Box x={200} y={40} w={170} h={64} label="view：拆最后一维" sub="(1, 3, 2, 4) · (24, 8, 4, 1)" tone="info" size="sm" />
+  <Box x={400} y={40} w={170} h={64} label="transpose(1, 2)" sub="(1, 2, 3, 4) · (24, 4, 8, 1)" tone="accent" size="sm" />
+  <Box x={400} y={160} w={170} h={64} label="transpose 回来" sub="(1, 3, 2, 4) · (24, 4, 8, 1)" tone="accent" size="sm" />
+  <Box x={200} y={160} w={170} h={64} label="reshape：合并" sub="(1, 3, 8) · (24, 8, 1)" tone="accent2" size="sm" />
+  <Arrow from={[170, 72]} to={[200, 72]} />
+  <Arrow from={[370, 72]} to={[400, 72]} />
+  <Arrow from={[485, 104]} to={[485, 160]} label="注意力计算" labelSide="right" />
+  <Arrow from={[400, 192]} to={[370, 192]} />
+  <Text x={645} y={72} label="视图，未复制" size="sm" tone="accent" />
+  <Text x={645} y={192} label="视图，未复制" size="sm" tone="accent" />
+  <Text x={110} y={192} label="不连续 → 复制" size="sm" tone="accent2" />
+  <Fragment slot="caption">每个框下方是 shape · stride。前两步只改元数据；transpose 后 stride 为 (24, 4, 8, 1)，不再是行优先递推，因此合头时 reshape 必须复制一次。这正是 model.py 里写 out.transpose(1, 2).reshape(B, T, -1) 而不是 view 的原因。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="heads" />
+
+第三部分的[多头注意力与因果掩码](/transformer/multi-head-attention/)会直接使用这些形状变换。届时请回来看这幅图：拆头不花钱，合头花一次复制。
+
+## dtype 与 device
+
+### 每个元素占多少字节
+
+dtype 决定每个元素的字节数与数值范围。训练大模型时最常见的几种：
+
+| dtype | 字节 | 指数位/尾数位 | 典型用途 |
+| --- | --- | --- | --- |
+| `float32` | 4 | 8 / 23 | 默认精度、优化器状态、主权重 |
+| `bfloat16` | 2 | 8 / 7 | 混合精度训练的激活与权重 |
+| `float16` | 2 | 5 / 10 | 推理；训练需要损失缩放 |
+| `float8_e4m3fn` | 1 | 4 / 3 | FP8 训练与推理的矩阵乘 |
+| `int64`（`long`） | 8 | — | token id、下标 |
+| `bool` | 1 | — | 掩码 |
+
+一个张量占用的内存是 `x.numel() * x.element_size()` 字节。这个乘法在[资源核算：FLOPs、显存与 MFU](/pytorch/resource-accounting/)里会反复出现。各种浮点格式的数值性质——舍入误差、上溢下溢、为什么 bf16 不需要损失缩放——在[浮点数与数值稳定性](/math/numerics/)中已经推导过，这里不再重复。
+
+### 类型提升与转换
+
+两个不同 dtype 的张量做运算时，PyTorch 按**类型提升**（type promotion）规则选择结果类型：整数与浮点相遇得浮点，bf16 与 fp32 相遇得 fp32，整数之间的真除法 `/` 得浮点（整除用 `//`）。混合精度训练中，“不小心”把 bf16 激活与 fp32 常量张量相乘，会悄悄得到 fp32 结果并占用双倍显存，这是值得用断言防范的地方。
+
+`x.to(dtype)` 与 `x.to(device)` 在目标与当前一致时直接返回 `x` 本身，不复制；否则返回新张量。测试中的 `assert x.to(torch.float32) is x` 说明了这一点。
+
+### device
+
+`device` 指张量所在的设备：`cpu`、`cuda:0`、`mps` 等。参与同一运算的张量必须在同一设备上（0 维标量张量除外），否则报错 `Expected all tensors to be on the same device`。从 CPU 拷到 GPU 走 PCIe 或 NVLink，带宽远低于 GPU 显存带宽，因此训练循环里应当一次性把一个批次搬上 GPU，而不是在循环内部反复 `.cpu()` / `.item()`——每次 `.item()` 都会让 CPU 等待 GPU 把前面排队的所有 kernel 执行完，这种隐式同步是常见的性能杀手。第八部分会用 profiler 观察这种同步。
+
+## 小结
+
+- 张量 = 一维 storage + (shape, stride, offset)。下标 $(i_j)$ 的位置是 $o + \sum_j i_j s_j$；本章所有结论都由这一个公式推出。
+- `transpose`、`permute`、基本切片、`unsqueeze`、`expand` 只改元数据，返回共享内存的视图；高级索引与布尔掩码返回副本。
+- `view` 从不复制、不行就报错；`reshape` 能 view 就 view，否则复制；`contiguous()` 把数据整理成行优先排列。
+- 广播按右对齐逐维比较，长度为 1 的维以 stride 0 扩展；`(N,1)` 与 `(N,)` 相减得到 `(N,N)` 是最常见的静默 bug。
+- `einsum` 和 `rearrange` 用轴的名字代替轴的位置，拆头是视图，合头需要一次复制。
+- 内存 = 元素数 × 每元素字节数；dtype 与 device 不一致会引起隐式提升、报错或同步。
+
+下一章转向 autograd：PyTorch 怎样在前向计算时记录下这些张量运算，又怎样在反向时把梯度沿记录传回去。
+
+## 练习
+
+1. 设 `x = torch.arange(24).reshape(2, 3, 4)`，写出 `x.permute(2, 0, 1)` 的 shape 与 stride，并计算其 `[3, 1, 2]` 元素在 storage 中的位置和值。
+
+<details>
+<summary>答案</summary>
+
+`x` 的 stride 是 $(12, 4, 1)$。`permute(2, 0, 1)` 把第 2、0、1 维依次放到新位置，shape 变为 $(4, 2, 3)$，stride 相应变为 $(1, 12, 4)$。新下标 $[3,1,2]$ 的位置是 $0 + 3\cdot 1 + 1\cdot 12 + 2\cdot 4 = 23$，值为 23；它对应原张量的 `x[1, 2, 3]`，位置 $12 + 8 + 3 = 23$，一致。
+
+</details>
+
+2. 为什么 `x.T.contiguous().view(-1)` 可以成功，而 `x.T.view(-1)` 会失败？两次调用结果中的元素顺序是什么？
+
+<details>
+<summary>答案</summary>
+
+`x.T` 的 stride 是 $(1,4)$，按逻辑顺序展平需要依次读位置 $0,4,8,1,5,9,\dots$，不能用一个常数步长表示，所以 `view` 失败。`contiguous()` 先把元素按 `x.T` 的逻辑顺序复制到新内存，新张量的 stride 是 $(3,1)$，此后 `view(-1)` 只是改解释。结果为 `[0, 4, 8, 1, 5, 9, 2, 6, 10, 3, 7, 11]`。`reshape(-1)` 会自动完成同样的两步。
+
+</details>
+
+3. 设 `y = torch.zeros(4, 1).expand(4, 1000)`。它占用多少内存？执行 `.contiguous()` 后呢？`y[0, 0] = 1` 与 `y.add_(1)` 分别会发生什么？
+
+<details>
+<summary>答案</summary>
+
+`expand` 是视图，第 1 维的 stride 为 0，storage 仍只有 4 个 float32，共 16 字节。`.contiguous()` 会真的复制成 $4\times1000$ 个元素，16000 字节。`y[0, 0] = 1` 只写一个内存位置（位置 0），但第 0 行的 1000 个逻辑元素都指向它，所以整行变成 1——一个不报错的意外。`y.add_(1)` 要对每个逻辑元素各加一次，而多个逻辑元素共享同一位置，结果无法定义，PyTorch 报错“more than one element of the written-to tensor refers to a single memory location”，提示先 `clone()`。
+
+</details>
+
+4. 下面的交叉熵实现在 `logits` 形状为 $(B, V)$、`targets` 形状为 $(B,)$ 时有一个广播 bug。找出它并改正：`logp = logits - logits.logsumexp(dim=-1); loss = -logp[range(B), targets].mean()`。
+
+<details>
+<summary>答案</summary>
+
+`logits.logsumexp(dim=-1)` 形状为 $(B,)$，与 $(B,V)$ 相减时被右对齐到最后一维，变成第 $j$ 列减去第 $j$ 个样本的 logsumexp。当 $B\ne V$ 时直接报错；当 $B=V$ 时静默算错。应写 `logits.logsumexp(dim=-1, keepdim=True)`，形状 $(B,1)$，沿每一行广播。
+
+</details>
+
+5. 用 `einsum` 写出批量矩阵-向量乘 $y_{bi} = \sum_j W_{ij} x_{bj}$，以及计算一批向量两两内积的 Gram 矩阵 $G_{bij} = \sum_d X_{bid} X_{bjd}$。
+
+<details>
+<summary>答案</summary>
+
+`torch.einsum("ij,bj->bi", W, x)`，等价于 `x @ W.T`；`torch.einsum("bid,bjd->bij", X, X)`，等价于 `X @ X.transpose(-2, -1)`。在两个式子里，只出现在输入、不出现在输出的字母（$j$ 与 $d$）被求和。
+
+</details>
+
+## 参考文献
+
+- PyTorch 文档：[Tensor Views](https://pytorch.org/docs/stable/tensor_view.html)，列出所有返回视图的操作。
+- PyTorch 文档：[Broadcasting semantics](https://pytorch.org/docs/stable/notes/broadcasting.html)。
+- PyTorch 文档：[Type promotion](https://pytorch.org/docs/stable/tensor_attributes.html#type-promotion-doc)。
+- NumPy 文档：[Indexing on ndarrays](https://numpy.org/doc/stable/user/basics.indexing.html)，基本索引与高级索引的定义。
+- Edward Z. Yang, [PyTorch internals](http://blog.ezyang.com/2019/05/pytorch-internals/)（2019），从 storage 与 stride 讲起的 PyTorch 内部结构。
+- Alex Rogozhnikov, [Einops: Clear and Reliable Tensor Manipulations with Einstein-like Notation](https://openreview.net/forum?id=oapKSVM2bcj)，ICLR 2022。
+- Stanford CS336 (Spring 2025), [Lecture 2: PyTorch, resource accounting](https://github.com/stanford-cs336/spring2025-lectures/blob/main/lecture_02.py)。

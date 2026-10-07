@@ -2,7 +2,314 @@
 title: 第一个神经语言模型
 description: 从字符级 bigram 计数模型到 Bengio 式 MLP 语言模型：嵌入、上下文窗口、交叉熵训练与采样。
 order: 6
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/char_lm.py
+  - src/llms_from_scratch/pytorch/data/corpus.txt
+  - tests/pytorch/test_char_lm.py
 ---
 
-本章正在撰写。
+这一部分到现在为止，我们学会了张量的内存布局、autograd、模块、训练循环和资源核算，但还没有训练过任何一个“语言模型”。本章把这些工具第一次用在语言上。目标很朴素：给定前面若干个字符，预测下一个字符的概率分布。我们从最简单的模型出发——数一数每个字符后面跟着什么——然后把它改写成一个可以用梯度下降训练的网络，再加上嵌入和隐藏层，得到 Bengio 等人 2003 年提出的神经概率语言模型。
+
+一路上会反复用到[概率、最大似然与交叉熵](/math/probability/)中的结论：语言模型就是一个条件分布 $P(x_t\mid x_{<t})$，训练它就是最大化训练数据的似然，等价于最小化交叉熵。本章的模型都很小，在 CPU 上几秒到几分钟就能训练完；但它们暴露的问题——过拟合与模型容量、固定上下文窗口的局限——正是下一部分 Transformer 要解决的。
+
+## 语料与字符级分词
+
+### 一份随仓库分发的小语料
+
+为了让测试离线可跑，本章使用随仓库分发的 `src/llms_from_scratch/pytorch/data/corpus.txt`：约 13 KB 的公有领域英文文本节选，包括葛底斯堡演说、《独立宣言》开篇、《傲慢与偏见》《爱丽丝漫游奇境》《双城记》《白鲸》的开头，几首莎士比亚十四行诗和钦定版圣经的片段。它有诗歌也有散文，有对话也有演说，足以让模型学到英语拼写的统计规律；同时它又小到足以让我们观察过拟合。
+
+### 字符级分词
+
+最简单的分词方式是把每个字符当作一个 token。词表就是语料中出现过的全部字符，本语料共 $V = 59$ 个：换行、空格、标点、大小写字母。第三部分的[分词：从字节到 BPE](/transformer/tokenization/)会讲为什么实际的 LLM 不这样做——字符级序列太长，模型要花大量容量去学习拼写——但对于理解语言模型的训练，字符级是最透明的选择。
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="tokenizer" />
+
+训练集与验证集按**位置**切分：前 90%（11665 个字符）训练，后 10%（1297 个字符）验证。如果把所有窗口打乱后随机切分，相邻窗口高度重叠，几乎相同的样本会同时出现在两边，验证损失就会虚低。按位置切分也有代价：验证集是语料末尾的《白鲸》开头，文体与训练集的平均有差异，所以验证损失会系统地偏高一些。这是一个诚实的估计。
+
+## bigram 计数模型
+
+### 最大似然估计就是数数
+
+最简单的语言模型只看上一个字符：$P(x_t\mid x_{<t}) \approx P(x_t\mid x_{t-1})$。这叫 **bigram** 模型（二元模型）。它的参数是一张 $V\times V$ 的表，第 $a$ 行是“上一个字符为 $a$ 时，下一个字符的分布”。
+
+怎样从数据中估计这张表？记 $C[a,b]$ 为训练语料中字符 $a$ 后面紧跟 $b$ 的次数。训练数据的对数似然为
+
+$$
+\log\mathcal L = \sum_{t}\log P(x_t\mid x_{t-1}) = \sum_{a}\sum_{b} C[a,b]\,\log P(b\mid a) .
+$$
+
+对每个 $a$，在约束 $\sum_b P(b\mid a) = 1$ 下最大化 $\sum_b C[a,b]\log P(b\mid a)$。用拉格朗日乘子 $\lambda_a$，令 $\partial/\partial P(b\mid a)$ 为零：$C[a,b]/P(b\mid a) = \lambda_a$，即 $P(b\mid a)\propto C[a,b]$，归一化得
+
+<KeyEq label="bigram 的最大似然估计">
+
+$$
+\hat P(b\mid a) = \frac{C[a,b]}{\sum_{b'} C[a,b']} .
+$$
+
+</KeyEq>
+
+最大似然估计就是频率。整个“训练”只是数一遍语料：
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="bigram_counts" />
+
+`index_put_(..., accumulate=True)` 一次性把所有 $(x_{t-1}, x_t)$ 对累加进计数表——[张量：形状、步长与视图](/pytorch/tensors/)中提到过，这里不能写 `counts[a, b] += 1`，因为重复的下标只会被加一次。
+
+<Diagram width={720} height={260} label="bigram 条件概率表的一个片段">
+  <Matrix x={130} y={60} rows={5} cols={8} cell={[62, 32]} values={[[0, 0.09, 0.02, 0.05, 0.05, 0.06, 0.17, 0.01], [0.25, 0.02, 0.08, 0.36, 0.05, 0.08, 0.01, 0.02], [0.13, 0.17, 0.44, 0, 0.1, 0.07, 0.05, 0.01], [0.32, 0.06, 0.03, 0, 0.01, 0.01, 0.04, 0], [0, 0, 0, 0, 0, 0, 0, 1]]} rowLabels={['上一个 = 空格', 't', 'h', 'e', 'q']} colLabels={['空格', 'a', 'e', 'h', 'i', 'o', 't', 'u']} title="P(下一个字符 | 上一个字符)，只显示 8 列" highlight={[{ cells: [[0, 6], [1, 3], [2, 2], [3, 0], [4, 7]], tone: 'accent' }]} />
+  <Fragment slot="caption">由训练集计数得到的部分概率（每行完整的 59 列之和为 1）。空格后最常见的是 t（单词 the、that 的开头）；t 后面最常见 h；h 后面 e；e 后面常是空格（词尾）。q 在训练集中出现 6 次，后面全是 u。这些规律构成了 bigram 模型的全部知识。</Fragment>
+</Diagram>
+
+### 用负对数似然评估
+
+评估语言模型的标准指标是验证集上的**平均负对数似然**（NLL），也就是交叉熵：
+
+$$
+\text{NLL} = -\frac{1}{N}\sum_{t=1}^{N}\log P(x_t\mid x_{t-1}) \quad(\text{单位：nat/字符}).
+$$
+
+它的基准是均匀分布：对 59 个字符一视同仁时，$\text{NLL} = \log 59 \approx 4.08$。困惑度（perplexity）$e^{\text{NLL}}$ 可以理解为“模型平均在多少个字符之间犹豫”。
+
+直接用频率估计有一个问题：验证集中出现了训练集里从没见过的组合（比如某个罕见的大写字母后接某个字符），频率为 0，$\log 0 = -\infty$，NLL 变成无穷大。**加法平滑**（add-α smoothing）给每个计数加上 $\alpha$：$P(b\mid a) = (C[a,b]+\alpha)/\sum_{b'}(C[a,b']+\alpha)$。
+
+| 平滑 α | 训练 NLL | 验证 NLL |
+| --- | --- | --- |
+| 0.01 | 2.308 | 2.350 |
+| 0.1 | 2.326 | 2.348 |
+| 1.0 | 2.430 | 2.429 |
+
+α 越大，训练 NLL 越高（模型偏离了最大似然估计），但对没见过的组合越宽容。α = 0.1 时验证 NLL 最低，约 2.35 nat/字符，困惑度约 10.5——比均匀分布的 59 好得多。从 bigram 表中采样得到的文本是这样的：
+
+```text
+Thesscad f thamss wekerthinownd ghadurr hucht, g r is t ndio therer I ang s the's, wan arld lde
+```
+
+字母的搭配像英语，空格的频率也对，但没有一个完整的单词——只看一个字符，模型无从知道自己在一个单词的什么位置。
+
+## 把计数变成可训练的网络
+
+### one-hot、logits 与 softmax
+
+现在换一个角度得到同一个模型。把上一个字符 $a$ 编码为 one-hot 向量 $e_a\in\{0,1\}^V$，乘以一个 $V\times V$ 的矩阵 $W$ 得到 **logits** $z = e_aW = W_{a,:}$，再经 softmax 变成概率：
+
+$$
+P(b\mid a) = \operatorname{softmax}(W_{a,:})_b = \frac{\exp W_{ab}}{\sum_{b'}\exp W_{ab'}} .
+$$
+
+用交叉熵损失（就是上面的 NLL）对 $W$ 做梯度下降。在[nn.Module、参数与初始化](/pytorch/modules/)中我们知道，one-hot 乘矩阵就是查表，所以模型就是一个 `nn.Embedding(V, V)`：
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="bigram_model" />
+
+### 梯度下降找回了计数
+
+这个网络会学到什么？对第 $a$ 行，损失中与它相关的部分是 $-\sum_b C[a,b]\log\operatorname{softmax}(W_{a,:})_b$。对 $W_{ab}$ 求导（softmax 交叉熵的梯度是“预测减目标”）：
+
+$$
+\frac{\partial}{\partial W_{ab}} = \Bigl(\sum_{b'}C[a,b']\Bigr)\operatorname{softmax}(W_{a,:})_b - C[a,b] .
+$$
+
+令其为零，得到 $\operatorname{softmax}(W_{a,:})_b = C[a,b]/\sum_{b'}C[a,b']$——恰好是计数模型的最大似然估计。也就是说，**两种方法求解的是同一个优化问题**：一个有闭式解，一个用梯度下降逼近。测试 `test_trained_bigram_approaches_count_model` 验证了三点：权重初始化为零时，初始损失恰好是 $\log V$；全批量训练 300 步后，损失与计数模型的 NLL 相差不到 0.02；而且永远不会低于它（最大似然估计是训练集上的最优解）。
+
+把 $W$ 初始化为零，是让模型从“均匀分布”出发。若用 $\mathcal N(0,1)$ 初始化，初始 logits 的随机差异会让模型一开始就“自信地猜错”，初始损失远大于 $\log V$，前几百步都在纠正这个错误。观察初始损失是否约为 $\log V$，是检查语言模型实现的第一个也是最便宜的测试。
+
+计数模型的平滑在网络中也有对应物：给 $W$ 加 L2 正则（权重衰减）会把 logits 拉向 0、把分布拉向均匀，作用与 α 相似。
+
+可训练的版本没有带来更好的结果，却带来了**可扩展性**：计数表只能处理“上一个字符”，上下文变长时表的大小 $V^n$ 指数爆炸；而神经网络可以换上任意复杂的函数来计算 logits。
+
+## Bengio 的神经概率语言模型
+
+### 结构
+
+Bengio 等人（2003）的模型同时解决了两个问题：上下文变长时参数不爆炸，以及让相似的词共享统计强度。它的结构是：
+
+1. 每个 token 查一张共享的嵌入表 $C\in\mathbb R^{V\times m}$，得到 $m$ 维向量；
+2. 把前 $n$ 个 token 的嵌入**拼接**成 $nm$ 维向量；
+3. 经过一个 tanh 隐藏层；
+4. 线性映射到 $V$ 个 logits，softmax 得到下一个 token 的分布。
+
+$$
+h = \tanh\bigl(W_h\,[C_{x_{t-n}};\dots;C_{x_{t-1}}] + b_h\bigr),\qquad
+P(x_t\mid x_{t-n:t-1}) = \operatorname{softmax}(W_o h + b_o).
+$$
+
+<Diagram width={720} height={330} label="Bengio MLP 语言模型的结构（n = 3）">
+  <Box x={40} y={270} w={80} h={40} label="T" mono />
+  <Box x={140} y={270} w={80} h={40} label="h" mono />
+  <Box x={240} y={270} w={80} h={40} label="e" mono />
+  <Box x={40} y={190} w={80} h={44} label="C[T]" sub="m = 16" tone="info" size="sm" />
+  <Box x={140} y={190} w={80} h={44} label="C[h]" sub="m = 16" tone="info" size="sm" />
+  <Box x={240} y={190} w={80} h={44} label="C[e]" sub="m = 16" tone="info" size="sm" />
+  <Arrow from={[80, 270]} to={[80, 234]} />
+  <Arrow from={[180, 270]} to={[180, 234]} />
+  <Arrow from={[280, 270]} to={[280, 234]} />
+  <Box x={40} y={120} w={280} h={40} label="拼接 [C_T; C_h; C_e]" sub="48" tone="neutral" size="sm" />
+  <Arrow from={[80, 190]} to={[80, 160]} />
+  <Arrow from={[180, 190]} to={[180, 160]} />
+  <Arrow from={[280, 190]} to={[280, 160]} />
+  <Box x={390} y={120} w={140} h={40} label="tanh(W_h · + b_h)" sub="H = 128" tone="accent" size="sm" />
+  <Box x={580} y={120} w={120} h={40} label="W_o · + b_o" sub="V = 59 logits" tone="accent" size="sm" />
+  <Box x={580} y={30} w={120} h={44} label="softmax" sub="P(下一个 | the)" tone="strong" size="sm" />
+  <Arrow from={[320, 140]} to={[390, 140]} />
+  <Arrow from={[530, 140]} to={[580, 140]} />
+  <Arrow from={[640, 120]} to={[640, 74]} />
+  <Region x={20} y={176} w={320} h={70} tone="ghost" />
+  <Text x={356} y={211} label="← 三个位置共享同一张嵌入表 C" size="sm" tone="info" anchor="start" />
+  <Fragment slot="caption">输入是最近 3 个字符 “The” 中的 T、h、e。每个字符查同一张嵌入表 C，拼接后经 tanh 隐藏层与输出层得到 59 个 logits。嵌入表在位置间共享，但拼接后的 W_h 对每个位置有一组独立的权重。</Fragment>
+</Diagram>
+
+嵌入是这个模型的关键创新。在 bigram 表里，每个字符（或词）都是孤立的符号；在嵌入空间里，经常出现在相似上下文中的符号会被训练得彼此靠近，于是模型对“见过的组合”学到的规律可以泛化到“相似但没见过的组合”。Bengio 等人当年用的是词级模型，这种泛化的效果尤其明显：见过 “the cat is walking” 能帮助预测 “a dog was running”。
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="mlp_model" />
+
+输出层权重初始化时乘以 0.1、偏置置零，让初始 logits 接近 0、初始损失接近 $\log V$，与上一节的道理相同。
+
+### 构造上下文窗口
+
+训练数据是 $(x_{t-n:t-1},\ x_t)$ 对。用[张量：形状、步长与视图](/pytorch/tensors/)中提到的 `unfold` 可以零复制地得到所有滑动窗口：在序列前面补 $n$ 个空格，`padded.unfold(0, n, 1)` 返回一个形状 $(N+1, n)$、stride 为 $(1, 1)$ 的视图——相邻窗口在内存中重叠。
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="windows" />
+
+### 参数量与计算量
+
+用资源核算的方法数一数（$n = 3$，$m = 16$，$H = 128$，$V = 59$）：
+
+| 部分 | 形状 | 参数 |
+| --- | --- | --- |
+| 嵌入 $C$ | $59\times16$ | 944 |
+| 隐藏层 $W_h, b_h$ | $128\times48$，128 | 6272 |
+| 输出层 $W_o, b_o$ | $59\times128$，59 | 7611 |
+| 合计 | | 14827 |
+
+每个字符的前向计算量约为 $2(nmH + HV) = 2(6144 + 7552) \approx 2.7\times10^4$ FLOPs，训练时乘以 3。训练集 11665 个字符，用批大小 128 训练 4000 步，相当于看过约 44 遍数据，总计算量约 $8\times10^4\times5.1\times10^5 \approx 4\times10^{10}$ FLOPs——按上一章测得的约 30 GFLOP/s，纯计算只需一两秒；实际耗时主要在 Python 与小矩阵的开销上，这正是上一章“矩阵太小时硬件吃不饱”的写照。
+
+## 训练、验证与过拟合
+
+### 训练循环
+
+训练循环是上两章的直接应用：随机抽取小批次，交叉熵损失，AdamW 更新，定期在完整的训练集与验证集上评估（`evaluate` 中用 `eval()` 与 `no_grad`）。
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="train" />
+
+### 容量与过拟合
+
+下表是不同上下文长度 $n$ 与隐藏层宽度 $H$ 的结果（$m = 16$，学习率 $3\times10^{-3}$，批大小 128，训练 4000 步，每 500 步评估一次；“最佳验证”是这些评估点中的最小值）。
+
+| $n$ | $H$ | 参数 | 最终训练 NLL | 最终验证 NLL | 最佳验证 NLL（步数） |
+| --- | --- | --- | --- | --- | --- |
+| 1 | — | 3481（bigram 表） | 2.33 | 2.38 | 2.37（1000） |
+| 3 | 32 | 4459 | 1.69 | 2.09 | 2.09（4000） |
+| 3 | 128 | 14827 | 1.29 | 2.14 | **2.01**（1500） |
+| 3 | 512 | 56299 | 1.26 | 2.39 | 2.08（1500） |
+| 8 | 32 | 7019 | 1.53 | 2.44 | 2.25（1000） |
+| 8 | 128 | 25067 | 0.34 | 3.68 | 2.28（500） |
+| 8 | 512 | 97259 | 0.15 | 3.80 | — |
+
+几个现象值得逐一解释。
+
+**更长的上下文确实有用。** 从 $n = 1$ 到 $n = 3$，最佳验证 NLL 从 2.37 降到 2.01，困惑度从 10.7 降到 7.5。三个字符足以判断“当前在一个单词的哪个位置”。
+
+**更大的模型在训练集上越来越好，在验证集上却越来越差。** $n = 8$、$H = 128$ 的模型把训练 NLL 降到 0.34（困惑度 1.4，几乎把训练集背了下来），验证 NLL 却从第 500 步的 2.28 一路升到 3.68。这就是**过拟合**：参数量（25K）已经与训练字符数（11.7K）同一个量级，模型有足够的容量记住每一个 8 字符上下文后面跟的是什么，而这些记忆对新文本毫无用处。
+
+<Plot label="n = 8、H = 128 的训练与验证损失" x={[0, 4000]} y={[0, 4.5]} xLabel="训练步数" yLabel="NLL（nat/字符）" series={[
+  { points: [[0, 4.076], [500, 1.721], [1000, 1.283], [1500, 0.985], [2000, 0.775], [2500, 0.611], [3000, 0.496], [3500, 0.405], [4000, 0.339]], label: '训练集' },
+  { points: [[0, 4.077], [500, 2.275], [1000, 2.345], [1500, 2.506], [2000, 2.736], [2500, 2.949], [3000, 3.191], [3500, 3.436], [4000, 3.68]], label: '验证集', tone: 'accent2' },
+  { fn: () => Math.log(59), label: 'log V（均匀分布）', tone: 'muted', dashed: true },
+]} markers={[{ at: [500, 2.275], label: '最佳验证点' }]}>
+  <Fragment slot="caption">训练损失单调下降，验证损失在第 500 步后持续上升，到 4000 步时只比均匀分布好一点。两条曲线的分叉点就是开始过拟合的位置；如果在这里停止训练（早停），就能得到这个模型最好的泛化性能。</Fragment>
+</Plot>
+
+**同样的参数预算，用在哪里很重要。** $n = 8$、$H = 32$（7K 参数）的验证结果比 $n = 3$、$H = 32$（4.5K 参数）差：多出来的参数全部花在了把 8 个位置的嵌入接到隐藏层上，而在这么小的语料里，第 4 到第 8 个字符之外的上下文提供的有效信息很少，主要是让模型有了更多记忆的机会。
+
+应对过拟合的方法有：更多的数据（根本方法）、更小的模型、权重衰减与 dropout 等正则化、早停。在 LLM 预训练中，数据通常多到每个 token 只看一遍，过拟合几乎不是问题，问题变成了“给定计算预算，模型多大、数据多少最好”——这是第五部分[缩放定律与计算最优](/pretraining/scaling-laws/)的主题。而在后训练阶段，数据又变少了，过拟合会重新出现。
+
+## 采样生成文本
+
+训练好的模型给出 $P(x_t\mid x_{t-n:t-1})$。自回归地生成文本：从分布中抽一个字符，把它接到上下文末尾，丢掉最老的一个，重复。**温度** $\tau$ 在 softmax 之前把 logits 除以 $\tau$：$\tau < 1$ 让分布更尖锐、文本更保守，$\tau > 1$ 让分布更平坦、文本更随机，$\tau\to0$ 退化为每步取最大概率（贪心解码）。
+
+<CodeFile path="src/llms_from_scratch/pytorch/char_lm.py" region="sample" />
+
+用 $n = 3$、$H = 128$ 的模型训练 1500 步（最佳验证点）后，以 “The ” 开头采样：
+
+```text
+τ = 1.0：The wass conf rutussed to think, the gatiresudder mor pact firmaterare ual, as compacturningle
+τ = 0.5：The was convery a sing to think down a waters. And (pon to his the well all for for the wately and
+```
+
+与 bigram 的输出相比，出现了大量真实的单词（the、to、think、down、waters、and、his、well、all、for），标点后面有空格，句号后面是大写字母。但句子没有任何意义：模型只能看见前三个字符，“to think down a waters” 中的每个三字符片段都很常见，整体却不通。降低温度让输出更集中在高频词上，同时也更容易陷入 “for for the” 这样的重复。第三部分的[文本生成：解码策略与 KV Cache](/transformer/generation/)会系统地讨论温度、top-k、top-p 等解码策略。
+
+## 固定上下文窗口的局限
+
+MLP 语言模型的上下文是一个固定长度 $n$ 的窗口，这带来了三个根本性的问题。
+
+**参数随窗口线性增长。** 拼接后的输入是 $nm$ 维，隐藏层权重有 $nmH$ 个参数。想看 1000 个 token 的上下文，隐藏层就要有 1000 倍宽的输入。
+
+**位置之间不共享。** $W_h$ 对第 1 个位置和第 8 个位置用的是完全不同的权重块。“前一个词是 the”这条知识要在每个位置上分别学一遍，而且模型无法自然地处理长度变化的输入。
+
+**看不见窗口之外的任何东西。** 无论窗口取多大，总有更远处的信息被截断：一个人物的名字在 200 个 token 前出现过，现在要再次提到他，MLP 无从得知。
+
+循环神经网络（RNN）用一个随时间传递的隐藏状态来处理任意长的历史，但把全部历史压缩进一个固定大小的向量，长距离信息很难保留，训练也只能按时间步串行进行。Transformer 的**注意力**给出了另一个答案：对每个位置，用内容（而不是固定的位置权重）计算它应该“看”上下文中的哪些位置，再按这个权重把它们的表示加起来。参数量与上下文长度无关，所有位置共享同一组投影矩阵，任意两个位置之间都只有一步的距离。下一部分从[注意力机制](/transformer/attention/)开始，一步步把这个想法变成全书使用的 GPT。
+
+## 小结
+
+- 语言模型就是条件分布 $P(x_t\mid x_{<t})$；按交叉熵（平均 NLL）训练和评估，均匀分布的基准是 $\log V$。
+- bigram 的最大似然估计就是频率；平滑防止未见组合的概率为零。
+- 把 bigram 写成 one-hot × 矩阵 + softmax 的网络，梯度下降求解的是同一个最大似然问题，最优解就是频率；初始损失应为 $\log V$。
+- Bengio 的 MLP 用共享嵌入表、拼接、tanh 隐藏层把上下文扩展到 $n$ 个 token；嵌入让相似符号共享统计强度。
+- 模型容量远超数据量时，训练损失持续下降、验证损失上升——过拟合；需要更多数据、正则化或早停。
+- 固定窗口的拼接结构让参数随上下文线性增长、位置间不共享、无法看到窗口之外，这引出了注意力。
+
+## 练习
+
+1. 只有 6 个 q 的训练数据中，q 后面全是 u。用 α = 0.1 的加法平滑，$P(\text{u}\mid\text{q})$ 是多少？若验证集中出现 “Qatar” 这样的组合，平滑前后会怎样？
+
+<details>
+<summary>答案</summary>
+
+$P(\text{u}\mid\text{q}) = (6 + 0.1)/(6 + 59\times0.1) = 6.1/11.9 \approx 0.513$。平滑把将近一半的概率分给了 58 个没见过的字符，对于只出现 6 次的上下文，这个先验的影响很大。若出现 q 后接 a，平滑前概率为 0，NLL 为无穷大；平滑后 $P = 0.1/11.9 \approx 0.0084$，贡献约 4.8 nat。（本语料大写 Q 不在词表中，实际会在编码时报错——字符级分词的“未登录字符”问题，BPE 用字节级回退解决。）
+
+</details>
+
+2. 证明：对 bigram 网络，若用全零初始化 $W$，第一步梯度下降后 $W_{a,:}$ 正比于“第 $a$ 行的经验分布减去均匀分布”。
+
+<details>
+<summary>答案</summary>
+
+全零时 $\operatorname{softmax}(W_{a,:}) = \mathbf 1/V$。平均损失对 $W_{ab}$ 的梯度为 $\frac{1}{N}\bigl(n_a/V - C[a,b]\bigr)$，其中 $n_a = \sum_{b}C[a,b]$。一步梯度下降后 $W_{ab} = \frac{\eta n_a}{N}\bigl(C[a,b]/n_a - 1/V\bigr)$，即正比于经验分布与均匀分布之差，比例系数 $\eta n_a/N$ 随字符 $a$ 的频率变化——常见字符的行学得更快。
+
+</details>
+
+3. $n = 8$、$m = 16$、$H = 128$ 的 MLP 有多少参数？若把上下文扩展到 $n = 1024$，参数量是多少？其中哪一部分随 $n$ 增长？
+
+<details>
+<summary>答案</summary>
+
+嵌入 $59\times16 = 944$，隐藏层 $128\times128 + 128 = 16512$，输出层 $59\times128 + 59 = 7611$，合计 25067（与表中一致）。$n = 1024$ 时隐藏层为 $128\times16384 + 128 = 2{,}097{,}280$，合计约 211 万。只有隐藏层的输入权重 $nmH$ 随 $n$ 线性增长；Transformer 的参数量与上下文长度无关。
+
+</details>
+
+4. 表中 $n = 3$、$H = 512$ 的模型参数是 $H = 128$ 的近 4 倍，最佳验证 NLL 却更差。给出两个可以改善它的具体做法，并预测效果。
+
+<details>
+<summary>答案</summary>
+
+（1）早停：在验证损失最低的步数（约 1500 步）停止，或每次评估时保存最佳检查点；它只能保证不变差。（2）加正则：例如权重衰减 0.1 或在隐藏层后加 dropout 0.2，限制有效容量，验证 NLL 有望接近或低于 2.0。根本的办法是增加数据：在同样的模型上用 10 倍的语料训练，过拟合会显著推迟，更大的模型会表现出更好的验证损失。
+
+</details>
+
+5. 把温度设为 $\tau\to0$（贪心解码）从 “The ” 开始生成，你预期会看到什么现象？为什么？
+
+<details>
+<summary>答案</summary>
+
+贪心解码通常很快陷入循环，例如反复生成 “the the the” 或 “of the world of the world”。原因是模型只看最近 3 个字符，状态空间有限；在确定性解码下，一旦某个 3 字符状态再次出现，后续输出就完全重复，形成环。随机采样通过引入随机性跳出环，这也是实际系统偏好采样而非贪心的原因之一。
+
+</details>
+
+## 参考文献
+
+- Y. Bengio, R. Ducharme, P. Vincent, C. Jauvin, [A Neural Probabilistic Language Model](https://www.jmlr.org/papers/v3/bengio03a.html)，JMLR 3, 2003。
+- C. E. Shannon, [Prediction and Entropy of Printed English](https://doi.org/10.1002/j.1538-7305.1951.tb01366.x)，Bell System Technical Journal, 1951。
+- D. Jurafsky, J. H. Martin, [Speech and Language Processing（第 3 版草稿）](https://web.stanford.edu/~jurafsky/slp3/)，第 3 章 N-gram Language Models。
+- A. Karpathy, [makemore](https://github.com/karpathy/makemore) 与 [Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html)（字符级 bigram 与 MLP 语言模型的教学实现）。
+- T. Mikolov et al., [Recurrent neural network based language model](https://www.isca-archive.org/interspeech_2010/mikolov10_interspeech.html)，Interspeech 2010。
+- Stanford CS336 (Spring 2025), [Language Modeling from Scratch](https://cs336.stanford.edu/spring2025/)。
+- 语料来源：Project Gutenberg 的公有领域文本（[Pride and Prejudice](https://www.gutenberg.org/ebooks/1342)、[Alice's Adventures in Wonderland](https://www.gutenberg.org/ebooks/11)、[A Tale of Two Cities](https://www.gutenberg.org/ebooks/98)、[Moby Dick](https://www.gutenberg.org/ebooks/2701)、[Shakespeare's Sonnets](https://www.gutenberg.org/ebooks/1041)、[King James Bible](https://www.gutenberg.org/ebooks/10)），以及葛底斯堡演说与《独立宣言》。

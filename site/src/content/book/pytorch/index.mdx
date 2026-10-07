@@ -2,9 +2,66 @@
 title: PyTorch 与资源核算
 description: 把数学变成能在硬件上运行的程序：理解张量在内存中的样子、autograd 如何记录计算，并学会在写代码之前先算清 FLOPs 和显存。
 order: 0
-draft: true
 ---
 
-把数学变成能在硬件上运行的程序：理解张量在内存中的样子、autograd 如何记录计算，并学会在写代码之前先算清 FLOPs 和显存。
+第一部分用纸笔和几十行 Python 建立了全书的数学工具：矩阵乘法、链式法则、反向传播、交叉熵与浮点误差。那些推导回答的是“算什么”。这一部分回答“怎样在真实的硬件上算”，以及“要花多少代价”。
+
+## 这一部分要解决的问题
+
+把一个数学公式变成能训练的程序，中间隔着三层问题。
+
+第一层是**表示**：一个 $(B, T, d)$ 的张量在内存里究竟长什么样？为什么 `transpose` 是免费的而 `reshape` 有时要复制？为什么形状“对了”结果却错了？这些问题的答案都藏在 storage 与 stride 里。
+
+第二层是**组织**：参数如何登记、梯度如何累积、计算图何时建立和释放、训练循环中每个调用各负责什么、断电后怎样精确地从检查点恢复。PyTorch 用 autograd、`nn.Module` 与优化器把这些簿记工作标准化了，但只有理解它们的语义，才能写出正确的梯度累加、裁剪与恢复逻辑。
+
+第三层是**代价**：一个模型要多少 FLOPs、多少显存、在给定的硬件上要跑多久。CS336 把这种“写代码之前先算账”的能力称为资源核算，它是后面每一部分做决策的依据——缩放定律用 $6ND$ 估算计算预算，分布式训练用每参数 16 字节规划显存切分，推理系统用 FLOPs 与带宽之比判断瓶颈。
+
+## 知识脉络
+
+<Diagram width={720} height={300} label="第二部分各章的依赖关系">
+  <Box x={20} y={40} w={150} h={56} label="张量" sub="shape · stride · 视图" tone="info" />
+  <Box x={20} y={150} w={150} h={56} label="autograd" sub="计算图 · 保存的激活" tone="info" />
+  <Box x={210} y={95} w={150} h={56} label="nn.Module" sub="参数 · 初始化" tone="info" />
+  <Box x={400} y={40} w={150} h={56} label="训练循环" sub="优化器 · 检查点" tone="accent" />
+  <Box x={400} y={150} w={150} h={56} label="资源核算" sub="FLOPs · 显存 · MFU" tone="accent" />
+  <Box x={580} y={95} w={130} h={56} label="第一个语言模型" sub="bigram → MLP" tone="strong" size="sm" />
+  <Arrow from={[170, 68]} to={[210, 112]} />
+  <Arrow from={[170, 178]} to={[210, 134]} />
+  <Arrow from={[360, 112]} to={[400, 68]} />
+  <Arrow from={[360, 134]} to={[400, 178]} />
+  <Arrow from={[550, 68]} to={[580, 112]} />
+  <Arrow from={[550, 178]} to={[580, 134]} />
+  <Box x={20} y={240} w={150} h={44} label="第一部分：数学基础" tone="ghost" size="sm" />
+  <Box x={560} y={240} w={150} h={44} label="第三部分：Transformer" tone="ghost" size="sm" />
+  <Arrow from={[95, 240]} to={[95, 206]} tone="muted" dashed />
+  <Arrow from={[645, 151]} to={[645, 240]} tone="muted" dashed />
+  <Fragment slot="caption">左列两章是 PyTorch 的底层语义；nn.Module 把它们组织成模型；训练循环与资源核算分别回答“怎样训练”和“要花多少”；最后一章把全部工具用在一个真实的语言模型上，并引出第三部分的注意力。</Fragment>
+</Diagram>
+
+六章依次是：
+
+- **张量**：storage、shape、stride 与 offset 的定位公式；视图与复制；广播规则与常见 bug；用 einsum 与 rearrange 给轴命名；dtype 与 device。
+- **autograd**：动态图怎样在前向时建立、在反向后释放；叶子张量与梯度累加；`no_grad`、`inference_mode` 与 `detach`；手写 SiLU 与直通估计器并用 gradcheck 验证；测量为反向保存的激活。
+- **nn.Module**：参数、子模块与 buffer 的登记；从零写 `Linear` 与 `Embedding` 并与 PyTorch 逐位对照；`state_dict`、train/eval、设备迁移；初始化的方差控制。
+- **训练循环**：数据窗口与可恢复的采样器；随机数与可复现；手写带动量的 SGD；梯度累加的正确缩放；梯度裁剪与学习率调度；用测试证明“中断后恢复”与“不中断”逐位一致。
+- **资源核算**：矩阵乘 $2mkn$、训练 $6ND$ 及反向为何是前向的两倍；全书 GPT 的参数量与每 token FLOPs 公式（用 FLOP 计数器核对）；每参数 16 字节的模型状态与激活显存；MFU 与硬件峰值。
+- **第一个神经语言模型**：字符级 bigram 计数模型，它的可训练版本，以及 Bengio 式 MLP；观察容量与过拟合，并看到固定上下文窗口的局限。
+
+## 与前后部分的关系
+
+这一部分直接建立在第一部分之上：[从零实现自动微分](/math/autodiff/)中的磁带就是 autograd 的雏形，[浮点数与数值稳定性](/math/numerics/)中的方差推导就是初始化的依据，[概率、最大似然与交叉熵](/math/probability/)中的最大似然就是语言模型的训练目标。我们不重复这些推导，只在用到时链接回去。
+
+它也为后面的部分打下工程基础。第三部分[从零实现 Transformer](/transformer/)会直接使用本部分的形状变换、模块组织和训练循环；第五部分的混合精度与优化器、第六部分的 ZeRO 与激活重计算，都从本部分的显存公式出发；第八部分的 GPU 编程则会把“stride 决定访存”与“矩阵太小时硬件吃不饱”这两个观察推向硬件层面。
+
+## 阅读与动手建议
+
+每章的完整实现在 `src/llms_from_scratch/pytorch/` 中，测试在 `tests/pytorch/` 中，全部在 CPU 上数秒内跑完。建议的读法是：先读正文，再打开对应的测试文件——测试就是本章结论的可执行版本，例如 `test_resume_reproduces_uninterrupted_run` 和 `test_param_formula_matches_model`。然后改动实现看测试怎样失败：删掉检查点中的一项、去掉梯度累加的除以 $k$、把 `reshape` 换成 `view`。
+
+```sh
+uv sync --group dev
+uv run pytest tests/pytorch -v
+```
+
+资源核算一章的公式值得在纸上手算一遍，再用 `llms_from_scratch.pytorch.accounting` 中的函数核对。养成“先估算、再实测、两者不一致时找出原因”的习惯，比记住任何一个具体数字都重要。
 
 <ChapterList part="pytorch" />

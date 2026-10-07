@@ -2,7 +2,246 @@
 title: nn.Module、参数与初始化
 description: 用 Module 组织参数与子模块，state_dict 与设备迁移，初始化策略及其方差推导。
 order: 3
-draft: true
+code:
+  - src/llms_from_scratch/pytorch/layers.py
+  - tests/pytorch/test_layers.py
 ---
 
-本章正在撰写。
+上一章的例子里，参数是一个个手工创建的 `requires_grad=True` 张量。模型一旦有几十层、几百个参数张量，这种写法就无法维护：优化器需要拿到全部参数，保存模型需要知道每个参数叫什么名字，切换到 GPU 需要把它们一起搬过去，验证时要关掉 dropout。`torch.nn.Module` 就是为解决这些“簿记”问题而存在的：它是一个能自动登记参数、子模块与 buffer 的容器，并在此基础上提供 `parameters()`、`state_dict()`、`to()`、`train()/eval()` 等统一接口。
+
+本章从零写出 `Linear` 与 `Embedding` 两个最基本的层，并逐位对比 PyTorch 的版本，借此弄清 `Module` 的登记机制、`state_dict` 的结构、train/eval 的语义，以及参数初始化的几种常见做法。初始化背后的方差推导已在[浮点数与数值稳定性](/math/numerics/)中完成，本章只把结论落实到代码。
+
+## Module 是一棵登记好的树
+
+### 赋值即登记
+
+`nn.Module` 重写了 `__setattr__`。在 `__init__` 中执行 `self.weight = nn.Parameter(...)` 时，它检查右侧的类型：
+
+- `nn.Parameter`（`Tensor` 的子类，默认 `requires_grad=True`）登记到 `self._parameters`；
+- `nn.Module` 登记到 `self._modules`，成为子模块；
+- 普通张量不登记——除非用 `self.register_buffer(name, tensor)` 显式声明为 **buffer**。
+
+`parameters()`、`named_parameters()`、`buffers()`、`state_dict()` 都是沿 `_modules` 递归遍历这棵树得到的。参数的名字就是从根到它的属性路径，用点号连接，例如 `fc1.weight`。这个机制有一个容易踩的坑：把子模块放在普通 Python 列表里（`self.layers = [Linear(...), ...]`），它们不会被登记，参数不会出现在 `parameters()` 里，优化器也就不会更新它们。应该使用 `nn.ModuleList` 或 `nn.ModuleDict`，全书的 GPT 用 `nn.ModuleList` 存放各个 Block。
+
+下面是本章用来演示的小模型：标准化 → 线性 → GELU → Dropout → 线性。
+
+<CodeFile path="src/llms_from_scratch/pytorch/layers.py" region="mlp" />
+
+<Diagram width={720} height={300} label="MLP 模块树与 state_dict 的键">
+  <Box x={290} y={20} w={140} h={50} label="MLP" sub="根模块" tone="strong" />
+  <Box x={20} y={120} w={150} h={50} label="norm" sub="Standardize" />
+  <Box x={200} y={120} w={150} h={50} label="fc1" sub="Linear(4, 8)" tone="accent" />
+  <Box x={380} y={120} w={150} h={50} label="drop" sub="Dropout(0.1)" tone="muted" />
+  <Box x={560} y={120} w={150} h={50} label="fc2" sub="Linear(8, 2)" tone="accent" />
+  <Arrow from={[330, 70]} to={[95, 120]} />
+  <Arrow from={[350, 70]} to={[275, 120]} />
+  <Arrow from={[370, 70]} to={[455, 120]} />
+  <Arrow from={[390, 70]} to={[635, 120]} />
+  <Box x={20} y={210} w={150} h={70} label={'norm.mean\nnorm.std'} sub="buffer" tone="info" size="sm" mono />
+  <Box x={200} y={210} w={150} h={70} label={'fc1.weight\nfc1.bias'} sub="Parameter" tone="accent" size="sm" mono />
+  <Box x={380} y={210} w={150} h={70} label="（无状态）" tone="ghost" size="sm" />
+  <Box x={560} y={210} w={150} h={70} label={'fc2.weight\nfc2.bias'} sub="Parameter" tone="accent" size="sm" mono />
+  <Arrow from={[95, 170]} to={[95, 210]} />
+  <Arrow from={[275, 170]} to={[275, 210]} />
+  <Arrow from={[455, 170]} to={[455, 210]} />
+  <Arrow from={[635, 170]} to={[635, 210]} />
+  <Fragment slot="caption">子模块通过属性赋值登记成树；底层方框是 state_dict 的键。parameters() 只返回绿色的四个 Parameter，优化器只更新它们；state_dict() 还包含蓝色的 buffer。Dropout 没有任何状态，但它的行为受 train/eval 标志控制。</Fragment>
+</Diagram>
+
+测试 `test_module_tree_parameters_buffers_state_dict` 核对了这棵树：`named_parameters()` 依次给出 `fc1.weight, fc1.bias, fc2.weight, fc2.bias`，`named_buffers()` 给出 `norm.mean, norm.std`，`state_dict()` 是两者的并集。参数总数为 $4\times 8 + 8 + 8\times 2 + 2 = 58$。
+
+### 参数与 buffer 的区别
+
+参数与 buffer 都是模型状态，都会随 `state_dict` 保存、随 `.to()` 迁移。区别只有一个：参数会出现在 `parameters()` 中、被优化器更新；buffer 不会。适合放进 buffer 的东西有 BatchNorm 的滑动均值、固定的标准化统计量、预先算好的位置编码表。全书 GPT 的 RoPE 旋转因子就是 buffer，并且声明为 `persistent=False`：它可以由配置随时重新计算，不必写进检查点。
+
+## 从零写 Linear
+
+### 布局：y = xWᵀ + b
+
+`nn.Linear(in_features, out_features)` 的权重形状是 $(d_\text{out}, d_\text{in})$，前向计算 $y = xW^\top + b$。把输出维放在前面看似别扭，其实对应数学中“$y = Wx$，$W$ 的每一行是一个输出神经元”的写法；对行向量批量输入 $X\in\mathbb R^{B\times d_\text{in}}$，就写成 $XW^\top$。上一章讲过，`.T` 只交换 stride，不复制数据，所以这样存放不影响效率——底层的 BLAS 矩阵乘接口本来就接受“是否转置”的标志。
+
+<CodeFile path="src/llms_from_scratch/pytorch/layers.py" region="linear" />
+
+### 默认初始化从哪里来
+
+`nn.Linear` 的默认初始化写作 `kaiming_uniform_(weight, a=math.sqrt(5))`，看起来神秘，化简后很简单。Kaiming 均匀初始化的界是
+
+$$
+\text{bound} = \text{gain}\cdot\sqrt{\frac{3}{d_\text{in}}},\qquad \text{gain} = \sqrt{\frac{2}{1+a^2}} .
+$$
+
+代入 $a=\sqrt5$，$\text{gain} = \sqrt{2/6} = 1/\sqrt3$，于是 $\text{bound} = 1/\sqrt{d_\text{in}}$，即 $W_{ij}\sim U(-1/\sqrt{d_\text{in}},\ 1/\sqrt{d_\text{in}})$。偏置用同样的界。均匀分布 $U(-c, c)$ 的方差为 $c^2/3$，所以
+
+$$
+\operatorname{Var}(W_{ij}) = \frac{1}{3d_\text{in}},\qquad
+\operatorname{Var}(y_i) = d_\text{in}\cdot\operatorname{Var}(W_{ij})\cdot\operatorname{Var}(x_j) = \frac{1}{3}\operatorname{Var}(x_j)
+$$
+
+（假设 $x$ 各分量独立、零均值）。每过一层，方差缩小到 $1/3$。这个默认值是为了兼容早期 Lua Torch 的行为而保留的历史设定，并不是针对某种激活函数推导的“最优”值；PyTorch 的维护者也在 issue 中讨论过它。训练 Transformer 时，几乎所有实现都会覆盖它。
+
+我们的 `Linear` 直接用 $U(-1/\sqrt{d_\text{in}}, 1/\sqrt{d_\text{in}})$ 初始化，并且与 `nn.Linear` 按同样的顺序（先 weight 后 bias）从全局随机数流中取数。测试 `test_linear_matches_nn_linear_bit_for_bit` 在相同种子下创建两者，比较到 $10^{-7}$ 以内（两种写法计算界时浮点运算顺序不同，最后一位可能有差别），再比较前向输出。这类“与参考实现逐位对照”的测试是从零实现时最有力的验证手段。
+
+## 从零写 Embedding
+
+### 查表就是与 one-hot 相乘
+
+词嵌入层存放一张 $V\times d$ 的表，输入 token id $i$，输出第 $i$ 行。数学上，它等价于把 $i$ 写成 one-hot 行向量 $e_i\in\{0,1\}^V$ 再乘以表 $W$：
+
+$$
+\operatorname{Embed}(i) = e_i W = W_{i,:}.
+$$
+
+但查表不做任何乘法：one-hot 矩阵乘要 $2Vd$ 次浮点运算，查表只是一次内存复制。这就是嵌入层在 FLOPs 核算中被视为“免费”的原因。实现就是一行高级索引：
+
+<CodeFile path="src/llms_from_scratch/pytorch/layers.py" region="embedding" />
+
+`self.weight[idx]` 对任意形状的 `idx` 都成立，输出形状是 `idx.shape + (d,)`。反向时，索引的梯度是“散射累加”：输出位置 $(b, t)$ 的梯度加到第 `idx[b, t]` 行上。同一个 token 出现多次，那一行就收到多份梯度之和；没有出现的行梯度为 0。测试中 token 1 出现两次，它那一行的梯度全是 2。
+
+`nn.Embedding` 的默认初始化是 $\mathcal N(0, 1)$。对于语言模型这个方差太大：输入嵌入经过若干层后还要与输出层共享权重（weight tying），GPT 系列通常改用标准差 $0.02$ 的正态分布。全书的 `GPT._init` 对 Linear 与 Embedding 一律使用 $\mathcal N(0, 0.02^2)$。
+
+## state_dict、加载与参数共享
+
+### state_dict 是有序字典
+
+`model.state_dict()` 返回一个从名字到张量的有序字典，包含全部参数与持久 buffer。它返回的张量与模型中的参数共享内存（是 `detach` 后的视图），所以保存前不需要复制，但也意味着修改它会改到模型。`load_state_dict(sd)` 按名字逐个 `copy_` 进模型现有的参数，默认 `strict=True`：多出或缺少任何一个键都会报错，这能拦住“改了模型结构却加载旧权重”的错误。
+
+几个实践要点：
+
+- 检查点保存 `state_dict()` 而不是整个模型对象（`torch.save(model)` 依赖 pickle 保存类的路径，代码一重构就无法加载）。
+- 加载时先按配置构建模型，再 `load_state_dict`。`torch.load(..., weights_only=True)` 只反序列化张量与基本容器，可以安全加载来源不明的文件。
+- 用 `torch.compile` 或 DDP 包装后，键名会多出 `_orig_mod.` 或 `module.` 前缀，保存前从原始模型取 `state_dict`。
+
+### 参数共享
+
+把同一个 `Parameter` 赋给两个属性，就得到共享权重。全书 GPT 中 `self.lm_head.weight = self.embed.weight` 让输出层与输入嵌入共用一张 $V\times d$ 的表。`parameters()` 会去重，共享的参数只返回一次，优化器只更新一次；反向时两处用途的梯度在同一个 `.grad` 中累加——这正是上一章“梯度累加”语义的又一次应用。`state_dict()` 则会把两个名字都列出来，指向同一块内存。
+
+## train 与 eval
+
+`model.train()` 与 `model.eval()` 只做一件事：递归地把每个子模块的 `training` 标志设为 `True` 或 `False`。行为取决于标志的模块只有少数几种，最常见的是 Dropout 与 BatchNorm。
+
+**Dropout** 训练时以概率 $p$ 把每个元素置零，并把保留的元素乘以 $1/(1-p)$，使期望不变：$\mathbb E[\tilde h] = (1-p)\cdot\frac{h}{1-p} = h$。这种“训练时放大”的写法叫 inverted dropout，好处是推理时什么都不用做——`eval()` 下 Dropout 就是恒等映射。测试 `test_train_eval_changes_dropout_only` 验证了 eval 下两次前向结果相同，train 下不同。
+
+**BatchNorm** 训练时用当前批的统计量并更新滑动均值 buffer，推理时用滑动均值。Transformer 用的 LayerNorm/RMSNorm 对每个样本独立归一化，train/eval 下行为一致。
+
+<Callout tone="warn" title="eval() 不会关闭梯度">
+`model.eval()` 只切换模块行为，不影响 autograd。验证时仍然要包一层 `torch.no_grad()`，否则会白白保存全部激活。反过来，`no_grad` 也不会关闭 dropout。两者解决的是不同的问题，验证循环里通常都需要。
+</Callout>
+
+## 设备、dtype 与参数的身份
+
+`model.to(device)` 与张量的 `.to()` 不同：它**原地**修改模块，把每个参数的 `.data` 换成目标设备上的新张量，参数对象本身（`Parameter` 的 Python 身份）保持不变，并返回 `self`。所以 `model = model.to("cuda")` 和 `model.to("cuda")` 效果相同。`model.to(torch.bfloat16)` 同样会转换所有浮点参数与 buffer（整数 buffer 不变）。
+
+由于参数身份不变，先创建优化器再 `.to()` 理论上可行；但优化器的状态（如 Adam 的矩估计）若已经创建，不会随模型一起迁移。稳妥的顺序是：**构建模型 → `.to(device)` → 创建优化器 → 加载检查点**。
+
+在 GPU 上创建大模型时，先在 CPU 上初始化再搬运会浪费时间和内存。我们的 `Linear` 接受 `device`、`dtype` 参数，直接在目标设备上分配；更进一步可以用 `torch.device("meta")` 只创建形状不分配内存，等加载权重时再实体化——分布式训练加载百亿参数模型时常这样做。
+
+## 初始化：把方差控制住
+
+### 为什么初始化重要
+
+一个 $L$ 层的网络，如果每层把激活的标准差乘以 $\rho$，那么第 $L$ 层的标准差就是 $\rho^L$。$\rho = 0.58$ 时 12 层后缩小到约 $10^{-3}$，$\rho = 1.5$ 时放大到约 130。前者让信号和梯度消失，后者让它们爆炸，两者都会使训练在开始时就陷入困境。[浮点数与数值稳定性](/math/numerics/)推导过，对线性层 $y = xW^\top$，若 $W$ 的元素独立、零均值、方差为 $\sigma^2$，则
+
+$$
+\operatorname{Var}(y_i) = d_\text{in}\,\sigma^2\,\operatorname{Var}(x_j),\qquad
+\rho = \sqrt{d_\text{in}}\,\sigma .
+$$
+
+于是 $\sigma^2 = 1/d_\text{in}$（LeCun）保持前向方差，$\sigma^2 = 2/(d_\text{in}+d_\text{out})$（Xavier/Glorot）在前向和反向之间折中，ReLU 网络因为一半激活被置零而需要 $\sigma^2 = 2/d_\text{in}$（Kaiming/He）。
+
+<Plot label="纯线性网络中激活标准差随深度的变化（d = 512）" x={[0, 12]} y={[0.0001, 100]} logY xLabel="层数" yLabel="激活标准差" series={[
+  { fn: (l) => Math.pow(1 / Math.sqrt(3), l), label: 'nn.Linear 默认' },
+  { fn: (l) => 1, label: 'σ² = 2/(in+out)', tone: 'accent' },
+  { fn: (l) => Math.pow(0.02 * Math.sqrt(512), l), label: 'σ = 0.02', tone: 'info', dashed: true },
+  { fn: (l) => Math.pow(Math.sqrt(2), l), label: 'σ² = 2/in', tone: 'accent2' },
+]}>
+  <Fragment slot="caption">按 ρ = √d_in · σ 逐层相乘的理论曲线（输入标准差为 1、方阵、无激活函数）。nn.Linear 的默认值每层缩小到 1/√3；Xavier 在方阵时恰好保持不变；固定 σ = 0.02 在 d = 512 时 ρ ≈ 0.45，在 d ≈ 2500 时才接近 1；Kaiming 为 ReLU 准备，用在无激活的网络上会逐层放大。</Fragment>
+</Plot>
+
+### Transformer 里的做法
+
+Transformer 有残差连接，信号主要沿残差流 $x_{l+1} = x_l + f_l(x_l)$ 传播，每层只是往上“加”一点。此时的主要风险是残差流的方差随层数累加：$L$ 层、每层两个分支（注意力与前馈），若各分支输出方差为 $v$，残差流方差约增长 $2Lv$。GPT-2 的对策被全书 GPT 沿用：所有权重 $\mathcal N(0, 0.02^2)$，但每个残差分支的输出投影（`o_proj` 与 `w2`）再乘以 $1/\sqrt{2L}$，使总增量与层数无关。
+
+CS336 的作业采用另一种常见约定：线性层用截断正态 $\mathcal N(0, \sigma^2)$，$\sigma^2 = 2/(d_\text{in} + d_\text{out})$，截断在 $\pm 3\sigma$，嵌入用截断的 $\mathcal N(0,1)$。截断去掉了极少数远离均值的样本，避免个别过大的初始权重。
+
+<CodeFile path="src/llms_from_scratch/pytorch/layers.py" region="init" />
+
+截断会让实际标准差略小于 $\sigma$：$\pm3\sigma$ 截断的正态分布标准差约为 $0.986\sigma$，测试 `test_trunc_normal_init_bounds_and_scale` 验证了这一点与截断边界。哪种初始化更好没有定论，它与学习率、归一化位置、优化器相互耦合；第五部分讨论 μP（maximal update parametrization）时会看到，按宽度系统地缩放初始化与学习率，可以让小模型上调好的超参数直接迁移到大模型。
+
+## 冻结参数与参数计数
+
+把某些参数的 `requires_grad` 设为 `False` 就“冻结”了它们：autograd 不会为它们计算梯度，`.grad` 保持 `None`，优化器即使拿到它们也不会更新（SGD、Adam 都跳过 `grad is None` 的参数）。`module.requires_grad_(False)` 递归冻结整个子模块。第七部分的 LoRA 正是冻结原模型、只训练新加的低秩矩阵。
+
+参数计数是资源核算的第一步：
+
+```python
+sum(p.numel() for p in model.parameters() if p.requires_grad)
+```
+
+`parameters()` 对共享参数去重，所以这个式子对 weight tying 的模型也是正确的。测试中冻结 `fc1` 后，可训练参数从 58 降为 $8\times2+2 = 18$。下一章开始训练，再下一章用参数量推出 FLOPs 与显存。
+
+## 小结
+
+- `nn.Module` 通过 `__setattr__` 登记 `Parameter`、子模块与 buffer，形成一棵树；子模块要放在 `ModuleList`/`ModuleDict` 中才会被登记。
+- 参数被优化器更新，buffer 不会；两者都进入 `state_dict`、随 `.to()` 迁移。`persistent=False` 的 buffer 不进入 `state_dict`。
+- `Linear` 存放 $(d_\text{out}, d_\text{in})$ 的权重，计算 $xW^\top + b$；默认初始化化简为 $U(\pm 1/\sqrt{d_\text{in}})$，每层把方差缩小到 1/3。
+- `Embedding` 是查表，等价于 one-hot 矩阵乘但不做乘法；反向把梯度散射累加到被选中的行。
+- `train()/eval()` 只切换 Dropout、BatchNorm 等模块的行为，与 autograd 无关；`model.to()` 原地修改并保持参数身份。
+- 初始化的目标是让每层的方差增益 $\rho = \sqrt{d_\text{in}}\sigma$ 接近 1；Transformer 用小标准差加残差分支 $1/\sqrt{2L}$ 缩放。
+
+## 练习
+
+1. 下面的模型有几个可训练参数？`self.blocks = [nn.Linear(8, 8) for _ in range(3)]; self.head = nn.Linear(8, 2)`。怎样修改才能让三个 block 被训练？
+
+<details>
+<summary>答案</summary>
+
+只有 `head` 被登记，可训练参数为 $8\times2+2 = 18$；列表中的三个 Linear 对 `parameters()` 不可见，优化器不会更新它们，`state_dict` 也不会保存它们。改成 `self.blocks = nn.ModuleList(nn.Linear(8, 8) for _ in range(3))` 后，参数为 $3\times(64+8) + 18 = 234$。
+
+</details>
+
+2. 证明 inverted dropout 不改变激活的期望，并计算它对方差的影响：若 $h$ 为常数，$\tilde h = m h/(1-p)$，$m\sim\text{Bernoulli}(1-p)$，求 $\operatorname{Var}(\tilde h)$。
+
+<details>
+<summary>答案</summary>
+
+$\mathbb E[\tilde h] = \frac{h}{1-p}\mathbb E[m] = h$。$\mathbb E[\tilde h^2] = \frac{h^2}{(1-p)^2}\mathbb E[m^2] = \frac{h^2}{1-p}$，所以 $\operatorname{Var}(\tilde h) = h^2\left(\frac{1}{1-p} - 1\right) = h^2\frac{p}{1-p}$。dropout 保持均值但增加了方差，这是 train 与 eval 下激活分布不完全一致的原因。
+
+</details>
+
+3. 全书 GPT 设置了 `tie_embeddings=True`。用 `named_parameters()` 和 `state_dict()` 分别列出名字，会看到 `lm_head.weight` 吗？参数总数应该怎样计算？
+
+<details>
+<summary>答案</summary>
+
+`named_parameters()` 默认对共享参数去重，只返回先登记的 `embed.weight`；`state_dict()` 两个键都有，指向同一块内存。参数总数应按去重计算，即 `sum(p.numel() for p in model.parameters())`，嵌入表只算一次。资源核算一章的 `gpt_param_count` 对 tie 与非 tie 两种情况都与实际模型对照过。
+
+</details>
+
+4. 对一个 $d_\text{in} = d_\text{out} = 4096$ 的线性层，分别计算 `nn.Linear` 默认、Xavier 与 $\sigma=0.02$ 三种初始化的权重标准差与方差增益 $\rho$。
+
+<details>
+<summary>答案</summary>
+
+默认：$\sigma = 1/\sqrt{3\cdot4096} \approx 0.0090$，$\rho = 1/\sqrt3 \approx 0.577$。Xavier：$\sigma = \sqrt{2/8192} \approx 0.0156$，$\rho = 1$。$\sigma = 0.02$：$\rho = 0.02\times64 = 1.28$。可见“0.02”在宽模型上会让单层略微放大信号，GPT 依靠残差结构与输出投影的 $1/\sqrt{2L}$ 缩放来控制整体方差。
+
+</details>
+
+5. 为什么推荐“`.to(device)` 之后再创建优化器”？构造一个反例说明先创建 Adam、训练一步、再 `.to()` 会出什么问题。
+
+<details>
+<summary>答案</summary>
+
+Adam 在第一步 `step()` 时为每个参数创建 `exp_avg`、`exp_avg_sq` 状态张量，位于当时参数所在的设备。之后 `model.to("cuda")` 只迁移参数，不迁移优化器状态，下一次 `step()` 时 CPU 上的状态与 GPU 上的梯度相遇，报设备不一致的错误。在构建优化器前完成迁移就不会有这个问题；加载检查点时 `optimizer.load_state_dict` 会把状态转换到对应参数的设备上。
+
+</details>
+
+## 参考文献
+
+- PyTorch 文档：[`torch.nn.Module`](https://pytorch.org/docs/stable/generated/torch.nn.Module.html)、[Saving and loading models](https://pytorch.org/tutorials/beginner/saving_loading_models.html)。
+- PyTorch 源码：[`torch/nn/modules/linear.py`](https://github.com/pytorch/pytorch/blob/main/torch/nn/modules/linear.py) 中 `Linear.reset_parameters`；关于 `a=sqrt(5)` 的讨论见 [pytorch/pytorch#15314](https://github.com/pytorch/pytorch/issues/15314)。
+- X. Glorot, Y. Bengio, [Understanding the difficulty of training deep feedforward neural networks](https://proceedings.mlr.press/v9/glorot10a.html)，AISTATS 2010。
+- K. He et al., [Delving Deep into Rectifiers](https://arxiv.org/abs/1502.01852)，ICCV 2015。
+- N. Srivastava et al., [Dropout: A Simple Way to Prevent Neural Networks from Overfitting](https://jmlr.org/papers/v15/srivastava14a.html)，JMLR 2014。
+- A. Radford et al., [Language Models are Unsupervised Multitask Learners](https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf)，2019（GPT-2 的残差缩放初始化）。
+- O. Press, L. Wolf, [Using the Output Embedding to Improve Language Models](https://arxiv.org/abs/1608.05859)，EACL 2017（权重共享）。
+- Stanford CS336 (Spring 2025), [Assignment 1: Basics](https://github.com/stanford-cs336/assignment1-basics)（截断正态初始化约定）。
