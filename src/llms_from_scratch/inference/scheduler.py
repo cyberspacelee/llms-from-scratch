@@ -12,6 +12,7 @@ import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from llms_from_scratch.inference.cost_model import HardwareSpec, ModelSpec, step_cost
 from llms_from_scratch.inference.prefix_cache import KVCacheManager
 
 
@@ -184,6 +185,15 @@ def affine_step_time(fixed: float, per_token: float, per_seq: float = 0.0
     return lambda b: fixed + per_token * b.total_tokens + per_seq * len(b.requests)
 
 
+def roofline_step_time(model: ModelSpec, hw: HardwareSpec, mfu: float = 0.5, mbu: float = 0.7,
+                       overhead: float = 0.0) -> Callable[[ScheduledBatch], float]:
+    """用上一章的成本模型估计一步的耗时：每个请求贡献 (本步 token 数, 已缓存长度)。"""
+    def time(b: ScheduledBatch) -> float:
+        items = [(b.num_tokens[r.request_id], r.num_computed_tokens) for r in b.requests]
+        return overhead + step_cost(model, items).time(hw, mfu=mfu, mbu=mbu)
+    return time
+
+
 @dataclass
 class SimResult:
     requests: list[Request]
@@ -196,6 +206,11 @@ class SimResult:
     def tpot(self) -> list[float]:
         return [(r.finish_time - r.first_token_time) / (len(r.output_token_ids) - 1)
                 for r in self.requests if len(r.output_token_ids) > 1]
+
+    def max_stall(self) -> float:
+        """含 decode 的步里最长的一步：正在生成的用户会感到的最长停顿（最差 ITL）。"""
+        return max((end - start for start, end, alloc in self.steps
+                    if any(n == 1 for n in alloc.values())), default=0.0)
 
     def throughput(self) -> float:
         return sum(len(r.output_token_ids) for r in self.requests) / self.makespan

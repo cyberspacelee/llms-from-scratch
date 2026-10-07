@@ -98,6 +98,7 @@ class KVCacheManager:
         self.pool = BlockPool(num_blocks, enable_prefix_caching)
         self.req_blocks: dict[str, list[Block]] = {}
         self.num_cached_blocks: dict[str, int] = {}  # 每个请求已登记进前缀缓存的满块数
+        self.req_hashes: dict[str, list[int]] = {}  # 每个请求满块的链式哈希（增量维护）
 
     def get_computed_blocks(self, token_ids: list[int]) -> tuple[list[Block], int]:
         """最长前缀命中。至少留最后一个 token 不命中：它的 logits 必须重新算。"""
@@ -129,8 +130,13 @@ class KVCacheManager:
 
     def cache_blocks(self, req_id: str, token_ids: list[int], num_computed: int) -> None:
         """前 num_computed 个 token 的 KV 已写入：把其中新填满的块登记进前缀缓存。"""
-        blocks = self.req_blocks[req_id]
-        hashes = block_hashes(token_ids[:num_computed], self.block_size)
+        if not self.pool.enable_caching:
+            return
+        blocks, b = self.req_blocks[req_id], self.block_size
+        hashes = self.req_hashes.setdefault(req_id, [])
+        for i in range(len(hashes), num_computed // b):  # 只对新填满的块增量地算哈希
+            hashes.append(hash_block(hashes[-1] if hashes else None,
+                                     tuple(token_ids[i * b:(i + 1) * b])))
         for i in range(self.num_cached_blocks.get(req_id, 0), len(hashes)):
             self.pool.cache_block(blocks[i], hashes[i])
         self.num_cached_blocks[req_id] = len(hashes)
@@ -139,6 +145,7 @@ class KVCacheManager:
         # 逆序释放：尾部块（最长前缀才会用到）最先被逐出
         self.pool.free_blocks(list(reversed(self.req_blocks.pop(req_id, []))))
         self.num_cached_blocks.pop(req_id, None)
+        self.req_hashes.pop(req_id, None)
 
     def block_ids(self, req_id: str) -> list[int]:
         return [b.block_id for b in self.req_blocks.get(req_id, [])]
@@ -155,6 +162,7 @@ class KVCacheManager:
         self.pool.touch(blocks)
         self.req_blocks[child_id] = list(blocks)
         self.num_cached_blocks[child_id] = self.num_cached_blocks.get(parent_id, 0)
+        self.req_hashes[child_id] = list(self.req_hashes.get(parent_id, []))
 
     def prepare_write(self, req_id: str, position: int) -> tuple[int, int] | None:
         """写时复制：要写的块若被共享（ref_cnt > 1），换成私有新块并返回 (源块, 新块) 供拷贝。"""

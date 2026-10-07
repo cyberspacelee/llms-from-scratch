@@ -101,7 +101,7 @@ def plan_prefill(model: ModelSpec, cluster: Cluster, work: Workload, slo: SLO, t
 # region decode
 def decode_step(model: ModelSpec, cluster: Cluster, tp: int, batch: int, context: int) -> float:
     cost = step_cost(model, [(1, context)] * batch)
-    kv = batch * (2 * context + 1) * kv_bytes_per_token(model)
+    kv = batch * (context + 2) * kv_bytes_per_token(model)  # 读 context+1 个位置，写 1 个
     weights = cost.bytes - kv
     per_gpu = weights / tp + kv / _kv_shards(model, tp)
     return per_gpu / (cluster.gpu.mem_bandwidth * cluster.mbu) + tp_comm_time(

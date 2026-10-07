@@ -1,5 +1,6 @@
 import random
 
+from llms_from_scratch.inference.cost_model import H100_SXM, LLAMA3_8B
 from llms_from_scratch.inference.prefix_cache import KVCacheManager
 from llms_from_scratch.inference.scheduler import (
     Request,
@@ -7,6 +8,7 @@ from llms_from_scratch.inference.scheduler import (
     SchedulerConfig,
     Status,
     affine_step_time,
+    roofline_step_time,
     simulate,
     simulate_static,
 )
@@ -108,3 +110,18 @@ def test_continuous_batching_beats_static_batching():
     assert continuous.throughput() > 1.3 * static.throughput()
     mean = lambda xs: sum(xs) / len(xs)  # noqa: E731
     assert mean(continuous.ttft()) < mean(static.ttft())
+
+
+def test_smaller_token_budget_shortens_decode_stalls():
+    """长提示与正在 decode 的请求混合：预算越小，含 decode 的步越短（停顿越小），代价是 TTFT。"""
+    def work():
+        reqs = [Request(f"d{i}", list(range(64)), max_tokens=80, arrival_time=0.0) for i in range(8)]
+        reqs += [Request(f"p{i}", list(range(4096)), max_tokens=4, arrival_time=0.05 * (i + 1))
+                 for i in range(4)]
+        return reqs
+    step = roofline_step_time(LLAMA3_8B, H100_SXM, mfu=0.5, mbu=0.7)
+    big = simulate(work(), SchedulerConfig(max_num_batched_tokens=8192), 4000, 16, step)
+    small = simulate(work(), SchedulerConfig(max_num_batched_tokens=512), 4000, 16, step)
+    assert small.max_stall() < 0.3 * big.max_stall()
+    long_ttft = lambda r: [t for t, q in zip(r.ttft(), r.requests) if q.request_id[0] == "p"]  # noqa: E731
+    assert long_ttft(small)[0] > long_ttft(big)[0]  # 第一个长提示被切成 8 块，首 token 更晚

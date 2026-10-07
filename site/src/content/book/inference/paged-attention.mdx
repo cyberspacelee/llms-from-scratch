@@ -1,8 +1,283 @@
 ---
 title: KV Cache 管理：PagedAttention 与前缀缓存
-description: 连续分配的碎片问题，分页 KV Cache 与块表，写时复制，前缀缓存与 RadixAttention。
+description: 为什么按最大长度连续预分配 KV Cache 会浪费大半显存；分页 KV Cache 的块、块表与槽位映射，按块计算的注意力，写时复制与并行采样，以及 vLLM 的块哈希前缀缓存与 SGLang 的 RadixAttention。
 order: 2
-draft: true
+code:
+  - src/llms_from_scratch/inference/paged_kv.py
+  - src/llms_from_scratch/inference/prefix_cache.py
+  - tests/inference/test_paged_kv.py
+  - tests/inference/test_prefix_cache.py
 ---
 
-本章正在撰写。
+[上一章](/inference/inference-cost/)的成本模型得出一个结论：decode 的吞吐取决于能同时放进显存的序列数，而 $B_{\max} = (M-W)/(c\cdot b_{kv})$。这个公式隐含了一个假设——每个序列**恰好**占用它当前长度那么多的 KV Cache。本章先说明早期推理系统为什么远远达不到这个假设，然后实现 vLLM 的解决方案 PagedAttention：把 KV Cache 像操作系统的虚拟内存一样分页管理。分页带来的第二个好处是“共享”：同一段前缀的 KV 可以被多个请求引用，于是有了写时复制和前缀缓存。
+
+全书共用 GPT 中的 `KVCache` 为每个序列预分配 `[B, n_kv_heads, max_len, head_dim]` 的连续张量。这在一次只生成一批、长度已知的教学场景里没有问题；在服务场景里，它正是要被替换的东西。
+
+## 连续预分配的三种浪费
+
+服务系统在请求到达时并不知道它会生成多少 token。若 KV Cache 必须是一段连续内存，系统只能按**可能的最大长度**（例如上下文上限 2048）为它预留空间。vLLM 论文（Kwon et al., 2023）把由此产生的浪费分成三类：
+
+1. **为未来 token 预留的槽（reserved）**：最终会用上，但在请求的整个生命周期里都被占着，别的请求用不了。
+2. **内部碎片（internal fragmentation）**：请求提前结束（遇到 EOS），预留到最大长度的剩余部分从来没被用过。
+3. **外部碎片（external fragmentation）**：不同请求的预留长度不同，释放后留下的空洞大小不一，新请求可能找不到足够长的连续空间。
+
+<Diagram width={720} height={190} label="连续预分配下 KV Cache 的三种浪费">
+  <Matrix x={40} y={50} rows={1} cols={24} cell={[26, 34]} gap={2}
+    values={[['A','A','A','A','A','·','·','·','·','·','·','·','','','B','B','B','·','·','·','×','×','×','×']]}
+    highlight={[
+      { cells: [[0,0],[0,1],[0,2],[0,3],[0,4],[0,14],[0,15],[0,16]], tone: 'accent' },
+      { cells: [[0,5],[0,6],[0,7],[0,17],[0,18],[0,19]], tone: 'info' },
+      { cells: [[0,8],[0,9],[0,10],[0,11],[0,20],[0,21],[0,22],[0,23]], tone: 'accent2' },
+      { cells: [[0,12],[0,13]], tone: 'muted' },
+    ]} />
+  <Text x={40} y={30} label="一段连续的 KV 显存（每格一个 token 槽）" anchor="start" size="sm" tone="muted" />
+  <Legend x={40} y={120} items={[
+    { label: '已存 token', tone: 'accent' },
+    { label: '为未来预留', tone: 'info' },
+    { label: '内部碎片', tone: 'accent2' },
+    { label: '外部碎片', tone: 'muted' },
+  ]} gap={150} />
+  <Text x={40} y={160} label="A 预留 12 槽只写了 5 槽；B 预留 10 槽；两段之间 2 槽太短，谁也放不下。" anchor="start" size="sm" />
+  <Fragment slot="caption">请求 A、B 各按最大长度预留了一段连续空间。只有绿色格子存着真正的 KV；蓝色在未来才会用到，橙色在请求结束后也不会被用到，灰色是无法利用的空洞。</Fragment>
+</Diagram>
+
+vLLM 论文对 FasterTransformer 与 Orca 的剖析显示，在这些系统中只有 **20.4%–38.2%** 的 KV Cache 显存真正存放了 token 状态。也就是说，上一章算出的最大批大小在现实中要打一个三到五折。
+
+`paged_kv.py` 里的两个小函数把这件事量化出来：连续预留的浪费是 $1 - \sum n_i/(N\cdot n_{\max})$；分页之后，浪费只剩每个序列最后一块中没填满的槽，上界是每序列 $b-1$ 个槽（$b$ 是块大小）。
+
+<CodeFile path="src/llms_from_scratch/inference/paged_kv.py" region="waste" />
+
+长度为 100、300、37、900 的四个请求，按 2048 预留浪费超过 80%；按 16 个 token 一块分页，浪费不到 3%。
+
+## 分页：块、块表与槽位
+
+操作系统用分页解决同样的问题：进程看到连续的虚拟地址，物理内存按固定大小的页分配，页表负责翻译。PagedAttention 把这个思路搬到 KV Cache 上：
+
+- **块（block）**：KV 显存被切成固定大小的物理块，每块存 $b$ 个 token 的 K 和 V（vLLM 默认 $b=16$）。每层的缓存是一个 `[num_blocks, block_size, n_kv_heads, head_dim]` 的张量，所有层共用同一套块号。
+- **逻辑块**：一个序列的第 $p$ 个 token 属于它的第 $\lfloor p/b \rfloor$ 个逻辑块，块内偏移 $p \bmod b$。
+- **块表（block table）**：每个序列一张表，第 $j$ 项是第 $j$ 个逻辑块对应的物理块号。物理块之间不需要连续，也不需要按顺序。
+
+<Diagram width={720} height={300} label="两个序列的逻辑块经块表映射到物理块">
+  <Text x={110} y={22} label="逻辑块（每块 4 个 token）" size="sm" tone="muted" />
+  <Box x={20} y={40} w={180} h={34} label="A₀: 今 天 天 气" tone="accent" size="sm" />
+  <Box x={20} y={82} w={180} h={34} label="A₁: 很 好 ， 我" tone="accent" size="sm" />
+  <Box x={20} y={124} w={180} h={34} label="A₂: 们 去 · ·" tone="accent" size="sm" />
+  <Box x={20} y={190} w={180} h={34} label="B₀: 你 好 吗 ？" tone="info" size="sm" />
+  <Box x={20} y={232} w={180} h={34} label="B₁: 我 · · ·" tone="info" size="sm" />
+  <Text x={330} y={22} label="块表" size="sm" tone="muted" />
+  <Matrix x={290} y={50} rows={1} cols={3} cell={[26, 28]} values={[[7, 1, 3]]} tone="accent" />
+  <Matrix x={290} y={200} rows={1} cols={2} cell={[26, 28]} values={[[5, 2]]} tone="info" />
+  <Text x={600} y={22} label="物理块（显存）" size="sm" tone="muted" />
+  <Matrix x={520} y={40} rows={8} cols={1} cell={[160, 26]} gap={4}
+    values={[['0：空块（保留）'], ['1：很 好 ， 我'], ['2：我 · · ·'], ['3：们 去 · ·'], ['4：空闲'], ['5：你 好 吗 ？'], ['6：空闲'], ['7：今 天 天 气']]}
+    highlight={[{ rows: [1, 3, 7], tone: 'accent' }, { rows: [2, 5], tone: 'info' }, { rows: [0, 4, 6], tone: 'muted' }]} />
+  <Arrow from={[200, 64]} to={[284, 64]} />
+  <Arrow from={[200, 214]} to={[284, 214]} />
+  <Arrow from={[303, 78]} to={[516, 263]} tone="accent" curve via={[[420, 170]]} />
+  <Arrow from={[331, 50]} to={[516, 83]} tone="accent" curve via={[[420, 40]]} />
+  <Arrow from={[359, 78]} to={[516, 143]} tone="accent" curve via={[[430, 120]]} />
+  <Fragment slot="caption">序列 A 的三个逻辑块映射到物理块 7、1、3，B 的两个逻辑块映射到 5、2。只有每个序列最后一块可能没填满；新 token 写满一块后才分配下一块。图中画出了 A 的三条映射。</Fragment>
+</Diagram>
+
+### 槽位映射
+
+写 KV 时需要的是一个扁平的“槽号”：物理块号乘以块大小再加块内偏移。
+
+<KeyEq label="逻辑位置到物理槽">
+
+$$
+\text{slot}(p) = \text{table}\big[\lfloor p/b\rfloor\big]\cdot b + (p \bmod b)
+$$
+
+</KeyEq>
+
+<CodeFile path="src/llms_from_scratch/inference/paged_kv.py" region="slot" />
+
+手算：块大小 4、块表 `[5, 7]`，位置 0 和 3 落在物理块 5 的槽 20、23；位置 4、5 进入第二个逻辑块，即物理块 7 的槽 28、29。
+
+写入时把缓存看成 `[num_blocks * block_size, n_kv_heads, head_dim]` 的二维表，用 `index_copy_` 按槽号一次写入本步所有 token 的 K/V。这一步对应 vLLM 中 `reshape_and_cache` 一类的小 kernel。
+
+<CodeFile path="src/llms_from_scratch/inference/paged_kv.py" region="write" />
+
+### 分配策略
+
+块是**按需分配**的：请求进来时只为提示分配块，生成过程中每写满一块才申请新块；请求结束时归还全部块。由于所有块大小相同，任何空闲块都能满足任何请求，外部碎片不复存在；内部碎片只剩最后一块。代价是多了一次间接寻址——注意力 kernel 不能再假设一个序列的 K/V 在显存中连续。
+
+## 按块计算注意力
+
+[FlashAttention](/gpu/flash-attention/)已经说明，注意力可以沿键的维度分块计算：维护每个查询的运行最大值 $m$、softmax 分母 $\ell$ 和未归一化的加权和 $\mathbf{a}$，每读入一块键值就更新
+
+$$
+m' = \max(m, \max_j s_j),\quad
+\ell' = \ell\, e^{m-m'} + \sum_j e^{s_j - m'},\quad
+\mathbf{a}' = \mathbf{a}\, e^{m-m'} + \sum_j e^{s_j-m'}\mathbf{v}_j ,
+$$
+
+最后输出 $\mathbf{a}/\ell$。这个“在线 softmax”对块的来源毫不在意——块在显存中的位置不同，只是取数的地址不同。PagedAttention kernel 就是这样工作的：每个线程块负责一个序列的一个头，沿块表逐个取物理块。
+
+我们的参考实现保留了这个循环结构：对每一行查询，按块表一块一块读 K/V，用在线 softmax 累积，从不拼出连续的 K/V。
+
+<CodeFile path="src/llms_from_scratch/inference/paged_kv.py" region="reference" />
+
+参考实现便于对照 kernel，但 Python 循环很慢。后面的迷你引擎使用张量化的版本：按块表一次 gather 出每行可见的全部块，再用一个“只看前 `seq_lens[n]` 个位置”的掩码做标准注意力。它的所有形状只依赖行数与块表宽度，与数据无关——这一点在 [CUDA Graph](/inference/cuda-graph/) 一章中至关重要。
+
+<CodeFile path="src/llms_from_scratch/inference/paged_kv.py" region="gather" />
+
+这里的每一“行”是一个查询 token，自带它所属序列的块表与可见长度。decode 时一行就是一个序列；prefill 时同一序列的 $T$ 行共享块表、可见长度依次为 $1, 2, \dots, T$，正好构成因果掩码。所以同一个函数既能做 decode，也能做 prefill 与混合批次。
+
+测试 `test_paged_attention_matches_contiguous` 把四条长度不同的序列按**随机打乱**的物理块写入缓存，验证两种分页注意力都与在连续 K/V 上调用 `scaled_dot_product_attention` 的结果一致（GQA 下 4 个查询头共享 2 个 KV 头）；`test_paged_attention_causal_rows_of_one_sequence` 验证用“一行一个查询 + 可见长度”表达的 prefill 等价于因果注意力。
+
+<Callout tone="note" title="块大小的权衡">
+块越小，内部碎片越少，前缀共享的粒度越细；但块表更长，kernel 每次取的数据更少、访存效率下降。vLLM 论文测得块大小 16 到 32 在多数负载上表现最好，默认取 16。FlashAttention、FlashInfer 等后来的 kernel 也支持分页布局，块大小常见 16、32 或 64；FlashMLA 使用 64。
+</Callout>
+
+## 共享与写时复制
+
+分页之后，“两个序列的某个逻辑块指向同一个物理块”变得非常自然，只需要给每个物理块加一个**引用计数**。这直接支持两种常见场景：
+
+- **并行采样**：同一个提示采样 $n$ 个回答（`n > 1`）。提示部分的 KV 完全相同，可以只存一份。
+- **束搜索**：各个候选共享大段公共前缀，并且候选之间不断分叉、淘汰。
+
+共享的块只能读不能写。当某个序列要往一个被共享的块（引用计数大于 1）里写新 token 时，先分配一个新块、把原块内容复制过去、把自己的块表指向新块、原块引用计数减一——这就是操作系统里的**写时复制（copy-on-write）**。
+
+<Diagram width={720} height={250} label="并行采样中的写时复制">
+  <Region x={10} y={10} w={330} h={230} title="fork 之后：共享" />
+  <Box x={30} y={50} w={130} h={40} label="序列 1" sub="块表 [3, 6]" tone="accent" />
+  <Box x={190} y={50} w={130} h={40} label="序列 2" sub="块表 [3, 6]" tone="info" />
+  <Box x={30} y={150} w={130} h={44} label="块 3（满）" sub="ref = 2" />
+  <Box x={190} y={150} w={130} h={44} label="块 6（半满）" sub="ref = 2" tone="accent2" />
+  <Arrow from={[95, 90]} to={[95, 150]} />
+  <Arrow from={[255, 90]} to={[110, 150]} />
+  <Arrow from={[110, 90]} to={[240, 150]} />
+  <Arrow from={[255, 90]} to={[255, 150]} />
+  <Region x={370} y={10} w={340} h={230} title="序列 2 写入第 7 个位置：复制" />
+  <Box x={390} y={50} w={130} h={40} label="序列 1" sub="块表 [3, 6]" tone="accent" />
+  <Box x={560} y={50} w={130} h={40} label="序列 2" sub="块表 [3, 9]" tone="info" />
+  <Box x={390} y={150} w={80} h={44} label="块 3" sub="ref = 2" />
+  <Box x={490} y={150} w={80} h={44} label="块 6" sub="ref = 1" />
+  <Box x={610} y={150} w={80} h={44} label="块 9" sub="ref = 1" tone="strong" />
+  <Arrow from={[440, 90]} to={[430, 150]} />
+  <Arrow from={[470, 90]} to={[530, 150]} />
+  <Arrow from={[600, 90]} to={[450, 150]} />
+  <Arrow from={[650, 90]} to={[650, 150]} />
+  <Arrow from={[530, 194]} via={[[530, 214], [650, 214]]} to={[650, 194]} dashed tone="accent2" label="复制内容" labelSide="below" />
+  <Fragment slot="caption">fork 只复制块表、增加引用计数。半满的最后一块被共享，谁先往里写，谁就先得到一个私有副本（块 9）；写满的块 3 永远不会再被写，可以一直共享。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" region="cow" />
+
+`prepare_write` 返回 `(源块, 新块)`，由模型运行器在下一次前向前完成显存拷贝。只有最后一块才可能触发复制：前面的块都已写满，永远不会再被写。vLLM 论文报告，在 OPT-13B 上这种共享为并行采样节省 6.1%–9.8% 的 KV 显存，为束搜索节省 37.6%–55.2%。
+
+## 前缀缓存：跨请求复用 KV
+
+写时复制在一个请求内部共享 KV。更大的收益来自**跨请求**共享：同一个系统提示、同一份长文档、多轮对话的历史、few-shot 示例，会在成千上万个请求的开头反复出现。如果某段前缀的 KV 已经算过，新请求只需从第一个不同的位置开始 prefill。DeepSeek 公布的线上统计中，一天 6080 亿输入 token 里有 56.3% 命中了磁盘上的 KV 缓存——前缀复用在真实负载中的分量由此可见。
+
+问题变成：如何快速判断“这个块的 KV 我是否已经算过”？
+
+### vLLM：块的链式哈希
+
+一个块的 KV 不仅取决于块内的 token，还取决于它**之前的所有 token**（注意力看全部前缀）。vLLM V1 用链式哈希表达这一点：
+
+$$
+h_j = \text{hash}\big(h_{j-1},\ (t_{jb}, \dots, t_{jb+b-1})\big),\qquad h_{-1} = \text{None}
+$$
+
+块 $j$ 的哈希包含父块的哈希，于是“哈希相等”就意味着“整个前缀相等”（除去哈希碰撞；vLLM 用 SHA-256 等哈希函数，并可加入 LoRA 名称、多模态输入等额外键）。只有**满块**才计算哈希，最后一个不满的块永远不进入缓存。
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" region="hash" />
+
+块池维护一个“哈希 → 物理块”的字典。关键设计在于：**引用计数归零的块并不立即抹掉内容**，而是带着它的哈希进入空闲队列，成为“可被命中的空闲块”。分配新块时从队头取；如果取到的块还挂着哈希，就在这时把它从字典中逐出。新请求命中一个躺在空闲队列里的块时，把它从队列中间摘出来（`touch`），引用计数加一。
+
+<Diagram width={720} height={240} label="前缀缓存的块池：哈希表与空闲队列">
+  <Text x={20} y={24} label="请求的满块哈希链" anchor="start" size="sm" tone="muted" />
+  <Box x={20} y={40} w={120} h={40} label="h₀" sub="系统提示 0–15" tone="accent" mono />
+  <Box x={170} y={40} w={120} h={40} label="h₁" sub="系统提示 16–31" tone="accent" mono />
+  <Box x={320} y={40} w={120} h={40} label="h₂" sub="用户问题" tone="info" mono />
+  <Arrow from={[140, 60]} to={[170, 60]} />
+  <Arrow from={[290, 60]} to={[320, 60]} />
+  <Box x={500} y={40} w={200} h={90} label="cached: 哈希 → 块" sub="h₀→7, h₁→2, h₉→4" tone="info" />
+  <Arrow from={[440, 60]} to={[500, 60]} dashed label="查表" />
+  <Text x={20} y={150} label="空闲队列（队头先被复用）" anchor="start" size="sm" tone="muted" />
+  <Matrix x={20} y={168} rows={1} cols={6} cell={[90, 34]} gap={6}
+    values={[['块 5', '块 8', '块 4 (h₉)', '块 2 (h₁)', '块 7 (h₀)', '块 11']]}
+    highlight={[{ cols: [0, 1, 5], tone: 'muted' }, { cols: [2, 3, 4], tone: 'info' }]} />
+  <Arrow from={[600, 130]} to={[300, 168]} tone="accent" label="命中：从队列中摘出" />
+  <Fragment slot="caption">请求的前两个块命中缓存（h₀、h₁ 指向块 7 和 2）。虽然它们的引用计数已经归零、躺在空闲队列里，内容仍然有效，被 touch 摘出后直接复用。无哈希的空闲块排在队头，最先被分配；带哈希的块按释放顺序排在后面，实现 LRU 淘汰。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" region="pool" />
+
+释放的顺序也有讲究。一个请求结束时，它的块按**逆序**放回队列：尾部的块（只有前缀很长的请求才能命中）排在前面先被逐出，头部的块（系统提示，最容易被复用）排在后面。没有哈希的块（例如最后一个不满的块）直接放在队头。vLLM 的 `BlockPool.free_blocks` 正是这样实现的：无哈希的块 `prepend`，有哈希的块 `append`。
+
+在块池之上，`KVCacheManager` 为每个请求维护块表，提供调度器需要的四个操作：查询最长前缀命中、为接下来要算的 token 分配块、在 KV 写入后把新填满的块登记进缓存、释放请求。
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" region="manager" />
+
+两个细节值得注意。第一，`get_computed_blocks` 只在 `token_ids[:-1]` 上找命中：即使整个提示都在缓存里，最后一个 token 也必须重新计算，因为我们需要它的 logits 来采样第一个输出 token。vLLM 的 `KVCacheManager.get_computed_blocks` 用 `max_cache_hit_length = request.num_tokens - 1` 处理同一个问题。第二，`allocate_slots` 要么全部成功、要么什么都不改：命中的块如果正在空闲队列里，被 `touch` 之后就不再可分配，所以判断余量时要先扣掉它们。
+
+测试覆盖了这些不变量：两个请求共享系统提示时块号相同、引用计数为 2，先后释放后计数归零但仍可命中（`test_prefix_hit_shares_blocks_and_refcounts`）；完全命中时最后一块仍要计算（`test_full_hit_leaves_last_token_to_compute`）；显存不足时按 LRU 逐出最早释放的缓存块（`test_lru_eviction_of_cached_blocks`）；分配失败不留下半截状态（`test_allocation_failure_is_atomic`）。
+
+### SGLang：RadixAttention
+
+SGLang（Zheng et al., 2024）用一棵**基数树**（radix tree）组织所有缓存的前缀。树的每条边标着一段 token 序列和这些 token 的 KV 槽号；从根到某个节点的路径就是一段已缓存的前缀。查找最长公共前缀就是从根沿边向下匹配；插入新序列时，若与某条边只匹配了一部分，就在分歧处把边一分为二。
+
+<Diagram width={720} height={250} label="基数树前缀缓存">
+  <Box x={300} y={20} w={120} h={36} label="根" tone="muted" />
+  <Box x={250} y={90} w={220} h={40} label="[你是一个助手。]" sub="slots 0–7" tone="accent" />
+  <Box x={60} y={180} w={220} h={40} label="[请翻译：Hello]" sub="slots 8–12" tone="info" />
+  <Box x={440} y={180} w={220} h={40} label="[请总结：…]" sub="slots 30–45" tone="info" />
+  <Arrow from={[360, 56]} to={[360, 90]} />
+  <Arrow from={[330, 130]} to={[170, 180]} />
+  <Arrow from={[390, 130]} to={[550, 180]} />
+  <Text x={600} y={110} label="lock_ref > 0 的路径不可淘汰" size="sm" tone="muted" />
+  <Fragment slot="caption">两个请求共享系统提示，插入第二个请求时，原来的一条长边在分歧处被拆成公共前缀与两个分支。淘汰从最久未用、且没有被运行中请求锁住的叶子开始。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/inference/prefix_cache.py" region="radix" />
+
+与 vLLM 的块哈希相比，基数树以 token 为粒度匹配（SGLang 默认页大小为 1，也支持更大的页），能命中不对齐块边界的前缀；树结构也方便实现“缓存感知”的调度——优先调度与已缓存前缀重合最多的请求，SGLang 称之为最长前缀优先。vLLM 的哈希方案则更简单：查找是一次字典访问，块天然与分页 KV 的分配单元对齐，而且和引用计数、LRU 淘汰共用同一个空闲队列，几乎没有额外开销。vLLM V1 因此把前缀缓存默认打开。
+
+`test_radix_cache_split_match_and_evict` 插入 `[1,2,3,4]` 与 `[1,2,7,8]`，检查树在 `[1,2]` 处分叉，匹配 `[1,2,7,9]` 得到三个槽，锁住这条路径后淘汰只能释放另外两片叶子。
+
+## 小结
+
+- 按最大长度连续预留 KV Cache 会造成预留、内部碎片与外部碎片三种浪费，早期系统只有 20%–40% 的 KV 显存真正存放 token。
+- PagedAttention 把 KV 切成固定大小的物理块，用块表把逻辑块映射到任意物理块；浪费只剩每个序列最后一块，分配与释放都是 O(1)。
+- 注意力按块表取数、用在线 softmax 累积；“每行一个查询 + 块表 + 可见长度”的表达同时覆盖 decode、prefill 与混合批次。
+- 引用计数让块可以共享；写时复制只在写入被共享的最后一块时发生，支持并行采样与束搜索。
+- 前缀缓存跨请求复用 KV：vLLM 用满块的链式哈希与带哈希的空闲队列实现 LRU 缓存，SGLang 用 token 粒度的基数树。
+
+[下一章](/inference/batching-scheduling/)把块管理器交给调度器：每一步决定哪些请求前进多少 token、何时分配块、显存不够时抢占谁。
+
+## 练习
+
+1. 块大小 16，四个请求当前长度为 1、16、17、100。分页时一共占用多少个块？浪费了多少个槽？
+2. 块大小 4，块表 `[9, 2, 6]`，写位置 10 的 K/V 要用哪个槽号？
+3. 为什么块哈希要包含父块哈希？如果只对块内 token 做哈希，举一个会出错的例子。
+4. 并行采样 $n=4$，提示 1000 token，每个样本生成 200 token，块大小 16。共享提示与不共享相比，KV 占用的块数各是多少？
+5. 前缀缓存为什么要求“至少留最后一个 token 不命中”？如果一个 32 token 的提示恰好两个满块都在缓存里，vLLM 的处理会重新计算多少个 token？
+
+<details>
+<summary>答案</summary>
+
+1. 块数为 $1+1+2+7 = 11$，共 176 槽，实际 134 个 token，浪费 42 槽；每个序列的浪费都小于 16。
+
+2. 位置 10 在第 $\lfloor 10/4\rfloor = 2$ 个逻辑块，对应物理块 6，偏移 2，槽号 $6\times4+2 = 26$。
+
+3. 块的 KV 取决于整个前缀：同样的 4 个 token “的 结 果 是”出现在“加法的结果是”与“乘法的结果是”之后，K/V 完全不同（每层的隐状态都看过前缀）。只对块内 token 哈希会把后者错误地当成前者的缓存。
+
+4. 提示 $1000/16$ 向上取整为 63 块，其中最后一块只有 8 个 token。不共享：每个样本 $\lceil 1200/16\rceil = 75$ 块，共 300 块。共享：62 个满块共享，第 63 块被写时复制成 4 份私有块，每个样本还需要 $\lceil 1200/16\rceil - 63 = 12$ 个新块，共 $62 + 4\times(1 + 12) = 114$ 块。
+
+5. 采样第一个输出 token 需要最后一个提示位置的 logits，而缓存里只有 K/V、没有 logits，所以最后一个 token 必须重新过一遍模型。我们的实现与 vLLM 都只在 `num_tokens - 1` 个 token 上查找命中：32 token 的提示只能命中第一块（16 个 token），第二块包含最后一个 token，因此要重新计算 16 个 token。vLLM 源码的注释也指出，这可能导致重算整个块而不只是最后一个 token。
+
+</details>
+
+## 参考文献
+
+- Kwon et al. *Efficient Memory Management for Large Language Model Serving with PagedAttention*. SOSP 2023. [arXiv:2309.06180](https://arxiv.org/abs/2309.06180)
+- Zheng et al. *SGLang: Efficient Execution of Structured Language Model Programs*. NeurIPS 2024. [arXiv:2312.07104](https://arxiv.org/abs/2312.07104)
+- vLLM 源码（提交 `cbe1f97`）：[`vllm/v1/core/block_pool.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/block_pool.py)，[`vllm/v1/core/kv_cache_manager.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_manager.py)，[`vllm/v1/core/kv_cache_utils.py`](https://github.com/vllm-project/vllm/blob/cbe1f9740d0ae7f6eb82bd752a984c7db8ab85fe/vllm/v1/core/kv_cache_utils.py)（`hash_block_tokens`、`FreeKVCacheBlockQueue`）
+- vLLM 文档：*Automatic Prefix Caching*. [docs.vllm.ai](https://docs.vllm.ai/en/latest/design/prefix_caching.html)
+- nano-vllm 的块管理器：[`nanovllm/engine/block_manager.py`](https://github.com/GeeeekExplorer/nano-vllm/blob/bb823b3e06983d71485a8e1f23715ebd87d98ef8/nanovllm/engine/block_manager.py)
+- DeepSeek. *DeepSeek-V3/R1 Inference System Overview*. 2025. [open-infra-index](https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_thing_deepseekV3R1_inference_system_overview.md)
+- Dao et al. *FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness*. NeurIPS 2022. [arXiv:2205.14135](https://arxiv.org/abs/2205.14135)
