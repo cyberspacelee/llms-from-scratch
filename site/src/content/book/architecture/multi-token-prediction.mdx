@@ -2,7 +2,187 @@
 title: 多 token 预测
 description: 一次预测多个未来 token 作为训练信号：并行头与 DeepSeek-V3 的顺序 MTP 模块，以及它与投机解码的联系。
 order: 8
-draft: true
+code:
+  - src/llms_from_scratch/architecture/mtp.py
+  - tests/architecture/test_mtp.py
 ---
 
-本章正在撰写。
+本部分前面的章节改的都是网络结构，这一章改的是**训练目标**。自 GPT 以来，语言模型的预训练目标几乎没有变过：在每个位置预测下一个 token。这个目标简单、与生成过程完全一致，但也有人质疑它“太短视”：模型在每一步只被要求猜对紧接着的一个 token，没有被直接要求为更远的未来做规划；而且很多 token（比如一个长单词的后半部分、代码里的闭括号）几乎可以由前文确定，提供的学习信号很少。
+
+多 token 预测（multi-token prediction，MTP）让模型在每个位置同时预测接下来的若干个 token。Gloeckle 等（2024）用共享主干加多个并行输出头实现了它，并发现收益随模型规模增大；DeepSeek-V3 设计了顺序的 MTP 模块，在预测更远的 token 时保留了完整的因果链，并在推理时把 MTP 模块作为投机解码的草稿模型。DeepSeek-V4、Qwen3-Next 等模型都沿用了这一做法。本章先把“预测第几个 token、用什么标签”这件事说清楚，再分别实现两种结构，并讨论它们与推理的联系。
+
+## 目标：每个位置预测未来 k 个 token
+
+设训练序列为 $t_0,t_1,\dots,t_{T-1}$。标准的语言模型损失是
+
+$$
+\mathcal L_{\text{main}} = -\frac{1}{T-1}\sum_{i=0}^{T-2}\log P_\theta\big(t_{i+1}\mid t_{\le i}\big).
+$$
+
+MTP 在此基础上为每个深度 $k=1,\dots,D$ 增加一个预测目标：在位置 $i$ 预测 $t_{i+1+k}$。深度 $k$ 的损失只能在前 $T-1-k$ 个位置上计算，因为更靠后的位置没有对应的标签。
+
+<KeyEq label="多 token 预测的标签">
+
+$$
+\mathcal L^{k} = -\frac{1}{T-1-k}\sum_{i=0}^{T-2-k}\log P^{k}_\theta\big(t_{i+1+k}\mid \cdots\big),\qquad
+\mathcal L = \mathcal L_{\text{main}} + \frac{\lambda}{D}\sum_{k=1}^{D}\mathcal L^{k}.
+$$
+
+</KeyEq>
+
+条件部分写成“$\cdots$”，是因为两种 MTP 结构的条件不同：并行头只条件于 $t_{\le i}$，顺序模块还条件于真实的 $t_{i+1},\dots,t_{i+k}$。$\lambda$ 是 MTP 损失的权重，除以 $D$ 让总权重不随深度变化。
+
+标签的对齐是实现 MTP 最容易出错的地方。用一个 6 个 token 的序列把它写成表格：
+
+<Diagram width={660} height={262} label="序列长度 6 时，主模型与两个 MTP 深度在每个位置的预测目标">
+  <Matrix x={140} y={50} rows={6} cols={4} cell={[96, 28]} rowLabels={['位置 0','位置 1','位置 2','位置 3','位置 4','位置 5']} colLabels={['输入','主目标 k=0','深度 1','深度 2']} values={[['t₀','t₁','t₂','t₃'],['t₁','t₂','t₃','t₄'],['t₂','t₃','t₄','t₅'],['t₃','t₄','t₅','—'],['t₄','t₅','—','—'],['t₅','—','—','—']]} tone="muted" highlight={[{ cols: [0], tone: 'neutral' }, { cells: [[0,1],[1,1],[2,1],[3,1],[4,1]], tone: 'accent' }, { cells: [[0,2],[1,2],[2,2],[3,2]], tone: 'info' }, { cells: [[0,3],[1,3],[2,3]], tone: 'accent2' }]} />
+  <Text x={330} y={250} label="深度 k 的目标 = tokens[:, 1 + k:]，有效位置数 = T − 1 − k" size="sm" tone="muted" />
+  <Fragment slot="caption">每行是一个位置，第一列是该位置的输入 token，后三列是主模型与两个 MTP 深度的预测目标。目标沿对角线错开：深度 $k$ 在位置 $i$ 预测 $t_{i+1+k}$，于是最后 $1+k$ 个位置没有标签（“—”），损失只在着色的格子上计算。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/architecture/mtp.py" region="targets" />
+
+一行代码就够了，但它值得一个专门的测试：`test_target_alignment` 用序列 $10,11,12,13,14$ 检查三个深度的标签分别是 $[11..14]$、$[12..14]$、$[13,14]$。
+
+## 并行预测头
+
+Gloeckle 等（2024）的结构最直接：一个共享的 Transformer 主干产生每个位置的表示 $h_i$，在其上并列放置 $n$ 个独立的输出头，第 $j$ 个头（$j=0,\dots,n-1$）预测 $t_{i+1+j}$。每个头是一个 Transformer 层，所有头共享同一个反嵌入矩阵（输出投影）。第 0 个头就是普通的下一个 token 预测。
+
+<CodeFile path="src/llms_from_scratch/architecture/mtp.py" symbol="ParallelHeads" />
+
+我们的实现直接复用第三部分的 `GPT`：`hidden_states` 取出主干最后一层的输出，每个头是一个新的 `Block`，最后经过 GPT 共享的最终 RMSNorm 与 `lm_head`。这里有一个实际问题：词表 $V$ 很大时，同时保存 $n$ 个头的 $[B,T,V]$ logits 会占用大量显存。论文的解决办法是按头依次做前向与反向，把每个头的梯度累加到主干的输出上，最后只对主干做一次反向，峰值显存从 $O(nV)$ 降到 $O(V+d)$。
+
+论文的主要发现：在 7B 以下，MTP 的收益不明显甚至略有损失；在 13B 规模上，用 $n=4$ 训练的模型在 HumanEval 上多解决约 12% 的问题、在 MBPP 上多约 17%；在字节级模型上，$n=8$ 的收益更为显著。此外，额外的头可以在推理时直接用作草稿，配合自投机解码最多带来约 3 倍的加速。
+
+并行头的局限在于：第 $j$ 个头预测 $t_{i+1+j}$ 时，只能看到 $t_{\le i}$，看不到中间的 $t_{i+1},\dots,t_{i+j}$。当未来存在多种可能时（“the cat sat on the ___ ___”），各个头会各自押注，第 1 个头预测的“mat”与第 2 个头预测的后续词可能来自不同的分支，组合起来不一致。
+
+## DeepSeek-V3 的顺序 MTP 模块
+
+DeepSeek-V3 的 MTP 采用**顺序**结构：第 $k$ 个 MTP 模块的输入是第 $k-1$ 个深度的表示（$k=1$ 时是主模型最后一层的输出），再加上**真实的**第 $i+k$ 个 token 的嵌入。具体地，对位置 $i$：
+
+<KeyEq label="顺序 MTP 模块">
+
+$$
+h_i'^{\,k} = M_k\big[\operatorname{RMSNorm}(h_i^{k-1});\ \operatorname{RMSNorm}(\operatorname{Emb}(t_{i+k}))\big],\qquad
+h^{k}_{1:T-k} = \operatorname{TRM}_k\big(h'^{\,k}_{1:T-k}\big),\qquad
+P^{k}_{i} = \operatorname{OutHead}\big(h^{k}_i\big).
+$$
+
+</KeyEq>
+
+$[\cdot;\cdot]$ 是拼接，$M_k\in\mathbb R^{d\times2d}$ 把拼接后的向量投影回 $d$ 维，$\operatorname{TRM}_k$ 是一个 Transformer 块，$\operatorname{Emb}$ 与 $\operatorname{OutHead}$ 与主模型**共享**。$P^k_i$ 预测的是 $t_{i+1+k}$。
+
+这个设计的要点在于“真实 token 的嵌入”。深度 1 在位置 $i$ 预测 $t_{i+2}$ 时，它已经知道主模型在位置 $i$ 的表示（编码了 $t_{\le i}$）以及真实的 $t_{i+1}$，所以它的条件是完整的 $t_{\le i+1}$——与“下一个 token 预测”在位置 $i+1$ 上的条件相同。顺序模块因此保持了**完整的因果链**：每个深度的预测都建立在所有已知真实 token 之上，不存在并行头那种“各自押注”的问题。DeepSeek 报告将其动机描述为让模型“预先规划”表示，以便更好地预测未来的 token。
+
+<Diagram width={700} height={300} label="DeepSeek-V3 的主模型与一个顺序 MTP 模块，以及它们在位置 i 上的输入与目标">
+  <Region x={10} y={10} w={250} h={280} title="主模型" />
+  <Box x={40} y={240} w={190} h={36} label="Emb(tᵢ)" tone="neutral" />
+  <Box x={40} y={150} w={190} h={60} label="L 个 Transformer 块" tone="accent" />
+  <Box x={40} y={50} w={190} h={40} label="OutHead → tᵢ₊₁" tone="strong" />
+  <Arrow from={[135, 240]} to={[135, 210]} />
+  <Arrow from={[135, 150]} to={[135, 90]} />
+  <Region x={290} y={10} w={400} h={280} title="MTP 模块 1" />
+  <Box x={310} y={240} w={170} h={36} label="RMSNorm(hᵢ⁰)" tone="info" size="sm" />
+  <Box x={500} y={240} w={170} h={36} label="RMSNorm(Emb(tᵢ₊₁))" tone="info" size="sm" />
+  <Box x={400} y={170} w={180} h={40} label="M₁ [ · ; · ]" sub="2d → d" tone="neutral" />
+  <Box x={400} y={110} w={180} h={40} label="TRM₁（1 个块）" tone="accent" />
+  <Box x={400} y={50} w={180} h={40} label="OutHead → tᵢ₊₂" tone="strong" />
+  <Arrow from={[230, 180]} via={[[270, 180], [270, 225], [395, 225]]} to={[395, 240]} tone="info" />
+  <Arrow from={[395, 240]} via={[[395, 225], [460, 225]]} to={[460, 210]} />
+  <Arrow from={[585, 240]} via={[[585, 225], [520, 225]]} to={[520, 210]} />
+  <Arrow from={[490, 170]} to={[490, 150]} />
+  <Arrow from={[490, 110]} to={[490, 90]} />
+  <Text x={480} y={30} label="嵌入与输出头与主模型共享" size="sm" tone="muted" />
+  <Fragment slot="caption">主模型在位置 $i$ 预测 $t_{i+1}$。MTP 模块把主模型在位置 $i$ 的最终表示与“真实的下一个 token” $t_{i+1}$ 的嵌入拼接，经一个 Transformer 块后预测 $t_{i+2}$。因此深度 1 的预测条件于完整的 $t_{\le i+1}$，因果链没有断开。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/architecture/mtp.py" region="sequential" />
+
+几个实现细节与公式一一对应。深度 $k$ 只处理前 $T-k$ 个位置（`T_k`），因为第 $i$ 个位置需要 $t_{i+k}$ 的嵌入，`idx[:, k:]` 恰好提供了 $t_k,\dots,t_{T-1}$。MTP 模块里的 `Block` 复用第三部分的实现，自带因果掩码，RoPE 频率取 `m.freqs[:T_k]`。所有深度共用 `m.lm_head` 与 `m.norm`。
+
+`tests/architecture/test_mtp.py` 检查三件事。`test_sequential_shapes_and_main_logits_unchanged`：深度 $k$ 的 logits 长度为 $T-k$，且加入 MTP 模块不改变主模型的输出。`test_sequential_mtp_is_causal_up_to_its_input_token`：改动 $t_6$ 后，深度 1 在位置 $0..4$ 的预测不变，而位置 5 的预测改变——因为位置 5 的输入恰好包含 $t_6$ 的嵌入，这正是“条件于 $t_{\le i+1}$”的直接体现。`test_loss_weighting_and_backward`：MTP 损失等于 $\frac{\lambda}{D}\sum_k\mathcal L^k$，且梯度能传到每个 MTP 模块。
+
+<CodeFile path="src/llms_from_scratch/architecture/mtp.py" region="loss" />
+
+DeepSeek-V3 取 $D=1$（只额外预测一个 token），$\lambda$ 在前 10T token 取 0.3，在剩余 4.8T token 取 0.1。MTP 模块的参数约 14B，不计入 671B 的主模型参数。报告中的消融显示，在小、大两种规模的基线上加入 MTP，绝大多数基准都有提升，而推理时只需丢弃 MTP 模块，主模型的结构和成本完全不变。DeepSeek-V4 沿用了与 V3 完全相同的 MTP 设置（深度 1）。
+
+## 推理时：MTP 作为投机解码的草稿
+
+MTP 模块在推理时还有第二个用途。[投机解码](/inference/speculative-decoding/)需要一个便宜的草稿模型先猜出若干个 token，再由大模型一次性并行验证；猜中的越多，每次大模型前向产生的 token 就越多。MTP 模块天然就是一个高质量的草稿器：它与主模型共享嵌入和输出头，只多一个 Transformer 块，而且它的输入正是主模型刚刚算出的表示。
+
+解码过程大致如下：主模型在位置 $i$ 输出 $t_{i+1}$ 的分布并采样；MTP 模块利用主模型在位置 $i$ 的表示与刚采样的 $t_{i+1}$ 的嵌入，预测 $t_{i+2}$ 作为草稿；下一步主模型把 $t_{i+1},t_{i+2}$ 一起前向，同时得到验证 $t_{i+2}$ 所需的分布和下一个位置的预测。若草稿被接受，这一次前向就产生了两个 token。DeepSeek-V3 报告第二个 token 的接受率在不同主题上为 85%—90%，解码速度（TPS）提升约 1.8 倍。
+
+这也解释了为什么 V3 选择 $D=1$：更深的 MTP 模块在训练中的收益递减，而在推理时接受率逐级相乘（第 $k$ 个草稿被接受要求前 $k-1$ 个都被接受），深度 1 已经拿到了大部分加速。Qwen3-Next 的模型卡同样指出 MTP 用于提升性能与推理速度；推理框架（如 vLLM、SGLang）提供了基于 MTP 的投机解码选项。
+
+## 为什么多预测几个 token 有用
+
+关于 MTP 为什么能改善**主模型**（推理时只用 $\mathcal L_{\text{main}}$ 对应的那部分），目前有几种互相补充的解释：
+
+- **更密的监督**：每个位置提供 $1+D$ 个学习信号，主干的表示需要同时服务于多个未来位置的预测，这相当于一种对表示的正则化。
+- **关注关键 token**：Gloeckle 等从信息论角度指出，MTP 损失相当于给“与未来 token 互信息高”的位置更高的权重。文本中的“选择点”（例如决定一段代码走哪个分支的那个 token）会影响后面许多 token，在 MTP 下被预测错误的代价被放大，模型因而更重视它们。
+- **缓解教师强制的短视**：下一个 token 预测在训练时总是条件于真实前缀，模型从未被要求为几步之外负责；MTP 让每个位置的表示必须编码一定的“前瞻”信息。
+
+代价方面，每增加一个深度，训练计算增加约一个 Transformer 块加一次输出投影（对 61 层的 V3 而言约为 2%—3%），显存增加一份 logits。收益与规模有关：Gloeckle 等观察到小模型上 MTP 可能有害，大模型上才明显受益。
+
+## 小结
+
+- MTP 在每个位置额外预测 $t_{i+1+k}$（$k=1..D$），深度 $k$ 的标签是 `tokens[:, 1+k:]`，只有前 $T-1-k$ 个位置有效；总损失为 $\mathcal L_{\text{main}}+\frac{\lambda}{D}\sum_k\mathcal L^k$。
+- 并行头在共享主干上并列 $n$ 个输出头，各头只条件于 $t_{\le i}$；13B 规模上用 $n=4$ 训练对代码基准有明显提升。
+- DeepSeek-V3 的顺序 MTP 模块拼接上一深度的表示与真实 $t_{i+k}$ 的嵌入，经一个块后预测 $t_{i+1+k}$，保持完整的因果链；嵌入与输出头与主模型共享。
+- V3 用 $D=1$、$\lambda$ 从 0.3 降到 0.1；推理时可丢弃 MTP 模块，也可把它作为投机解码草稿，第二个 token 的接受率为 85%—90%，速度提升约 1.8 倍。
+
+## 练习
+
+1. 序列长度 $T=4096$、$D=2$ 时，三个损失项各在多少个位置上计算？如果实现时忘了截断 logits，直接把形状为 $[B, T, V]$ 的 logits 与长度为 $T-1-k$ 的标签对齐，会发生什么？
+
+<details>
+<summary>答案</summary>
+
+主损失 4095 个位置，深度 1 有 4094 个，深度 2 有 4093 个。若不截断，`cross_entropy` 会因形状不匹配报错；更危险的情形是有人用填充把标签补到长度 $T$，却没有把填充位置设为 `ignore_index`，模型就会被训练去在最后几个位置预测填充符号。`mtp_loss` 中的 `logits[:, : targets.shape[1]]` 正是为了让每个深度只在有标签的位置上计算。
+
+</details>
+
+2. 在顺序 MTP 中，深度 1 在位置 $i$ 的预测条件于 $t_{\le i+1}$，这与主模型在位置 $i+1$ 预测 $t_{i+2}$ 的条件相同。既然条件相同，深度 1 的预测岂不是多余的？
+
+<details>
+<summary>答案</summary>
+
+条件中的信息相同，但计算路径不同。主模型在位置 $i+1$ 用全部 $L$ 层处理 $t_{i+1}$；深度 1 只能用主模型在位置 $i$ 的最终表示（尚未见过 $t_{i+1}$）加上一个额外的块来完成同样的预测。为了让这个“捷径”能成功，主模型在位置 $i$ 的表示必须已经编码了关于 $t_{i+2}$ 的前瞻信息，这正是 MTP 对主干表示施加的训练压力。推理时这一差异也带来好处：深度 1 只需一个块就能给出 $t_{i+2}$ 的草稿，而不必等主模型处理完 $t_{i+1}$。
+
+</details>
+
+3. 用 DeepSeek-V3 报告的接受率估算：若 MTP 草稿（只猜 1 个 token）的接受率为 $p$，每次主模型前向平均产生多少个 token？$p=0.85$ 和 $p=0.9$ 时分别是多少？与报告的 1.8 倍加速相比如何？
+
+<details>
+<summary>答案</summary>
+
+每次前向一定产生 1 个 token（主模型自己的预测），草稿被接受时再多 1 个，期望为 $1+p$。$p=0.85$ 时为 1.85，$p=0.9$ 时为 1.9。报告的 1.8 倍略低于此，因为每一步还要额外运行 MTP 模块、主模型一次处理 2 个 token 的成本也略高于 1 个，实际加速要扣除这些开销。
+
+</details>
+
+4. `test_sequential_mtp_is_causal_up_to_its_input_token` 改动了 $t_6$，断言深度 1 在位置 0—4 的输出不变、位置 5 的输出改变。如果把 `emb = m.embed(idx[:, k:])` 错写成 `m.embed(idx[:, :T_k])`，这个测试会怎样？
+
+<details>
+<summary>答案</summary>
+
+错写后位置 $i$ 拼接的是 $t_i$ 的嵌入（而不是 $t_{i+1}$），深度 1 的条件变成 $t_{\le i}$，与并行头相同。改动 $t_6$ 只会影响位置 $\ge6$ 的输出，而深度 1 只有 $T-1=9$ 个位置（0—8），位置 5 的输出不会改变，于是 `assert not torch.allclose(a[:, 5], b[:, 5])` 失败。这个测试正好能抓住“少错开一位”的错误。
+
+</details>
+
+5. 为什么 MTP 模块要与主模型共享嵌入矩阵与输出头？如果各用一套独立的，会有什么后果？
+
+<details>
+<summary>答案</summary>
+
+一是参数与显存：DeepSeek-V3 的嵌入与输出头各约 $129280\times7168\approx0.93$B 参数，每个深度各复制一份会让 MTP 模块的参数翻倍以上。二是表示空间一致：共享输出头意味着 MTP 模块的输出必须落在主模型的同一个表示空间中，这让 MTP 的训练信号直接作用于主模型的表示，而不是被一个独立的输出头“吸收”；推理时作为草稿器，它与主模型的 token 分布也更一致，接受率更高。
+
+</details>
+
+## 参考文献
+
+- Gloeckle et al. [Better & Faster Large Language Models via Multi-token Prediction](https://arxiv.org/abs/2404.19737). 2024.
+- Qi et al. [ProphetNet: Predicting Future N-gram for Sequence-to-Sequence Pre-training](https://arxiv.org/abs/2001.04063). 2020.
+- DeepSeek-AI. [DeepSeek-V3 Technical Report](https://arxiv.org/abs/2412.19437). 2024（§2.2 多 token 预测，以及 MTP 的消融实验与推理加速的讨论）.
+- DeepSeek-AI. [DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence](https://arxiv.org/abs/2606.19348). 2026.
+- Leviathan et al. [Fast Inference from Transformers via Speculative Decoding](https://arxiv.org/abs/2211.17192). 2022.
+- Qwen Team. [Qwen3-Next-80B-A3B 模型卡](https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct). 2025.

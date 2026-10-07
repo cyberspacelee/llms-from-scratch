@@ -2,7 +2,209 @@
 title: 多模态：视觉语言模型
 description: 图像如何变成 token：ViT 与 patch 嵌入、投影器与对齐训练，动态分辨率与原生多模态的结构选择。
 order: 9
-draft: true
+code:
+  - src/llms_from_scratch/architecture/vision.py
+  - tests/architecture/test_vision.py
 ---
 
-本章正在撰写。
+到目前为止，模型的输入都是文本 token 的序列。但 decoder-only Transformer 本身并不关心 token 从哪里来：只要能把一张图片变成一串 $d$ 维向量，放进序列里与文本嵌入排在一起，后面的注意力、FFN、KV Cache 都可以原样工作。今天的视觉语言模型（vision-language model，VLM）——LLaVA、Qwen2-VL 到 Qwen3-VL、LLaMA 4、Kimi-VL——几乎都遵循这个思路。
+
+本章回答三个问题。第一，**图像怎样变成向量序列**：视觉 Transformer（ViT）把图像切成小块，每块线性映射成一个向量。第二，**视觉向量怎样进入语言模型**：一个投影器把视觉特征映射到语言模型的嵌入空间，配合分阶段的对齐训练。第三，**位置怎样编码**：图像是二维的，视频还多了时间维，而语言模型的 RoPE 是一维的；Qwen2-VL 的 M-RoPE 给出了一个优雅的统一方案，并支持任意分辨率的输入。最后讨论“后接适配器”与“原生多模态”两条路线的取舍。
+
+## ViT：把图像切成 patch
+
+ViT（Dosovitskiy 等 2020）的做法几乎是对文本 Transformer 的直接搬运。把一张 $H\times W$、$C$ 个通道的图像切成不重叠的 $p\times p$ 小块（patch），共 $N=\frac{H}{p}\cdot\frac{W}{p}$ 块；每块展平成 $Cp^2$ 维向量，经一个共享的线性层映射到 $d$ 维，加上位置编码，就得到了一个长度为 $N$ 的“视觉 token”序列，再交给一个标准的（双向）Transformer 编码器。
+
+<KeyEq label="patch 嵌入">
+
+$$
+z_j = W_E\,\operatorname{vec}(x_j) + b,\qquad x_j\in\mathbb R^{C\times p\times p},\quad W_E\in\mathbb R^{d\times Cp^2},\quad j = 1,\dots,\tfrac{HW}{p^2}.
+$$
+
+</KeyEq>
+
+“对每个 patch 做同一个线性映射”恰好就是一个**核大小与步长都等于 $p$ 的卷积**：卷积核在每个不重叠的 $p\times p$ 窗口上做一次内积，输出通道数为 $d$。实现中都用 `Conv2d` 写，因为它不需要显式地切块与重排。
+
+<CodeFile path="src/llms_from_scratch/architecture/vision.py" region="patch" />
+
+`patchify` 用两次 `unfold` 显式地切出 patch，并按行优先顺序展平；测试 `test_patch_embed_is_linear_on_patches` 断言卷积的输出等于“切块后乘以展平的卷积核”，`test_patchify_row_major_order` 在一个 $4\times4$ 的小图上确认第 0 行第 1 列的 patch 是 $(2,3,6,7)$。
+
+序列长度随分辨率平方增长。CLIP ViT-L/14 在 224 像素输入时得到 $16\times16=256$ 个 patch，336 像素时为 $24\times24=576$ 个；一张 1344×1344 的文档图片若用 14 像素的 patch，会有 9216 个。视觉 token 的数量直接决定了语言模型的上下文占用与 prefill 成本，后面的“合并”和“动态分辨率”都是在处理这个问题。
+
+视觉编码器通常不从零训练，而是取自对比学习预训练的模型：CLIP 与 SigLIP 用海量图文对训练图像编码器和文本编码器，使配对的图文向量相近、不配对的远离。这样得到的视觉特征已经与语言语义对齐，是连接语言模型的良好起点。
+
+## 投影器：连接视觉与语言
+
+视觉编码器输出的特征（维度 $d_v$）与语言模型的嵌入空间（维度 $d$）既维度不同、语义坐标也不同，需要一个**投影器**（projector，也称连接器）把前者映射到后者。主流的设计有三类：
+
+- **MLP 投影**：LLaVA 用一个线性层，LLaVA-1.5 改为两层 MLP（中间 GELU），每个视觉 token 独立映射，token 数不变。简单而有效，是目前最常见的选择。
+- **可学习查询的重采样**：BLIP-2 的 Q-Former 用 32 个可学习的查询向量，通过交叉注意力从视觉特征中“读取”信息，无论图像多大都输出固定 32 个 token；Flamingo 的 Perceiver Resampler 思路相同。它压缩了 token 数，但也可能丢失细粒度信息（如文档中的小字），近年在高分辨率任务上较少使用。
+- **空间合并**：Qwen2-VL 把相邻的 $2\times2$ 个 patch 特征拼接成一个 $4d_v$ 维向量，再经两层 MLP 投影，视觉 token 数降为 1/4。它在压缩的同时保留了局部的空间结构。
+
+<Diagram width={700} height={270} label="视觉语言模型的输入通路：图像经 ViT、合并与投影后与文本嵌入拼成一条序列">
+  <Box x={20} y={30} w={110} h={80} label="图像" sub="H × W × 3" />
+  <Box x={160} y={30} w={110} h={80} label="ViT 编码器" sub="patch 14 × 14" tone="info" />
+  <Box x={300} y={30} w={130} h={80} label="2×2 合并 + MLP" sub="token 数 ÷ 4" tone="accent" />
+  <Arrow from={[130, 70]} to={[160, 70]} />
+  <Arrow from={[270, 70]} to={[300, 70]} />
+  <Text x={480} y={44} label="视觉 token" size="sm" tone="accent" />
+  <Arrow from={[430, 70]} via={[[480, 70]]} to={[480, 150]} tone="accent" />
+  <Text x={30} y={140} label="一条序列" size="sm" tone="muted" anchor="start" />
+  <Box x={30} y={150} w={60} h={36} label="用户" size="sm" />
+  <Box x={95} y={150} w={60} h={36} label="：" size="sm" />
+  <Box x={160} y={150} w={40} h={36} label="⟨img⟩" size="sm" tone="muted" />
+  <Box x={205} y={150} w={45} h={36} tone="accent" />
+  <Box x={255} y={150} w={45} h={36} tone="accent" />
+  <Box x={305} y={150} w={45} h={36} tone="accent" />
+  <Box x={355} y={150} w={45} h={36} tone="accent" />
+  <Box x={405} y={150} w={45} h={36} tone="accent" />
+  <Box x={455} y={150} w={45} h={36} tone="accent" />
+  <Box x={505} y={150} w={40} h={36} label="⟨/img⟩" size="sm" tone="muted" />
+  <Box x={550} y={150} w={60} h={36} label="图里" size="sm" />
+  <Box x={615} y={150} w={60} h={36} label="有什么" size="sm" />
+  <Box x={160} y={214} w={390} h={40} label="语言模型（decoder-only，与纯文本完全相同）" tone="strong" />
+  <Arrow from={[355, 186]} to={[355, 214]} />
+  <Fragment slot="caption">图像经 ViT 编码、相邻 patch 合并并投影到语言模型的嵌入维度后，替换序列中图像占位符的位置；其余位置仍是普通的文本嵌入。语言模型看到的只是一条 $d$ 维向量的序列，不区分它们来自哪种模态。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/architecture/vision.py" region="projector" />
+
+`PatchMerger` 的关键是一次 `view` 加 `permute`：把 $[B, h\cdot w, d]$ 的 patch 序列先看成 $[B, \frac h2, 2, \frac w2, 2, d]$，再把两个“2”挪到一起，于是每个输出位置拿到的恰好是一个 $2\times2$ 的空间邻域。测试 `test_merger_groups_spatial_neighbours` 在 $4\times4$ 网格上验证：第一个合并 token 包含 patch $(0,1,4,5)$，第二个包含 $(2,3,6,7)$——如果直接对一维序列每 4 个分一组，得到的会是同一行的 $(0,1,2,3)$，空间结构就被破坏了。
+
+### 拼接进文本序列
+
+在输入端，文本中用一个特殊的占位 token 标记图像的位置，分词后按图像的视觉 token 数展开成相应数量的占位符。语言模型先对整条序列做文本嵌入，再把占位符位置的嵌入**替换**为投影后的视觉 token：
+
+<CodeFile path="src/llms_from_scratch/architecture/vision.py" symbol="splice_image_tokens" />
+
+此后的计算与纯文本完全相同。训练时，损失只在回答部分的文本 token 上计算（图像位置与用户提问不计损失），这与[监督微调与对话模板](/post-training/sft/)中的损失掩码是同一套机制。
+
+## 对齐训练：LLaVA 的两阶段
+
+LLaVA（Liu 等 2023）确立了一个简单的训练流程，至今仍是许多 VLM 的基础：
+
+1. **特征对齐（预训练）**：冻结视觉编码器与语言模型，只训练投影器。数据是大规模的图像—描述对（LLaVA 用从 CC3M 中筛选的约 59.5 万对，LLaVA-1.5 用约 55.8 万对），任务是根据图像生成描述。这一阶段让投影器学会把视觉特征“翻译”到语言模型能理解的嵌入空间。
+2. **视觉指令微调**：继续冻结视觉编码器，同时训练投影器和语言模型。数据是多轮的视觉问答与指令（LLaVA 用 GPT-4 生成的约 15.8 万条，LLaVA-1.5 混合了约 66.5 万条，包括学术 VQA 数据）。这一阶段让模型学会按指令使用视觉信息。
+
+第一阶段之所以冻结语言模型，是为了保护其语言能力：此时的投影器输出接近随机，若同时训练语言模型，噪声梯度会损害已有的知识。LLaVA-1.5 的结果表明，仅用两层 MLP 投影、约 120 万条数据和单机一天的训练，就能在当时的多项基准上达到最优水平。
+
+此后的模型普遍扩展了这个流程：在两阶段之间加入大规模的图文交错数据与 OCR、文档、图表数据的继续预训练，并解冻视觉编码器一起训练（Qwen2-VL 的视觉编码器约 675M 参数，在第一阶段就参与训练）；在指令微调之后再做偏好对齐与强化学习。
+
+## 动态分辨率与多模态位置编码
+
+### 动态分辨率
+
+早期 VLM 把所有图像缩放到固定分辨率（如 336×336）。这对自然照片尚可，对文档、图表、截图则是灾难：一页 A4 文档缩到 336 像素，文字已无法辨认。两种解决思路：
+
+- **切图（AnyRes）**：LLaVA-NeXT 等把高分辨率图像切成若干个固定尺寸的子图，分别编码后拼接，再附加一张缩略图提供全局信息。
+- **原生分辨率**：Qwen2-VL 的“朴素动态分辨率”让 ViT 直接处理任意尺寸的图像（只要求宽高是 28 的倍数），patch 数随图像大小变化。为此 ViT 内部的位置编码改为二维 RoPE（按行、列分别旋转），而不是固定长度的绝对位置嵌入。一张 224×224 的图像产生 $16\times16$ 个 patch，$2\times2$ 合并后为 64 个视觉 token，加上首尾两个特殊 token 共 66 个；一张 1344×896 的图像则产生 $96\times64$ 个 patch、合并后 1536 个 token。
+
+### M-RoPE：一维、二维与时间的统一
+
+语言模型的 RoPE 为每个 token 分配一个整数位置。视觉 token 放进序列后该如何编号？最简单的办法是把它们当成文本，按行优先依次编号，但这样同一列上下相邻的两个 patch 位置相差一整行的长度，空间结构完全丢失。
+
+Qwen2-VL 提出了**多模态旋转位置编码**（Multimodal RoPE，M-RoPE）：每个 token 的位置不再是一个整数，而是一个三元组 $(p^{t}, p^{h}, p^{w})$，分别表示时间、高度、宽度。RoPE 的 $d/2$ 个旋转频率被分成三段，分别用三个分量转动：
+
+<KeyEq label="M-RoPE 的位置编号">
+
+$$
+\text{text: }\ (p^t,p^h,p^w) = (m, m, m),\qquad
+\text{image at row } r,\ \text{col } c:\ (p^t,p^h,p^w) = (s,\ s+r,\ s+c),
+$$
+
+</KeyEq>
+
+其中 $m$ 是文本 token 的顺序编号，$s$ 是图像开始时的编号。图像之后的文本从当前三元组中最大的分量加 1 继续编号。对视频，每一帧的时间分量依次递增。这个设计有两个漂亮的性质：
+
+- **对纯文本完全退化为一维 RoPE**：三个分量相同，三段频率转过的角度与普通 RoPE 中同一位置的角度完全一致。因此一个以文本 RoPE 预训练的语言模型可以无缝接入 M-RoPE。
+- **图像内部保持二维的相对位置**：同一行相邻的两个 patch 只有宽度分量相差 1，同一列相邻的只有高度分量相差 1，注意力分数通过 RoPE 的相对性质自然地感知二维距离。
+
+<Diagram width={660} height={200} label="一条“2 个文本 token + 2×3 图像 + 2 个文本 token”的序列的 M-RoPE 位置编号">
+  <Matrix x={110} y={50} rows={3} cols={10} cell={[48, 30]} rowLabels={['时间 t','高 h','宽 w']} colLabels={['文','文','图','图','图','图','图','图','文','文']} values={[[0,1,2,2,2,2,2,2,5,6],[0,1,2,2,2,3,3,3,5,6],[0,1,2,3,4,2,3,4,5,6]]} tone="muted" highlight={[{ cols: [2,3,4,5,6,7], tone: 'accent' }, { cols: [0,1,8,9], tone: 'info' }]} />
+  <Text x={350} y={170} label="图像网格 2 行 × 3 列，起点 s = 2；之后的文本从 max + 1 = 5 继续" size="sm" tone="muted" />
+  <Fragment slot="caption">每列是序列中的一个 token，三行是它的三个位置分量。文本 token 的三个分量相同；图像 token 的时间分量固定为起点 2，高、宽分量分别是起点加行号、列号。图像之后的文本从 5 开始，而不是从 2 + 6 = 8 开始，所以一张大图不会把后续文本的位置推得很远。</Fragment>
+</Diagram>
+
+<CodeFile path="src/llms_from_scratch/architecture/vision.py" region="mrope" />
+
+`mrope_frequencies` 先按 `sections` 决定每个频率用哪个分量，再用对应的位置编号计算角度，返回的复数因子与第三部分 `rope_frequencies` 格式相同，可以直接交给 `apply_rope`。Qwen2-VL 在头维 128 时取 `mrope_section = [16, 24, 24]`，即 64 个频率中前 16 个用时间、中间 24 个用高度、最后 24 个用宽度。测试 `test_mrope_position_ids` 检查了上图中的全部编号，`test_mrope_reduces_to_rope_for_text` 断言纯文本时 M-RoPE 与普通 RoPE 逐元素相同。
+
+后续版本对 M-RoPE 做了改进。Qwen2.5-VL 把视频的时间分量与真实的时间戳对齐，使模型能理解不同帧率视频中的时间间隔。Qwen3-VL 把三段“分块”的频率分配改为交错分配，让时间、高度、宽度都能覆盖从高频到低频的完整频谱，改善长视频理解。
+
+## 原生多模态
+
+上面介绍的都是“后接适配器”的路线：先有一个训练好的纯文本语言模型，再接上视觉编码器与投影器，用相对少量的多模态数据训练连接。它的优点是复用强大的语言模型、训练成本低；缺点是视觉与语言在预训练阶段从未一起学习，模态之间的融合只发生在较浅的接口处。
+
+**原生多模态**（native multimodal）从预训练开始就让模型同时学习多种模态。有两种做法：
+
+- **离散 token 的早期融合**：Chameleon（Meta，2024）用一个 VQ 图像分词器把图像变成离散的 token（与文本 token 共用一个词表），一个 Transformer 从头在图文交错的序列上训练，既能理解也能生成图像。代价是 VQ 量化会丢失细节，训练也更不稳定（Chameleon 为此引入了 QK-Norm 等技巧）。
+- **连续特征的早期融合**：LLaMA 4 采用“早期融合”，在预训练阶段就把视觉编码器的连续特征与文本 token 一起送入同一个主干，联合训练大量的文本、图像与视频数据。
+
+两条路线目前并存。对于以理解为主的 VLM，“强语言模型 + 视觉编码器 + MLP 投影 + 多阶段训练”仍是最常见、最经济的方案；原生多模态在统一理解与生成、以及模态间更深的融合上更有潜力，代价是需要从预训练开始投入大量的多模态数据与计算。
+
+## 小结
+
+- ViT 把图像切成 $p\times p$ 的 patch，每块线性映射成一个向量，等价于核大小与步长均为 $p$ 的卷积；token 数随分辨率平方增长。
+- 投影器把视觉特征映射到语言模型的嵌入空间：MLP（最常见）、可学习查询的重采样（固定 token 数）、$2\times2$ 空间合并（token 数 ÷4，保留局部结构）。
+- 视觉 token 替换文本序列中的占位符，之后的计算与纯文本完全相同；损失只在回答 token 上计算。
+- LLaVA 两阶段训练：先冻结编码器和语言模型、只训练投影器做特征对齐，再训练投影器与语言模型做视觉指令微调。
+- 动态分辨率让 ViT 直接处理原生尺寸的图像；M-RoPE 用 (时间, 高, 宽) 三元组编号，纯文本时退化为一维 RoPE，图像内部保持二维相对位置。
+- 原生多模态从预训练开始联合学习多种模态（Chameleon 的离散 token、LLaMA 4 的早期融合），与“后接适配器”路线各有取舍。
+
+## 练习
+
+1. 用 patch 大小 14、$2\times2$ 合并的 Qwen2-VL 式编码器处理一张 1120×784 的图像，会产生多少个 patch？进入语言模型的视觉 token 有多少（不计特殊 token）？若用 LLaVA-1.5 的方式先缩放到 336×336，又是多少？
+
+<details>
+<summary>答案</summary>
+
+$1120/14=80$，$784/14=56$，共 $80\times56=4480$ 个 patch；合并后 $40\times28=1120$ 个视觉 token。LLaVA-1.5 缩放到 336 后为 $24\times24=576$ 个 token，不做合并。前者 token 数约为后者的 2 倍，但保留了原始分辨率的细节，且宽高比没有被扭曲。
+
+</details>
+
+2. 证明：若一个序列只含文本 token，M-RoPE 与普通 RoPE 产生完全相同的旋转。若把文本的三个分量设为 $(m, 0, 0)$ 而不是 $(m,m,m)$，会有什么问题？
+
+<details>
+<summary>答案</summary>
+
+M-RoPE 中第 $k$ 个频率的角度是 $p^{(s_k)}\theta_k$，$s_k$ 是该频率所属的分量。文本 token 三个分量都等于 $m$，于是每个频率的角度都是 $m\theta_k$，与普通 RoPE 完全相同。若设为 $(m,0,0)$，则只有属于时间段的前 16 个频率随位置旋转，其余 48 个频率不随位置变化，文本的位置信息只剩四分之一的频率在编码，预训练时学到的位置模式全部失效。
+
+</details>
+
+3. 在 `PatchMerger` 中，如果把 `x.view(B, grid_h // m, m, grid_w // m, m, d).permute(0, 1, 3, 2, 4, 5)` 改成直接 `x.view(B, -1, m * m * d)`，合并的会是哪些 patch？对一张 4×4 的网格写出第一个合并 token 包含的 patch 编号。
+
+<details>
+<summary>答案</summary>
+
+直接 `view` 按一维顺序每 4 个分组，第一个合并 token 包含 patch $(0,1,2,3)$，即第一行的全部 4 个 patch，而不是左上角的 $2\times2$ 邻域 $(0,1,4,5)$。合并后的 token 不再对应一个紧凑的空间区域，空间结构被破坏；测试 `test_merger_groups_spatial_neighbours` 能发现这个错误。
+
+</details>
+
+4. LLaVA 第一阶段为什么冻结语言模型？如果只有极少量的图文对数据，你会选择 MLP 投影还是 Q-Former？说明理由。
+
+<details>
+<summary>答案</summary>
+
+第一阶段开始时投影器是随机初始化的，它输出的“视觉嵌入”对语言模型而言是噪声；如果此时语言模型也参与训练，噪声输入产生的梯度会扰动语言模型已有的知识。冻结语言模型让投影器先学会把视觉特征映射到语言模型“认识”的区域。数据极少时，参数更少、结构更简单的 MLP 投影更不容易过拟合，而 Q-Former 自身就是一个多层 Transformer，需要更多数据来训练（BLIP-2 为它专门设计了两阶段预训练）。
+
+</details>
+
+5. 一段 2 秒、每秒 2 帧的视频，每帧合并后为 $2\times2$ 个视觉 token，紧接着一个文本 token。按 Qwen2-VL 的 M-RoPE 规则（视频的时间分量每帧加 1），从起点 $s=0$ 开始，写出所有 token 的三元组。
+
+<details>
+<summary>答案</summary>
+
+共 4 帧。第 $f$ 帧（$f=0..3$）的 token 为 $(f, r, c)$，$r,c\in\{0,1\}$：第 0 帧 $(0,0,0),(0,0,1),(0,1,0),(0,1,1)$；第 1 帧 $(1,0,0),(1,0,1),(1,1,0),(1,1,1)$；第 2、3 帧同理，时间分量为 2、3。所有分量的最大值为 3，后面的文本 token 为 $(4,4,4)$。Qwen2.5-VL 进一步把时间分量与真实时间戳对齐，使每秒的间隔在不同帧率下保持一致。
+
+</details>
+
+## 参考文献
+
+- Dosovitskiy et al. [An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale](https://arxiv.org/abs/2010.11929). 2020.
+- Radford et al. [Learning Transferable Visual Models From Natural Language Supervision](https://arxiv.org/abs/2103.00020)（CLIP）. 2021；Zhai et al. [Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343)（SigLIP）. 2023.
+- Alayrac et al. [Flamingo: a Visual Language Model for Few-Shot Learning](https://arxiv.org/abs/2204.14198). 2022.
+- Li et al. [BLIP-2: Bootstrapping Language-Image Pre-training with Frozen Image Encoders and Large Language Models](https://arxiv.org/abs/2301.12597). 2023.
+- Liu et al. [Visual Instruction Tuning](https://arxiv.org/abs/2304.08485)（LLaVA）. 2023；Liu et al. [Improved Baselines with Visual Instruction Tuning](https://arxiv.org/abs/2310.03744)（LLaVA-1.5）. 2023.
+- Wang et al. [Qwen2-VL: Enhancing Vision-Language Model's Perception of the World at Any Resolution](https://arxiv.org/abs/2409.12191). 2024；Qwen Team. [Qwen2.5-VL Technical Report](https://arxiv.org/abs/2502.13923). 2025.
+- Chameleon Team. [Chameleon: Mixed-Modal Early-Fusion Foundation Models](https://arxiv.org/abs/2405.09818). 2024.
+- Meta AI. [The Llama 4 herd: The beginning of a new era of natively multimodal AI innovation](https://ai.meta.com/blog/llama-4-multimodal-intelligence/). 2025.
