@@ -59,15 +59,15 @@ $N = 4096$、FP32（$e=4$）时 $I_{\max}\approx 683$ FLOP/byte，远高于任�
 具体做法是沿 $K$ 维切成长度为 $T$ 的段：每一轮，block 把 $A$ 的一个 $T\times T$ 子块和 $B$ 的一个 $T\times T$ 子块搬进共享内存（每个线程搬一个元素），同步，然后每个线程用共享内存中的数据做 $T$ 次乘加，再同步，进入下一轮。
 
 <Diagram width={700} height={300} label="共享内存分块：一个 block 计算 C 的一个子块">
-  <Matrix x={250} y={40} rows={6} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ rows: [2, 3], cols: [], tone: 'accent' }, { cells: [[2, 0], [2, 1], [3, 0], [3, 1]], tone: 'strong' }]} title="A（M × K）" />
-  <Matrix x={480} y={40} rows={8} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ cols: [4, 5], tone: 'info' }, { cells: [[0, 4], [0, 5], [1, 4], [1, 5]], tone: 'strong' }]} title="B（K × N）" />
+  <Matrix x={250} y={40} rows={6} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ rows: [2, 3], cols: [], tone: 'accent' }, { cells: [[2, 0], [2, 1], [3, 0], [3, 1]], tone: 'strong' }]} title="$A$（$M \times K$）" />
+  <Matrix x={480} y={40} rows={8} cols={8} cell={22} gap={1} tone="neutral" highlight={[{ cols: [4, 5], tone: 'info' }, { cells: [[0, 4], [0, 5], [1, 4], [1, 5]], tone: 'strong' }]} title="$B$（$K \times N$）" />
   <Matrix x={480} y={236} rows={2} cols={8} cell={22} gap={1} tone="muted" highlight={[{ cells: [[0, 4], [0, 5], [1, 4], [1, 5]], tone: 'accent2' }]} />
-  <Text x={420} y={260} label="C 的子块" anchor="end" size="sm" tone="accent2" />
-  <Box x={20} y={60} w={190} h={60} label="共享内存 As" sub="T × T，本轮的 A 子块" tone="accent" />
-  <Box x={20} y={190} w={190} h={56} label="共享内存 Bs" sub="T × T，本轮的 B 子块" tone="info" />
+  <Text x={420} y={260} label="$C$ 的子块" anchor="end" size="sm" tone="accent2" />
+  <Box x={20} y={60} w={190} h={60} label="共享内存 As" sub="$T \times T$，本轮的 $A$ 子块" tone="accent" />
+  <Box x={20} y={190} w={190} h={56} label="共享内存 Bs" sub="$T \times T$，本轮的 $B$ 子块" tone="info" />
   <Arrow from={[250, 92]} to={[210, 90]} tone="accent" />
   <Arrow from={[480, 74]} via={[[450, 74], [450, 218]]} to={[210, 218]} tone="info" />
-  <Text x={115} y={278} label="沿 K 方向滑动：K / T 轮" size="sm" tone="muted" />
+  <Text x={115} y={278} label="沿 $K$ 方向滑动：$K / T$ 轮" size="sm" tone="muted" />
   <Fragment slot="caption">以 T = 2 示意。block 负责 C 中橙色的 T×T 子块，它需要 A 的两行（绿色）与 B 的两列（蓝色）。每一轮只把其中一个 T×T 子块（深色）搬进共享内存，块内所有线程从共享内存读取；K/T 轮之后累加完毕。</Fragment>
 </Diagram>
 
@@ -223,15 +223,15 @@ Blackwell（B200）的第五代 Tensor Core 再进一步：`tcgen05.mma` 的累�
 回顾本章，一个高性能 GEMM 在每一级存储上都做了分块，每一级的子块是下一级的“问题”：
 
 <Diagram width={700} height={250} label="GEMM 的分层分块">
-  <Box x={15} y={40} w={150} h={70} label="设备级" sub="C：M × N" tone="neutral" />
+  <Box x={15} y={40} w={150} h={70} label="设备级" sub="$C$：$M \times N$" tone="neutral" />
   <Box x={190} y={40} w={150} h={70} label="线程块 tile" sub="$B_M \times B_N$ · 共享内存" tone="info" />
   <Box x={365} y={40} w={150} h={70} label="warp tile" sub="$W_M \times W_N$ · 寄存器" tone="accent" />
-  <Box x={540} y={40} w={145} h={70} label="MMA 指令" sub="如 16×8×16" tone="strong" />
+  <Box x={540} y={40} w={145} h={70} label="MMA 指令" sub="如 $16 \times 8 \times 16$" tone="strong" />
   <Arrow from={[165, 75]} to={[190, 75]} />
   <Arrow from={[340, 75]} to={[365, 75]} />
   <Arrow from={[515, 75]} to={[540, 75]} />
   <Text x={90} y={136} label="网格：每个 block 一块" size="sm" tone="muted" />
-  <Text x={265} y={136} label="沿 K 循环，多级流水" size="sm" tone="muted" />
+  <Text x={265} y={136} label="沿 $K$ 循环，多级流水" size="sm" tone="muted" />
   <Text x={440} y={136} label="每个 warp 一块" size="sm" tone="muted" />
   <Text x={612} y={136} label="Tensor Core" size="sm" tone="muted" />
   <Box x={15} y={170} w={670} h={56} label="每一级都是同一个问题：把下一级需要的数据搬到更近的存储，在那里复用尽可能多次" tone="ghost" />

@@ -22,30 +22,30 @@ code:
 用一个具体的例子：$x = [1,2,3,4]$，$A$ 是 $0$ 到 $15$ 按行排成的 $4\times4$ 矩阵，$y = xA = [80, 90, 100, 110]$。两卡列切分时 rank 0 用前两列得到 $[80,90]$，rank 1 得到 $[100,110]$；行切分时 rank 0 用 $x_1=[1,2]$ 与前两行得到 $[8,11,14,17]$，rank 1 用 $x_2=[3,4]$ 与后两行得到 $[72,79,86,93]$，逐元素相加才是 $y$。
 
 <Diagram width={720} height={330} label="矩阵乘的列切分与行切分">
-  <Text x={20} y={20} label="列切分：每个 rank 持有 A 的若干列，得到 Y 的若干列（拼接）" anchor="start" size="sm" bold />
-  <Matrix x={60} y={98} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="x（完整）" />
-  <Text x={200} y={111} label="×" />
-  <Matrix x={220} y={46} rows={4} cols={4} cell={[28, 26]} title="A"
+  <Text x={20} y={20} label="列切分：每个 rank 持有 $A$ 的若干列，得到 $Y$ 的若干列（拼接）" anchor="start" size="sm" bold />
+  <Matrix x={60} y={98} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="$x$（完整）" />
+  <Text x={200} y={111} label="$\times$" />
+  <Matrix x={220} y={46} rows={4} cols={4} cell={[28, 26]} title="$A$"
     values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]}
     highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
-  <Text x={360} y={111} label="=" />
-  <Matrix x={380} y={98} rows={1} cols={4} cell={[28, 26]} values={[[80, 90, 100, 110]]} title="y"
+  <Text x={360} y={111} label="$=$" />
+  <Matrix x={380} y={98} rows={1} cols={4} cell={[28, 26]} values={[[80, 90, 100, 110]]} title="$y$"
     highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
-  <Text x={530} y={96} label="rank 0：[80, 90]" anchor="start" size="sm" />
-  <Text x={530} y={126} label="rank 1：[100, 110]" anchor="start" size="sm" />
-  <Text x={20} y={180} label="行切分：每个 rank 持有 A 的若干行与 x 的对应段，得到部分和（相加）" anchor="start" size="sm" bold />
-  <Matrix x={60} y={258} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="x（切分）"
+  <Text x={530} y={96} label="rank 0：$[80, 90]$" anchor="start" size="sm" />
+  <Text x={530} y={126} label="rank 1：$[100, 110]$" anchor="start" size="sm" />
+  <Text x={20} y={180} label="行切分：每个 rank 持有 $A$ 的若干行与 $x$ 的对应段，得到部分和（相加）" anchor="start" size="sm" bold />
+  <Matrix x={60} y={258} rows={1} cols={4} cell={[28, 26]} values={[[1, 2, 3, 4]]} title="$x$（切分）"
     highlight={[{ cols: [0, 1], tone: 'accent' }, { cols: [2, 3], tone: 'info' }]} />
-  <Text x={200} y={271} label="×" />
-  <Matrix x={220} y={206} rows={4} cols={4} cell={[28, 26]} title="A"
+  <Text x={200} y={271} label="$\times$" />
+  <Matrix x={220} y={206} rows={4} cols={4} cell={[28, 26]} title="$A$"
     values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]]}
     highlight={[{ rows: [0, 1], tone: 'accent' }, { rows: [2, 3], tone: 'info' }]} />
-  <Text x={360} y={271} label="=" />
+  <Text x={360} y={271} label="$=$" />
   <Matrix x={380} y={232} rows={1} cols={4} cell={[28, 26]} values={[[8, 11, 14, 17]]} tone="accent" />
   <Matrix x={380} y={284} rows={1} cols={4} cell={[28, 26]} values={[[72, 79, 86, 93]]} tone="info" />
   <Text x={514} y={245} label="rank 0" anchor="start" size="sm" tone="muted" />
   <Text x={514} y={297} label="rank 1" anchor="start" size="sm" tone="muted" />
-  <Arrow from={[566, 271]} to={[592, 271]} label="Σ" />
+  <Arrow from={[566, 271]} to={[592, 271]} label="$\sum$" />
   <Matrix x={598} y={258} rows={1} cols={4} cell={[28, 26]} values={[[80, 90, 100, 110]]} tone="strong" />
   <Fragment slot="caption">上：列切分不需要通信就能各自算出 y 的一段，但输入必须完整。下：行切分让每个 rank 只用输入的一段，但输出是同一形状的部分和，要 all-reduce 才得到 y。两种切法的输入、输出布局恰好互补。</Fragment>
 </Diagram>
@@ -97,18 +97,18 @@ $$
 本书模型用的是 SwiGLU：$\mathrm{FFN}(X) = \big(\mathrm{SiLU}(XW_1^\top)\odot XW_3^\top\big)W_2^\top$。门控是逐元素乘法，所以 $W_1$ 与 $W_3$ **用同样的方式列切**（第 $i$ 个 rank 拿到中间维的同一段），$W_2$ 行切，整个前馈层仍然只在出口处 all-reduce 一次。中间激活 $[N, d_\text{ff}/t]$ 自始至终留在本地，这也是张量并行节省激活显存的来源。
 
 <Diagram width={720} height={250} label="张量并行的 SwiGLU 前馈层">
-  <Box x={20} y={100} w={70} h={44} label="X" tone="neutral" />
-  <Box x={110} y={100} w={44} h={44} label="f" tone="strong" />
+  <Box x={20} y={100} w={70} h={44} label="$X$" tone="neutral" />
+  <Box x={110} y={100} w={44} h={44} label="$f$" tone="strong" />
   <Region x={176} y={14} w={420} h={100} title="rank 0" />
-  <Box x={190} y={46} w={110} h={50} label={"X W1,0ᵀ\nX W3,0ᵀ"} tone="accent" size="sm" mono />
-  <Box x={330} y={46} w={110} h={50} label={"SiLU(·) ⊙ ·"} tone="accent" size="sm" mono />
-  <Box x={470} y={46} w={110} h={50} label={"· W2,0ᵀ\n部分和"} tone="accent" size="sm" mono />
+  <Box x={190} y={46} w={110} h={50} label={"$XW_{1,0}^\\top$\n$XW_{3,0}^\\top$"} tone="accent" size="sm" mono />
+  <Box x={330} y={46} w={110} h={50} label="$\operatorname{SiLU}(\cdot)\odot\cdot$" tone="accent" size="sm" mono />
+  <Box x={470} y={46} w={110} h={50} label={"$\\cdot W_{2,0}^\\top$\n部分和"} tone="accent" size="sm" mono />
   <Region x={176} y={130} w={420} h={100} title="rank 1" />
-  <Box x={190} y={162} w={110} h={50} label={"X W1,1ᵀ\nX W3,1ᵀ"} tone="info" size="sm" mono />
-  <Box x={330} y={162} w={110} h={50} label={"SiLU(·) ⊙ ·"} tone="info" size="sm" mono />
-  <Box x={470} y={162} w={110} h={50} label={"· W2,1ᵀ\n部分和"} tone="info" size="sm" mono />
-  <Box x={616} y={100} w={44} h={44} label="g" tone="strong" />
-  <Box x={676} y={100} w={34} h={44} label="Z" tone="neutral" />
+  <Box x={190} y={162} w={110} h={50} label={"$XW_{1,1}^\\top$\n$XW_{3,1}^\\top$"} tone="info" size="sm" mono />
+  <Box x={330} y={162} w={110} h={50} label="$\operatorname{SiLU}(\cdot)\odot\cdot$" tone="info" size="sm" mono />
+  <Box x={470} y={162} w={110} h={50} label={"$\\cdot W_{2,1}^\\top$\n部分和"} tone="info" size="sm" mono />
+  <Box x={616} y={100} w={44} h={44} label="$g$" tone="strong" />
+  <Box x={676} y={100} w={34} h={44} label="$Z$" tone="neutral" />
   <Arrow from={[90, 122]} to={[110, 122]} />
   <Arrow from={[154, 122]} via={[[170, 122], [170, 71]]} to={[190, 71]} />
   <Arrow from={[154, 122]} via={[[170, 122], [170, 187]]} to={[190, 187]} />
@@ -182,11 +182,11 @@ $$
 这些操作都是**逐 token** 的：LayerNorm/RMSNorm、dropout、残差相加对序列中的每个位置独立计算。所以可以在这些区域沿**序列维**切分：每个 rank 只持有 $[b, s/t, h]$。进入张量并行区时需要完整序列，用 all-gather 把序列拼起来；离开时，行切分产生的部分和不再 all-reduce，而是 **reduce-scatter**：既完成求和，又顺便把结果沿序列切开。
 
 <Diagram width={720} height={210} label="序列并行与张量并行交替的数据布局">
-  <Box x={20} y={70} w={120} h={60} label={"RMSNorm\n[b, s/t, h]"} tone="info" size="sm" />
+  <Box x={20} y={70} w={120} h={60} label={"RMSNorm\n$[b, s/t, h]$"} tone="info" size="sm" />
   <Box x={170} y={70} w={110} h={60} label={"all-gather\n沿序列"} tone="strong" size="sm" />
-  <Box x={310} y={70} w={150} h={60} label={"列并行 → 行并行\n[b, s, d_ff/t]"} tone="accent" size="sm" />
+  <Box x={310} y={70} w={150} h={60} label={"列并行 → 行并行\n$[b, s, d_{\\mathrm{ff}}/t]$"} tone="accent" size="sm" />
   <Box x={490} y={70} w={110} h={60} label={"reduce-scatter\n沿序列"} tone="strong" size="sm" />
-  <Box x={630} y={70} w={80} h={60} label={"+ 残差\n[b, s/t, h]"} tone="info" size="sm" />
+  <Box x={630} y={70} w={80} h={60} label={"+ 残差\n$[b, s/t, h]$"} tone="info" size="sm" />
   <Arrow from={[140, 100]} to={[170, 100]} />
   <Arrow from={[280, 100]} to={[310, 100]} />
   <Arrow from={[460, 100]} to={[490, 100]} />
@@ -233,15 +233,15 @@ $$
 两个系数恰好把旧的归一化分母换成新的。因为合并是满足结合律的，块的到达顺序无关紧要——这也是它能在环上工作的原因。
 
 <Diagram width={720} height={210} label="四个 rank 的因果 Ring Attention 中每个块在第几步计算">
-  <Text x={60} y={20} label="查询段 i（rank）× 键值段 j" anchor="start" size="sm" bold />
-  <Text x={46} y={72} label="Q0" size="sm" tone="muted" mono />
-  <Text x={46} y={104} label="Q1" size="sm" tone="muted" mono />
-  <Text x={46} y={136} label="Q2" size="sm" tone="muted" mono />
-  <Text x={46} y={168} label="Q3" size="sm" tone="muted" mono />
-  <Text x={88} y={44} label="KV0" size="sm" tone="muted" mono />
-  <Text x={134} y={44} label="KV1" size="sm" tone="muted" mono />
-  <Text x={180} y={44} label="KV2" size="sm" tone="muted" mono />
-  <Text x={226} y={44} label="KV3" size="sm" tone="muted" mono />
+  <Text x={60} y={20} label="查询段 $i$（rank）$\times$ 键值段 $j$" anchor="start" size="sm" bold />
+  <Text x={46} y={72} label="$Q_0$" size="sm" tone="muted" mono />
+  <Text x={46} y={104} label="$Q_1$" size="sm" tone="muted" mono />
+  <Text x={46} y={136} label="$Q_2$" size="sm" tone="muted" mono />
+  <Text x={46} y={168} label="$Q_3$" size="sm" tone="muted" mono />
+  <Text x={88} y={44} label="$\mathrm{KV}_0$" size="sm" tone="muted" mono />
+  <Text x={134} y={44} label="$\mathrm{KV}_1$" size="sm" tone="muted" mono />
+  <Text x={180} y={44} label="$\mathrm{KV}_2$" size="sm" tone="muted" mono />
+  <Text x={226} y={44} label="$\mathrm{KV}_3$" size="sm" tone="muted" mono />
   <Matrix x={66} y={56} rows={4} cols={4} cell={[44, 30]}
     values={[['0', '跳过', '跳过', '跳过'], ['1', '0', '跳过', '跳过'], ['2', '1', '0', '跳过'], ['3', '2', '1', '0']]}
     highlight={[{ upper: true, tone: 'muted' }, { cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent2' }, { cells: [[1, 0], [2, 1], [3, 2], [2, 0], [3, 1], [3, 0]], tone: 'accent' }]} />

@@ -199,7 +199,7 @@ $$
   <Arrow from={[440, 60]} to={[500, 60]} dashed label="查表" />
   <Text x={20} y={150} label="空闲队列（队头先被复用）" anchor="start" size="sm" tone="muted" />
   <Matrix x={20} y={168} rows={1} cols={6} cell={[90, 34]} gap={6}
-    values={[['块 5', '块 8', '块 4 (h₉)', '块 2 (h₁)', '块 7 (h₀)', '块 11']]}
+    values={[['块 5', '块 8', '块 4 ($h_9$)', '块 2 ($h_1$)', '块 7 ($h_0$)', '块 11']]}
     highlight={[{ cols: [0, 1, 5], tone: 'muted' }, { cols: [2, 3, 4], tone: 'info' }]} />
   <Arrow from={[600, 130]} to={[300, 168]} tone="accent" label="命中：从队列中摘出" />
   <Fragment slot="caption">请求的前两个块命中缓存（h₀、h₁ 指向块 7 和 2）。虽然它们的引用计数已经归零、躺在空闲队列里，内容仍然有效，被 touch 摘出后直接复用。无哈希的空闲块排在队头，最先被分配；带哈希的块按释放顺序排在后面，实现 LRU 淘汰。</Fragment>

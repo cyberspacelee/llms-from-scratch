@@ -32,21 +32,21 @@ code:
   <Text x={14} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={14} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={28} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "a1", "a2", "a3"], ["", "", "", ""], ["", "", "", ""], ["", "", "", ""]]}
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["", "", "", ""], ["", "", "", ""], ["", "", "", ""]]}
     highlight={[{ rows: [1, 2, 3], tone: 'muted' }, { rows: [0], tone: 'accent' }]} />
   <Arrow from={[126, 107]} to={[144, 107]} />
   <Matrix x={148} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"], ["a0", "a1", "a2", "a3"]]} tone="accent" />
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$a_0$", "$a_1$", "$a_2$", "$a_3$"]]} tone="accent" />
   <Text x={356} y={16} label="reduce（root = 0）" bold size="sm" />
   <Text x={250} y={68} label="R0" size="sm" tone="muted" mono />
   <Text x={250} y={94} label="R1" size="sm" tone="muted" mono />
   <Text x={250} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={250} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={264} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$b_0$", "$b_1$", "$b_2$", "$b_3$"], ["$c_0$", "$c_1$", "$c_2$", "$c_3$"], ["$d_0$", "$d_1$", "$d_2$", "$d_3$"]]} />
   <Arrow from={[362, 107]} to={[380, 107]} />
   <Matrix x={384} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["Σ0", "Σ1", "Σ2", "Σ3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]}
+    values={[["$\\Sigma_0$", "$\\Sigma_1$", "$\\Sigma_2$", "$\\Sigma_3$"], ["$b_0$", "$b_1$", "$b_2$", "$b_3$"], ["$c_0$", "$c_1$", "$c_2$", "$c_3$"], ["$d_0$", "$d_1$", "$d_2$", "$d_3$"]]}
     highlight={[{ rows: [1, 2, 3], tone: 'muted' }, { rows: [0], tone: 'strong' }]} />
   <Text x={592} y={16} label="all-reduce" bold size="sm" />
   <Text x={486} y={68} label="R0" size="sm" tone="muted" mono />
@@ -54,10 +54,10 @@ code:
   <Text x={486} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={486} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={500} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$b_0$", "$b_1$", "$b_2$", "$b_3$"], ["$c_0$", "$c_1$", "$c_2$", "$c_3$"], ["$d_0$", "$d_1$", "$d_2$", "$d_3$"]]} />
   <Arrow from={[598, 107]} to={[616, 107]} />
   <Matrix x={620} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"], ["Σ0", "Σ1", "Σ2", "Σ3"]]} tone="strong" />
+    values={[["$\\Sigma_0$", "$\\Sigma_1$", "$\\Sigma_2$", "$\\Sigma_3$"], ["$\\Sigma_0$", "$\\Sigma_1$", "$\\Sigma_2$", "$\\Sigma_3$"], ["$\\Sigma_0$", "$\\Sigma_1$", "$\\Sigma_2$", "$\\Sigma_3$"], ["$\\Sigma_0$", "$\\Sigma_1$", "$\\Sigma_2$", "$\\Sigma_3$"]]} tone="strong" />
   <Fragment slot="caption">一行是一个 rank 的缓冲区，一列是一段。broadcast 把 root 的数据复制到所有 rank；reduce 把所有 rank 的数据逐元素相加，结果只留在 root（其他 rank 的缓冲区不变，画成灰色）；all-reduce 让每个 rank 都得到总和。</Fragment>
 </Diagram>
 
@@ -68,21 +68,21 @@ code:
   <Text x={14} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={14} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={28} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "", "", ""], ["", "b1", "", ""], ["", "", "c2", ""], ["", "", "", "d3"]]} tone="muted"
+    values={[["$a_0$", "", "", ""], ["", "$b_1$", "", ""], ["", "", "$c_2$", ""], ["", "", "", "$d_3$"]]} tone="muted"
     highlight={[{ cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'accent' }]} />
   <Arrow from={[126, 107]} to={[144, 107]} />
   <Matrix x={148} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"], ["a0", "b1", "c2", "d3"]]} tone="accent" />
+    values={[["$a_0$", "$b_1$", "$c_2$", "$d_3$"], ["$a_0$", "$b_1$", "$c_2$", "$d_3$"], ["$a_0$", "$b_1$", "$c_2$", "$d_3$"], ["$a_0$", "$b_1$", "$c_2$", "$d_3$"]]} tone="accent" />
   <Text x={356} y={16} label="reduce-scatter" bold size="sm" />
   <Text x={250} y={68} label="R0" size="sm" tone="muted" mono />
   <Text x={250} y={94} label="R1" size="sm" tone="muted" mono />
   <Text x={250} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={250} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={264} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]} />
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$b_0$", "$b_1$", "$b_2$", "$b_3$"], ["$c_0$", "$c_1$", "$c_2$", "$c_3$"], ["$d_0$", "$d_1$", "$d_2$", "$d_3$"]]} />
   <Arrow from={[362, 107]} to={[380, 107]} />
   <Matrix x={384} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["Σ0", "", "", ""], ["", "Σ1", "", ""], ["", "", "Σ2", ""], ["", "", "", "Σ3"]]} tone="muted"
+    values={[["$\\Sigma_0$", "", "", ""], ["", "$\\Sigma_1$", "", ""], ["", "", "$\\Sigma_2$", ""], ["", "", "", "$\\Sigma_3$"]]} tone="muted"
     highlight={[{ cells: [[0, 0], [1, 1], [2, 2], [3, 3]], tone: 'strong' }]} />
   <Text x={592} y={16} label="all-to-all" bold size="sm" />
   <Text x={486} y={68} label="R0" size="sm" tone="muted" mono />
@@ -90,11 +90,11 @@ code:
   <Text x={486} y={120} label="R2" size="sm" tone="muted" mono />
   <Text x={486} y={146} label="R3" size="sm" tone="muted" mono />
   <Matrix x={500} y={56} rows={4} cols={4} cell={[22, 24]} title="之前"
-    values={[["a0", "a1", "a2", "a3"], ["b0", "b1", "b2", "b3"], ["c0", "c1", "c2", "c3"], ["d0", "d1", "d2", "d3"]]}
+    values={[["$a_0$", "$a_1$", "$a_2$", "$a_3$"], ["$b_0$", "$b_1$", "$b_2$", "$b_3$"], ["$c_0$", "$c_1$", "$c_2$", "$c_3$"], ["$d_0$", "$d_1$", "$d_2$", "$d_3$"]]}
     highlight={[{ cols: [1], tone: 'info' }]} />
   <Arrow from={[598, 107]} to={[616, 107]} />
   <Matrix x={620} y={56} rows={4} cols={4} cell={[22, 24]} title="之后"
-    values={[["a0", "b0", "c0", "d0"], ["a1", "b1", "c1", "d1"], ["a2", "b2", "c2", "d2"], ["a3", "b3", "c3", "d3"]]}
+    values={[["$a_0$", "$b_0$", "$c_0$", "$d_0$"], ["$a_1$", "$b_1$", "$c_1$", "$d_1$"], ["$a_2$", "$b_2$", "$c_2$", "$d_2$"], ["$a_3$", "$b_3$", "$c_3$", "$d_3$"]]}
     highlight={[{ rows: [1], tone: 'info' }]} />
   <Fragment slot="caption">all-gather 把每个 rank 的一段拼成完整缓冲区并发给所有人；reduce-scatter 求和之后只把第 j 段的和交给 rank j；all-to-all 是一次“转置”：rank i 的第 j 段送到 rank j 的第 i 个位置（蓝色标出了所有发往 rank 1 的段）。</Fragment>
 </Diagram>
@@ -244,9 +244,9 @@ $$
 <Plot label="环形与树形 all-reduce 的 α-β 模型耗时" x={[1e3, 1e10]} y={[1e-5, 1]} logX logY
   xLabel="消息大小（字节）" yLabel="耗时（秒）"
   series={[
-    { fn: (n) => 2 * 255 * 5e-6 + 2 * 255 / 256 * n / 50e9, label: '环 p=256' },
-    { fn: (n) => 2 * 8 * 5e-6 + 2 * n / 50e9, label: '树 p=256', tone: 'accent2', dashed: true },
-    { fn: (n) => 2 * 7 * 5e-6 + 2 * 7 / 8 * n / 50e9, label: '环 p=8', tone: 'info' },
+    { fn: (n) => 2 * 255 * 5e-6 + 2 * 255 / 256 * n / 50e9, label: '环 $p = 256$' },
+    { fn: (n) => 2 * 8 * 5e-6 + 2 * n / 50e9, label: '树 $p = 256$', tone: 'accent2', dashed: true },
+    { fn: (n) => 2 * 7 * 5e-6 + 2 * 7 / 8 * n / 50e9, label: '环 $p = 8$', tone: 'info' },
   ]}>
   <Fragment slot="caption">α = 5 μs、B = 50 GB/s 时的模型曲线（不是实测）。256 卡时环形算法的 2(p−1)α ≈ 2.55 ms 平台一直延伸到约 100 MB，树形的延迟只有 16α；消息足够大以后三条线都趋于 2n/B。8 卡时环的延迟项很小，大消息上它比树略快（2(p−1)/p 小于 2）。</Fragment>
 </Plot>

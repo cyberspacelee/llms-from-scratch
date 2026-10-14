@@ -56,7 +56,7 @@ $\tau = 1$ 是模型原本的分布；$\tau < 1$ 放大 logits 之间的差距�
 用一个 6 个 token 的例子比较这些策略。logits 为 $(3, 2, 1, 0.5, 0, -1)$：
 
 <Diagram width={720} height={260} label="同一组 logits 在不同温度与截断策略下的采样分布">
-  <Matrix x={190} y={50} rows={5} cols={6} cell={[76, 30]} digits={3} values={[[0.86, 0.116, 0.016, 0.006, 0.002, 0.0], [0.605, 0.222, 0.082, 0.05, 0.03, 0.011], [0.382, 0.232, 0.14, 0.109, 0.085, 0.052], [0.665, 0.245, 0.09, 0, 0, 0], [0.665, 0.245, 0.09, 0, 0, 0]]} highlight={[{ rows: [1], tone: 'info' }, { cells: [[3, 3], [3, 4], [3, 5], [4, 3], [4, 4], [4, 5]], tone: 'muted' }, { cells: [[0, 0]], tone: 'accent' }]} rowLabels={['τ = 0.5', 'τ = 1（原分布）', 'τ = 2', 'top-k, k = 3', 'top-p, p = 0.9']} colLabels={['z=3', 'z=2', 'z=1', 'z=0.5', 'z=0', 'z=−1']} title="采样概率" />
+  <Matrix x={190} y={50} rows={5} cols={6} cell={[76, 30]} digits={3} values={[[0.86, 0.116, 0.016, 0.006, 0.002, 0.0], [0.605, 0.222, 0.082, 0.05, 0.03, 0.011], [0.382, 0.232, 0.14, 0.109, 0.085, 0.052], [0.665, 0.245, 0.09, 0, 0, 0], [0.665, 0.245, 0.09, 0, 0, 0]]} highlight={[{ rows: [1], tone: 'info' }, { cells: [[3, 3], [3, 4], [3, 5], [4, 3], [4, 4], [4, 5]], tone: 'muted' }, { cells: [[0, 0]], tone: 'accent' }]} rowLabels={['$\\tau = 0.5$', '$\\tau = 1$（原分布）', '$\\tau = 2$', 'top-k, $k = 3$', 'top-p, $p = 0.9$']} colLabels={['$z = 3$', '$z = 2$', '$z = 1$', '$z = 0.5$', '$z = 0$', '$z = -1$']} title="采样概率" />
   <Fragment slot="caption">第二行是原分布，其累积概率为 0.605、0.827、0.909……，所以 p = 0.9 的核恰好是前三个 token，与 k = 3 的结果相同。截断后剩余概率重新归一化：0.605/0.909 = 0.665。降低温度把概率集中到最大者（0.86），升高温度把概率分散到长尾。</Fragment>
 </Diagram>
 
@@ -105,13 +105,13 @@ $$
 
 <Diagram width={720} height={270} label="KV Cache 的 prefill 与 decode：缓存逐步增长，每步只计算一个新 token">
   <Text x={20} y={40} label="prefill" anchor="start" size="sm" bold />
-  <Matrix x={130} y={25} rows={1} cols={5} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅"]]} tone="accent" />
+  <Matrix x={130} y={25} rows={1} cols={5} cell={[44, 30]} values={[["$k_1v_1$", "$k_2v_2$", "$k_3v_3$", "$k_4v_4$", "$k_5v_5$"]]} tone="accent" />
   <Text x={380} y={40} label="一次处理整段提示（5 个 token）" anchor="start" size="sm" tone="muted" />
   <Text x={20} y={100} label="decode 1" anchor="start" size="sm" bold />
-  <Matrix x={130} y={85} rows={1} cols={6} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆"]]} tone="info" highlight={[{ cells: [[0, 5]], tone: 'accent' }]} />
+  <Matrix x={130} y={85} rows={1} cols={6} cell={[44, 30]} values={[["$k_1v_1$", "$k_2v_2$", "$k_3v_3$", "$k_4v_4$", "$k_5v_5$", "$k_6v_6$"]]} tone="info" highlight={[{ cells: [[0, 5]], tone: 'accent' }]} />
   <Text x={420} y={100} label="$q_6$ 与 6 个键做注意力" anchor="start" size="sm" tone="muted" />
   <Text x={20} y={160} label="decode 2" anchor="start" size="sm" bold />
-  <Matrix x={130} y={145} rows={1} cols={7} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆", "k₇v₇"]]} tone="info" highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
+  <Matrix x={130} y={145} rows={1} cols={7} cell={[44, 30]} values={[["$k_1v_1$", "$k_2v_2$", "$k_3v_3$", "$k_4v_4$", "$k_5v_5$", "$k_6v_6$", "$k_7v_7$"]]} tone="info" highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
   <Text x={460} y={160} label="$q_7$ 与 7 个键做注意力" anchor="start" size="sm" tone="muted" />
   <Matrix x={130} y={205} rows={1} cols={10} cell={[44, 30]} tone="ghost" />
   <Text x={20} y={220} label="预分配" anchor="start" size="sm" bold />

@@ -35,8 +35,8 @@ $$
 标签的对齐是实现 MTP 最容易出错的地方。用一个 6 个 token 的序列把它写成表格：
 
 <Diagram width={660} height={262} label="序列长度 6 时，主模型与两个 MTP 深度在每个位置的预测目标">
-  <Matrix x={140} y={50} rows={6} cols={4} cell={[96, 28]} rowLabels={['位置 0','位置 1','位置 2','位置 3','位置 4','位置 5']} colLabels={['输入','主目标 k=0','深度 1','深度 2']} values={[['t₀','t₁','t₂','t₃'],['t₁','t₂','t₃','t₄'],['t₂','t₃','t₄','t₅'],['t₃','t₄','t₅','—'],['t₄','t₅','—','—'],['t₅','—','—','—']]} tone="muted" highlight={[{ cols: [0], tone: 'neutral' }, { cells: [[0,1],[1,1],[2,1],[3,1],[4,1]], tone: 'accent' }, { cells: [[0,2],[1,2],[2,2],[3,2]], tone: 'info' }, { cells: [[0,3],[1,3],[2,3]], tone: 'accent2' }]} />
-  <Text x={330} y={250} label="深度 k 的目标 = tokens[:, 1 + k:]，有效位置数 = T − 1 − k" size="sm" tone="muted" />
+  <Matrix x={140} y={50} rows={6} cols={4} cell={[96, 28]} rowLabels={['位置 0','位置 1','位置 2','位置 3','位置 4','位置 5']} colLabels={['输入','主目标 $k=0$','深度 1','深度 2']} values={[['$t_0$','$t_1$','$t_2$','$t_3$'],['$t_1$','$t_2$','$t_3$','$t_4$'],['$t_2$','$t_3$','$t_4$','$t_5$'],['$t_3$','$t_4$','$t_5$','—'],['$t_4$','$t_5$','—','—'],['$t_5$','—','—','—']]} tone="muted" highlight={[{ cols: [0], tone: 'neutral' }, { cells: [[0,1],[1,1],[2,1],[3,1],[4,1]], tone: 'accent' }, { cells: [[0,2],[1,2],[2,2],[3,2]], tone: 'info' }, { cells: [[0,3],[1,3],[2,3]], tone: 'accent2' }]} />
+  <Text x={330} y={250} label="深度 $k$ 的目标 = tokens[:, 1 + k:]，有效位置数 $= T - 1 - k$" size="sm" tone="muted" />
   <Fragment slot="caption">每行是一个位置，第一列是该位置的输入 token，后三列是主模型与两个 MTP 深度的预测目标。目标沿对角线错开：深度 $k$ 在位置 $i$ 预测 $t_{i+1+k}$，于是最后 $1+k$ 个位置没有标签（“—”），损失只在着色的格子上计算。</Fragment>
 </Diagram>
 
@@ -77,14 +77,14 @@ $[\cdot;\cdot]$ 是拼接，$M_k\in\mathbb R^{d\times2d}$ 把拼接后的向量�
 <Diagram width={700} height={300} label="DeepSeek-V3 的主模型与一个顺序 MTP 模块，以及它们在位置 i 上的输入与目标">
   <Region x={10} y={10} w={250} h={280} title="主模型" />
   <Box x={40} y={240} w={190} h={36} label="$\mathrm{Emb}(t_i)$" tone="neutral" />
-  <Box x={40} y={150} w={190} h={60} label="L 个 Transformer 块" tone="accent" />
+  <Box x={40} y={150} w={190} h={60} label="$L$ 个 Transformer 块" tone="accent" />
   <Box x={40} y={50} w={190} h={40} label="OutHead → $t_{i+1}$" tone="strong" />
   <Arrow from={[135, 240]} to={[135, 210]} />
   <Arrow from={[135, 150]} to={[135, 90]} />
   <Region x={290} y={10} w={400} h={280} title="MTP 模块 1" />
   <Box x={310} y={240} w={170} h={36} label="$\mathrm{RMSNorm}(h_i^0)$" tone="info" size="sm" />
   <Box x={500} y={240} w={170} h={36} label="$\mathrm{RMSNorm}(\mathrm{Emb}(t_{i+1}))$" tone="info" size="sm" />
-  <Box x={400} y={170} w={180} h={40} label="$M_1\,[\,\cdot\,;\,\cdot\,]$" sub="2d → d" tone="neutral" />
+  <Box x={400} y={170} w={180} h={40} label="$M_1\,[\,\cdot\,;\,\cdot\,]$" sub="$2d \to d$" tone="neutral" />
   <Box x={400} y={110} w={180} h={40} label="$\mathrm{TRM}_1$（1 个块）" tone="accent" />
   <Box x={400} y={50} w={180} h={40} label="OutHead → $t_{i+2}$" tone="strong" />
   <Arrow from={[230, 180]} via={[[270, 180], [270, 225], [395, 225]]} to={[395, 240]} tone="info" />

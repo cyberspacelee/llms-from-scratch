@@ -32,12 +32,12 @@ z.grad_fn.next_functions        # ((<MulBackward0>, 0), (<AccumulateGrad>, 0))
 每个反向节点（`SumBackward0`、`PowBackward0`……）知道两件事：怎样把输出梯度变成输入梯度（这一步的 VJP），以及输入来自哪些上游节点（`next_functions`）。图的终点是 `AccumulateGrad` 节点，它把流到叶子张量的梯度加进 `.grad`。`x` 不需要梯度，所以 `MulBackward0` 指向它的那条边是 `None`。
 
 <Diagram width={720} height={270} label="z = x·w + b，loss = Σz² 的前向与反向图">
-  <Box x={20} y={30} w={110} h={50} label="x" sub="数据" tone="muted" />
-  <Box x={20} y={110} w={110} h={50} label="w" sub="叶子·参数" tone="info" />
-  <Box x={20} y={190} w={110} h={50} label="b" sub="叶子·参数" tone="info" />
-  <Box x={190} y={70} w={130} h={50} label="MulBackward0" sub="只保存 x" size="sm" tone="accent" />
+  <Box x={20} y={30} w={110} h={50} label="$x$" sub="数据" tone="muted" />
+  <Box x={20} y={110} w={110} h={50} label="$w$" sub="叶子·参数" tone="info" />
+  <Box x={20} y={190} w={110} h={50} label="$b$" sub="叶子·参数" tone="info" />
+  <Box x={190} y={70} w={130} h={50} label="MulBackward0" sub="只保存 $x$" size="sm" tone="accent" />
   <Box x={370} y={110} w={130} h={50} label="AddBackward0" sub="不保存" size="sm" tone="accent" />
-  <Box x={550} y={50} w={150} h={50} label="PowBackward0" sub="保存 z、指数 2" size="sm" tone="accent" />
+  <Box x={550} y={50} w={150} h={50} label="PowBackward0" sub="保存 $z$、指数 2" size="sm" tone="accent" />
   <Box x={550} y={170} w={150} h={50} label="SumBackward0" sub="保存形状" size="sm" tone="strong" />
   <Arrow from={[130, 55]} to={[190, 88]} />
   <Arrow from={[130, 135]} to={[190, 102]} />

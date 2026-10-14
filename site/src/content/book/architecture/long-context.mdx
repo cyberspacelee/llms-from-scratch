@@ -27,9 +27,9 @@ $$
 
 $b$ 是底数（base，原始 RoPE 取 10000）。$\theta_k$ 是第 $k$ 对维度每前进一个 token 转过的弧度，$\lambda_k$ 是转满一圈需要的 token 数，即这对维度的**波长**。$k=0$ 的波长是 $2\pi\approx6.3$，每个 token 转约 57°，它分辨的是相邻几个 token 之间的细微位置差；$k=d/2-1$ 的波长接近 $2\pi b\approx62832$，在几千个 token 的范围内只转了一个小角度，它编码的是粗粒度的“远近”。RoPE 的所有频率构成一个几何级数，像一组从秒针到时针的指针。
 
-<Plot label="RoPE 各维度对的波长（d = 128）" x={[0, 63]} y={[1, 1000000]} logY xLabel="维度对编号 k" yLabel="波长 $\lambda_k$（token）" series={[
-  { fn: (k) => 2 * Math.PI * Math.pow(10000, (2 * k) / 128), label: 'b = 10000' },
-  { fn: (k) => 2 * Math.PI * Math.pow(500000, (2 * k) / 128), label: 'b = 500000', tone: 'info' },
+<Plot label="RoPE 各维度对的波长（d = 128）" x={[0, 63]} y={[1, 1000000]} logY xLabel="维度对编号 $k$" yLabel="波长 $\lambda_k$（token）" series={[
+  { fn: (k) => 2 * Math.PI * Math.pow(10000, (2 * k) / 128), label: '$b = 10000$' },
+  { fn: (k) => 2 * Math.PI * Math.pow(500000, (2 * k) / 128), label: '$b = 500000$', tone: 'info' },
   { fn: () => 4096, label: '训练长度 4096', tone: 'accent2', dashed: true },
 ]}>
   <Fragment slot="caption">纵轴为对数。虚线以下的维度对在 4096 个 token 内转了不止一圈，训练时已经见过所有可能的角度；虚线以上的维度对在训练长度内连一圈都没转完，推理时超过 4096 的位置会产生它们从未见过的角度。增大底数（LLaMA 3 用 500000）让整条曲线上移，更多维度落在“没转满一圈”的区域。</Fragment>
@@ -97,7 +97,7 @@ $$
 
 <CodeFile path="src/llms_from_scratch/architecture/rope_scaling.py" region="yarn" />
 
-<Plot label="三种方法对每个频率的缩放比例 θ'_k / θ_k（d = 128，s = 16，L = 4096）" x={[0, 63]} y={[0.04, 1.2]} logY xLabel="维度对编号 k（左高频，右低频）" yLabel="θ' / θ" series={[
+<Plot label="三种方法对每个频率的缩放比例 θ'_k / θ_k（d = 128，s = 16，L = 4096）" x={[0, 63]} y={[0.04, 1.2]} logY xLabel="维度对编号 $k$（左高频，右低频）" yLabel="$\theta' / \theta$" series={[
   { fn: () => 1 / 16, label: 'PI', tone: 'accent2' },
   { fn: (k) => Math.pow(16, (-2 * k) / 126), label: 'NTK-aware', tone: 'info' },
   { fn: (k) => { const r = 4096 / (2 * Math.PI * Math.pow(10000, (2 * k) / 128)); const g = Math.min(1, Math.max(0, (r - 1) / 31)); return (1 - g) / 16 + g; }, label: 'YaRN', tone: 'accent' },
@@ -128,18 +128,18 @@ YaRN 已成为开源模型的标准做法。DeepSeek-V3 在 4K 预训练之后�
     { cells: Array.from({ length: 10 }, (_, i) => Array.from({ length: 10 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && j > i - 4), tone: 'accent' },
     { cells: Array.from({ length: 10 }, (_, i) => [i, 0]), tone: 'accent2' },
   ]} />
-  <Text x={158} y={16} label="键位置 j" size="sm" tone="muted" />
-  <Text x={18} y={158} label="查询 i" size="sm" tone="muted" rotate={-90} />
-  <Legend x={20} y={300} items={[{ label: '窗口内（W = 4）', tone: 'accent' }, { label: '汇聚点（$n_{\\text{sink}} = 1$）', tone: 'accent2' }, { label: '不可见', tone: 'muted' }]} gap={150} />
+  <Text x={158} y={16} label="键位置 $j$" size="sm" tone="muted" />
+  <Text x={18} y={158} label="查询 $i$" size="sm" tone="muted" rotate={-90} />
+  <Legend x={20} y={300} items={[{ label: '窗口内（$W = 4$）', tone: 'accent' }, { label: '汇聚点（$n_{\\text{sink}} = 1$）', tone: 'accent2' }, { label: '不可见', tone: 'muted' }]} gap={150} />
   <Text x={480} y={60} label="生成位置 9 时的缓存槽位" size="sm" bold />
   <Box x={330} y={90} w={52} h={44} label="0" sub="sink" tone="accent2" mono />
   <Box x={400} y={90} w={52} h={44} label="9" sub="槽 0" tone="accent" mono />
   <Box x={458} y={90} w={52} h={44} label="6" sub="槽 1" tone="accent" mono />
   <Box x={516} y={90} w={52} h={44} label="7" sub="槽 2" tone="accent" mono />
   <Box x={574} y={90} w={52} h={44} label="8" sub="槽 3" tone="accent" mono />
-  <Text x={480} y={160} label="位置 t 写入环形槽 (t − 1) mod 4" size="sm" tone="muted" />
+  <Text x={480} y={160} label="位置 $t$ 写入环形槽 $(t - 1) \bmod 4$" size="sm" tone="muted" />
   <Text x={480} y={184} label="位置 9 覆盖了位置 5" size="sm" tone="muted" />
-  <Text x={480} y={230} label="缓存始终 1 + 4 = 5 个槽位，" size="sm" />
+  <Text x={480} y={230} label="缓存始终 $1 + 4 = 5$ 个槽位，" size="sm" />
   <Text x={480} y={252} label="与已生成长度无关" size="sm" />
   <Fragment slot="caption">左：第 $i$ 行是位置 $i$ 的查询能看到的键。深色对角带是宽度 4 的滑动窗口，第 0 列是永久保留的汇聚点。右：生成到位置 9 时的缓存内容。汇聚点占固定槽位，其余位置轮流写入 4 个环形槽位，位置 9 覆盖了刚滑出窗口的位置 5。</Fragment>
 </Diagram>

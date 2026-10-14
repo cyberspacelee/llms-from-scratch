@@ -24,15 +24,15 @@ code:
 循环神经网络（RNN）用一个不断更新的隐藏状态处理任意长的序列，解决了前两个问题，但它把整个前缀压缩进一个固定大小的向量，远处的信息要经过许多步的非线性变换才能到达当前位置，梯度也随之衰减；而且第 $t$ 步必须等第 $t-1$ 步算完，无法在序列维度上并行。注意力机制同时解决了这四个问题：每个位置可以**直接**读取前文任何位置的信息，读取的权重由**内容决定**，参数与序列长度无关，所有位置可以**并行**计算。
 
 <Diagram width={720} height={230} label="固定窗口 MLP 与注意力读取上下文的方式">
-  <Region x={10} y={10} w={340} h={210} title="固定窗口（k = 3）" />
+  <Region x={10} y={10} w={340} h={210} title="固定窗口（$k = 3$）" />
   <Region x={370} y={10} w={340} h={210} title="注意力" />
-  <Matrix x={30} y={50} rows={1} cols={7} cell={[38, 34]} values={[["x₁", "x₂", "x₃", "x₄", "x₅", "x₆", "x₇"]]} highlight={[{ cells: [[0, 0], [0, 1], [0, 2], [0, 3]], tone: 'muted' }, { cells: [[0, 4], [0, 5], [0, 6]], tone: 'info' }]} />
+  <Matrix x={30} y={50} rows={1} cols={7} cell={[38, 34]} values={[["$x_1$", "$x_2$", "$x_3$", "$x_4$", "$x_5$", "$x_6$", "$x_7$"]]} highlight={[{ cells: [[0, 0], [0, 1], [0, 2], [0, 3]], tone: 'muted' }, { cells: [[0, 4], [0, 5], [0, 6]], tone: 'info' }]} />
   <Box x={150} y={130} w={150} h={50} label="拼接 → MLP" tone="info" />
   <Arrow from={[200, 84]} to={[200, 130]} />
   <Arrow from={[240, 84]} to={[240, 130]} />
   <Arrow from={[280, 84]} to={[260, 130]} />
   <Text x={90} y={110} label="窗口外不可见" size="sm" tone="muted" />
-  <Matrix x={390} y={50} rows={1} cols={7} cell={[38, 34]} values={[["x₁", "x₂", "x₃", "x₄", "x₅", "x₆", "x₇"]]} highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
+  <Matrix x={390} y={50} rows={1} cols={7} cell={[38, 34]} values={[["$x_1$", "$x_2$", "$x_3$", "$x_4$", "$x_5$", "$x_6$", "$x_7$"]]} highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
   <Box x={560} y={150} w={130} h={46} label="加权平均" tone="accent" />
   <Arrow from={[409, 84]} to={[575, 150]} tone="accent" width={3} />
   <Arrow from={[447, 84]} to={[590, 150]} tone="muted" width={1} />
@@ -87,20 +87,20 @@ $$
 $M$ 是掩码矩阵，允许的位置为 $0$，禁止的位置为 $-\infty$（下一节解释）。softmax 沿最后一维（键的维度）进行，输出的第 $t$ 行就是 $o_t = \sum_s \alpha_{ts} v_s$。
 
 <Diagram width={720} height={250} label="单头注意力的数据流与张量形状">
-  <Box x={10} y={100} w={90} h={50} label="X" sub="(T, d)" />
+  <Box x={10} y={100} w={90} h={50} label="$X$" sub="$(T, d)$" />
   <Box x={150} y={30} w={90} h={46} label="$Q = XW_Q$" sub="$(T, d_k)$" tone="accent" size="sm" />
   <Box x={150} y={102} w={90} h={46} label="$K = XW_K$" sub="$(T, d_k)$" tone="accent" size="sm" />
   <Box x={150} y={174} w={90} h={46} label="$V = XW_V$" sub="$(T, d_v)$" tone="info" size="sm" />
-  <Box x={290} y={60} w={110} h={50} label="$QK^\top / \sqrt{d_k}$" sub="(T, T)" tone="accent" size="sm" />
-  <Box x={440} y={60} w={110} h={50} label="+ M, softmax" sub="(T, T)" tone="accent" size="sm" />
-  <Box x={590} y={120} w={120} h={56} label="输出 AV" sub="$(T, d_v)$" tone="strong" />
+  <Box x={290} y={60} w={110} h={50} label="$QK^\top / \sqrt{d_k}$" sub="$(T, T)$" tone="accent" size="sm" />
+  <Box x={440} y={60} w={110} h={50} label="$+M$，softmax" sub="$(T, T)$" tone="accent" size="sm" />
+  <Box x={590} y={120} w={120} h={56} label="输出 $AV$" sub="$(T, d_v)$" tone="strong" />
   <Arrow from={[100, 125]} via={[[125, 125], [125, 53]]} to={[150, 53]} />
   <Arrow from={[100, 125]} to={[150, 125]} />
   <Arrow from={[100, 125]} via={[[125, 125], [125, 197]]} to={[150, 197]} />
   <Arrow from={[240, 53]} via={[[265, 53], [265, 85]]} to={[290, 85]} />
   <Arrow from={[240, 125]} via={[[265, 125], [265, 85]]} to={[290, 85]} />
   <Arrow from={[400, 85]} to={[440, 85]} />
-  <Arrow from={[550, 85]} via={[[650, 85]]} to={[650, 120]} label="权重 A" labelSide="above" />
+  <Arrow from={[550, 85]} via={[[650, 85]]} to={[650, 120]} label="权重 $A$" labelSide="above" />
   <Arrow from={[240, 197]} via={[[650, 197]]} to={[650, 176]} tone="info" label="值" labelSide="below" />
   <Fragment slot="caption">同一个输入 X 经过三个线性映射得到查询、键、值。查询与键决定 T × T 的权重矩阵 A（“看哪里”），值决定读到什么内容（“读什么”）。两条通路在最后一次矩阵乘法中汇合。</Fragment>
 </Diagram>
@@ -169,10 +169,10 @@ $$
 分数 $QK^\top/\sqrt 2$ 的第 2 行是 $(0, 2, 1, -2)/\sqrt 2 = (0, 1.41, 0.71, -1.41)$，掩码后只保留前两项 $(0, 1.41)$，softmax 得 $(1, e^{1.41})/(1 + e^{1.41}) = (0.20, 0.80)$，输出 $0.2 \cdot (1, 0) + 0.8 \cdot (0, 1) = (0.20, 0.80)$。第 3 行的三个有效分数都是 $1.41$，权重均为 $1/3$，输出是前三个值的平均 $(0.67, 0.67)$。第 4 行的分数 $(1.41, -1.41, 0, 2.83)$ 全部有效，权重约为 $(0.18, 0.01, 0.04, 0.76)$——查询 $(1, -1)$ 与键 $(2, -2)$ 方向一致，几乎全部注意力都集中在第 4 个位置上。
 
 <Diagram width={720} height={250} label="手算例子的分数矩阵与因果掩码后的注意力权重">
-  <Matrix x={90} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1.41, 0, 0.71, 1.41], [0, 1.41, 0.71, -1.41], [1.41, 1.41, 1.41, 0], [1.41, -1.41, 0, 2.83]]} highlight={[{ upper: true, tone: 'muted' }]} rowLabels={['q₁', 'q₂', 'q₃', 'q₄']} colLabels={['k₁', 'k₂', 'k₃', 'k₄']} title="分数 QKᵀ/√2（灰色将被掩码）" />
-  <Text x={360} y={135} label="+M, softmax" size="sm" tone="muted" />
+  <Matrix x={90} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1.41, 0, 0.71, 1.41], [0, 1.41, 0.71, -1.41], [1.41, 1.41, 1.41, 0], [1.41, -1.41, 0, 2.83]]} highlight={[{ upper: true, tone: 'muted' }]} rowLabels={['$q_1$', '$q_2$', '$q_3$', '$q_4$']} colLabels={['$k_1$', '$k_2$', '$k_3$', '$k_4$']} title="分数 $QK^\top/\sqrt{2}$（灰色将被掩码）" />
+  <Text x={360} y={135} label="$+M$，softmax" size="sm" tone="muted" />
   <Arrow from={[320, 150]} to={[400, 150]} />
-  <Matrix x={460} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1, 0, 0, 0], [0.2, 0.8, 0, 0], [0.33, 0.33, 0.33, 0], [0.18, 0.01, 0.04, 0.76]]} highlight={[{ upper: true, tone: 'muted' }, { cells: [[1, 1], [3, 3]], tone: 'accent' }]} rowLabels={['q₁', 'q₂', 'q₃', 'q₄']} colLabels={['k₁', 'k₂', 'k₃', 'k₄']} title="注意力权重 A（每行和为 1）" />
+  <Matrix x={460} y={60} rows={4} cols={4} cell={[56, 36]} values={[[1, 0, 0, 0], [0.2, 0.8, 0, 0], [0.33, 0.33, 0.33, 0], [0.18, 0.01, 0.04, 0.76]]} highlight={[{ upper: true, tone: 'muted' }, { cells: [[1, 1], [3, 3]], tone: 'accent' }]} rowLabels={['$q_1$', '$q_2$', '$q_3$', '$q_4$']} colLabels={['$k_1$', '$k_2$', '$k_3$', '$k_4$']} title="注意力权重 $A$（每行和为 1）" />
   <Fragment slot="caption">左图上三角（灰色）是未来位置，加上 −∞ 后在右图中权重为 0。第 1 个位置只能看自己，权重为 1；第 4 行的权重高度集中在与查询方向一致的 k₄ 上。</Fragment>
 </Diagram>
 

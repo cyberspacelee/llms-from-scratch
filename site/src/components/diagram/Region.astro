@@ -1,5 +1,6 @@
 ---
 /** A dashed or tinted container that groups primitives, titled at its top-left: "GPU 0", "SM", "Encoder". */
+import Label from './Label.astro'
 import { shape, size as sizes, type Tone } from './tones'
 
 interface Props {
@@ -15,6 +16,6 @@ const colors = shape[tone]
 ---
 <g>
   <rect x={x} y={y} width={w} height={h} rx={10} class:list={[colors.box, tone !== 'ghost' && '[fill-opacity:0.45]', 'stroke-[1.25]']} />
-  {title && <text x={x + 12} y={y + 18} font-size={sizes.sm} font-weight="600" class={tone === 'strong' ? 'fill-accent' : 'fill-muted'}>{title}</text>}
+  {title && <Label x={x + 12} y={y + 18} label={title} fontSize={sizes.sm} bold tone={tone === 'strong' ? 'fill-accent' : 'fill-muted'} />}
   <slot />
 </g>

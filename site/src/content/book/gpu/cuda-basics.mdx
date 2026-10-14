@@ -34,10 +34,10 @@ code:
   <Matrix x={54} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" />
   <Matrix x={274} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" />
   <Matrix x={494} y={92} rows={1} cols={4} cell={[42, 34]} gap={4} values={[["t0", "t1", "t2", "t3"]]} tone="accent" highlight={[{ cols: [2, 3], tone: 'muted' }]} />
-  <Text x={360} y={206} label="全局下标 i = blockIdx.x × blockDim.x + threadIdx.x" mono bold />
+  <Text x={360} y={206} label="全局下标 $i = \texttt{blockIdx.x} \times \texttt{blockDim.x} + \texttt{threadIdx.x}$" mono bold />
   <Matrix x={124} y={226} rows={1} cols={12} cell={[36, 30]} gap={4} values={[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]} tone="accent" highlight={[{ cols: [10, 11], tone: 'muted' }]} />
-  <Text x={110} y={241} label="i" anchor="end" mono />
-  <Text x={364} y={274} label="n = 10：i = 10、11 的线程被 if (i < n) 挡掉" size="sm" tone="muted" />
+  <Text x={110} y={241} label="$i$" anchor="end" mono />
+  <Text x={364} y={274} label="$n = 10$：$i = 10, 11$ 的线程被 if (i < n) 挡掉" size="sm" tone="muted" />
   <Fragment slot="caption">一次启动 3 个 block，每个 block 4 个线程（blockDim.x = 4）。每个线程用 blockIdx.x 与 threadIdx.x 算出自己负责的全局下标；元素数 n = 10 不是块大小的整数倍，最后一个 block 有两个线程无事可做（灰色）。</Fragment>
 </Diagram>
 

@@ -56,7 +56,7 @@ $$
 
 频率 $\omega_i$ 从 $\omega_0 = 1$（波长 $2\pi \approx 6.3$ 个位置）几何递减到 $\omega_{d/2-1} \approx 1/10000$（波长约 6 万个位置）。可以把它类比成一个用正弦“指针”表示的多位计数器：高频维度像秒针，相邻位置之间差异很大，用来区分近处；低频维度像时针，变化缓慢，用来区分远处。
 
-<Plot label="正弦位置编码在不同频率上的分量" x={[0, 64]} y={[-1.2, 1.2]} xLabel="位置 p" yLabel="PE 分量" height={260} series={[{ fn: (p) => Math.sin(p), label: 'i = 0（ω = 1）' }, { fn: (p) => Math.sin(p * Math.pow(10000, -4 / 64)), label: 'i = 2', tone: 'info' }, { fn: (p) => Math.sin(p * Math.pow(10000, -16 / 64)), label: 'i = 8', tone: 'accent2' }]}>
+<Plot label="正弦位置编码在不同频率上的分量" x={[0, 64]} y={[-1.2, 1.2]} xLabel="位置 $p$" yLabel="PE 分量" height={260} series={[{ fn: (p) => Math.sin(p), label: '$i = 0$（$\\omega = 1$）' }, { fn: (p) => Math.sin(p * Math.pow(10000, -4 / 64)), label: '$i = 2$', tone: 'info' }, { fn: (p) => Math.sin(p * Math.pow(10000, -16 / 64)), label: '$i = 8$', tone: 'accent2' }]}>
   <Fragment slot="caption">d = 64 时第 2i 维 sin(p·ωᵢ) 随位置的变化。i 越大频率越低：i = 0 每约 6 个位置振荡一次，i = 8 在 64 个位置内只走了约四分之一个周期。所有频率合起来给每个位置一个独特的“指纹”。</Fragment>
 </Plot>
 
@@ -109,18 +109,18 @@ $$
 结果只依赖 $n - m$。几何上看更直观：旋转不改变向量的长度，两个向量各自旋转 $m\theta$ 与 $n\theta$ 之后，它们之间的夹角只改变了 $(n - m)\theta$，而内积由长度与夹角决定。
 
 <Diagram width={720} height={260} label="RoPE 的二维几何：查询与键按各自位置旋转，夹角只取决于相对位置">
-  <Region x={20} y={10} w={330} h={240} title="位置 m = 1, n = 3" />
-  <Region x={370} y={10} w={330} h={240} title="位置 m = 4, n = 6（整体平移 3）" />
+  <Region x={20} y={10} w={330} h={240} title="位置 $m = 1, n = 3$" />
+  <Region x={370} y={10} w={330} h={240} title="位置 $m = 4, n = 6$（整体平移 3）" />
   <Arrow from={[90, 200]} to={[300, 200]} tone="ghost" head="none" />
   <Arrow from={[90, 200]} to={[90, 50]} tone="ghost" head="none" />
-  <Arrow from={[90, 200]} to={[230, 140]} tone="accent" width={2.2} label="q 旋转 1·θ" labelSide="below" />
-  <Arrow from={[90, 200]} to={[150, 70]} tone="info" width={2.2} label="k 旋转 3·θ" labelSide="left" />
-  <Text x={175} y={150} label="夹角 2θ" size="sm" tone="accent2" />
+  <Arrow from={[90, 200]} to={[230, 140]} tone="accent" width={2.2} label="$q$ 旋转 $\theta$" labelSide="below" />
+  <Arrow from={[90, 200]} to={[150, 70]} tone="info" width={2.2} label="$k$ 旋转 $3\theta$" labelSide="left" />
+  <Text x={175} y={150} label="夹角 $2\theta$" size="sm" tone="accent2" />
   <Arrow from={[440, 200]} to={[650, 200]} tone="ghost" head="none" />
   <Arrow from={[440, 200]} to={[440, 50]} tone="ghost" head="none" />
-  <Arrow from={[440, 200]} to={[530, 80]} tone="accent" width={2.2} label="q 旋转 4·θ" labelSide="right" />
-  <Arrow from={[440, 200]} to={[420, 60]} tone="info" width={2.2} label="k 旋转 6·θ" labelSide="left" />
-  <Text x={480} y={120} label="夹角 2θ" size="sm" tone="accent2" />
+  <Arrow from={[440, 200]} to={[530, 80]} tone="accent" width={2.2} label="$q$ 旋转 $4\theta$" labelSide="right" />
+  <Arrow from={[440, 200]} to={[420, 60]} tone="info" width={2.2} label="$k$ 旋转 $6\theta$" labelSide="left" />
+  <Text x={480} y={120} label="夹角 $2\theta$" size="sm" tone="accent2" />
   <Fragment slot="caption">同一对查询与键放在不同的绝对位置上，各自的方向变了，但两者之间的夹角始终是 (n − m)θ，长度不变，因此内积不变。这就是“打分只依赖相对位置”。</Fragment>
 </Diagram>
 
@@ -158,13 +158,13 @@ $$
 
 不同的对有不同的“转速”。第 $i$ 对旋转一整圈需要 $2\pi/\theta_i$ 个位置，即波长：
 
-<Plot label="RoPE 各维度对的波长（d_h = 128，Θ = 10000）" x={[0, 63]} y={[1, 100000]} logY xLabel="维度对编号 i" yLabel="波长 / 位置数（对数刻度）" height={250} series={[{ fn: (i) => 2 * Math.PI * Math.pow(10000, (2 * i) / 128), label: 'Θ = 10000' }, { fn: (i) => 2 * Math.PI * Math.pow(500000, (2 * i) / 128), label: 'Θ = 500000（LLaMA 3）', tone: 'accent2', dashed: true }]}>
+<Plot label="RoPE 各维度对的波长（d_h = 128，Θ = 10000）" x={[0, 63]} y={[1, 100000]} logY xLabel="维度对编号 $i$" yLabel="波长 / 位置数（对数刻度）" height={250} series={[{ fn: (i) => 2 * Math.PI * Math.pow(10000, (2 * i) / 128), label: '$\\Theta = 10000$' }, { fn: (i) => 2 * Math.PI * Math.pow(500000, (2 * i) / 128), label: '$\\Theta = 500000$（LLaMA 3）', tone: 'accent2', dashed: true }]}>
   <Fragment slot="caption">波长随 i 几何增长：最快的一对每 6 个位置转一圈，最慢的一对在 Θ = 10000 时要约 5 万个位置。LLaMA 3 把 Θ 提高到 500000，让低频对转得更慢，为更长的上下文留出余地；长上下文的外推方法（位置插值、NTK、YaRN）都在调整这些频率。</Fragment>
 </Plot>
 
 高频对对相对距离非常敏感，相差几个位置就转过很大角度，适合表达精确的局部关系；低频对在很长的距离上几乎不转，接近“没有位置编码”，适合传递语义内容。Su 等人还指出 RoPE 具有某种**远程衰减**：若 $q$ 与 $k$ 在各对上同向，打分 $\sum_i \cos((m - n)\theta_i)$ 随着距离 $|m - n|$ 增大而整体变小（各对的余弦逐渐失去相位一致性）。
 
-<Plot label="同向查询与键在 RoPE 下的打分随相对距离的变化" x={[0, 400]} y={[-0.2, 1]} xLabel="相对距离 |m − n|" yLabel="平均 $\cos((m-n)\theta_i)$" height={240} series={[{ fn: (t) => { let s = 0; for (let i = 0; i < 64; i++) s += Math.cos(t * Math.pow(10000, -i / 64)); return s / 64 }, label: '$d_h = 128$，$\\Theta = 10000$' }]}>
+<Plot label="同向查询与键在 RoPE 下的打分随相对距离的变化" x={[0, 400]} y={[-0.2, 1]} xLabel="相对距离 $|m-n|$" yLabel="平均 $\cos((m-n)\theta_i)$" height={240} series={[{ fn: (t) => { let s = 0; for (let i = 0; i < 64; i++) s += Math.cos(t * Math.pow(10000, -i / 64)); return s / 64 }, label: '$d_h = 128$，$\\Theta = 10000$' }]}>
   <Fragment slot="caption">q = k 且每对分量相同时，归一化的内积就是 64 个余弦的平均。距离为 0 时为 1；随着距离增大，高频对迅速失去一致性，整体呈下降趋势并伴随振荡。这是一种归纳偏置：在其他条件相同时，近处的 token 得分更高。</Fragment>
 </Plot>
 

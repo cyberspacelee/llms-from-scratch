@@ -47,12 +47,12 @@ $$
 <Diagram width={720} height={250} label="从 token 流中随机取窗口并构造右移的目标">
   <Matrix x={20} y={50} rows={1} cols={18} cell={[34, 30]} gap={2} values={[["Once", "upon", "a", "time", "…", "Kim", ".", "EOT", "One", "day", ",", "Tom", "went", "to", "the", "park", ".", "EOT"]]} highlight={[{ cells: [[0, 7], [0, 17]], tone: 'accent2' }, { cells: [[0, 3], [0, 4], [0, 5], [0, 6]], tone: 'accent' }]} />
   <Text x={20} y={30} label="token 流（文档以 EOT 分隔）" size="sm" anchor="start" />
-  <Box x={20} y={110} w={150} h={34} label="起点 s ~ U{0…N−T−1}" size="sm" tone="info" />
+  <Box x={20} y={110} w={150} h={44} label="起点\n$s \sim U\{0,\ldots,N-T-1\}$" size="xs" tone="info" />
   <Arrow from={[95, 110]} via={[[95, 100], [140, 100]]} to={[140, 82]} tone="info" />
-  <Matrix x={190} y={125} rows={2} cols={4} cell={[56, 30]} gap={2} values={[["time", "…", "Kim", "."], ["…", "Kim", ".", "EOT"]]} highlight={[{ rows: [0], tone: 'accent' }, { rows: [1], tone: 'strong' }]} rowLabels={["x", "y"]} />
+  <Matrix x={190} y={125} rows={2} cols={4} cell={[56, 30]} gap={2} values={[["time", "…", "Kim", "."], ["…", "Kim", ".", "EOT"]]} highlight={[{ rows: [0], tone: 'accent' }, { rows: [1], tone: 'strong' }]} rowLabels={["$x$", "$y$"]} />
   <Text x={440} y={140} label="x[t] = tokens[s + t]" size="sm" anchor="start" mono />
   <Text x={440} y={170} label="y[t] = tokens[s + t + 1]" size="sm" anchor="start" mono />
-  <Text x={440} y={215} label="位置 t 的 logits 与 y[t] 计算交叉熵" size="sm" anchor="start" tone="muted" />
+  <Text x={440} y={215} label="位置 $t$ 的 logits 与 y[t] 计算交叉熵" size="sm" anchor="start" tone="muted" />
   <Fragment slot="caption">蓝色窗口是输入 x，紫色是右移一位的目标 y，它们来自同一段 token 流，只错开一个位置。一次前向因此同时训练了窗口内 T 个位置的预测。</Fragment>
 </Diagram>
 
@@ -159,7 +159,7 @@ $$
 
 测试检查了关键点：$t=0$ 为 0、预热中点为 $\eta_{\max}/2$、余弦段中点恰为 $(\eta_{\max}+\eta_{\min})/2$、末尾等于 $\eta_{\min}$ 且整段单调不增。
 
-<Plot label="预热加余弦学习率（W = 50，S = 1500）" x={[0, 1500]} y={[0, 0.0035]} xLabel="训练步数 t" yLabel="学习率 η" height={240} series={[{ fn: (t) => t < 50 ? 0.003 * t / 50 : t >= 1500 ? 0.0003 : 0.0003 + 0.5 * (1 + Math.cos(Math.PI * (t - 50) / 1450)) * 0.0027, label: '$\\eta_{\\max} = 3 \\times 10^{-3}$，$\\eta_{\\min} = 3 \\times 10^{-4}$' }]}>
+<Plot label="预热加余弦学习率（W = 50，S = 1500）" x={[0, 1500]} y={[0, 0.0035]} xLabel="训练步数 $t$" yLabel="学习率 $\eta$" height={240} series={[{ fn: (t) => t < 50 ? 0.003 * t / 50 : t >= 1500 ? 0.0003 : 0.0003 + 0.5 * (1 + Math.cos(Math.PI * (t - 50) / 1450)) * 0.0027, label: '$\\eta_{\\max} = 3 \\times 10^{-3}$，$\\eta_{\\min} = 3 \\times 10^{-4}$' }]}>
   <Fragment slot="caption">本章训练使用的学习率曲线：前 50 步线性升到 3×10⁻³，随后沿余弦下降到峰值的 10%。末尾学习率小，参数在最优点附近做精细调整，这是损失在训练最后阶段仍明显下降的原因之一。</Fragment>
 </Plot>
 
@@ -187,11 +187,11 @@ $$
 
 <Diagram width={720} height={190} label="一步训练的数据流">
   <Box x={10} y={60} w={100} h={56} label="取批" sub="get_batch" />
-  <Box x={135} y={60} w={100} h={56} label="前向" sub="logits [B,T,V]" tone="accent" />
-  <Box x={260} y={60} w={100} h={56} label="交叉熵" sub="标量 ℓ" tone="accent" />
+  <Box x={135} y={60} w={100} h={56} label="前向" sub="logits $[B,T,V]$" tone="accent" />
+  <Box x={260} y={60} w={100} h={56} label="交叉熵" sub="标量 $\ell$" tone="accent" />
   <Box x={385} y={60} w={100} h={56} label="反向" sub="loss.backward()" tone="accent2" />
-  <Box x={510} y={60} w={90} h={56} label="裁剪" sub="‖g‖ ≤ 1" tone="accent2" />
-  <Box x={625} y={60} w={85} h={56} label="AdamW" sub="θ ← θ − …" tone="strong" />
+  <Box x={510} y={60} w={90} h={56} label="裁剪" sub="$\|g\| \le 1$" tone="accent2" />
+  <Box x={625} y={60} w={85} h={56} label="AdamW" sub="$\theta \leftarrow \theta - \cdots$" tone="strong" />
   <Arrow from={[110, 88]} to={[135, 88]} />
   <Arrow from={[235, 88]} to={[260, 88]} />
   <Arrow from={[360, 88]} to={[385, 88]} />

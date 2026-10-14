@@ -86,20 +86,20 @@ $$
 </KeyEq>
 
 <Diagram width={720} height={240} label="线性层反向传播的三个矩阵乘法及其形状">
-  <Box x={20} y={30} w={130} h={50} label="dY" sub="$(N, d_{\text{out}})$" tone="accent2" />
-  <Box x={200} y={30} w={130} h={50} label="W" sub="$(d_{\text{out}}, d_{\text{in}})$" tone="info" />
-  <Box x={470} y={30} w={130} h={50} label="dX = dY W" sub="$(N, d_{\text{in}})$" tone="accent" />
+  <Box x={20} y={30} w={130} h={50} label="$dY$" sub="$(N, d_{\text{out}})$" tone="accent2" />
+  <Box x={200} y={30} w={130} h={50} label="$W$" sub="$(d_{\text{out}}, d_{\text{in}})$" tone="info" />
+  <Box x={470} y={30} w={130} h={50} label="$dX = dY W$" sub="$(N, d_{\text{in}})$" tone="accent" />
   <Box x={20} y={100} w={130} h={50} label="$dY^\top$" sub="$(d_{\text{out}}, N)$" tone="accent2" />
-  <Box x={200} y={100} w={130} h={50} label="X" sub="$(N, d_{\text{in}})$" tone="info" />
+  <Box x={200} y={100} w={130} h={50} label="$X$" sub="$(N, d_{\text{in}})$" tone="info" />
   <Box x={470} y={100} w={130} h={50} label="$dW = dY^\top X$" sub="$(d_{\text{out}}, d_{\text{in}})$" tone="accent" />
-  <Box x={20} y={170} w={130} h={50} label="dY" sub="$(N, d_{\text{out}})$" tone="accent2" />
-  <Box x={200} y={170} w={130} h={50} label="沿 N 求和" />
-  <Box x={470} y={170} w={130} h={50} label="db" sub="$(d_{\text{out}},)$" tone="accent" />
+  <Box x={20} y={170} w={130} h={50} label="$dY$" sub="$(N, d_{\text{out}})$" tone="accent2" />
+  <Box x={200} y={170} w={130} h={50} label="沿 $N$ 求和" />
+  <Box x={470} y={170} w={130} h={50} label="$db$" sub="$(d_{\text{out}},)$" tone="accent" />
   <Text x={175} y={55} label="@" />
   <Text x={175} y={125} label="@" />
   <Arrow from={[150, 195]} to={[200, 195]} />
   <Arrow from={[330, 55]} to={[470, 55]} label="内维 $d_{\text{out}}$ 被消掉" />
-  <Arrow from={[330, 125]} to={[470, 125]} label="内维 N 被消掉" />
+  <Arrow from={[330, 125]} to={[470, 125]} label="内维 $N$ 被消掉" />
   <Arrow from={[330, 195]} to={[470, 195]} />
   <Fragment slot="caption">每个梯度的形状都与对应变量相同。$\bar W$ 的内维是批大小 $N$：样本被求和消掉，因为所有样本共用一个 $W$。两个矩阵乘的 FLOPs 各为 $2N d_{\text{in}} d_{\text{out}}$，与前向相同，所以反向约是前向的两倍。</Fragment>
 </Diagram>
@@ -144,11 +144,11 @@ SiLU 是现代 LLM 前馈层 SwiGLU 的组成部分。
   label="ReLU、GELU、SiLU 的导数"
   x={[-4, 4]}
   y={[-0.2, 1.2]}
-  xLabel="x"
+  xLabel="$x$"
   series={[
-    { label: "ReLU′", fn: (t) => (t > 0 ? 1 : 0), samples: 400 },
-    { label: "GELU′", fn: (t) => { const a = Math.abs(t) / Math.SQRT2; const k = 1 / (1 + 0.3275911 * a); const erf = 1 - k * (0.254829592 + k * (-0.284496736 + k * (1.421413741 + k * (-1.453152027 + k * 1.061405429)))) * Math.exp(-a * a); const cdf = 0.5 * (1 + Math.sign(t) * erf); return cdf + t * Math.exp(-t * t / 2) / Math.sqrt(2 * Math.PI) } },
-    { label: "SiLU′", fn: (t) => { const s = 1 / (1 + Math.exp(-t)); return s * (1 + t * (1 - s)) } },
+    { label: "$\\operatorname{ReLU}'$", fn: (t) => (t > 0 ? 1 : 0), samples: 400 },
+    { label: "$\\operatorname{GELU}'$", fn: (t) => { const a = Math.abs(t) / Math.SQRT2; const k = 1 / (1 + 0.3275911 * a); const erf = 1 - k * (0.254829592 + k * (-0.284496736 + k * (1.421413741 + k * (-1.453152027 + k * 1.061405429)))) * Math.exp(-a * a); const cdf = 0.5 * (1 + Math.sign(t) * erf); return cdf + t * Math.exp(-t * t / 2) / Math.sqrt(2 * Math.PI) } },
+    { label: "$\\operatorname{SiLU}'$", fn: (t) => { const s = 1 / (1 + Math.exp(-t)); return s * (1 + t * (1 - s)) } },
   ]}
 >
   <Fragment slot="caption">ReLU 的导数是阶跃函数，负半轴梯度恒为 0（“死亡 ReLU”问题的根源）。GELU 与 SiLU 的导数是光滑的：在负半轴有小的负值，在正半轴略微超过 1 后回落到 1。</Fragment>
@@ -200,12 +200,12 @@ $$
 手算：$z = (2, 1, 0)$，$y = 0$。$p\approx(0.665, 0.245, 0.090)$，$\ell = -\log 0.665\approx 0.408$，梯度 $p - e_0\approx(-0.335, 0.245, 0.090)$。
 
 <Diagram width={720} height={170} label="softmax 交叉熵梯度的手算例子：概率减去独热标签">
-  <Matrix x={40} y={60} rows={1} cols={3} cell={[70, 40]} values={[[2, 1, 0]]} title="logits z" />
+  <Matrix x={40} y={60} rows={1} cols={3} cell={[70, 40]} values={[[2, 1, 0]]} title="logits $z$" />
   <Arrow from={[262, 80]} to={[304, 80]} label="softmax" />
-  <Matrix x={310} y={60} rows={1} cols={3} cell={[60, 40]} values={[[0.665, 0.245, 0.09]]} digits={3} title="p" tone="info" />
-  <Text x={515} y={80} label="−" size="lg" />
-  <Matrix x={530} y={60} rows={1} cols={3} cell={[40, 40]} values={[[1, 0, 0]]} title="e_y" highlight={[{ cells: [[0, 0]], tone: 'accent' }]} />
-  <Text x={420} y={140} label="∂ℓ/∂z = (−0.335, 0.245, 0.090)：推高正确类，按概率压低其余类" size="sm" tone="accent2" />
+  <Matrix x={310} y={60} rows={1} cols={3} cell={[60, 40]} values={[[0.665, 0.245, 0.09]]} digits={3} title="$p$" tone="info" />
+  <Text x={515} y={80} label="$-$" size="lg" />
+  <Matrix x={530} y={60} rows={1} cols={3} cell={[40, 40]} values={[[1, 0, 0]]} title="$e_y$" highlight={[{ cells: [[0, 0]], tone: 'accent' }]} />
+  <Text x={420} y={140} label="$\partial\ell/\partial z = (-0.335, 0.245, 0.090)$：推高正确类，按概率压低其余类" size="sm" tone="accent2" />
   <Fragment slot="caption">正确类别（第 0 个）的梯度为负，梯度下降会增大它的 logit；其余类别按各自的预测概率被压低。三个分量之和为 0。</Fragment>
 </Diagram>
 

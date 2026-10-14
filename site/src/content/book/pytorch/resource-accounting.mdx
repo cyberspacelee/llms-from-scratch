@@ -51,13 +51,13 @@ $$
 两者都是与前向同样规模的矩阵乘，各 $2mkn$ FLOPs。对输入的梯度要继续传给更早的层，对权重的梯度交给优化器——两者缺一不可（只有网络的第一层可以省掉对输入的梯度）。因此反向是前向的两倍。
 
 <Diagram width={720} height={250} label="线性层前向一次矩阵乘、反向两次矩阵乘">
-  <Region x={10} y={10} w={220} h={230} title="前向：2mkn" tone="accent" />
-  <Box x={30} y={60} w={180} h={50} label="$Y = X W^\top$" sub="(m×k)(k×n)" tone="accent" mono />
+  <Region x={10} y={10} w={220} h={230} title="前向：$2mkn$" tone="accent" />
+  <Box x={30} y={60} w={180} h={50} label="$Y = X W^\top$" sub="$(m\times k)(k\times n)$" tone="accent" mono />
   <Text x={120} y={150} label="每个 token 每个权重" size="sm" tone="muted" />
   <Text x={120} y={172} label="1 次乘 + 1 次加" size="sm" tone="muted" />
-  <Region x={250} y={10} w={460} h={230} title="反向：4mkn" tone="accent2" />
-  <Box x={270} y={60} w={200} h={50} label="dX = G W" sub="(m×n)(n×k)" tone="accent2" mono />
-  <Box x={490} y={60} w={200} h={50} label="$dW = G^\top X$" sub="(n×m)(m×k)" tone="accent2" mono />
+  <Region x={250} y={10} w={460} h={230} title="反向：$4mkn$" tone="accent2" />
+  <Box x={270} y={60} w={200} h={50} label="$dX = GW$" sub="$(m\times n)(n\times k)$" tone="accent2" mono />
+  <Box x={490} y={60} w={200} h={50} label="$dW = G^\top X$" sub="$(n\times m)(m\times k)$" tone="accent2" mono />
   <Text x={370} y={150} label="传给前一层" size="sm" tone="muted" />
   <Text x={590} y={150} label="交给优化器" size="sm" tone="muted" />
   <Arrow from={[370, 110]} to={[370, 135]} />
@@ -158,8 +158,8 @@ $$
 <CodeFile path="src/llms_from_scratch/pytorch/accounting.py" region="memory" />
 
 <Bars label="6.74B 参数模型的模型状态显存（不含激活）" unit="GB" items={[
-  { label: 'FP32 + Adam', segments: [{ value: 26.95, label: '参数' }, { value: 26.95, label: '梯度' }, { value: 53.91, label: 'Adam m, v' }, { value: 0, label: 'FP32 主权重' }] },
-  { label: '混合精度 + Adam', segments: [{ value: 13.48, label: '参数' }, { value: 13.48, label: '梯度' }, { value: 53.91, label: 'Adam m, v' }, { value: 26.95, label: 'FP32 主权重' }] },
+  { label: 'FP32 + Adam', segments: [{ value: 26.95, label: '参数' }, { value: 26.95, label: '梯度' }, { value: 53.91, label: 'Adam $m, v$' }, { value: 0, label: 'FP32 主权重' }] },
+  { label: '混合精度 + Adam', segments: [{ value: 13.48, label: '参数' }, { value: 13.48, label: '梯度' }, { value: 53.91, label: 'Adam $m, v$' }, { value: 26.95, label: 'FP32 主权重' }] },
   { label: 'BF16 推理', segments: [{ value: 13.48, label: '参数' }] },
 ]}>
   <Fragment slot="caption">按 1 GB = 10⁹ 字节计。两种训练方式都是 16 字节/参数、约 108 GB，超过一张 80 GB 的 H100；推理只需参数本身的 13.5 GB。这就是“7B 模型能推理却不能在单卡上全参数训练”的原因，也是第六部分 ZeRO/FSDP 把模型状态切分到多卡上的动机。</Fragment>
@@ -219,10 +219,10 @@ $$
 
 `measure_matmul_flops_per_s` 在 CPU 上计时 $n\times n$ 矩阵乘：先预热两次（第一次调用要分配内存、选择内核），再取多次计时的中位数（避开被操作系统打断的离群值）。在 GPU 上计时还必须在前后调用 `torch.cuda.synchronize()`，因为 kernel 是异步启动的，不同步只会测到启动时间。
 
-<Plot label="单线程 FP32 矩阵乘的实测吞吐（Intel N100，作者机器上的一次测量）" x={[32, 1024]} y={[0, 60]} logX xLabel="矩阵边长 n" yLabel="GFLOP/s" xTicks={[32, 64, 128, 256, 512, 1024]} series={[
+<Plot label="单线程 FP32 矩阵乘的实测吞吐（Intel N100，作者机器上的一次测量）" x={[32, 1024]} y={[0, 60]} logX xLabel="矩阵边长 $n$" yLabel="GFLOP/s" xTicks={[32, 64, 128, 256, 512, 1024]} series={[
   { points: [[32, 6.9], [64, 19.5], [128, 29.5], [256, 30.0], [512, 22.6], [1024, 18.7]], label: '实测（单线程）' },
   { fn: () => 54.4, label: '理论峰值（估计）', tone: 'muted', dashed: true },
-]} markers={[{ at: [256, 30.0], label: '≈ 55% 峰值' }]}>
+]} markers={[{ at: [256, 30.0], label: '$\\approx 55\\%$ 峰值' }]}>
   <Fragment slot="caption">小矩阵受函数调用与数据搬运开销限制，吞吐很低；中等尺寸时达到约 30 GFLOP/s。理论峰值按每周期 16 次 FP32 运算（两条 128 位 FMA 流水线）× 3.4 GHz 睿频估计，仅作量级参考。测量时机器上还有其他负载，大矩阵的下降部分来自缓存与内存争用，数字会随环境波动；请在你自己的机器上运行同样的函数。</Fragment>
 </Plot>
 

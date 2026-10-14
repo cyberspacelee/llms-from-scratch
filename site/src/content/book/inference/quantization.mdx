@@ -66,11 +66,11 @@ $$
 - **分组**（group-wise）：沿输入维每 $g$ 个元素一个 scale（常见 $g=128$ 或 64）。scale 不能再提到求和外面，kernel 要在每组累加结束时乘一次，但在 4 比特下几乎是必须的。
 
 <Diagram width={720} height={230} label="三种量化粒度下 scale 的覆盖范围">
-  <Text x={20} y={22} label="权重矩阵 W（4 行 × 8 列），同色的格子共享一个 scale" anchor="start" size="sm" tone="muted" />
+  <Text x={20} y={22} label="权重矩阵 $W$（4 行 × 8 列），同色的格子共享一个 scale" anchor="start" size="sm" tone="muted" />
   <Matrix x={20} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="逐张量" highlight={[{ rows: [0, 1, 2, 3], tone: 'accent' }]} />
   <Matrix x={260} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="逐通道"
     highlight={[{ rows: [0], tone: 'accent' }, { rows: [1], tone: 'info' }, { rows: [2], tone: 'accent2' }, { rows: [3], tone: 'muted' }]} />
-  <Matrix x={500} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="分组（g = 4）"
+  <Matrix x={500} y={50} rows={4} cols={8} cell={[22, 22]} gap={2} title="分组（$g = 4$）"
     highlight={[
       { cells: [[0,0],[0,1],[0,2],[0,3],[2,0],[2,1],[2,2],[2,3]], tone: 'accent' },
       { cells: [[0,4],[0,5],[0,6],[0,7],[2,4],[2,5],[2,6],[2,7]], tone: 'info' },
@@ -217,21 +217,21 @@ $$
 $\alpha=0.5$ 时，缩放之后激活第 $j$ 列与权重第 $j$ 列的最大值相等，都是 $\sqrt{\max|X_{:,j}|\max|W_{:,j}|}$。离群通道的幅度被两边平摊，不再由激活独自承担。$\alpha$ 越大，迁移给权重的越多；对激活离群特别严重的模型（GLM-130B 等）要取 0.75 左右。
 
 <Diagram width={720} height={250} label="SmoothQuant 把激活离群通道的幅度迁移到权重">
-  <Text x={20} y={22} label="X（激活，每行一个 token）" anchor="start" size="sm" tone="muted" />
+  <Text x={20} y={22} label="$X$（激活，每行一个 token）" anchor="start" size="sm" tone="muted" />
   <Matrix x={20} y={40} rows={4} cols={6} cell={[26, 26]} gap={2}
     highlight={[{ cols: [2], tone: 'accent2' }]} />
   <Text x={20} y={188} label="第 2 列是离群通道，幅度 ≈ 50×" anchor="start" size="sm" />
-  <Text x={238} y={90} label="÷ s" size="md" tone="accent" mono />
+  <Text x={238} y={90} label="$\div s$" size="md" tone="accent" mono />
   <Arrow from={[200, 100]} to={[272, 100]} tone="accent" />
   <Text x={294} y={22} label="$\hat X = X\, \mathrm{diag}(s)^{-1}$" anchor="start" size="sm" tone="muted" />
   <Matrix x={294} y={40} rows={4} cols={6} cell={[26, 26]} gap={2}
     highlight={[{ cols: [2], tone: 'accent' }]} />
   <Text x={294} y={188} label="各列幅度接近，INT8 够用" anchor="start" size="sm" />
-  <Text x={540} y={22} label="Ŵ = W diag(s)" anchor="start" size="sm" tone="muted" />
+  <Text x={540} y={22} label="$\hat W = W\,\operatorname{diag}(s)$" anchor="start" size="sm" tone="muted" />
   <Matrix x={540} y={40} rows={6} cols={4} cell={[26, 26]} gap={2}
     highlight={[{ rows: [2], tone: 'info' }]} />
   <Text x={540} y={218} label="权重的第 2 个输入通道被放大，仍在可量化范围内" anchor="start" size="sm" />
-  <Text x={470} y={90} label="× s" size="md" tone="info" mono />
+  <Text x={470} y={90} label="$\times s$" size="md" tone="info" mono />
   <Arrow from={[452, 100]} to={[536, 100]} tone="info" dashed />
   <Fragment slot="caption">离群通道固定在少数输入维度上，所以对每个输入通道乘除一个常数就能抹平它。X 侧的 $\operatorname{diag}(s)^{-1}$ 可以融进前面的 LayerNorm，W 侧的放大在量化前离线完成，推理时没有任何额外运算。</Fragment>
 </Diagram>

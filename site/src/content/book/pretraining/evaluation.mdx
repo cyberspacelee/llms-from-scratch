@@ -40,7 +40,7 @@ $$
   <Box x={240} y={120} w={80} h={40} label="iev" mono tone="accent" />
   <Box x={320} y={120} w={100} h={40} label="able" mono tone="accent" />
   <Text x={440} y={140} label="4 个 token" anchor="start" size="sm" tone="muted" />
-  <Text x={440} y={180} label="−log P(文本) 相同时，每 token 损失之比为 4 : 3" anchor="start" size="sm" tone="muted" />
+  <Text x={340} y={180} label="$-\log P(\text{文本})$ 相同时，每 token 损失之比为 $4:3$" size="sm" tone="muted" />
   <Fragment slot="caption">每个格子宽度正比于字节数。两个分词器覆盖的字节完全相同；如果两个模型给这个词的总对数概率相同，它们的“每 token 损失”仍然不同。按字节归一化消除了这个差异。</Fragment>
 </Diagram>
 
@@ -93,7 +93,7 @@ $$
   <Box x={30} y={40} w={280} h={44} label="题干：水在海平面沸腾的温度是" size="sm" />
   <Box x={30} y={110} w={130} h={36} label="… 100 °C" size="sm" tone="accent" />
   <Box x={180} y={110} w={130} h={36} label="… 50 °C" size="sm" />
-  <Text x={170} y={175} label="每个选项单独计算 log P(选项 | 题干)" size="sm" tone="muted" />
+  <Text x={170} y={175} label="每个选项单独计算 $\log P(\text{选项}\mid\text{题干})$" size="sm" tone="muted" />
   <Text x={170} y={205} label="小模型也能给出信号" size="sm" tone="muted" />
   <Region x={350} y={10} w={320} h={230} title="选项字母（MCF）" tone="accent" />
   <Box x={370} y={40} w={280} h={70} label="题干 + A. 100 °C  B. 50 °C\n答案：" size="sm" />
@@ -144,11 +144,11 @@ $$
 
 测试 `test_pass_at_k_is_unbiased` 对 $n=10$、$c=3$、$k=4$ 穷举所有 $\binom{10}4=210$ 个子集，验证公式与“至少含一个正确样本的子集比例”完全相等，并检查 $k=1$ 时它退化为 $c/n$。
 
-<Plot label="pass@k 随 k 的增长" x={[1, 100]} y={[0, 1]} logX xLabel="k（每题采样数）" yLabel="pass@k"
+<Plot label="pass@k 随 k 的增长" x={[1, 100]} y={[0, 1]} logX xLabel="$k$（每题采样数）" yLabel="pass@k"
   series={[
-    { fn: (k) => 1 - (1 - 0.5) ** k, label: 'p = 0.5' },
-    { fn: (k) => 1 - (1 - 0.1) ** k, label: 'p = 0.1', tone: 'info' },
-    { fn: (k) => 1 - (1 - 0.01) ** k, label: 'p = 0.01', tone: 'accent2' },
+    { fn: (k) => 1 - (1 - 0.5) ** k, label: '$p = 0.5$' },
+    { fn: (k) => 1 - (1 - 0.1) ** k, label: '$p = 0.1$', tone: 'info' },
+    { fn: (k) => 1 - (1 - 0.01) ** k, label: '$p = 0.01$', tone: 'accent2' },
   ]}>
   <Fragment slot="caption">单次成功概率 p 不同的三道题，pass@k = 1 − (1 − p)^k。pass@1 衡量“一次就做对”，pass@100 衡量“能不能做对”：一道 p = 0.01 的题 pass@1 几乎为 0，pass@100 却有 63%。这正是强化学习后训练想要利用的差距——把偶尔能做对的题变成稳定做对（见第七部分）。</Fragment>
 </Plot>

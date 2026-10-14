@@ -34,12 +34,12 @@ $$
 <CodeFile path="src/llms_from_scratch/pytorch/tensors.py" region="offset" />
 
 <Diagram width={720} height={370} label="同一块 12 元素的存储被解释为 3×4 矩阵 x 和它的转置 xᵀ">
-  <Matrix x={60} y={60} rows={3} cols={4} cell={36} values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]} rowLabels={['0', '1', '2']} colLabels={['0', '1', '2', '3']} title="x：shape (3, 4)，stride (4, 1)" highlight={[{ rows: [1], tone: 'accent' }, { cells: [[1, 2]], tone: 'strong' }]} />
-  <Matrix x={520} y={40} rows={4} cols={3} cell={36} values={[[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7, 11]]} rowLabels={['0', '1', '2', '3']} colLabels={['0', '1', '2']} title="xᵀ：shape (4, 3)，stride (1, 4)" highlight={[{ cols: [1], tone: 'accent' }, { cells: [[2, 1]], tone: 'strong' }]} />
+  <Matrix x={60} y={60} rows={3} cols={4} cell={36} values={[[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11]]} rowLabels={['0', '1', '2']} colLabels={['0', '1', '2', '3']} title="$x$：shape (3, 4)，stride (4, 1)" highlight={[{ rows: [1], tone: 'accent' }, { cells: [[1, 2]], tone: 'strong' }]} />
+  <Matrix x={520} y={40} rows={4} cols={3} cell={36} values={[[0, 4, 8], [1, 5, 9], [2, 6, 10], [3, 7, 11]]} rowLabels={['0', '1', '2', '3']} colLabels={['0', '1', '2']} title="$x^\top$：shape (4, 3)，stride (1, 4)" highlight={[{ cols: [1], tone: 'accent' }, { cells: [[2, 1]], tone: 'strong' }]} />
   <Matrix x={74} y={290} rows={1} cols={12} cell={[44, 34]} values={[[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]} colLabels={['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']} highlight={[{ cells: [[0, 4], [0, 5], [0, 7]], tone: 'accent' }, { cells: [[0, 6]], tone: 'strong' }]} />
   <Arrow from={[154, 174]} to={[358, 270]} tone="accent" />
   <Arrow from={[576, 194]} to={[386, 270]} tone="accent" />
-  <Text x={40} y={236} label="x[1, 2]：0 + 1·4 + 2·1 = 6" size="sm" anchor="start" mono />
+  <Text x={40} y={236} label="x[1, 2]：$0 + 1\cdot4 + 2\cdot1 = 6$" size="sm" anchor="start" mono />
   <Text x={700} y={236} label="$x^\top[2, 1]$：$0 + 2 \cdot 1 + 1 \cdot 4 = 6$" size="sm" anchor="end" mono />
   <Text x={360} y={350} label="storage：一维连续内存（上方数字是位置）" size="sm" tone="muted" />
   <Fragment slot="caption">上方两个矩阵共享下方同一块存储。x 的第 1 行（浅色）与 xᵀ 的第 1 列是同样四个内存位置 4–7；深色格子 x[1, 2] 与 xᵀ[2, 1] 都按“偏移 + Σ 下标 × 步长”算到位置 6。转置没有搬动任何数据，只是交换了 shape 与 stride。</Fragment>
@@ -110,8 +110,8 @@ RuntimeError: view size is not compatible with input tensor's size and stride
 <Diagram width={720} height={250} label="view、reshape 与 contiguous 的决策过程">
   <Box x={20} y={95} w={160} h={56} label="x.reshape(shape)" mono />
   <Box x={240} y={95} w={200} h={56} label={'能否用新的 stride\n表达同一块内存？'} size="sm" />
-  <Box x={520} y={20} w={180} h={56} label="返回视图" sub="共享 storage，O(1)" tone="accent" />
-  <Box x={520} y={170} w={180} h={56} label="contiguous() 复制" sub="新 storage，O(n)" tone="accent2" />
+  <Box x={520} y={20} w={180} h={56} label="返回视图" sub="共享 storage，$O(1)$" tone="accent" />
+  <Box x={520} y={170} w={180} h={56} label="contiguous() 复制" sub="新 storage，$O(n)$" tone="accent2" />
   <Arrow from={[180, 123]} to={[240, 123]} />
   <Arrow from={[440, 110]} via={[[480, 110], [480, 48]]} to={[520, 48]} tone="accent" label="能" labelSide="left" />
   <Arrow from={[440, 136]} via={[[480, 136], [480, 198]]} to={[520, 198]} tone="accent2" label="不能" labelSide="left" />
@@ -150,14 +150,14 @@ PyTorch 沿用 NumPy 的索引语义，分两类，规则可以概括为一句�
 手算一个例子：$(3,1)$ 与 $(1,4)$ 右对齐后逐维比较，第 0 维 $3$ 与 $1$ 取 3，第 1 维 $1$ 与 $4$ 取 4，结果为 $(3,4)$。$(2,3,4)$ 与 $(4,)$ 补齐成 $(1,1,4)$ 后结果为 $(2,3,4)$——偏置被加到每个批、每个位置上。$(3,4)$ 与 $(3,)$ 则失败：右对齐后最后一维是 $4$ 对 $3$，既不相等也没有 1。
 
 <Diagram width={720} height={210} label="(3,1) 与 (1,4) 广播为 (3,4) 的外加">
-  <Matrix x={40} y={50} rows={3} cols={1} cell={34} values={[[0], [10], [20]]} title="a：(3, 1)" tone="info" />
-  <Text x={110} y={102} label="+" size="lg" />
-  <Matrix x={140} y={84} rows={1} cols={4} cell={34} values={[[0, 1, 2, 3]]} title="b：(1, 4)" tone="accent" />
-  <Text x={300} y={102} label="=" size="lg" />
-  <Matrix x={340} y={50} rows={3} cols={4} cell={34} values={[[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]} title="a + b：(3, 4)" highlight={[{ cells: [[2, 1]], tone: 'strong' }]} />
-  <Text x={520} y={70} label="a 沿列方向 expand" size="sm" tone="info" anchor="start" />
+  <Matrix x={40} y={50} rows={3} cols={1} cell={34} values={[[0], [10], [20]]} title="$a$：(3, 1)" tone="info" />
+  <Text x={110} y={102} label="$+$" size="lg" />
+  <Matrix x={140} y={84} rows={1} cols={4} cell={34} values={[[0, 1, 2, 3]]} title="$b$：(1, 4)" tone="accent" />
+  <Text x={300} y={102} label="$=$" size="lg" />
+  <Matrix x={340} y={50} rows={3} cols={4} cell={34} values={[[0, 1, 2, 3], [10, 11, 12, 13], [20, 21, 22, 23]]} title="$a + b$：(3, 4)" highlight={[{ cells: [[2, 1]], tone: 'strong' }]} />
+  <Text x={520} y={70} label="$a$ 沿列方向 expand" size="sm" tone="info" anchor="start" />
   <Text x={520} y={92} label="（第 1 维 stride = 0）" size="sm" tone="muted" anchor="start" mono />
-  <Text x={520} y={124} label="b 沿行方向 expand" size="sm" tone="accent" anchor="start" />
+  <Text x={520} y={124} label="$b$ 沿行方向 expand" size="sm" tone="accent" anchor="start" />
   <Text x={520} y={146} label="（第 0 维 stride = 0）" size="sm" tone="muted" anchor="start" mono />
   <Fragment slot="caption">列向量与行向量相加得到“外加表”。结果的 [2, 1] = a[2, 0] + b[0, 1] = 20 + 1。两个输入都没有被真正复制：广播在读数时把长度为 1 的维度的步长当作 0。</Fragment>
 </Diagram>

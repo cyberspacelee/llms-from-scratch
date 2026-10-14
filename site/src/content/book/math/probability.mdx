@@ -65,7 +65,7 @@ $$
   <Arrow from={[75, 110]} to={[400, 70]} />
   <Arrow from={[195, 110]} to={[420, 70]} />
   <Arrow from={[315, 110]} to={[440, 70]} />
-  <Box x={520} y={60} w={170} h={70} label={"log P(x₁…x₄)\n= Σₜ log P(xₜ | x<ₜ)"} tone="strong" size="sm" />
+  <Box x={520} y={60} w={170} h={70} label={"$\\log P(x_1,\\dots,x_4)$\n$= \\sum_t\\log P(x_t\\mid x_{<t})$"} tone="strong" size="sm" />
   <Arrow from={[480, 45]} to={[520, 80]} tone="muted" dashed />
   <Fragment slot="caption">每个条件分布只能看到它左边的 token（箭头）。序列的对数概率是各位置条件对数概率之和。Transformer 用因果掩码在一次前向中同时计算所有位置的条件分布。</Fragment>
 </Diagram>
@@ -174,14 +174,14 @@ $H(\hat p)$ 与参数无关，所以**最大化似然 = 最小化交叉熵 = 最
   label="二元分布 p = (0.3, 0.7) 时交叉熵 H(p, q) 随 q 的变化"
   x={[0.01, 0.99]}
   y={[0, 2]}
-  xLabel="q(x = 1)"
+  xLabel="$q(x = 1)$"
   yLabel="nat"
   series={[
-    { label: 'H(p, q)', fn: (q) => -(0.3 * Math.log(q) + 0.7 * Math.log(1 - q)) },
-    { label: 'H(p)', fn: () => -(0.3 * Math.log(0.3) + 0.7 * Math.log(0.7)), dashed: true, tone: 'muted' },
-    { label: 'KL(p‖q)', fn: (q) => 0.3 * Math.log(0.3 / q) + 0.7 * Math.log(0.7 / (1 - q)), tone: 'accent2' },
+    { label: '$H(p, q)$', fn: (q) => -(0.3 * Math.log(q) + 0.7 * Math.log(1 - q)) },
+    { label: '$H(p)$', fn: () => -(0.3 * Math.log(0.3) + 0.7 * Math.log(0.7)), dashed: true, tone: 'muted' },
+    { label: '$\\operatorname{KL}(p\\Vert q)$', fn: (q) => 0.3 * Math.log(0.3 / q) + 0.7 * Math.log(0.7 / (1 - q)), tone: 'accent2' },
   ]}
-  markers={[{ at: [0.3, 0.6109], label: 'q = p', tone: 'accent' }]}
+  markers={[{ at: [0.3, 0.6109], label: '$q = p$', tone: 'accent' }]}
 >
   <Fragment slot="caption">交叉熵（实线）是熵（水平虚线，约 0.611 nat）加上 KL 散度。最小值恰好在 $q = p$ 处，此时 KL 为零。$q$ 把很小的概率分配给实际常见的结果时（右端），交叉熵急剧增大。</Fragment>
 </Plot>
@@ -241,13 +241,13 @@ $$
   x={[0.1, 10]}
   y={[0, 1]}
   logX
-  xLabel="温度 τ"
+  xLabel="温度 $\tau$"
   yLabel="概率"
   series={[
     { label: '$p_1$（$z = 2$）', fn: (t) => Math.exp(2 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
     { label: '$p_2$（$z = 1$）', fn: (t) => Math.exp(1 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
     { label: '$p_3$（$z = 0$）', fn: (t) => 1 / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
-    { label: '1/3', fn: () => 1 / 3, dashed: true, tone: 'muted' },
+    { label: '$1/3$', fn: () => 1 / 3, dashed: true, tone: 'muted' },
   ]}
 >
   <Fragment slot="caption">低温时最大 logit 独占全部概率，高温时三者都趋于 $1/3$。温度不改变 logits 的排序，只改变分布的尖锐程度。</Fragment>

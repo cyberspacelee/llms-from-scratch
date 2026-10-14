@@ -42,9 +42,9 @@ $$
 - **空间合并**：Qwen2-VL 把相邻的 $2\times2$ 个 patch 特征拼接成一个 $4d_v$ 维向量，再经两层 MLP 投影，视觉 token 数降为 1/4。它在压缩的同时保留了局部的空间结构。
 
 <Diagram width={700} height={270} label="视觉语言模型的输入通路：图像经 ViT、合并与投影后与文本嵌入拼成一条序列">
-  <Box x={20} y={30} w={110} h={80} label="图像" sub="H × W × 3" />
-  <Box x={160} y={30} w={110} h={80} label="ViT 编码器" sub="patch 14 × 14" tone="info" />
-  <Box x={300} y={30} w={130} h={80} label="2×2 合并 + MLP" sub="token 数 ÷ 4" tone="accent" />
+  <Box x={20} y={30} w={110} h={80} label="图像" sub="$H \times W \times 3$" />
+  <Box x={160} y={30} w={110} h={80} label="ViT 编码器" sub="patch $14 \times 14$" tone="info" />
+  <Box x={300} y={30} w={130} h={80} label="$2 \times 2$ 合并 + MLP" sub="token 数 $\div 4$" tone="accent" />
   <Arrow from={[130, 70]} to={[160, 70]} />
   <Arrow from={[270, 70]} to={[300, 70]} />
   <Text x={480} y={44} label="视觉 token" size="sm" tone="accent" />
@@ -120,8 +120,9 @@ $$
 - **图像内部保持二维的相对位置**：同一行相邻的两个 patch 只有宽度分量相差 1，同一列相邻的只有高度分量相差 1，注意力分数通过 RoPE 的相对性质自然地感知二维距离。
 
 <Diagram width={660} height={200} label="一条“2 个文本 token + 2×3 图像 + 2 个文本 token”的序列的 M-RoPE 位置编号">
-  <Matrix x={110} y={50} rows={3} cols={10} cell={[48, 30]} rowLabels={['时间 t','高 h','宽 w']} colLabels={['文','文','图','图','图','图','图','图','文','文']} values={[[0,1,2,2,2,2,2,2,5,6],[0,1,2,2,2,3,3,3,5,6],[0,1,2,3,4,2,3,4,5,6]]} tone="muted" highlight={[{ cols: [2,3,4,5,6,7], tone: 'accent' }, { cols: [0,1,8,9], tone: 'info' }]} />
-  <Text x={350} y={170} label="图像网格 2 行 × 3 列，起点 s = 2；之后的文本从 max + 1 = 5 继续" size="sm" tone="muted" />
+  <Matrix x={110} y={50} rows={3} cols={10} cell={[48, 30]} rowLabels={['时间 $t$','高 $h$','宽 $w$']} colLabels={['文','文','图','图','图','图','图','图','文','文']} values={[[0,1,2,2,2,2,2,2,5,6],[0,1,2,2,2,3,3,3,5,6],[0,1,2,3,4,2,3,4,5,6]]} tone="muted" highlight={[{ cols: [2,3,4,5,6,7], tone: 'accent' }, { cols: [0,1,8,9], tone: 'info' }]} />
+  <Text x={350} y={156} label="图像网格 $2 \times 3$，起点 $s = 2$" size="sm" tone="muted" />
+  <Text x={350} y={180} label="之后的文本从 $\max(p^t, p^h, p^w) + 1 = 5$ 继续" size="sm" tone="muted" />
   <Fragment slot="caption">每列是序列中的一个 token，三行是它的三个位置分量。文本 token 的三个分量相同；图像 token 的时间分量固定为起点 2，高、宽分量分别是起点加行号、列号。图像之后的文本从 5 开始，而不是从 2 + 6 = 8 开始，所以一张大图不会把后续文本的位置推得很远。</Fragment>
 </Diagram>
 

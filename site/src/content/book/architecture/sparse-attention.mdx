@@ -17,9 +17,9 @@ GQA 与 MLA 缩小了每个 token 的缓存，但没有改变一个事实：每�
 
 <Diagram width={660} height={246} label="三种固定稀疏模式的注意力掩码：局部窗口、步长、块加全局">
   <Matrix x={30} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && j > i - 3), tone: 'accent' }]} />
-  <Text x={117} y={22} label="局部窗口（W = 3）" size="sm" bold />
+  <Text x={117} y={22} label="局部窗口（$W = 3$）" size="sm" bold />
   <Matrix x={250} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && (i - j) % 3 === 0), tone: 'info' }]} />
-  <Text x={337} y={22} label="步长（s = 3）" size="sm" bold />
+  <Text x={337} y={22} label="步长（$s = 3$）" size="sm" bold />
   <Matrix x={470} y={40} rows={8} cols={8} cell={20} gap={2} tone="muted" highlight={[{ cells: Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => [i, j])).flat().filter(([i, j]) => j <= i && Math.floor(i / 2) === Math.floor(j / 2)), tone: 'accent' }, { cells: Array.from({ length: 8 }, (_, i) => [i, 0]), tone: 'accent2' }]} />
   <Text x={557} y={22} label="块内 + 全局 token" size="sm" bold />
   <Text x={330} y={232} label="每行是一个查询，深色是它能看到的键；所有模式都只保留下三角（因果）" size="sm" tone="muted" />
@@ -113,13 +113,13 @@ softmax 在块内逐维计算，$B$ 是块内位置的可学习偏置。V4 的�
 <Diagram width={700} height={290} label="DeepSeek-V4 中 CSA 与 HCA 两种注意力层读取的 KV 条目">
   <Text x={20} y={22} label="原始序列（16 个 token）" anchor="start" size="sm" tone="muted" />
   <Matrix x={20} y={34} rows={1} cols={16} cell={[36, 22]} gap={4} tone="muted" highlight={[{ cols: [13, 14, 15], tone: 'accent2' }]} />
-  <Region x={10} y={74} w={340} h={206} title="CSA：每 4 个压成 1 个，再选 top-k" />
-  <Matrix x={30} y={110} rows={1} cols={4} cell={[64, 30]} gap={10} values={[['c₀', 'c₁', 'c₂', 'c₃']]} tone="muted" highlight={[{ cols: [0, 2], tone: 'accent' }]} />
-  <Text x={180} y={166} label="索引器从压缩条目中选 top-k（此处 k = 2）" size="sm" />
+  <Region x={10} y={74} w={340} h={206} title="CSA：每 4 个压成 1 个，再选 top-$k$" />
+  <Matrix x={30} y={110} rows={1} cols={4} cell={[64, 30]} gap={10} values={[['$c_0$', '$c_1$', '$c_2$', '$c_3$']]} tone="muted" highlight={[{ cols: [0, 2], tone: 'accent' }]} />
+  <Text x={180} y={166} label="索引器从压缩条目中选 top-$k$（此处 $k = 2$）" size="sm" />
   <Text x={180} y={196} label="+ 最近 $n_{\text{win}}$ 个原始 token（滑窗）" size="sm" tone="accent2" />
   <Text x={180} y={236} label="每查询读取 $\le k + n_{\text{win}}$ 个条目" size="sm" bold />
   <Region x={360} y={74} w={330} h={206} title="HCA：每 128 个压成 1 个，全部稠密" />
-  <Matrix x={390} y={110} rows={1} cols={1} cell={[260, 30]} values={[['c₀（覆盖 128 个 token）']]} tone="accent" />
+  <Matrix x={390} y={110} rows={1} cols={1} cell={[260, 30]} values={[['$c_0$（覆盖 128 个 token）']]} tone="accent" />
   <Text x={525} y={166} label="压缩条目全部参与注意力" size="sm" />
   <Text x={525} y={196} label="+ 最近 $n_{\text{win}}$ 个原始 token（滑窗）" size="sm" tone="accent2" />
   <Text x={525} y={236} label="每查询读取 $T / 128 + n_{\text{win}}$ 个条目" size="sm" bold />
@@ -133,9 +133,9 @@ softmax 在块内逐维计算，$B$ 是块内位置的可学习偏置。V4 的�
 测试 `test_compress_uniform_weights_is_mean_pooling` 验证权重全零时压缩退化为块内平均；`test_compressed_attention_with_m1_and_no_window_is_dense` 验证 $m=1$、无窗口时等于稠密因果注意力。`entries_per_query` 计算一个查询要读多少个条目，测试中用 V4-Pro 的配置核对了位置 1M 处的数字。
 
 <Bars label="位置约 100 万处，每个查询读取的 KV 条目数" items={[
-  { label: 'HCA（m′ = 128，+128 窗口）', value: 7940, tone: 'info' },
-  { label: 'DSA（V3.2，k = 2048）', value: 2048, tone: 'accent2' },
-  { label: 'CSA（V4-Pro，k = 1024，+128）', value: 1152, tone: 'accent' },
+  { label: 'HCA（$m\' = 128$，+128 窗口）', value: 7940, tone: 'info' },
+  { label: 'DSA（V3.2，$k = 2048$）', value: 2048, tone: 'accent2' },
+  { label: 'CSA（V4-Pro，$k = 1024$，+128）', value: 1152, tone: 'accent' },
 ]}>
   <Fragment slot="caption">稠密注意力在同一位置要读 100 万个条目，不在图中（会把其他条压成看不见的细线）。DSA 选 2048 个 token；CSA 在 4 倍压缩后选 1024 个条目，等效覆盖约 4096 个原始 token；HCA 读取全部 7812 个压缩条目加 128 个窗口 token。三者都比稠密少两到三个数量级。</Fragment>
 </Bars>

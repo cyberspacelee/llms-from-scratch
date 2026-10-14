@@ -24,10 +24,10 @@ WET 拿来就能用，但它的抽取很粗糙：导航菜单、页脚版权声�
 <Diagram width={680} height={300} label="预训练数据处理流水线">
   <Box x={15} y={40} w={140} h={64} label="Common Crawl" sub="WARC 原始 HTML" tone="info" />
   <Box x={185} y={40} w={140} h={64} label="正文抽取" sub="trafilatura" />
-  <Box x={355} y={40} w={140} h={64} label="语言识别" sub="fastText ≥ 0.65" />
+  <Box x={355} y={40} w={140} h={64} label="语言识别" sub="fastText $\ge 0.65$" />
   <Box x={525} y={40} w={140} h={64} label="启发式过滤" sub="Gopher / C4" />
   <Box x={525} y={180} w={140} h={64} label="质量分类器" sub="FineWeb-Edu/DCLM" tone="accent" />
-  <Box x={355} y={180} w={140} h={64} label="近似去重" sub="MinHash 14×8" tone="accent" />
+  <Box x={355} y={180} w={140} h={64} label="近似去重" sub="MinHash $14\times8$" tone="accent" />
   <Box x={185} y={180} w={140} h={64} label="PII 与有害内容" sub="正则 + 分类器" />
   <Box x={15} y={180} w={140} h={64} label="配比与分词" sub="多阶段 / 退火" tone="strong" />
   <Arrow from={[155, 72]} to={[185, 72]} />
@@ -226,11 +226,11 @@ $$
 
 手算 FineWeb 的配置 $b=14,\ r=8$（共 112 个哈希）：$s_{\text{thr}}\approx14^{-1/8}=e^{-\ln 14/8}=e^{-0.330}\approx0.72$。再算两个点。$s=0.8$ 时，$0.8^8\approx0.168$，$(1-0.168)^{14}=e^{14\ln0.832}\approx e^{-2.57}\approx0.076$，所以 $P_{\text{cand}}\approx0.92$；$s=0.5$ 时，$0.5^8\approx0.0039$，$(1-0.0039)^{14}\approx0.947$，$P_{\text{cand}}\approx0.053$。也就是说，Jaccard 0.8 的近似重复有 92% 的概率被找到，而 Jaccard 0.5 的“部分相似”只有 5% 的概率被误当成候选。
 
-<Plot label="LSH 候选概率随 Jaccard 相似度变化的 S 曲线" x={[0, 1]} y={[0, 1]} xLabel="Jaccard 相似度 s" yLabel="成为候选对的概率"
+<Plot label="LSH 候选概率随 Jaccard 相似度变化的 S 曲线" x={[0, 1]} y={[0, 1]} xLabel="Jaccard 相似度 $s$" yLabel="成为候选对的概率"
   series={[
-    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 8), 14), label: 'b=14, r=8' },
-    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 4), 28), label: 'b=28, r=4', tone: 'info' },
-    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 16), 7), label: 'b=7, r=16', tone: 'accent2' },
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 8), 14), label: '$b = 14, r = 8$' },
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 4), 28), label: '$b = 28, r = 4$', tone: 'info' },
+    { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 16), 7), label: '$b = 7, r = 16$', tone: 'accent2' },
     { fn: (s) => (s >= 0.75 ? 1 : 0), label: '理想阶跃', tone: 'muted', dashed: true, samples: 800 },
   ]}
   markers={[{ at: [0.72, 0.63], label: '$(1/b)^{1/r} \\approx 0.72$' }]}>

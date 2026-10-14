@@ -51,7 +51,7 @@ $$
 
 在正常训练中这个比值约为 1（Adam 的每坐标更新约为 $\eta$）。但取 $\beta_1=0.9$、$\beta_2=0.999$，$j=1$ 时它等于 $0.1/\sqrt{0.001}\approx3.2$，$j=10$ 时约为 $0.65/\sqrt{0.00995}\approx6.5$：一个沉寂已久的参数在梯度恢复后的头几十步里，每步更新是正常值的 3～6 倍。这正是偏差修正想要处理的“零初始化”问题，只是它发生在训练中途，偏差修正已经不起作用了。
 
-<Plot label="长时间无梯度之后 Adam 的单步更新大小" x={[1, 1000]} y={[0, 7]} logX xLabel="梯度恢复后的步数 j" yLabel="更新大小 / η"
+<Plot label="长时间无梯度之后 Adam 的单步更新大小" x={[1, 1000]} y={[0, 7]} logX xLabel="梯度恢复后的步数 $j$" yLabel="更新大小 / $\eta$"
   series={[
     { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.999 ** j), label: '$\\beta_2 = 0.999$', tone: 'accent2' },
     { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.95 ** j), label: '$\\beta_2 = 0.95$', tone: 'accent' },
@@ -159,11 +159,11 @@ Kimi K2 取 $\tau=100$，把 Muon 与 QK-Clip 的组合称为 MuonClip。报告�
 测试 `test_qk_clip_caps_max_logit_exactly` 把 $W_Q$、$W_K$ 各放大 40 倍制造大 logit，调用 `qk_clip_` 后用同一输入再次前向，验证 $S_{\max}$ 恰好被压到 $\tau$。
 
 <Diagram width={680} height={320} label="各种稳定性对策在前向计算中的位置">
-  <Box x={10} y={40} w={90} h={48} label="x" sub="残差流" />
+  <Box x={10} y={40} w={90} h={48} label="$x$" sub="残差流" />
   <Box x={130} y={10} w={110} h={44} label="$W_Q x$" mono tone="info" />
   <Box x={130} y={74} w={110} h={44} label="$W_K x$" mono tone="info" />
   <Box x={270} y={40} w={110} h={48} label="QK-Norm" tone="accent" />
-  <Box x={410} y={40} w={110} h={48} label="q·k / √d" mono />
+  <Box x={410} y={40} w={110} h={48} label="$q\cdot k / \sqrt{d}$" mono />
   <Box x={550} y={40} w={120} h={48} label="注意力软截断" tone="accent" size="sm" />
   <Arrow from={[100, 64]} to={[130, 32]} />
   <Arrow from={[100, 64]} to={[130, 96]} />
@@ -182,7 +182,7 @@ Kimi K2 取 $\tau=100$，把 Muon 与 QK-Clip 的组合称为 MuonClip。报告�
   <Arrow from={[130, 264]} to={[160, 264]} />
   <Arrow from={[270, 264]} to={[300, 264]} />
   <Arrow from={[450, 264]} to={[480, 264]} />
-  <Text x={340} y={220} label="输出一侧：约束 log Z 与 logit 的绝对大小" size="sm" tone="muted" />
+  <Text x={340} y={220} label="输出一侧：约束 $\log Z$ 与 logit 的绝对大小" size="sm" tone="muted" />
   <Fragment slot="caption">上半部分是一个注意力头：QK-Norm 在点积之前归一化 q、k，软截断作用在点积之后，QK-Clip（橙色虚线）不在前向路径上，而是在优化器更新后直接修改权重。下半部分是输出一侧：软截断限制单个 logit，z-loss 约束 log Z。梯度裁剪、预热与 Adam 超参数作用在优化器上，不在图中。</Fragment>
 </Diagram>
 

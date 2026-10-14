@@ -54,10 +54,10 @@ $$
 第一步 `view(B, T, h, d_h)` 把最后一维拆成两维。由于最后一维在内存中是连续的，相邻的 $d_h$ 个数正好属于同一个头，这一步只修改形状元数据，不移动数据。第二步 `transpose(1, 2)` 交换 $T$ 与 $h$ 两维，得到 `[B, h, T, d_h]`，它同样只交换步长（stride），不复制数据，但结果不再是内存连续的。
 
 <Diagram width={720} height={250} label="split_heads 的内存布局：view 再 transpose，不复制数据">
-  <Matrix x={40} y={60} rows={3} cols={8} cell={[30, 30]} values={[[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15], [16, 17, 18, 19, 20, 21, 22, 23]]} highlight={[{ cols: [0, 1, 2, 3], tone: 'accent' }, { cols: [4, 5, 6, 7], tone: 'info' }]} rowLabels={['t=0', 't=1', 't=2']} title="q_all：[T=3, d=8]" />
+  <Matrix x={40} y={60} rows={3} cols={8} cell={[30, 30]} values={[[0, 1, 2, 3, 4, 5, 6, 7], [8, 9, 10, 11, 12, 13, 14, 15], [16, 17, 18, 19, 20, 21, 22, 23]]} highlight={[{ cols: [0, 1, 2, 3], tone: 'accent' }, { cols: [4, 5, 6, 7], tone: 'info' }]} rowLabels={['$t = 0$', '$t = 1$', '$t = 2$']} title="q_all：$[T = 3, d = 8]$" />
   <Arrow from={[300, 105]} to={[400, 105]} label="view + transpose" />
-  <Matrix x={440} y={40} rows={3} cols={4} cell={[30, 26]} values={[[0, 1, 2, 3], [8, 9, 10, 11], [16, 17, 18, 19]]} tone="accent" rowLabels={['t=0', 't=1', 't=2']} title="头 0：[T, d_h=4]" />
-  <Matrix x={440} y={150} rows={3} cols={4} cell={[30, 26]} values={[[4, 5, 6, 7], [12, 13, 14, 15], [20, 21, 22, 23]]} tone="info" rowLabels={['t=0', 't=1', 't=2']} />
+  <Matrix x={440} y={40} rows={3} cols={4} cell={[30, 26]} values={[[0, 1, 2, 3], [8, 9, 10, 11], [16, 17, 18, 19]]} tone="accent" rowLabels={['$t = 0$', '$t = 1$', '$t = 2$']} title="头 0：$[T, d_h = 4]$" />
+  <Matrix x={440} y={150} rows={3} cols={4} cell={[30, 26]} values={[[4, 5, 6, 7], [12, 13, 14, 15], [20, 21, 22, 23]]} tone="info" rowLabels={['$t = 0$', '$t = 1$', '$t = 2$']} />
   <Text x={500} y={240} label="头 1" size="sm" tone="muted" />
   <Text x={60} y={190} label="数字是元素在内存中的偏移" anchor="start" size="sm" tone="muted" />
   <Text x={60} y={212} label="结果的 stride 为 $(h \cdot T \cdot d_h, d_h, d, 1) = (24, 4, 8, 1)$" anchor="start" size="sm" tone="muted" mono />
@@ -101,10 +101,10 @@ $$
 <CodeFile path="src/llms_from_scratch/transformer/attention.py" symbol="padding_mask" />
 
 <Diagram width={720} height={230} label="因果掩码、padding 掩码与二者的逻辑与">
-  <Matrix x={50} y={60} rows={5} cols={5} cell={30} values={[["✓", "", "", "", ""], ["✓", "✓", "", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "✓", ""], ["✓", "✓", "✓", "✓", "✓"]]} highlight={[{ lower: true, tone: 'accent' }, { upper: true, tone: 'muted' }]} title="因果 [T, T]" />
-  <Text x={240} y={135} label="∧" size="lg" />
-  <Matrix x={280} y={60} rows={5} cols={5} cell={30} values={[["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""]]} highlight={[{ cols: [0, 1, 2], tone: 'info' }, { cols: [3, 4], tone: 'muted' }]} title="padding（ℓ = 3）" />
-  <Text x={470} y={135} label="=" size="lg" />
+  <Matrix x={50} y={60} rows={5} cols={5} cell={30} values={[["✓", "", "", "", ""], ["✓", "✓", "", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "✓", ""], ["✓", "✓", "✓", "✓", "✓"]]} highlight={[{ lower: true, tone: 'accent' }, { upper: true, tone: 'muted' }]} title="因果 $[T, T]$" />
+  <Text x={240} y={135} label="$\land$" size="lg" />
+  <Matrix x={280} y={60} rows={5} cols={5} cell={30} values={[["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""]]} highlight={[{ cols: [0, 1, 2], tone: 'info' }, { cols: [3, 4], tone: 'muted' }]} title="padding（$\ell = 3$）" />
+  <Text x={470} y={135} label="$=$" size="lg" />
   <Matrix x={510} y={60} rows={5} cols={5} cell={30} values={[["✓", "", "", "", ""], ["✓", "✓", "", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""], ["✓", "✓", "✓", "", ""]]} highlight={[{ lower: true, tone: 'accent' }, { upper: true, tone: 'muted' }, { cells: [[3, 3], [4, 3], [4, 4]], tone: 'muted' }]} title="组合掩码" />
   <Fragment slot="caption">行是查询位置，列是键位置。有效长度为 3 的样本，第 4、5 列是 padding。组合后，真实位置（前 3 行）的掩码与纯因果相同；padding 位置作为查询（后 2 行）的输出不会被使用，它们的损失也要在计算时排除。</Fragment>
 </Diagram>
@@ -144,7 +144,7 @@ PyTorch 2.0 起提供 `F.scaled_dot_product_attention`，它在 GPU 上会自动
 
 显存问题更突出。朴素实现要把 `[B, h, T, T]` 的分数与权重矩阵都存下来（反向传播需要 softmax 的输出）。以 GPT-2 small 的配置（$h = 12$）为例，$B = 8$、$T = 2048$、FP32 时，**一层**的权重矩阵就有 $8 \times 12 \times 2048^2 \times 4$ 字节 $\approx 1.5$ GiB，12 层合计 18 GiB，远超模型参数本身（约 0.5 GiB）。序列长度翻倍，这部分显存变为 4 倍。
 
-<Plot label="注意力核心的 CPU 耗时随序列长度的变化" x={[256, 2048]} y={[1, 1000]} logX logY xLabel="序列长度 T（对数刻度）" yLabel="耗时 / ms（对数刻度）" height={260} series={[{ points: [[256, 26.3], [512, 46.8], [1024, 213.3], [2048, 750.8]], label: '逐步实现（显式 T×T 矩阵）' }, { points: [[256, 5.8], [512, 26.3], [1024, 63.3], [2048, 181.7]], label: 'F.scaled_dot_product_attention', tone: 'info' }, { fn: (t) => 750.8 * (t / 2048) ** 2, label: '$\\propto T^2$', tone: 'muted', dashed: true }]}>
+<Plot label="注意力核心的 CPU 耗时随序列长度的变化" x={[256, 2048]} y={[1, 1000]} logX logY xLabel="序列长度 $T$（对数刻度）" yLabel="耗时 / ms（对数刻度）" height={260} series={[{ points: [[256, 26.3], [512, 46.8], [1024, 213.3], [2048, 750.8]], label: '逐步实现（显式 $T\\times T$ 矩阵）' }, { points: [[256, 5.8], [512, 26.3], [1024, 63.3], [2048, 181.7]], label: 'F.scaled_dot_product_attention', tone: 'info' }, { fn: (t) => 750.8 * (t / 2048) ** 2, label: '$\\propto T^2$', tone: 'muted', dashed: true }]}>
   <Fragment slot="caption">B = 1、h = 8、d_h = 64，在本书写作所用的共享 4 核 CPU 上用 2 个线程测得，绝对数值仅供参考，看的是斜率。两条实测曲线都接近虚线所示的平方增长；融合实现快约 3–4 倍，并且利用因果性跳过了一半的计算，但改变不了 T² 的增长阶数。</Fragment>
 </Plot>
 

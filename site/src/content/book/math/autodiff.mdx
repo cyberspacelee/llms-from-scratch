@@ -133,11 +133,11 @@ $$
 所以 $\mathcal B^\top(G)_k = \sum_nG_{nk}$：**广播的伴随是沿被复制的维度求和**。一般地，广播可能在前面补维度（补出来的维度整个求和掉），也可能把大小为 1 的维度拉伸（沿该维求和并保留大小 1）。
 
 <Diagram width={720} height={200} label="广播的前向复制与反向求和">
-  <Matrix x={40} y={80} rows={1} cols={4} cell={[44, 32]} values={[['b₁', 'b₂', 'b₃', 'b₄']]} tone="info" title="b：(1, 4)" />
+  <Matrix x={40} y={80} rows={1} cols={4} cell={[44, 32]} values={[['$b_1$', '$b_2$', '$b_3$', '$b_4$']]} tone="info" title="$b$: $(1, 4)$" />
   <Arrow from={[230, 96]} to={[300, 96]} label="广播：复制" />
-  <Matrix x={310} y={50} rows={3} cols={4} cell={[44, 32]} values={[['b₁', 'b₂', 'b₃', 'b₄'], ['b₁', 'b₂', 'b₃', 'b₄'], ['b₁', 'b₂', 'b₃', 'b₄']]} tone="info" title="(3, 4)" />
+  <Matrix x={310} y={50} rows={3} cols={4} cell={[44, 32]} values={[['$b_1$', '$b_2$', '$b_3$', '$b_4$'], ['$b_1$', '$b_2$', '$b_3$', '$b_4$'], ['$b_1$', '$b_2$', '$b_3$', '$b_4$']]} tone="info" title="$(3, 4)$" />
   <Arrow from={[510, 96]} to={[580, 96]} label="反向：求和" tone="accent2" />
-  <Matrix x={590} y={80} rows={1} cols={4} cell={[28, 32]} values={[['Σ', 'Σ', 'Σ', 'Σ']]} tone="accent2" title="db：(1, 4)" />
+  <Matrix x={590} y={80} rows={1} cols={4} cell={[28, 32]} values={[['$\\sum$', '$\\sum$', '$\\sum$', '$\\sum$']]} tone="accent2" title="$db$: $(1, 4)$" />
   <Fragment slot="caption">前向时 $b$ 的同一个元素被三行共用，每一行都会送回一份梯度；按多元链式法则，这三份梯度相加。`sum_to_shape` 把形状 (3, 4) 的梯度归约回 (1, 4)。</Fragment>
 </Diagram>
 

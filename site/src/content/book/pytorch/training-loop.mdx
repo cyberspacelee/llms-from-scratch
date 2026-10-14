@@ -23,9 +23,9 @@ code:
   <Arrow from={[180, 58]} to={[200, 58]} />
   <Arrow from={[360, 58]} to={[380, 58]} />
   <Arrow from={[530, 58]} to={[550, 58]} />
-  <Box x={200} y={150} w={160} h={56} label="参数 θ" sub="Parameter" tone="accent" />
-  <Box x={380} y={150} w={150} h={56} label="梯度 θ.grad" sub="与 θ 同形状" tone="accent2" />
-  <Box x={550} y={150} w={160} h={56} label="优化器状态" sub="optimizer.state[θ]" tone="info" />
+  <Box x={200} y={150} w={160} h={56} label="参数 $\theta$" sub="Parameter" tone="accent" />
+  <Box x={380} y={150} w={150} h={56} label="梯度 $\theta$.grad" sub="与 $\theta$ 同形状" tone="accent2" />
+  <Box x={550} y={150} w={160} h={56} label="优化器状态" sub="optimizer.state[$\theta$]" tone="info" />
   <Arrow from={[280, 86]} to={[280, 150]} tone="muted" label="读" labelSide="right" />
   <Arrow from={[455, 86]} to={[455, 150]} tone="accent2" label="累加" labelSide="right" />
   <Arrow from={[630, 86]} to={[630, 150]} tone="info" label="读写" labelSide="right" />
@@ -147,9 +147,9 @@ $$
 
 <CodeFile path="src/llms_from_scratch/pytorch/training.py" region="schedule" />
 
-<Plot label="线性预热 + 余弦衰减（W = 10，S = 100，r = 0.1）" x={[0, 120]} y={[0, 1.1]} xLabel="步数 t" yLabel="学习率倍率" series={[
+<Plot label="线性预热 + 余弦衰减（W = 10，S = 100，r = 0.1）" x={[0, 120]} y={[0, 1.1]} xLabel="步数 $t$" yLabel="学习率倍率" series={[
   { fn: (t) => (t < 10 ? (Math.floor(t) + 1) / 10 : 0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * Math.min(1, (t - 10) / 90)))), label: 'warmup_cosine' },
-]} markers={[{ at: [9, 1], label: '预热结束' }, { at: [100, 0.1], label: '衰减到 r' }]}>
+]} markers={[{ at: [9, 1], label: '预热结束' }, { at: [100, 0.1], label: '衰减到 $r$' }]}>
   <Fragment slot="caption">预热阶段 Adam 的二阶矩估计还不可靠、参数刚离开初始化，小学习率可以避免早期的大幅震荡；之后余弦衰减让学习率平滑地下降，训练后期的小步长帮助损失进一步降低。超过 S 步后保持在 r。</Fragment>
 </Plot>
 

@@ -151,7 +151,7 @@ $$
 <Plot label="纯线性网络中激活标准差随深度的变化（d = 512）" x={[0, 12]} y={[0.0001, 100]} logY xLabel="层数" yLabel="激活标准差" series={[
   { fn: (l) => Math.pow(1 / Math.sqrt(3), l), label: 'nn.Linear 默认' },
   { fn: (l) => 1, label: '$\\sigma^2 = 2/(\\mathrm{in}+\\mathrm{out})$', tone: 'accent' },
-  { fn: (l) => Math.pow(0.02 * Math.sqrt(512), l), label: 'σ = 0.02', tone: 'info', dashed: true },
+  { fn: (l) => Math.pow(0.02 * Math.sqrt(512), l), label: '$\\sigma = 0.02$', tone: 'info', dashed: true },
   { fn: (l) => Math.pow(Math.sqrt(2), l), label: '$\\sigma^2 = 2/\\mathrm{in}$', tone: 'accent2' },
 ]}>
   <Fragment slot="caption">按 ρ = √d_in · σ 逐层相乘的理论曲线（输入标准差为 1、方阵、无激活函数）。nn.Linear 的默认值每层缩小到 1/√3；Xavier 在方阵时恰好保持不变；固定 σ = 0.02 在 d = 512 时 ρ ≈ 0.45，在 d ≈ 2500 时才接近 1；Kaiming 为 ReLU 准备，用在无激活的网络上会逐层放大。</Fragment>

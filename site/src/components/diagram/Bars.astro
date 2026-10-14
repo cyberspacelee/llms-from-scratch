@@ -24,16 +24,17 @@ const { label, items, unit = '', width = 720, totals = true } = Astro.props
 const tones: Tone[] = ['accent', 'info', 'accent2', 'muted', 'neutral']
 const rows = items.map((item) => ({ ...item, segments: item.segments ?? [{ value: item.value ?? 0, tone: item.tone }] }))
 const total = (row: (typeof rows)[number]) => row.segments.reduce((sum, s) => sum + s.value, 0)
+const fmt = (v: number) => String(Number(v.toPrecision(4)))
 const max = Astro.props.max ?? Math.max(...rows.map(total))
 const left = Math.max(80, Math.max(...items.map((item) => [...visible(item.label)].length)) * 13 + 20)
-const right = totals ? 90 : 16, barH = 26, gap = 14
+const right = totals ? Math.max(90, ...rows.map((row) => labelWidth(`${fmt(total(row))} ${unit} ${row.note ?? ''}`) + 24)) : 16
+const barH = 26, gap = 14
 const segmentLabels = [...new Map(rows.flatMap((row) => row.segments.map((s, i) => [s.label, s.tone ?? tones[i % tones.length]] as const)).filter(([l]) => l)).entries()]
 const legendH = segmentLabels.length > 1 ? 30 : 0
 const legendX: number[] = []
 segmentLabels.reduce((cursor, [text]) => { legendX.push(cursor); return cursor + 18 + labelWidth(text ?? '') + 24 }, left)
 const height = legendH + rows.length * (barH + gap) + 6
 const sx = (v: number) => (v / max) * (width - left - right)
-const fmt = (v: number) => String(Number(v.toPrecision(4)))
 ---
 <FigureShell label={label}>
   <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} font-size={sizes.sm} class="mx-auto block h-auto w-full font-sans" style={`min-width:${Math.round(width * 0.7)}px`}>
@@ -43,6 +44,7 @@ const fmt = (v: number) => String(Number(v.toPrecision(4)))
     </g>)}
     {rows.map((row, r) => {
       const y = legendH + r * (barH + gap) + 4
+      const totalLabel = `${fmt(total(row))}${unit ? ` ${unit}` : ''}`
       let cursor = left
       return <g>
         <Label x={left - 10} y={y + barH / 2} label={row.label} anchor="end" baseline="central" fontSize={sizes.sm} tone="fill-ink" />
@@ -51,7 +53,10 @@ const fmt = (v: number) => String(Number(v.toPrecision(4)))
           cursor += w
           return <rect x={x} y={y} width={Math.max(0, w)} height={barH} class:list={[shape[s.tone ?? tones[i % tones.length]].box, 'stroke-[1.25]']} />
         })}
-        {totals && <text x={cursor + 8} y={y + barH / 2} dominant-baseline="central" font-size={sizes.sm} class="fill-ink font-mono">{fmt(total(row))}{unit && ` ${unit}`}{row.note && <tspan class="fill-muted"> {row.note}</tspan>}</text>}
+        {totals && <g>
+          <Label x={cursor + 8} y={y + barH / 2} label={totalLabel} baseline="central" fontSize={sizes.sm} tone="fill-ink" mono />
+          {row.note && <Label x={cursor + 8 + labelWidth(`${totalLabel} `)} y={y + barH / 2} label={row.note} baseline="central" fontSize={sizes.sm} tone="fill-muted" mono />}
+        </g>}
       </g>
     })}
   </svg>

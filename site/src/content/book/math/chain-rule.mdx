@@ -58,22 +58,22 @@ $$
 $$
 
 <Diagram width={720} height={250} label="单个神经元的计算图：上方是前向值，下方虚线是反向传回的梯度">
-  <Box x={20} y={30} w={70} h={44} label="w" sub="0.5" tone="info" />
-  <Box x={20} y={100} w={70} h={44} label="x" sub="2" tone="info" />
-  <Box x={20} y={170} w={70} h={44} label="b" sub="−0.5" tone="info" />
-  <Box x={170} y={90} w={110} h={64} label="z = wx + b" sub="0.5" tone="accent" mono />
-  <Box x={350} y={90} w={100} h={64} label="a = tanh z" sub="0.4621" tone="accent" mono />
+  <Box x={20} y={30} w={70} h={44} label="$w$" sub="0.5" tone="info" />
+  <Box x={20} y={100} w={70} h={44} label="$x$" sub="2" tone="info" />
+  <Box x={20} y={170} w={70} h={44} label="$b$" sub="−0.5" tone="info" />
+  <Box x={170} y={90} w={110} h={64} label="$z = wx + b$" sub="0.5" tone="accent" mono />
+  <Box x={350} y={90} w={100} h={64} label="$a = \tanh z$" sub="0.4621" tone="accent" mono />
   <Box x={520} y={90} w={110} h={64} label="$\ell = \tfrac{1}{2}(a-t)^2$" sub="0.1447" tone="strong" mono />
   <Arrow from={[90, 52]} to={[170, 108]} />
   <Arrow from={[90, 122]} to={[170, 122]} />
   <Arrow from={[90, 192]} to={[170, 138]} />
   <Arrow from={[280, 122]} to={[350, 122]} />
   <Arrow from={[450, 122]} to={[520, 122]} />
-  <Text x={485} y={185} label="∂ℓ/∂a = −0.538" size="sm" tone="accent2" />
-  <Text x={315} y={185} label="∂ℓ/∂z = −0.423" size="sm" tone="accent2" />
+  <Text x={485} y={185} label="$\partial\ell/\partial a = -0.538$" size="sm" tone="accent2" />
+  <Text x={315} y={185} label="$\partial\ell/\partial z = -0.423$" size="sm" tone="accent2" />
   <Text x={315} y={205} label="（$\times\, (1 - a^2) = 0.786$）" size="sm" tone="muted" />
-  <Text x={130} y={30} label="∂ℓ/∂w = −0.846" size="sm" tone="accent2" anchor="start" />
-  <Text x={130} y={230} label="∂ℓ/∂b = −0.423" size="sm" tone="accent2" anchor="start" />
+  <Text x={130} y={30} label="$\partial\ell/\partial w = -0.846$" size="sm" tone="accent2" anchor="start" />
+  <Text x={130} y={230} label="$\partial\ell/\partial b = -0.423$" size="sm" tone="accent2" anchor="start" />
   <Arrow from={[575, 154]} via={[[575, 166]]} to={[225, 166]} tone="accent2" dashed />
   <Fragment slot="caption">上方实线是前向依赖，框内小字是前向值。反向传递从 $\ell$ 出发，每经过一个节点乘以该节点的局部导数（例如 $\tanh$ 的局部导数 $1 - a^2$），到达参数时就得到损失对参数的偏导数。</Fragment>
 </Diagram>
@@ -102,19 +102,19 @@ $$
 
 正是乘积法则的结果。乘积法则本身只是多元链式法则的一个特例。
 
-<Diagram width={720} height={230} label="多路径汇合：x 通过 u 和 v 两条路径影响 z，梯度沿两条路径传回后相加">
-  <Box x={40} y={85} w={80} h={56} label="x" tone="info" />
-  <Box x={250} y={20} w={110} h={56} label="u = g(x)" tone="accent" mono />
-  <Box x={250} y={150} w={110} h={56} label="v = h(x)" tone="accent" mono />
-  <Box x={500} y={85} w={120} h={56} label="z = F(u, v)" tone="strong" mono />
-  <Arrow from={[120, 105]} to={[250, 48]} label="g′(x)" />
-  <Arrow from={[120, 121]} to={[250, 178]} label="h′(x)" labelSide="below" />
-  <Arrow from={[360, 48]} to={[500, 105]} label="∂F/∂u" />
-  <Arrow from={[360, 178]} to={[500, 121]} label="∂F/∂v" labelSide="below" />
-  <Text x={180} y={113} label="+" size="lg" tone="accent2" bold />
-  <Text x={640} y={60} label="dz/dx =" anchor="start" size="sm" tone="accent2" />
-  <Text x={640} y={82} label="∂F/∂u · g′" anchor="start" size="sm" tone="accent2" />
-  <Text x={640} y={104} label="+ ∂F/∂v · h′" anchor="start" size="sm" tone="accent2" />
+<Diagram width={800} height={230} label="多路径汇合：x 通过 u 和 v 两条路径影响 z，梯度沿两条路径传回后相加">
+  <Box x={40} y={85} w={80} h={56} label="$x$" tone="info" />
+  <Box x={250} y={20} w={110} h={56} label="$u = g(x)$" tone="accent" mono />
+  <Box x={250} y={150} w={110} h={56} label="$v = h(x)$" tone="accent" mono />
+  <Box x={500} y={85} w={120} h={56} label="$z = F(u, v)$" tone="strong" mono />
+  <Arrow from={[120, 105]} to={[250, 48]} label="$g'(x)$" />
+  <Arrow from={[120, 121]} to={[250, 178]} label="$h'(x)$" labelSide="below" />
+  <Arrow from={[360, 48]} to={[500, 105]} label="$\partial F/\partial u$" />
+  <Arrow from={[360, 178]} to={[500, 121]} label="$\partial F/\partial v$" labelSide="below" />
+  <Text x={180} y={113} label="$+$" size="lg" tone="accent2" bold />
+  <Text x={640} y={60} label="$\mathrm{d}z/\mathrm{d}x =$" anchor="start" size="sm" tone="accent2" />
+  <Text x={640} y={82} label="$\partial F/\partial u\cdot g'$" anchor="start" size="sm" tone="accent2" />
+  <Text x={640} y={104} label="$+\partial F/\partial v\cdot h'$" anchor="start" size="sm" tone="accent2" />
   <Fragment slot="caption">每条边标着它的局部导数。从 $x$ 到 $z$ 有两条路径，各自的边相乘，再把两条路径的结果相加。在反向传递中，“相加”发生在 $x$ 处：两个后继节点各自送回一份梯度，$x$ 把它们累加起来。</Fragment>
 </Diagram>
 
@@ -149,12 +149,12 @@ $$
   <Box x={130} y={70} w={90} h={50} label="$J_3$" sub="$(m, d_2)$" />
   <Box x={250} y={70} w={90} h={50} label="$J_2$" sub="$(d_2, d_1)$" />
   <Box x={370} y={70} w={90} h={50} label="$J_1$" sub="$(d_1, n)$" />
-  <Box x={490} y={70} w={70} h={50} label="v" sub="(n, 1)" tone="info" />
-  <Box x={30} y={70} w={70} h={50} label="$g^\top$" sub="(1, m)" tone="accent2" />
+  <Box x={490} y={70} w={70} h={50} label="$v$" sub="$(n, 1)$" tone="info" />
+  <Box x={30} y={70} w={70} h={50} label="$g^\top$" sub="$(1, m)$" tone="accent2" />
   <Arrow from={[525, 140]} via={[[525, 160], [175, 160]]} to={[175, 140]} tone="info" label="前向模式：$J_1 v \to J_2(J_1 v) \to \dots$（JVP）" labelSide="below" />
   <Arrow from={[65, 50]} via={[[65, 30], [415, 30]]} to={[415, 50]} tone="accent2" label="反向模式：$g^\top J_3 \to (g^\top J_3) J_2 \to \dots$（VJP）" />
-  <Text x={600} y={95} label="n 个输入" anchor="start" size="sm" tone="muted" />
-  <Text x={600} y={117} label="m 个输出" anchor="start" size="sm" tone="muted" />
+  <Text x={600} y={95} label="$n$ 个输入" anchor="start" size="sm" tone="muted" />
+  <Text x={600} y={117} label="$m$ 个输出" anchor="start" size="sm" tone="muted" />
   <Fragment slot="caption">两种顺序得到的数学结果相同，但中间结果的形状不同：前向模式始终携带一个列向量（与输入同维），反向模式始终携带一个行向量（与输出同维）。都只做矩阵-向量乘，从不构造完整的雅可比矩阵。</Fragment>
 </Diagram>
 
@@ -242,11 +242,11 @@ $$
 $$
 
 <Diagram width={720} height={280} label="两层网络的前向值与反向梯度">
-  <Box x={20} y={100} w={80} h={56} label="x" sub="(1, 2)" tone="info" />
-  <Box x={150} y={100} w={110} h={56} label="$z = W_1 x + b_1$" sub="(−0.5, 1.5)" tone="accent" />
-  <Box x={310} y={100} w={90} h={56} label="h = relu z" sub="(0, 1.5)" tone="accent" />
+  <Box x={20} y={100} w={80} h={56} label="$x$" sub="$(1, 2)$" tone="info" />
+  <Box x={150} y={100} w={110} h={56} label="$z = W_1 x + b_1$" sub="$(-0.5, 1.5)$" tone="accent" />
+  <Box x={310} y={100} w={90} h={56} label="$h = \operatorname{relu}(z)$" sub="$(0, 1.5)$" tone="accent" size="sm" />
   <Box x={450} y={100} w={110} h={56} label="$y = w_2 \cdot h + b_2$" sub="−1" tone="accent" />
-  <Box x={610} y={100} w={70} h={56} label="ℓ" sub="2" tone="strong" />
+  <Box x={610} y={100} w={70} h={56} label="$\ell$" sub="2" tone="strong" />
   <Arrow from={[100, 128]} to={[150, 128]} />
   <Arrow from={[260, 128]} to={[310, 128]} />
   <Arrow from={[400, 128]} to={[450, 128]} />
@@ -255,10 +255,10 @@ $$
   <Box x={450} y={20} w={110} h={44} label="$w_2, b_2$" tone="info" />
   <Arrow from={[205, 64]} to={[205, 100]} />
   <Arrow from={[505, 64]} to={[505, 100]} />
-  <Text x={645} y={190} label="∂ℓ/∂y = −2" size="sm" tone="accent2" />
-  <Text x={505} y={190} label="∂ℓ/∂h = (−4, 2)" size="sm" tone="accent2" />
-  <Text x={355} y={190} label="∂ℓ/∂z = (0, 2)" size="sm" tone="accent2" />
-  <Text x={205} y={190} label="∂ℓ/∂x = (1, 2)" size="sm" tone="accent2" />
+  <Text x={645} y={190} label="$\partial\ell/\partial y = -2$" size="sm" tone="accent2" />
+  <Text x={505} y={190} label="$\partial\ell/\partial h = (-4, 2)$" size="sm" tone="accent2" />
+  <Text x={355} y={190} label="$\partial\ell/\partial z = (0, 2)$" size="sm" tone="accent2" />
+  <Text x={205} y={190} label="$\partial\ell/\partial x = (1, 2)$" size="sm" tone="accent2" />
   <Text x={355} y={215} label="relu 截断第 1 个分量" size="sm" tone="muted" />
   <Text x={505} y={215} label="$\partial \ell / \partial w_2 = (0, -3)$" size="sm" tone="accent2" />
   <Text x={205} y={215} label="$\partial \ell / \partial W_1 = [[0,0],[2,4]]$" size="sm" tone="accent2" />

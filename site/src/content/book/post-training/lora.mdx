@@ -44,21 +44,21 @@ $$
 $W_0$ 冻结，只训练 $A$ 与 $B$。计算时先算 $Ax$（降到 $r$ 维），再乘 $B$（升回 $d_{\text{out}}$ 维），不必物化 $d_{\text{out}}\times d_{\text{in}}$ 的 $\Delta W$。批量写法与 `nn.Linear` 一致：$Y = XW_0^\top + \frac{\alpha}{r}(XA^\top)B^\top$。
 
 <Diagram width={720} height={250} label="LoRA 的低秩旁路结构">
-  <Box x={20} y={100} w={80} h={50} label="x" sub="$d_{\text{in}}$" />
+  <Box x={20} y={100} w={80} h={50} label="$x$" sub="$d_{\text{in}}$" />
   <Box x={200} y={30} w={220} h={56} label="$W_0$（冻结）" sub="$d_{\text{out}} \times d_{\text{in}}$" tone="muted" />
-  <Box x={180} y={160} w={90} h={56} label="A" sub="$r \times d_{\text{in}}$" tone="accent" />
-  <Box x={330} y={160} w={90} h={56} label="B" sub="$d_{\text{out}} \times r$" tone="accent" />
-  <Box x={470} y={160} w={70} h={56} label="× α/r" tone="neutral" />
-  <Box x={590} y={95} w={50} h={60} label="+" tone="neutral" />
-  <Box x={670} y={100} w={40} h={50} label="h" tone="strong" />
+  <Box x={180} y={160} w={90} h={56} label="$A$" sub="$r \times d_{\text{in}}$" tone="accent" />
+  <Box x={330} y={160} w={90} h={56} label="$B$" sub="$d_{\text{out}} \times r$" tone="accent" />
+  <Box x={470} y={160} w={70} h={56} label="$\times\alpha/r$" tone="neutral" />
+  <Box x={590} y={95} w={50} h={60} label="$+$" tone="neutral" />
+  <Box x={670} y={100} w={40} h={50} label="$h$" tone="strong" />
   <Arrow from={[100, 125]} via={[[140, 125], [140, 58]]} to={[200, 58]} />
   <Arrow from={[140, 125]} via={[[140, 188]]} to={[180, 188]} tone="accent" />
-  <Arrow from={[270, 188]} to={[330, 188]} tone="accent" label="r 维" />
+  <Arrow from={[270, 188]} to={[330, 188]} tone="accent" label="$r$ 维" />
   <Arrow from={[420, 188]} to={[470, 188]} tone="accent" />
   <Arrow from={[540, 188]} via={[[615, 188]]} to={[615, 155]} tone="accent" />
   <Arrow from={[420, 58]} via={[[615, 58]]} to={[615, 95]} />
   <Arrow from={[640, 125]} to={[670, 125]} />
-  <Text x={225} y={235} label="初始化：A ~ 随机，B = 0" size="sm" tone="accent" />
+  <Text x={225} y={235} label="初始化：$A\sim$ 随机，$B = 0$" size="sm" tone="accent" />
   <Fragment slot="caption">冻结的 W₀ 与可训练的低秩旁路并联。输入先被 A 压到 r 维，再由 B 投回输出维度并乘以 α/r。因为 B 初始化为零，训练开始时旁路输出为零，模型与基座完全相同。</Fragment>
 </Diagram>
 
@@ -157,7 +157,7 @@ $$
 
 <CodeFile path="src/llms_from_scratch/post_training/nf4.py" region="nf4_code" />
 
-<Plot label="NF4 码值与归一化后的权重分布" x={[-1.1, 1.1]} y={[0, 0.8]} xLabel="归一化权重 w / absmax" yLabel="密度"
+<Plot label="NF4 码值与归一化后的权重分布" x={[-1.1, 1.1]} y={[0, 0.8]} xLabel="归一化权重 $w/\mathrm{absmax}$" yLabel="密度"
   series={[{ fn: (t) => 1.848 * Math.exp(-0.5 * (1.848 * t) ** 2) / Math.sqrt(2 * Math.PI), label: '缩放后的标准正态密度' }]}
   markers={[-1.0, -0.6962, -0.5251, -0.3949, -0.2844, -0.1848, -0.0911, 0.0, 0.0796, 0.1609, 0.2461, 0.3379, 0.4407, 0.5626, 0.7230, 1.0].map((c) => ({ at: [c, 1.848 * Math.exp(-0.5 * (1.848 * c) ** 2) / Math.sqrt(2 * Math.PI)], tone: 'accent2' }))}>
   <Fragment slot="caption">曲线是“权重除以块内最大绝对值”之后的近似分布，圆点是 16 个 NF4 码值。码值在密度高的中心区域密、在尾部稀，每个码值覆盖的概率质量大致相同；0 恰好是一个码值。均匀的 4-bit 整数码会在 [−1, 1] 上等距排列，尾部的码值很少被用到。</Fragment>

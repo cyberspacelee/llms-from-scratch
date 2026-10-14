@@ -26,11 +26,11 @@ code:
   <Matrix x={80} y={148} rows={1} cols={2} cell={[60, 34]} gap={10} values={[["14", "17"]]} tone="accent" />
   <Matrix x={80} y={204} rows={1} cols={1} cell={[60, 30]} gap={10} values={[["31"]]} tone="strong" />
   <Text x={20} y={37} label="smem" anchor="start" size="sm" tone="muted" mono />
-  <Text x={20} y={101} label="s=4" anchor="start" size="sm" tone="muted" mono />
-  <Text x={20} y={165} label="s=2" anchor="start" size="sm" tone="muted" mono />
-  <Text x={20} y={219} label="s=1" anchor="start" size="sm" tone="muted" mono />
-  <Text x={440} y={101} label="线程 t < 4：smem[t] += smem[t + 4]" anchor="start" size="sm" mono />
-  <Text x={440} y={165} label="线程 t < 2：smem[t] += smem[t + 2]" anchor="start" size="sm" mono />
+  <Text x={20} y={101} label="$s=4$" anchor="start" size="sm" tone="muted" mono />
+  <Text x={20} y={165} label="$s=2$" anchor="start" size="sm" tone="muted" mono />
+  <Text x={20} y={219} label="$s=1$" anchor="start" size="sm" tone="muted" mono />
+  <Text x={440} y={101} label="线程 $t < 4$：smem[t] += smem[t + 4]" anchor="start" size="sm" mono />
+  <Text x={440} y={165} label="线程 $t < 2$：smem[t] += smem[t + 2]" anchor="start" size="sm" mono />
   <Text x={440} y={219} label="线程 0：smem[0] += smem[1]" anchor="start" size="sm" mono />
   <Fragment slot="caption">“顺序寻址”的树形归约：每一步步长 s 减半，前 s 个线程把后半段加到前半段上。第一步 3+5=8、1+9=10、4+2=6、1+6=7。8 个数经过 log₂8 = 3 步得到 31；每一步之后需要一次 __syncthreads()。</Fragment>
 </Diagram>
@@ -70,9 +70,9 @@ lane $i$ 得到 lane $i+\delta$ 的 `var`；若 $i+\delta \ge 32$，得到自己
   <Matrix x={120} y={150} rows={1} cols={8} cell={[54, 32]} gap={6} values={[["14", "17", "", "", "", "", "", ""]]} tone="accent" highlight={[{ cols: [2, 3, 4, 5, 6, 7], tone: 'muted' }]} />
   <Matrix x={120} y={204} rows={1} cols={8} cell={[54, 30]} gap={6} values={[["31", "", "", "", "", "", "", ""]]} tone="strong" highlight={[{ cols: [1, 2, 3, 4, 5, 6, 7], tone: 'muted' }]} />
   <Text x={20} y={46} label="lane" anchor="start" size="sm" tone="muted" />
-  <Text x={20} y={112} label="δ = 4" anchor="start" size="sm" mono />
-  <Text x={20} y={166} label="δ = 2" anchor="start" size="sm" mono />
-  <Text x={20} y={219} label="δ = 1" anchor="start" size="sm" mono />
+  <Text x={20} y={112} label="$\delta = 4$" anchor="start" size="sm" mono />
+  <Text x={20} y={166} label="$\delta = 2$" anchor="start" size="sm" mono />
+  <Text x={20} y={219} label="$\delta = 1$" anchor="start" size="sm" mono />
   <Fragment slot="caption">以 8 个 lane 示意（真实 warp 为 32 个 lane、5 轮：δ = 16, 8, 4, 2, 1）。每轮 lane i 加上 lane i+δ 的值；灰色 lane 也在执行加法，但其结果不再被使用。最后 lane 0 持有总和，整个过程不经过共享内存，也不需要 __syncthreads()。</Fragment>
 </Diagram>
 

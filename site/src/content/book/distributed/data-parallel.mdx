@@ -35,11 +35,11 @@ $$
   <Box x={20} y={160} w={110} h={44} label="批的后一半" tone="info" size="sm" />
   <Region x={160} y={14} w={280} h={80} title="rank 0" />
   <Box x={180} y={40} w={110} h={44} label={"完整模型\n前向 + 反向"} tone="accent" size="sm" />
-  <Box x={310} y={40} w={110} h={44} label="局部梯度 g0" tone="accent2" size="sm" />
+  <Box x={310} y={40} w={110} h={44} label="局部梯度 $g_0$" tone="accent2" size="sm" />
   <Region x={160} y={144} w={280} h={80} title="rank 1" />
   <Box x={180} y={170} w={110} h={44} label={"完整模型\n前向 + 反向"} tone="accent" size="sm" />
-  <Box x={310} y={170} w={110} h={44} label="局部梯度 g1" tone="accent2" size="sm" />
-  <Box x={480} y={95} w={110} h={50} label={"all-reduce\n(g0 + g1) / 2"} tone="strong" size="sm" />
+  <Box x={310} y={170} w={110} h={44} label="局部梯度 $g_1$" tone="accent2" size="sm" />
+  <Box x={480} y={95} w={110} h={50} label={"all-reduce\n$(g_0 + g_1)/2$"} tone="strong" size="sm" />
   <Box x={620} y={40} w={80} h={44} label="更新" tone="neutral" size="sm" />
   <Box x={620} y={170} w={80} h={44} label="更新" tone="neutral" size="sm" />
   <Arrow from={[130, 52]} to={[180, 62]} />

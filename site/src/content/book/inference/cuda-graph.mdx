@@ -90,8 +90,8 @@ $s_{\max}$ 默认上限为 512。小批之间间隔小，因为小批的 padding
   x={[1, 512]}
   y={[1, 2]}
   logX
-  xLabel="真实批大小 n"
-  yLabel="padded(n) / n"
+  xLabel="真实批大小 $n$"
+  yLabel="$\operatorname{padded}(n)/n$"
   series={[
     { label: 'vLLM 默认捕获尺寸', points: Array.from({ length: 512 }, (_, i) => { const k = i + 1; const s = k <= 2 ? k : k <= 4 ? 4 : k <= 248 ? Math.ceil(k / 8) * 8 : Math.ceil(k / 16) * 16; return [k, s / k] }) },
     { label: '只捕获 2 的幂', points: Array.from({ length: 512 }, (_, i) => [i + 1, 2 ** Math.ceil(Math.log2(i + 1)) / (i + 1)]), tone: 'accent2' },
@@ -143,12 +143,12 @@ prefill 和混合批更难：每个请求的查询长度不同，最优的 kerne
   <Box x={170} y={60} w={100} h={56} label="注意力" sub="eager" tone="accent2" />
   <Box x={290} y={52} w={150} h={72} label={'O 投影 + FFN\n+ 下一层 QKV'} sub="graph 2" tone="accent" />
   <Box x={460} y={60} w={100} h={56} label="注意力" sub="eager" tone="accent2" />
-  <Box x={580} y={60} w={120} h={56} label="…… + LM head" sub="graph L+1" tone="accent" />
+  <Box x={580} y={60} w={120} h={56} label="…… + LM head" sub="graph $L+1$" tone="accent" />
   <Arrow from={[150, 88]} to={[170, 88]} />
   <Arrow from={[270, 88]} to={[290, 88]} />
   <Arrow from={[440, 88]} to={[460, 88]} />
   <Arrow from={[560, 88]} to={[580, 88]} />
-  <Text x={360} y={150} label="每一段只依赖本步 token 总数 N，按 N 分桶捕获；注意力按真实元数据 eager 执行" size="sm" tone="muted" />
+  <Text x={360} y={150} label="每一段只依赖本步 token 总数 $N$，按 $N$ 分桶捕获；注意力按真实元数据 eager 执行" size="sm" tone="muted" />
   <Fragment slot="caption">vLLM 用 torch.compile 把模型编译成一张计算图，在注意力算子处切开（splitting_ops），对两次注意力之间的每一段分别捕获 CUDA Graph。L 层模型被切成 L+1 段，注意力由 CPU 正常发射，其余数百个小 kernel 都在图里。</Fragment>
 </Diagram>
 

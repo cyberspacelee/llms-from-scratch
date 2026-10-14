@@ -60,22 +60,22 @@ $$
 <Diagram width={720} height={270} label="点积的几何意义：u 在 v 方向上的投影长度乘以 v 的长度">
   <Region x={20} y={20} w={330} h={240} title="点积 = 投影 × 长度" />
   <Arrow from={[60, 200]} to={[300, 200]} tone="accent" width={2.2} />
-  <Text x={310} y={200} label="v" anchor="start" bold tone="accent" />
+  <Text x={310} y={200} label="$v$" anchor="start" bold tone="accent" />
   <Arrow from={[60, 200]} to={[220, 70]} tone="info" width={2.2} />
-  <Text x={226} y={62} label="u" anchor="start" bold tone="info" />
+  <Text x={226} y={62} label="$u$" anchor="start" bold tone="info" />
   <Arrow from={[220, 70]} to={[220, 200]} tone="muted" dashed head="none" />
-  <Arrow from={[60, 222]} to={[220, 222]} tone="accent2" head="both" label="‖u‖cos θ" labelSide="below" />
-  <Text x={100} y={186} label="θ" tone="muted" />
+  <Arrow from={[60, 222]} to={[220, 222]} tone="accent2" head="both" label="$\lVert u\rVert\cos\theta$" labelSide="below" />
+  <Text x={100} y={186} label="$\theta$" tone="muted" />
   <Region x={380} y={20} w={300} h={240} title="三种典型关系" />
   <Arrow from={[420, 110]} to={[490, 70]} tone="info" />
   <Arrow from={[420, 110]} to={[500, 90]} tone="accent" />
-  <Text x={460} y={140} label="同向：u·v > 0" size="sm" />
+  <Text x={460} y={140} label="同向：$u\cdot v > 0$" size="sm" />
   <Arrow from={[560, 110]} to={[560, 60]} tone="info" />
   <Arrow from={[560, 110]} to={[630, 110]} tone="accent" />
-  <Text x={600} y={140} label="正交：u·v = 0" size="sm" />
+  <Text x={600} y={140} label="正交：$u\cdot v = 0$" size="sm" />
   <Arrow from={[530, 196]} to={[450, 196]} tone="info" />
   <Arrow from={[530, 204]} to={[610, 204]} tone="accent" />
-  <Text x={530} y={230} label="反向：u·v < 0" size="sm" />
+  <Text x={530} y={230} label="反向：$u\cdot v < 0$" size="sm" />
   <Fragment slot="caption">左：$u$ 在 $v$ 方向上的投影长度是 $\lVert u\rVert\cos\theta$，再乘以 $\lVert v\rVert$ 就是点积。右：点积的符号只由夹角决定，大小还取决于两个向量的长度。</Fragment>
 </Diagram>
 
@@ -148,17 +148,17 @@ $$
 这正是神经网络里的读法：$A$ 的每一行是一个样本（或一个 token 的向量），$B$ 是一层的权重，整个矩阵乘法就是把同一个变换并行地施加到所有样本上。线性变换的另一个性质是可以复合：先做 $B$ 再做 $D$，等于直接做 $BD$，因为 $(xB)D = x(BD)$——矩阵乘法满足结合律。这个性质马上会告诉我们为什么神经网络必须有非线性。
 
 <Diagram width={720} height={250} label="同一个矩阵乘法 C = AB 的两种读法：一个元素是行与列的点积，一列是 A 的列的线性组合">
-  <Matrix x={60} y={60} rows={2} cols={2} cell={44} values={[[1, 2], [3, 4]]} title="A" highlight={[{ rows: [0], tone: 'accent' }]} />
-  <Text x={175} y={105} label="×" size="lg" />
-  <Matrix x={200} y={60} rows={2} cols={2} cell={44} values={[[5, 6], [7, 8]]} title="B" highlight={[{ cols: [1], tone: 'accent' }]} />
-  <Text x={315} y={105} label="=" size="lg" />
-  <Matrix x={340} y={60} rows={2} cols={2} cell={44} values={[[19, 22], [43, 50]]} title="C" highlight={[{ cells: [[0, 1]], tone: 'strong' }]} />
+  <Matrix x={60} y={60} rows={2} cols={2} cell={44} values={[[1, 2], [3, 4]]} title="$A$" highlight={[{ rows: [0], tone: 'accent' }]} />
+  <Text x={175} y={105} label="$\times$" size="lg" />
+  <Matrix x={200} y={60} rows={2} cols={2} cell={44} values={[[5, 6], [7, 8]]} title="$B$" highlight={[{ cols: [1], tone: 'accent' }]} />
+  <Text x={315} y={105} label="$=$" size="lg" />
+  <Matrix x={340} y={60} rows={2} cols={2} cell={44} values={[[19, 22], [43, 50]]} title="$C$" highlight={[{ cells: [[0, 1]], tone: 'strong' }]} />
   <Text x={240} y={190} label="$C_{12} = 1 \cdot 6 + 2 \cdot 8 = 22$（行 · 列）" size="sm" />
-  <Text x={495} y={105} label="5 ·" anchor="end" />
-  <Matrix x={502} y={60} rows={2} cols={1} cell={44} values={[[1], [3]]} title="A 第 1 列" tone="info" />
-  <Text x={575} y={105} label="+ 7 ·" />
-  <Matrix x={606} y={60} rows={2} cols={1} cell={44} values={[[2], [4]]} title="A 第 2 列" tone="info" />
-  <Text x={575} y={190} label="C 第 1 列 = (19, 43)" size="sm" />
+  <Text x={495} y={105} label="$5\cdot$" anchor="end" />
+  <Matrix x={502} y={60} rows={2} cols={1} cell={44} values={[[1], [3]]} title="$A$ 第 1 列" tone="info" />
+  <Text x={575} y={105} label="$+7\cdot$" />
+  <Matrix x={606} y={60} rows={2} cols={1} cell={44} values={[[2], [4]]} title="$A$ 第 2 列" tone="info" />
+  <Text x={575} y={190} label="$C$ 第 1 列 $= (19, 43)$" size="sm" />
   <Fragment slot="caption">左：$C$ 的一个元素来自 $A$ 的一行与 $B$ 的一列的点积（看法一）。右：$C$ 的一整列是 $A$ 各列的线性组合，系数取自 $B$ 的对应列（看法二），即 $(19, 43) = 5\cdot(1,3) + 7\cdot(2,4)$。</Fragment>
 </Diagram>
 
@@ -201,9 +201,9 @@ $$
 例如 `(8, 1, 6, 1)` 与 `(7, 1, 5)` 广播：先把后者补成 `(1, 7, 1, 5)`，再逐维取较大者，得到 `(8, 7, 6, 5)`。而 `(2, 3)` 与 `(4,)` 无法广播，因为最后一维 3 与 4 既不相等也没有 1。
 
 <Diagram width={720} height={230} label="广播的逐维对齐：右对齐、补 1、逐维取较大者">
-  <Text x={60} y={50} label="张量 a" anchor="start" size="sm" tone="muted" />
+  <Text x={60} y={50} label="张量 $a$" anchor="start" size="sm" tone="muted" />
   <Matrix x={160} y={36} rows={1} cols={4} cell={[64, 28]} values={[['8', '1', '6', '1']]} highlight={[{ cells: [[0, 1], [0, 3]], tone: 'muted' }]} />
-  <Text x={60} y={100} label="张量 b" anchor="start" size="sm" tone="muted" />
+  <Text x={60} y={100} label="张量 $b$" anchor="start" size="sm" tone="muted" />
   <Matrix x={160} y={86} rows={1} cols={4} cell={[64, 28]} values={[['(1)', '7', '1', '5']]} highlight={[{ cells: [[0, 0], [0, 2]], tone: 'muted' }, { cells: [[0, 0]], tone: 'ghost' }]} />
   <Text x={60} y={160} label="结果" anchor="start" size="sm" tone="muted" bold />
   <Matrix x={160} y={146} rows={1} cols={4} cell={[64, 28]} values={[['8', '7', '6', '5']]} tone="accent" />
@@ -263,14 +263,14 @@ $$
 就塌缩成了一层，权重为 $W_2W_1$，偏置为 $b_1W_2^\top + b_2$。不管叠多少层，结果都只能表示线性函数——它连“异或”这样简单的模式都无法拟合。非线性打断了这种塌缩：ReLU 把每个超平面一侧的输出置零，许多这样的“折痕”叠加起来，网络就能逼近任意复杂的连续函数（通用逼近定理）。
 
 <Diagram width={720} height={200} label="两层 MLP 的形状流：矩阵乘、加偏置、逐元素非线性、再矩阵乘">
-  <Box x={10} y={70} w={90} h={56} label="X" sub="$(B, d_{\text{in}})$" tone="info" />
+  <Box x={10} y={70} w={90} h={56} label="$X$" sub="$(B, d_{\text{in}})$" tone="info" />
   <Box x={140} y={70} w={140} h={56} label="$X W_1^\top + b_1$" sub="$(B, d_{\text{hidden}})$" tone="accent" mono />
   <Box x={320} y={70} w={90} h={56} label="relu" sub="逐元素" />
   <Box x={450} y={70} w={140} h={56} label="$H W_2^\top + b_2$" sub="$(B, d_{\text{out}})$" tone="accent" mono />
-  <Box x={620} y={70} w={60} h={56} label="Y" tone="strong" />
+  <Box x={620} y={70} w={60} h={56} label="$Y$" tone="strong" />
   <Arrow from={[100, 98]} to={[140, 98]} />
   <Arrow from={[280, 98]} to={[320, 98]} />
-  <Arrow from={[410, 98]} to={[450, 98]} label="H" />
+  <Arrow from={[410, 98]} to={[450, 98]} label="$H$" />
   <Arrow from={[590, 98]} to={[620, 98]} />
   <Text x={210} y={155} label="$W_1$: $(d_{\text{hidden}}, d_{\text{in}})$" size="sm" tone="muted" mono />
   <Text x={520} y={155} label="$W_2$: $(d_{\text{out}}, d_{\text{hidden}})$" size="sm" tone="muted" mono />

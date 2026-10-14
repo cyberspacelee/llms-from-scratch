@@ -108,7 +108,7 @@ $$
   <Matrix x={150} y={40} rows={3} cols={9} cell={[56, 34]} gap={3}
     values={[["user", "3", "+", "4", "END", "asst", "7", "END", "\\n"], ["−100", "−100", "−100", "−100", "−100", "−100", "7", "END", "−100"], ["−100", "−100", "−100", "−100", "−100", "7", "END", "−100", "—"]]}
     highlight={[{ cells: [[1, 6], [1, 7]], tone: "accent" }, { cells: [[2, 5], [2, 6]], tone: "accent" }, { cells: [[2, 8]], tone: "muted" }]} />
-  <Text x={415} y={172} label="位置 t 的 logits 对应 labels[t+1]；最后一个位置没有目标" size="sm" tone="muted" />
+  <Text x={415} y={172} label="位置 $t$ 的 logits 对应 labels[t+1]；最后一个位置没有目标" size="sm" tone="muted" />
   <Fragment slot="caption">为了排版，角色头被简写成一个格子，END 表示 <code>&lt;|im_end|&gt;</code>。第二行是与输入对齐的标签；第三行是错位一位之后、每个位置的 logits 真正要预测的目标。只有“asst”和“7”两个位置的输出参与损失，它们分别要预测回复内容与结束标记。</Fragment>
 </Diagram>
 
@@ -146,13 +146,13 @@ SFT 样本长短悬殊：一句寒暄只有十几个 token，一段代码解释�
 <Diagram width={720} height={330} label="普通因果掩码与文档掩码的对比">
   <Matrix x={80} y={60} rows={8} cols={8} cell={26} gap={2}
     title="普通因果掩码"
-    colLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
-    rowLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    colLabels={["$A_0$", "$A_1$", "$A_2$", "$B_0$", "$B_1$", "$B_2$", "$B_3$", "$B_4$"]}
+    rowLabels={["$A_0$", "$A_1$", "$A_2$", "$B_0$", "$B_1$", "$B_2$", "$B_3$", "$B_4$"]}
     highlight={[{ upper: true, tone: "muted" }, { lower: true, tone: "accent" }, { cells: [[3, 0], [3, 1], [3, 2], [4, 0], [4, 1], [4, 2], [5, 0], [5, 1], [5, 2], [6, 0], [6, 1], [6, 2], [7, 0], [7, 1], [7, 2]], tone: "accent2" }]} />
   <Matrix x={430} y={60} rows={8} cols={8} cell={26} gap={2}
     title="文档掩码（块对角 + 因果）"
-    colLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
-    rowLabels={["A0", "A1", "A2", "B0", "B1", "B2", "B3", "B4"]}
+    colLabels={["$A_0$", "$A_1$", "$A_2$", "$B_0$", "$B_1$", "$B_2$", "$B_3$", "$B_4$"]}
+    rowLabels={["$A_0$", "$A_1$", "$A_2$", "$B_0$", "$B_1$", "$B_2$", "$B_3$", "$B_4$"]}
     highlight={[{ upper: true, tone: "muted" }, { lower: true, tone: "accent" }, { cells: [[3, 0], [3, 1], [3, 2], [4, 0], [4, 1], [4, 2], [5, 0], [5, 1], [5, 2], [6, 0], [6, 1], [6, 2], [7, 0], [7, 1], [7, 2]], tone: "muted" }]} />
   <Text x={190} y={300} label="position_ids：0 1 2 3 4 5 6 7" size="sm" mono />
   <Text x={540} y={300} label="position_ids：0 1 2 0 1 2 3 4" size="sm" mono />

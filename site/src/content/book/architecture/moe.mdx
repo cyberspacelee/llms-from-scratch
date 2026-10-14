@@ -30,8 +30,8 @@ $$
 打分函数 $\sigma$ 有两种主流选择。**softmax**（GShard、Switch、Mixtral、Qwen3）让所有专家的分数构成一个概率分布；Mixtral 先选 top-$k$ 的 logits，再只在这 $k$ 个上做 softmax，这与“对全体做 softmax 再在被选中者之间重新归一化”是同一回事。**sigmoid**（DeepSeek-V3）让每个专家的分数独立地落在 $(0,1)$，再在选中的 $k$ 个之间归一化。在专家数很大（256 个）时，softmax 会让单个专家的分数被大量专家稀释，sigmoid 的独立打分更便于调节，也与下文的偏置调节配合得更好。DeepSeek-V4 又把打分函数换成 $\sqrt{\mathrm{softplus}(\cdot)}$。路由器梯度只经过被选中专家的 $g_i$ 回传，top-$k$ 的选择本身是离散、不可导的。
 
 <Diagram width={700} height={300} label="一个 top-2、8 专家的 MoE 层处理一个 token 的数据流">
-  <Box x={20} y={120} w={80} h={50} label="x" sub="(d)" />
-  <Box x={140} y={120} w={110} h={50} label="路由器" sub="E × d" tone="accent" />
+  <Box x={20} y={120} w={80} h={50} label="$x$" sub="$(d)$" />
+  <Box x={140} y={120} w={110} h={50} label="路由器" sub="$E \times d$" tone="accent" />
   <Box x={290} y={20} w={110} h={30} label="$\mathrm{FFN}_1$" size="sm" tone="muted" />
   <Box x={290} y={55} w={110} h={30} label="$\mathrm{FFN}_2$  $g = 0.62$" size="sm" tone="accent" />
   <Box x={290} y={90} w={110} h={30} label="$\mathrm{FFN}_3$" size="sm" tone="muted" />
@@ -41,7 +41,7 @@ $$
   <Box x={290} y={230} w={110} h={30} label="$\mathrm{FFN}_7$" size="sm" tone="muted" />
   <Box x={290} y={265} w={110} h={30} label="$\mathrm{FFN}_8$" size="sm" tone="muted" />
   <Box x={460} y={120} w={100} h={50} label="加权求和" tone="info" />
-  <Box x={600} y={120} w={80} h={50} label="y" sub="(d)" tone="strong" />
+  <Box x={600} y={120} w={80} h={50} label="$y$" sub="$(d)$" tone="strong" />
   <Arrow from={[100, 145]} to={[140, 145]} />
   <Arrow from={[250, 145]} via={[[270, 145], [270, 70]]} to={[290, 70]} tone="accent" />
   <Arrow from={[250, 145]} via={[[270, 145], [270, 210]]} to={[290, 210]} tone="accent" />
@@ -126,8 +126,8 @@ $$
 容量因子 $\text{cf}$ 通常取 1.0 到 1.25。分给某个专家的 token 超过 $C$ 时，多出的 token 被**丢弃**：它们不经过这个专家，只靠残差连接把输入原样传到下一层。
 
 <Diagram width={660} height={250} label="6 个 token、4 个专家、top-1 路由、容量 2 时的分配与丢弃">
-  <Matrix x={130} y={40} rows={6} cols={4} cell={[64, 28]} rowLabels={['token 0','token 1','token 2','token 3','token 4','token 5']} colLabels={['专家 0','专家 1','专家 2','专家 3']} tone="muted" values={[['1','','',''],['','1','',''],['2','','',''],['×','','',''],['','','1',''],['','2','','']]} highlight={[{ cells: [[0,0],[1,1],[2,0],[4,2],[5,1]], tone: 'accent' }, { cells: [[3,0]], tone: 'accent2' }]} />
-  <Text x={470} y={70} label="容量 C = ⌈1.0 × 6 × 1 / 4⌉ = 2" size="sm" anchor="start" />
+  <Matrix x={130} y={40} rows={6} cols={4} cell={[64, 28]} rowLabels={['token 0','token 1','token 2','token 3','token 4','token 5']} colLabels={['专家 0','专家 1','专家 2','专家 3']} tone="muted" values={[['1','','',''],['','1','',''],['2','','',''],['$\\times$','','',''],['','','1',''],['','2','','']]} highlight={[{ cells: [[0,0],[1,1],[2,0],[4,2],[5,1]], tone: 'accent' }, { cells: [[3,0]], tone: 'accent2' }]} />
+  <Text x={400} y={70} label="容量 $C = \lceil 1.0 \times 6 \times 1 / 4 \rceil = 2$" size="sm" anchor="start" />
   <Text x={470} y={100} label="数字：该专家收到的第几个" size="sm" anchor="start" tone="muted" />
   <Text x={470} y={130} label="token 3 是专家 0 的第 3 个，" size="sm" anchor="start" tone="accent2" />
   <Text x={470} y={152} label="超出容量被丢弃，" size="sm" anchor="start" tone="accent2" />
@@ -150,15 +150,15 @@ DeepSeekMoE 的第一个改动是**细粒度专家切分**：把每个专家的�
 
 <Diagram width={700} height={240} label="传统 MoE、细粒度专家、细粒度加共享专家三种设计的对比">
   <Region x={10} y={10} w={210} h={220} title="传统：8 选 2" />
-  <Box x={30} y={50} w={80} h={36} label="E1" tone="accent" />
-  <Box x={120} y={50} w={80} h={36} label="E2" tone="muted" />
-  <Box x={30} y={96} w={80} h={36} label="E3" tone="muted" />
-  <Box x={120} y={96} w={80} h={36} label="E4" tone="accent" />
+  <Box x={30} y={50} w={80} h={36} label="$\mathrm{E}_1$" tone="accent" />
+  <Box x={120} y={50} w={80} h={36} label="$\mathrm{E}_2$" tone="muted" />
+  <Box x={30} y={96} w={80} h={36} label="$\mathrm{E}_3$" tone="muted" />
+  <Box x={120} y={96} w={80} h={36} label="$\mathrm{E}_4$" tone="accent" />
   <Box x={30} y={142} w={80} h={36} label="…" tone="muted" />
-  <Box x={120} y={142} w={80} h={36} label="E8" tone="muted" />
-  <Text x={115} y={208} label="组合数 C(8, 2) = 28" size="sm" />
+  <Box x={120} y={142} w={80} h={36} label="$\mathrm{E}_8$" tone="muted" />
+  <Text x={115} y={208} label="组合数 $\binom{8}{2} = 28$" size="sm" />
   <Region x={240} y={10} w={210} h={220} title="细粒度：32 选 8" />
-  <Text x={345} y={208} label="组合数 $C(32, 8) \approx 1.1 \times 10^7$" size="sm" />
+  <Text x={345} y={208} label="组合数 $\binom{32}{8} \approx 1.1 \times 10^7$" size="sm" />
   <Region x={470} y={10} w={220} h={220} title="+ 共享专家：31 选 7 + 1" />
   <Box x={490} y={46} w={180} h={30} label="共享专家（总是激活）" size="sm" tone="info" />
   <Text x={580} y={208} label="通用知识集中到共享专家" size="sm" />

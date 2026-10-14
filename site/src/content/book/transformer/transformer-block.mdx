@@ -46,7 +46,7 @@ $$
 
 我们用 12 层的块在初始化时实测梯度在各层输入处的范数 $\|\partial \ell / \partial h_l\|$。三种排布分别是：无残差（`plain`，$h_{l+1} = N(F(h_l))$）、原始 Transformer 的 Post-Norm、以及 Pre-Norm（下一节定义）。权重以标准差 $1/\sqrt d$ 初始化，损失是对随机目标的均方误差：
 
-<Plot label="初始化时损失对各层输入的梯度范数（12 层，d = 64）" x={[0, 12]} y={[0.001, 3]} logY xLabel="层编号 l（0 为最底层输入）" yLabel="$\|\partial \ell / \partial h_l\|$（对数刻度）" height={270} series={[{ points: [[0, 1.912], [1, 1.102], [2, 0.782], [3, 0.491], [4, 0.364], [5, 0.245], [6, 0.151], [7, 0.0798], [8, 0.0424], [9, 0.0244], [10, 0.0131], [11, 0.0079], [12, 0.0223]], label: '无残差', tone: 'accent2' }, { points: [[0, 0.255], [1, 0.180], [2, 0.151], [3, 0.114], [4, 0.0867], [5, 0.069], [6, 0.0505], [7, 0.0373], [8, 0.0296], [9, 0.0225], [10, 0.018], [11, 0.0162], [12, 0.022]], label: 'Post-Norm', tone: 'info' }, { points: [[0, 0.0453], [1, 0.0226], [2, 0.0154], [3, 0.0114], [4, 0.0092], [5, 0.0077], [6, 0.0066], [7, 0.0058], [8, 0.0052], [9, 0.0047], [10, 0.0043], [11, 0.004], [12, 0.0037]], label: 'Pre-Norm' }]}>
+<Plot label="初始化时损失对各层输入的梯度范数（12 层，d = 64）" x={[0, 12]} y={[0.001, 3]} logY xLabel="层编号 $l$（0 为最底层输入）" yLabel="$\|\partial \ell / \partial h_l\|$（对数刻度）" height={270} series={[{ points: [[0, 1.912], [1, 1.102], [2, 0.782], [3, 0.491], [4, 0.364], [5, 0.245], [6, 0.151], [7, 0.0798], [8, 0.0424], [9, 0.0244], [10, 0.0131], [11, 0.0079], [12, 0.0223]], label: '无残差', tone: 'accent2' }, { points: [[0, 0.255], [1, 0.180], [2, 0.151], [3, 0.114], [4, 0.0867], [5, 0.069], [6, 0.0505], [7, 0.0373], [8, 0.0296], [9, 0.0225], [10, 0.018], [11, 0.0162], [12, 0.022]], label: 'Post-Norm', tone: 'info' }, { points: [[0, 0.0453], [1, 0.0226], [2, 0.0154], [3, 0.0114], [4, 0.0092], [5, 0.0077], [6, 0.0066], [7, 0.0058], [8, 0.0052], [9, 0.0047], [10, 0.0043], [11, 0.004], [12, 0.0037]], label: 'Pre-Norm' }]}>
   <Fragment slot="caption">没有残差时，梯度从顶层到底层变化超过两个数量级（这里是逐层放大）；有残差的两种排布变化约一个数量级。若再按 GPT-2 的做法把写回残差流的投影缩小 1/√(2L)，Pre-Norm 与 Post-Norm 各层的梯度都落在 0.012–0.022 之间，几乎平坦。数据由 residual_gradient_norms 计算。</Fragment>
 </Plot>
 
@@ -69,8 +69,8 @@ $$
   <Region x={10} y={10} w={340} h={280} title="Post-Norm（2017）" />
   <Region x={370} y={10} w={340} h={280} title="Pre-Norm（GPT-2 之后）" />
   <Box x={130} y={250} w={100} h={30} label="$h_l$" size="sm" />
-  <Box x={60} y={170} w={100} h={40} label="F" tone="accent" />
-  <Box x={150} y={110} w={60} h={34} label="+" size="lg" />
+  <Box x={60} y={170} w={100} h={40} label="$F$" tone="accent" />
+  <Box x={150} y={110} w={60} h={34} label="$+$" size="lg" />
   <Box x={130} y={50} w={100} h={36} label="Norm" tone="info" />
   <Arrow from={[180, 250]} via={[[180, 230], [110, 230]]} to={[110, 210]} />
   <Arrow from={[180, 250]} via={[[180, 230], [260, 230], [260, 127]]} to={[210, 127]} tone="accent" width={2.2} label="残差" labelSide="right" />
@@ -80,8 +80,8 @@ $$
   <Text x={60} y={70} label="残差流被归一化" size="sm" tone="accent2" anchor="start" />
   <Box x={490} y={250} w={100} h={30} label="$h_l$" size="sm" />
   <Box x={400} y={190} w={100} h={34} label="Norm" tone="info" />
-  <Box x={400} y={120} w={100} h={40} label="F" tone="accent" />
-  <Box x={510} y={60} w={60} h={34} label="+" size="lg" />
+  <Box x={400} y={120} w={100} h={40} label="$F$" tone="accent" />
+  <Box x={510} y={60} w={60} h={34} label="$+$" size="lg" />
   <Arrow from={[540, 250]} via={[[540, 238], [450, 238]]} to={[450, 224]} />
   <Arrow from={[540, 250]} to={[540, 94]} tone="accent" width={2.2} label="恒等通路" labelSide="right" />
   <Arrow from={[450, 190]} to={[450, 160]} />
@@ -160,7 +160,7 @@ $$
 
 $\Phi$ 是标准正态分布函数。它是 ReLU 的光滑版本，在 0 附近可导，负半轴有一个小的负值区域。另一个形状相近的函数是 SiLU（也叫 Swish）：$\operatorname{SiLU}(x) = x\,\sigma(x)$，$\sigma$ 是 sigmoid。
 
-<Plot label="ReLU、GELU 与 SiLU" x={[-4, 4]} y={[-0.6, 4]} xLabel="x" yLabel="φ(x)" height={250} series={[{ fn: (t) => Math.max(0, t), label: 'ReLU', tone: 'muted' }, { fn: (t) => 0.5 * t * (1 + Math.tanh(0.7978845608 * (t + 0.044715 * t * t * t))), label: 'GELU', tone: 'info' }, { fn: (t) => t / (1 + Math.exp(-t)), label: 'SiLU', tone: 'accent' }]}>
+<Plot label="ReLU、GELU 与 SiLU" x={[-4, 4]} y={[-0.6, 4]} xLabel="$x$" yLabel="$\varphi(x)$" height={250} series={[{ fn: (t) => Math.max(0, t), label: 'ReLU', tone: 'muted' }, { fn: (t) => 0.5 * t * (1 + Math.tanh(0.7978845608 * (t + 0.044715 * t * t * t))), label: 'GELU', tone: 'info' }, { fn: (t) => t / (1 + Math.exp(-t)), label: 'SiLU', tone: 'accent' }]}>
   <Fragment slot="caption">GELU 与 SiLU 都是“光滑的 ReLU”：正半轴近似恒等，负半轴趋于 0，在原点附近连续可导。SiLU 的负值区域更深（最小值约 −0.28）。</Fragment>
 </Plot>
 
@@ -195,13 +195,13 @@ z = x + \operatorname{MHA}\big(\operatorname{RMSNorm}(x)\big), \qquad y = z + \o
 $$
 
 <Diagram width={720} height={320} label="Pre-Norm 解码器块的完整数据流">
-  <Box x={300} y={280} w={120} h={32} label="x" sub="[B, T, d]" size="sm" />
+  <Box x={300} y={280} w={120} h={32} label="$x$" sub="$[B, T, d]$" size="sm" />
   <Box x={120} y={220} w={140} h={36} label="RMSNorm" tone="info" />
   <Box x={120} y={160} w={140} h={44} label="多头注意力" sub="+ RoPE, 因果掩码" tone="accent" size="sm" />
-  <Box x={330} y={150} w={60} h={34} label="+" size="lg" />
+  <Box x={330} y={150} w={60} h={34} label="$+$" size="lg" />
   <Box x={460} y={110} w={140} h={36} label="RMSNorm" tone="info" />
-  <Box x={460} y={50} w={140} h={44} label="SwiGLU FFN" sub="d → 8d/3 → d" tone="accent" size="sm" />
-  <Box x={330} y={20} w={60} h={34} label="+" size="lg" />
+  <Box x={460} y={50} w={140} h={44} label="SwiGLU FFN" sub="$d \to 8d/3 \to d$" tone="accent" size="sm" />
+  <Box x={330} y={20} w={60} h={34} label="$+$" size="lg" />
   <Arrow from={[360, 280]} via={[[360, 268], [190, 268]]} to={[190, 256]} />
   <Arrow from={[190, 220]} to={[190, 204]} />
   <Arrow from={[190, 160]} via={[[190, 140], [300, 140], [300, 167]]} to={[330, 167]} />
@@ -213,7 +213,7 @@ $$
   <Text x={380} y={230} label="残差流" size="sm" tone="accent" anchor="start" />
   <Text x={20} y={182} label="位置间交换信息" size="sm" tone="muted" anchor="start" />
   <Text x={620} y={72} label="逐位置加工" size="sm" tone="muted" anchor="start" />
-  <Text x={400} y={12} label="输出 [B, T, d]，送入下一块" size="sm" tone="muted" anchor="start" />
+  <Text x={400} y={12} label="输出 $[B, T, d]$，送入下一块" size="sm" tone="muted" anchor="start" />
   <Fragment slot="caption">粗线是残差流，自下而上贯穿整个块。两个子层各自从残差流读取一份归一化后的副本，计算后再加回残差流。输入与输出的形状都是 [B, T, d]，块可以任意堆叠。</Fragment>
 </Diagram>
 

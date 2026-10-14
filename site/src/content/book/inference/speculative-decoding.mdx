@@ -147,12 +147,12 @@ $$
   label="加速比随草稿长度 k 的变化（c = 0.05）"
   x={[1, 12]}
   y={[1, 5]}
-  xLabel="草稿长度 k"
-  yLabel="加速比 S"
+  xLabel="草稿长度 $k$"
+  yLabel="加速比 $S$"
   series={[
-    { label: 'α = 0.6', fn: (k) => (1 - Math.pow(0.6, k + 1)) / ((1 - 0.6) * (k * 0.05 + 1)), tone: 'accent2' },
-    { label: 'α = 0.8', fn: (k) => (1 - Math.pow(0.8, k + 1)) / ((1 - 0.8) * (k * 0.05 + 1)), tone: 'info' },
-    { label: 'α = 0.9', fn: (k) => (1 - Math.pow(0.9, k + 1)) / ((1 - 0.9) * (k * 0.05 + 1)) },
+    { label: '$\\alpha = 0.6$', fn: (k) => (1 - Math.pow(0.6, k + 1)) / ((1 - 0.6) * (k * 0.05 + 1)), tone: 'accent2' },
+    { label: '$\\alpha = 0.8$', fn: (k) => (1 - Math.pow(0.8, k + 1)) / ((1 - 0.8) * (k * 0.05 + 1)), tone: 'info' },
+    { label: '$\\alpha = 0.9$', fn: (k) => (1 - Math.pow(0.9, k + 1)) / ((1 - 0.9) * (k * 0.05 + 1)) },
   ]}
 >
   <Fragment slot="caption">接受率低时，增大 k 很快就得不偿失：α=0.6 的最佳 k 约 4，之后曲线下降；α=0.9 时增大到 8 仍有收益。真实系统要根据最近的接受率动态调整 k。</Fragment>
@@ -188,7 +188,7 @@ $$
   <Arrow from={[210, 72]} to={[270, 94]} />
   <Arrow from={[330, 37]} to={[390, 37]} />
   <Text x={20} y={250} label="节点序号 0..4 = a b c d e；parents = [-1, -1, 0, 0, 2]；深度 = [0, 0, 1, 1, 2]" anchor="start" size="sm" mono />
-  <Text x={500} y={22} label="掩码：行 i 能看到的列 j" anchor="start" size="sm" tone="muted" />
+  <Text x={500} y={22} label="掩码：行 $i$ 能看到的列 $j$" anchor="start" size="sm" tone="muted" />
   <Matrix x={510} y={46} rows={5} cols={5} cell={[30, 30]} gap={2}
     rowLabels={['a', 'b', 'c', 'd', 'e']} colLabels={['a', 'b', 'c', 'd', 'e']}
     values={[[1,0,0,0,0],[0,1,0,0,0],[1,0,1,0,0],[1,0,0,1,0],[1,0,1,0,1]]}

@@ -84,9 +84,9 @@ $$
 
 结果是：前向 KL 给出 $m = 0$、$s = 2.088$，与矩匹配的解析解一致；反向 KL 从 $(m, s) = (1, 0.5)$ 出发给出 $m\approx1.997$、$s\approx0.605$，几乎完全锁定在右边的峰上。
 
-<Plot label="单个高斯拟合双峰分布：前向 KL 与反向 KL" x={[-6, 6]} y={[0, 0.7]} xLabel="y" yLabel="密度"
+<Plot label="单个高斯拟合双峰分布：前向 KL 与反向 KL" x={[-6, 6]} y={[0, 0.7]} xLabel="$y$" yLabel="密度"
   series={[
-    { fn: (t) => 0.5 * Math.exp(-0.5 * ((t + 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)) + 0.5 * Math.exp(-0.5 * ((t - 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)), label: '教师 p', tone: 'neutral' },
+    { fn: (t) => 0.5 * Math.exp(-0.5 * ((t + 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)) + 0.5 * Math.exp(-0.5 * ((t - 2) / 0.6) ** 2) / (0.6 * Math.sqrt(2 * Math.PI)), label: '教师 $p$', tone: 'neutral' },
     { fn: (t) => Math.exp(-0.5 * (t / 2.088) ** 2) / (2.088 * Math.sqrt(2 * Math.PI)), label: '前向 KL 拟合', tone: 'info', dashed: true },
     { fn: (t) => Math.exp(-0.5 * ((t - 1.997) / 0.605) ** 2) / (0.605 * Math.sqrt(2 * Math.PI)), label: '反向 KL 拟合', tone: 'accent2' },
   ]}>

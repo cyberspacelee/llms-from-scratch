@@ -25,16 +25,16 @@ code:
 位置 $t$ 的 logits 经 softmax 后就是模型给出的 $P(x_{t+1} \mid x_{\le t})$。由于因果掩码，一次前向同时给出了全部 $T$ 个位置的预测。
 
 <Diagram width={720} height={330} label="GPT 的整体结构与张量形状">
-  <Box x={20} y={140} w={110} h={50} label="token ID" sub="[B, T]" />
-  <Box x={160} y={140} w={110} h={50} label="嵌入 E" sub="[B, T, d]" tone="info" />
-  <Region x={300} y={30} w={190} h={270} title="× L 个块" />
+  <Box x={20} y={140} w={110} h={50} label="token ID" sub="$[B, T]$" />
+  <Box x={160} y={140} w={110} h={50} label="嵌入 $E$" sub="$[B, T, d]$" tone="info" />
+  <Region x={300} y={30} w={190} h={270} title="$\times L$ 个块" />
   <Box x={320} y={230} w={150} h={36} label="RMSNorm → MHA" tone="accent" size="sm" />
-  <Box x={380} y={186} w={30} h={26} label="+" size="sm" />
+  <Box x={380} y={186} w={30} h={26} label="$+$" size="sm" />
   <Box x={320} y={130} w={150} h={36} label="RMSNorm → FFN" tone="accent" size="sm" />
-  <Box x={380} y={86} w={30} h={26} label="+" size="sm" />
+  <Box x={380} y={86} w={30} h={26} label="$+$" size="sm" />
   <Text x={395} y={60} label="RoPE 旋转因子 $[T, d_h/2]$" size="xs" tone="muted" />
   <Box x={520} y={140} w={80} h={50} label="final\nnorm" tone="info" size="sm" />
-  <Box x={620} y={140} w={90} h={50} label="LM head" sub="[B, T, V]" tone="strong" />
+  <Box x={620} y={140} w={90} h={50} label="LM head" sub="$[B, T, V]$" tone="strong" />
   <Arrow from={[130, 165]} to={[160, 165]} />
   <Arrow from={[270, 165]} via={[[285, 165], [285, 280], [395, 280]]} to={[395, 266]} />
   <Arrow from={[395, 230]} to={[395, 212]} />
@@ -162,7 +162,7 @@ $$
 
 沿用 CS336 作业的设定，把 GPT-2 四种尺寸的宽度与深度代入我们的架构（$V = 50257$，不绑定，$T = 1024$），看前向 FLOPs 在各部件之间的分配：
 
-<Bars label="各部件占前向 FLOPs 的百分比（GPT-2 尺寸的本书架构）" unit="%" max={100} totals={false} items={[{ label: 'small', segments: [{ value: 19.9, label: '注意力投影' }, { value: 13.2, label: '注意力核心' }, { value: 39.8, label: 'FFN' }, { value: 27.1, label: '输出层' }] }, { label: 'medium', segments: [{ value: 24.8, label: '注意力投影' }, { value: 12.4, label: '注意力核心' }, { value: 50.1, label: 'FFN' }, { value: 12.7, label: '输出层' }] }, { label: 'large', segments: [{ value: 27.0, label: '注意力投影' }, { value: 10.8, label: '注意力核心' }, { value: 54.8, label: 'FFN' }, { value: 7.4, label: '输出层' }] }, { label: 'XL, T=1024', segments: [{ value: 28.6, label: '注意力投影' }, { value: 9.2, label: '注意力核心' }, { value: 57.5, label: 'FFN' }, { value: 4.7, label: '输出层' }] }, { label: 'XL, T=16384', segments: [{ value: 12.1, label: '注意力投影' }, { value: 61.8, label: '注意力核心' }, { value: 24.2, label: 'FFN' }, { value: 2.0, label: '输出层' }] }]}>
+<Bars label="各部件占前向 FLOPs 的百分比（GPT-2 尺寸的本书架构）" unit="%" max={100} totals={false} items={[{ label: 'small', segments: [{ value: 19.9, label: '注意力投影' }, { value: 13.2, label: '注意力核心' }, { value: 39.8, label: 'FFN' }, { value: 27.1, label: '输出层' }] }, { label: 'medium', segments: [{ value: 24.8, label: '注意力投影' }, { value: 12.4, label: '注意力核心' }, { value: 50.1, label: 'FFN' }, { value: 12.7, label: '输出层' }] }, { label: 'large', segments: [{ value: 27.0, label: '注意力投影' }, { value: 10.8, label: '注意力核心' }, { value: 54.8, label: 'FFN' }, { value: 7.4, label: '输出层' }] }, { label: 'XL, $T = 1024$', segments: [{ value: 28.6, label: '注意力投影' }, { value: 9.2, label: '注意力核心' }, { value: 57.5, label: 'FFN' }, { value: 4.7, label: '输出层' }] }, { label: 'XL, $T = 16384$', segments: [{ value: 12.1, label: '注意力投影' }, { value: 61.8, label: '注意力核心' }, { value: 24.2, label: 'FFN' }, { value: 2.0, label: '输出层' }] }]}>
   <Fragment slot="caption">模型变大时，FFN 与注意力投影（都随 d² 增长）的占比上升，输出层（随 Vd 增长）的占比从 27% 降到 5%。把 GPT-2 XL 的序列长度从 1024 提高到 16384，总计算量增加约 38 倍，注意力核心（随 T² 增长）的占比从 9% 跃升到 62%。</Fragment>
 </Bars>
 

@@ -48,10 +48,10 @@ $$
 Ainslie 等（2023）的 GQA 把 $h$ 个查询头分成 $h_{kv}$ 组，每组 $g = h/h_{kv}$ 个查询头共享一个 KV 头。第 $i$ 个查询头使用第 $\lfloor i/g\rfloor$ 个 KV 头。$h_{kv}=h$ 时就是 MHA，$h_{kv}=1$ 时就是 MQA。取 $h_{kv}=8$ 恰好让 8 卡张量并行时每卡分到一个 KV 头，既不复制也不浪费，这也是 8 成为最常见取值的工程原因。
 
 <Diagram width={720} height={250} label="MHA、GQA、MQA 中查询头与 K/V 头的对应关系">
-  <Region x={10} y={10} w={226} h={230} title="MHA：h_kv = h = 8" />
-  <Region x={247} y={10} w={226} h={230} title="GQA：h_kv = 2" />
-  <Region x={484} y={10} w={226} h={230} title="MQA：h_kv = 1" />
-  <Text x={20} y={58} label="Q" anchor="start" size="sm" tone="muted" />
+  <Region x={10} y={10} w={226} h={230} title="MHA：$h_{kv} = h = 8$" />
+  <Region x={247} y={10} w={226} h={230} title="GQA：$h_{kv} = 2$" />
+  <Region x={484} y={10} w={226} h={230} title="MQA：$h_{kv} = 1$" />
+  <Text x={20} y={58} label="$Q$" anchor="start" size="sm" tone="muted" />
   <Box x={36} y={44} w={20} h={28} tone="accent" />
   <Box x={60} y={44} w={20} h={28} tone="accent" />
   <Box x={84} y={44} w={20} h={28} tone="accent" />
@@ -213,7 +213,7 @@ $$
 于是每层每 token 的缓存是 $d_c + d_R = 512 + 64 = 576$ 个数。DeepSeek-V2 的论文把它表述为 $\frac{9}{2}d_h$，相当于只有 2.25 组的 GQA，但质量报告为优于 MHA。
 
 <Diagram width={700} height={270} label="MLA 的数据流：哪些量进入缓存，哪些在计算时由吸收消去">
-  <Box x={20} y={110} w={90} h={50} label="$h_t$" sub="(d)" />
+  <Box x={20} y={110} w={90} h={50} label="$h_t$" sub="$(d)$" />
   <Region x={140} y={20} w={190} h={230} title="" tone="info" />
   <Box x={150} y={40} w={170} h={50} label="$c_{KV} = W_{DKV} h$" sub="$(d_c = 512)$" tone="info" />
   <Box x={150} y={180} w={170} h={50} label="$k_R = \mathrm{RoPE}(W_{KR} h)$" sub="$(d_R = 64)$" tone="info" />

@@ -38,26 +38,26 @@ $$
   <Text x={260} y={18} label="按目标 rank 排序" size="sm" bold />
   <Text x={450} y={18} label="收到后按专家分组" size="sm" bold />
   <Text x={640} y={18} label="combine 回原位" size="sm" bold />
-  <Region x={10} y={32} w={700} h={136} title="rank 0：专家 E0、E1" />
-  <Region x={10} y={180} w={700} h={136} title="rank 1：专家 E2、E3" />
-  <Box x={30} y={60} w={110} h={28} label="t0 → E2" size="sm" mono />
-  <Box x={30} y={94} w={110} h={28} label="t1 → E0" size="sm" mono />
-  <Box x={30} y={128} w={110} h={28} label="t2 → E3" size="sm" mono />
-  <Box x={30} y={208} w={110} h={28} label="t3 → E1" size="sm" mono />
-  <Box x={30} y={242} w={110} h={28} label="t4 → E2" size="sm" mono />
-  <Box x={30} y={276} w={110} h={28} label="t5 → E0" size="sm" mono />
-  <Box x={200} y={60} w={120} h={28} label="t1 发往 r0" size="sm" tone="accent" />
-  <Box x={200} y={94} w={120} h={28} label="t0 发往 r1" size="sm" tone="info" />
-  <Box x={200} y={128} w={120} h={28} label="t2 发往 r1" size="sm" tone="info" />
-  <Box x={200} y={208} w={120} h={28} label="t3 发往 r0" size="sm" tone="accent" />
-  <Box x={200} y={242} w={120} h={28} label="t5 发往 r0" size="sm" tone="accent" />
-  <Box x={200} y={276} w={120} h={28} label="t4 发往 r1" size="sm" tone="info" />
-  <Box x={390} y={70} w={120} h={34} label="E0：t1, t5" size="sm" tone="accent" />
-  <Box x={390} y={114} w={120} h={34} label="E1：t3" size="sm" tone="accent" />
-  <Box x={390} y={218} w={120} h={34} label="E2：t0, t4" size="sm" tone="info" />
-  <Box x={390} y={262} w={120} h={34} label="E3：t2" size="sm" tone="info" />
-  <Box x={580} y={60} w={110} h={96} label={"y0, y1, y2\n按 g 加权"} size="sm" tone="strong" />
-  <Box x={580} y={208} w={110} h={96} label={"y3, y4, y5\n按 g 加权"} size="sm" tone="strong" />
+  <Region x={10} y={32} w={700} h={136} title="rank 0：专家 $E_0, E_1$" />
+  <Region x={10} y={180} w={700} h={136} title="rank 1：专家 $E_2, E_3$" />
+  <Box x={30} y={60} w={110} h={28} label="$t_0\to E_2$" size="sm" mono />
+  <Box x={30} y={94} w={110} h={28} label="$t_1\to E_0$" size="sm" mono />
+  <Box x={30} y={128} w={110} h={28} label="$t_2\to E_3$" size="sm" mono />
+  <Box x={30} y={208} w={110} h={28} label="$t_3\to E_1$" size="sm" mono />
+  <Box x={30} y={242} w={110} h={28} label="$t_4\to E_2$" size="sm" mono />
+  <Box x={30} y={276} w={110} h={28} label="$t_5\to E_0$" size="sm" mono />
+  <Box x={200} y={60} w={120} h={28} label="$t_1$ 发往 $r_0$" size="sm" tone="accent" />
+  <Box x={200} y={94} w={120} h={28} label="$t_0$ 发往 $r_1$" size="sm" tone="info" />
+  <Box x={200} y={128} w={120} h={28} label="$t_2$ 发往 $r_1$" size="sm" tone="info" />
+  <Box x={200} y={208} w={120} h={28} label="$t_3$ 发往 $r_0$" size="sm" tone="accent" />
+  <Box x={200} y={242} w={120} h={28} label="$t_5$ 发往 $r_0$" size="sm" tone="accent" />
+  <Box x={200} y={276} w={120} h={28} label="$t_4$ 发往 $r_1$" size="sm" tone="info" />
+  <Box x={390} y={70} w={120} h={34} label="$E_0$：$t_1, t_5$" size="sm" tone="accent" />
+  <Box x={390} y={114} w={120} h={34} label="$E_1$：$t_3$" size="sm" tone="accent" />
+  <Box x={390} y={218} w={120} h={34} label="$E_2$：$t_0, t_4$" size="sm" tone="info" />
+  <Box x={390} y={262} w={120} h={34} label="$E_3$：$t_2$" size="sm" tone="info" />
+  <Box x={580} y={60} w={110} h={96} label={"$y_0, y_1, y_2$\n按 $g$ 加权"} size="sm" tone="strong" />
+  <Box x={580} y={208} w={110} h={96} label={"$y_3, y_4, y_5$\n按 $g$ 加权"} size="sm" tone="strong" />
   <Arrow from={[140, 108]} to={[200, 108]} label="排序" />
   <Arrow from={[320, 74]} via={[[340, 74], [340, 87]]} to={[390, 87]} />
   <Arrow from={[320, 290]} via={[[340, 290], [340, 235]]} to={[390, 235]} />
@@ -137,10 +137,10 @@ DeepSeek-V3 选择**不丢弃 token**，转而依靠无辅助损失的负载均�
   <Region x={20} y={20} w={150} h={220} title="源节点" />
   <Box x={40} y={110} w={110} h={40} label="token" tone="strong" />
   <Region x={250} y={20} w={450} h={220} title="EP 组中被选中的 4 个节点（共 8 个）" />
-  <Box x={270} y={56} w={90} h={34} label="节点 a" tone="info" size="sm" />
-  <Box x={270} y={100} w={90} h={34} label="节点 b" tone="info" size="sm" />
-  <Box x={270} y={144} w={90} h={34} label="节点 c" tone="info" size="sm" />
-  <Box x={270} y={188} w={90} h={34} label="节点 d" tone="info" size="sm" />
+  <Box x={270} y={56} w={90} h={34} label="节点 $a$" tone="info" size="sm" />
+  <Box x={270} y={100} w={90} h={34} label="节点 $b$" tone="info" size="sm" />
+  <Box x={270} y={144} w={90} h={34} label="节点 $c$" tone="info" size="sm" />
+  <Box x={270} y={188} w={90} h={34} label="节点 $d$" tone="info" size="sm" />
   <Box x={440} y={46} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
   <Box x={440} y={76} w={110} h={24} label="GPU · 专家" size="sm" tone="accent" />
   <Box x={440} y={110} w={110} h={24} label="GPU · 专家 ×2" size="sm" tone="accent" />
@@ -171,7 +171,7 @@ NCCL 的 all-to-all 是通用的，不知道 MoE 的路由结构，也不支持�
 
 **低延迟 kernel（low-latency kernels）**用于推理的 decode：每步只有很少的 token（测试设置是每批 128 个），延迟比带宽更重要。它只用纯 RDMA，并提供一种基于 hook 的重叠方式：发起通信后立即返回，由网卡在后台完成数据传输，**不占用任何 SM**，计算可以照常进行，需要结果时再调用 hook 等待。
 
-<Bars label="DeepEP v1 低延迟 kernel 的 dispatch 延迟（128 token/批，H800 + CX7）" unit="μs"
+<Bars label="DeepEP v1 低延迟 kernel 的 dispatch 延迟（128 token/批，H800 + CX7）" unit="$\mu\mathrm{s}$"
   items={[
     { label: 'EP 8', value: 77 },
     { label: 'EP 16', value: 118 },

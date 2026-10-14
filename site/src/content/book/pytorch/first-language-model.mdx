@@ -55,7 +55,7 @@ $$
 `index_put_(..., accumulate=True)` 一次性把所有 $(x_{t-1}, x_t)$ 对累加进计数表——[张量：形状、步长与视图](/pytorch/tensors/)中提到过，这里不能写 `counts[a, b] += 1`，因为重复的下标只会被加一次。
 
 <Diagram width={720} height={260} label="bigram 条件概率表的一个片段">
-  <Matrix x={130} y={60} rows={5} cols={8} cell={[62, 32]} values={[[0, 0.09, 0.02, 0.05, 0.05, 0.06, 0.17, 0.01], [0.25, 0.02, 0.08, 0.36, 0.05, 0.08, 0.01, 0.02], [0.13, 0.17, 0.44, 0, 0.1, 0.07, 0.05, 0.01], [0.32, 0.06, 0.03, 0, 0.01, 0.01, 0.04, 0], [0, 0, 0, 0, 0, 0, 0, 1]]} rowLabels={['上一个 = 空格', 't', 'h', 'e', 'q']} colLabels={['空格', 'a', 'e', 'h', 'i', 'o', 't', 'u']} title="P(下一个字符 | 上一个字符)，只显示 8 列" highlight={[{ cells: [[0, 6], [1, 3], [2, 2], [3, 0], [4, 7]], tone: 'accent' }]} />
+  <Matrix x={130} y={60} rows={5} cols={8} cell={[62, 32]} values={[[0, 0.09, 0.02, 0.05, 0.05, 0.06, 0.17, 0.01], [0.25, 0.02, 0.08, 0.36, 0.05, 0.08, 0.01, 0.02], [0.13, 0.17, 0.44, 0, 0.1, 0.07, 0.05, 0.01], [0.32, 0.06, 0.03, 0, 0.01, 0.01, 0.04, 0], [0, 0, 0, 0, 0, 0, 0, 1]]} rowLabels={['上一个 = 空格', 't', 'h', 'e', 'q']} colLabels={['空格', 'a', 'e', 'h', 'i', 'o', 't', 'u']} title="$P(\text{下一个字符}\mid\text{上一个字符})$，只显示 8 列" highlight={[{ cells: [[0, 6], [1, 3], [2, 2], [3, 0], [4, 7]], tone: 'accent' }]} />
   <Fragment slot="caption">由训练集计数得到的部分概率（每行完整的 59 列之和为 1）。空格后最常见的是 t（单词 the、that 的开头）；t 后面最常见 h；h 后面 e；e 后面常是空格（词尾）。q 在训练集中出现 6 次，后面全是 u。这些规律构成了 bigram 模型的全部知识。</Fragment>
 </Diagram>
 
@@ -135,9 +135,9 @@ $$
   <Box x={40} y={270} w={80} h={40} label="T" mono />
   <Box x={140} y={270} w={80} h={40} label="h" mono />
   <Box x={240} y={270} w={80} h={40} label="e" mono />
-  <Box x={40} y={190} w={80} h={44} label="C[T]" sub="m = 16" tone="info" size="sm" />
-  <Box x={140} y={190} w={80} h={44} label="C[h]" sub="m = 16" tone="info" size="sm" />
-  <Box x={240} y={190} w={80} h={44} label="C[e]" sub="m = 16" tone="info" size="sm" />
+  <Box x={40} y={190} w={80} h={44} label="C[T]" sub="$m = 16$" tone="info" size="sm" />
+  <Box x={140} y={190} w={80} h={44} label="C[h]" sub="$m = 16$" tone="info" size="sm" />
+  <Box x={240} y={190} w={80} h={44} label="C[e]" sub="$m = 16$" tone="info" size="sm" />
   <Arrow from={[80, 270]} to={[80, 234]} />
   <Arrow from={[180, 270]} to={[180, 234]} />
   <Arrow from={[280, 270]} to={[280, 234]} />
@@ -145,14 +145,14 @@ $$
   <Arrow from={[80, 190]} to={[80, 160]} />
   <Arrow from={[180, 190]} to={[180, 160]} />
   <Arrow from={[280, 190]} to={[280, 160]} />
-  <Box x={390} y={120} w={140} h={40} label="$\tanh(W_h \,\cdot\, + b_h)$" sub="H = 128" tone="accent" size="sm" />
-  <Box x={580} y={120} w={120} h={40} label="$W_o \,\cdot\, + b_o$" sub="V = 59 logits" tone="accent" size="sm" />
-  <Box x={580} y={30} w={120} h={44} label="softmax" sub="P(下一个 | the)" tone="strong" size="sm" />
+  <Box x={390} y={120} w={140} h={40} label="$\tanh(W_h \,\cdot\, + b_h)$" sub="$H = 128$" tone="accent" size="sm" />
+  <Box x={580} y={120} w={120} h={40} label="$W_o \,\cdot\, + b_o$" sub="$V = 59$ logits" tone="accent" size="sm" />
+  <Box x={580} y={30} w={120} h={44} label="softmax" sub="$P(\text{下一个}\mid\text{the})$" tone="strong" size="sm" />
   <Arrow from={[320, 140]} to={[390, 140]} />
   <Arrow from={[530, 140]} to={[580, 140]} />
   <Arrow from={[640, 120]} to={[640, 74]} />
   <Region x={20} y={176} w={320} h={70} tone="ghost" />
-  <Text x={356} y={211} label="← 三个位置共享同一张嵌入表 C" size="sm" tone="info" anchor="start" />
+  <Text x={356} y={211} label="← 三个位置共享同一张嵌入表 $C$" size="sm" tone="info" anchor="start" />
   <Fragment slot="caption">输入是最近 3 个字符 “The” 中的 T、h、e。每个字符查同一张嵌入表 C，拼接后经 tanh 隐藏层与输出层得到 59 个 logits。嵌入表在位置间共享，但拼接后的 W_h 对每个位置有一组独立的权重。</Fragment>
 </Diagram>
 
@@ -212,7 +212,7 @@ $$
 <Plot label="n = 8、H = 128 的训练与验证损失" x={[0, 4000]} y={[0, 4.5]} xLabel="训练步数" yLabel="NLL（nat/字符）" series={[
   { points: [[0, 4.076], [500, 1.721], [1000, 1.283], [1500, 0.985], [2000, 0.775], [2500, 0.611], [3000, 0.496], [3500, 0.405], [4000, 0.339]], label: '训练集' },
   { points: [[0, 4.077], [500, 2.275], [1000, 2.345], [1500, 2.506], [2000, 2.736], [2500, 2.949], [3000, 3.191], [3500, 3.436], [4000, 3.68]], label: '验证集', tone: 'accent2' },
-  { fn: () => Math.log(59), label: 'log V（均匀分布）', tone: 'muted', dashed: true },
+  { fn: () => Math.log(59), label: '$\\log V$（均匀分布）', tone: 'muted', dashed: true },
 ]} markers={[{ at: [500, 2.275], label: '最佳验证点' }]}>
   <Fragment slot="caption">训练损失单调下降，验证损失在第 500 步后持续上升，到 4000 步时只比均匀分布好一点。两条曲线的分叉点就是开始过拟合的位置；如果在这里停止训练（早停），就能得到这个模型最好的泛化性能。</Fragment>
 </Plot>

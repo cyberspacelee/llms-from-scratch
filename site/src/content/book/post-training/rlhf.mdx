@@ -22,7 +22,7 @@ code:
   <Box x={30} y={50} w={180} h={50} label="提示 + 人写示范" sub="约 1.3 万条提示" tone="info" />
   <Box x={30} y={140} w={180} h={50} label="SFT" sub="交叉熵" tone="accent" />
   <Box x={30} y={225} w={180} h={50} label="$\pi_{\text{SFT}}$" tone="neutral" />
-  <Box x={270} y={50} w={180} h={50} label="$\pi_{\text{SFT}}$ 采样 $K$ 个回复" sub="K = 4…9" tone="info" />
+  <Box x={270} y={50} w={180} h={50} label="$\pi_{\text{SFT}}$ 采样 $K$ 个回复" sub="$K = 4,\ldots,9$" tone="info" />
   <Box x={270} y={140} w={180} h={50} label="标注员排序" sub="约 3.3 万条提示" tone="info" />
   <Box x={270} y={225} w={180} h={50} label="奖励模型 $r_\phi$" sub="Bradley–Terry 损失" tone="accent" />
   <Box x={510} y={50} w={180} h={50} label="新提示，策略采样" sub="约 3.1 万条提示" tone="info" />
@@ -80,8 +80,8 @@ $$
 对 $r_l$ 的导数则是它的相反数。梯度总是把选中回复的分数往上推、把被拒回复的分数往下压，推力的大小是“模型认为排错的概率” $\sigma(-\Delta)$：已经排对且间隔很大的样本几乎不再贡献梯度。
 
 <Plot label="Bradley–Terry 损失与梯度大小" x={[-6, 6]} y={[0, 6]} xLabel="分数差 $\Delta = r_w - r_l$" yLabel="数值"
-  series={[{ fn: (t) => Math.log1p(Math.exp(-t)), label: '损失 −log σ(Δ)' }, { fn: (t) => 1 / (1 + Math.exp(t)), label: '梯度大小 σ(−Δ)', tone: 'accent2', dashed: true }]}
-  markers={[{ at: [0, Math.log(2)], label: 'Δ = 0 时损失为 log 2' }]}>
+  series={[{ fn: (t) => Math.log1p(Math.exp(-t)), label: '损失 $-\\log\\sigma(\\Delta)$' }, { fn: (t) => 1 / (1 + Math.exp(t)), label: '梯度大小 $\\sigma(-\\Delta)$', tone: 'accent2', dashed: true }]}
+  markers={[{ at: [0, Math.log(2)], label: '$\\Delta = 0$ 时损失为 $\\log 2$' }]}>
   <Fragment slot="caption">Δ 越大，奖励模型越确信选中回复更好，损失趋于 0，梯度也趋于 0；Δ 为负（排错）时损失近似线性增长，梯度趋于 1。这与逻辑回归的交叉熵完全相同。</Fragment>
 </Plot>
 
@@ -203,9 +203,9 @@ $$
 
 取 min 使 $L^{\text{CLIP}}$ 是未裁剪目标的一个**下界**（悲观估计）：只忽略“让目标变得更好”的那部分变化，从不忽略“让目标变得更差”的部分。
 
-<Plot label="PPO 裁剪目标随重要性比的变化" x={[0, 2]} y={[-2, 1.5]} xLabel="重要性比 ρ" yLabel="单个 token 的目标"
-  series={[{ fn: (t) => Math.min(t, Math.min(Math.max(t, 0.8), 1.2)), label: 'Â = +1' }, { fn: (t) => Math.min(-t, -Math.min(Math.max(t, 0.8), 1.2)), label: 'Â = −1', tone: 'accent2' }, { fn: (t) => t, label: '未裁剪 ρÂ（Â = +1）', tone: 'muted', dashed: true }]}
-  markers={[{ at: [1.2, 1.2], label: '1 + ε' }, { at: [0.8, -0.8], label: '1 − ε' }]}>
+<Plot label="PPO 裁剪目标随重要性比的变化" x={[0, 2]} y={[-2, 1.5]} xLabel="重要性比 $\rho$" yLabel="单个 token 的目标"
+  series={[{ fn: (t) => Math.min(t, Math.min(Math.max(t, 0.8), 1.2)), label: '$\\hat A = +1$' }, { fn: (t) => Math.min(-t, -Math.min(Math.max(t, 0.8), 1.2)), label: '$\\hat A = -1$', tone: 'accent2' }, { fn: (t) => t, label: '未裁剪 $\\rho\\hat A$（$\\hat A = +1$）', tone: 'muted', dashed: true }]}
+  markers={[{ at: [1.2, 1.2], label: '$1 + \\epsilon$' }, { at: [0.8, -0.8], label: '$1 - \\epsilon$' }]}>
   <Fragment slot="caption">ε = 0.2。Â 为正时，目标在 ρ = 1.2 之后变平，继续增大 ρ 没有收益；Â 为负时，目标在 ρ = 0.8 之前是平的。两条曲线在 ρ = 1 处的斜率都等于 Â，此时 PPO 退化为普通的策略梯度。</Fragment>
 </Plot>
 
@@ -299,7 +299,7 @@ KL 惩罚有两个作用。其一是防止奖励黑客（下文详述）：奖�
 
 Gao 等（2023）系统地测量了这一现象。他们用一个大的“金标准”奖励模型代替人类，用它的标注训练较小的代理奖励模型，再用代理奖励模型做 RL 或 best-of-$n$ 采样。随着策略离初始模型越来越远（以 $d=\sqrt{\mathrm{KL}}$ 度量），代理奖励单调上升，金标准奖励却先升后降。对 RL，他们拟合出的函数形式是 $R(d) = d(\alpha - \beta\log d)$。
 
-<Plot label="奖励过度优化（示意）" x={[0, 10]} y={[0, 2.5]} xLabel="离初始策略的距离 d = √KL" yLabel="奖励"
+<Plot label="奖励过度优化（示意）" x={[0, 10]} y={[0, 2.5]} xLabel="离初始策略的距离 $d = \sqrt{\mathrm{KL}}$" yLabel="奖励"
   series={[{ fn: (t) => 0.25 * t, label: '代理奖励', tone: 'muted', dashed: true }, { fn: (t) => (t <= 0 ? 0 : 0.6 * t * (1 - 0.43 * Math.log(t))), label: '金标准奖励' }]}
   markers={[{ at: [Math.exp(1 / 0.43 - 1), 0.6 * Math.exp(1 / 0.43 - 1) * 0.43], label: '最优停止点' }]}>
   <Fragment slot="caption">示意图，参数为任意选取（α = 0.6，β ≈ 0.26），只用于展示 Gao 等（2023）拟合的函数形状：代理奖励持续上升，真实奖励在 d = e^(α/β − 1) 处达到最大后下降。KL 惩罚的作用就是把策略限制在峰值附近。</Fragment>

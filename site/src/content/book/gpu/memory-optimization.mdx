@@ -106,9 +106,9 @@ stats.sectors_per_load, stats.sectors_per_store     # (4.0, 32.0)
 全局内存的读和写因此都是合并的；“非连续访问”被移到了共享内存上，而共享内存没有扇区的概念，任意地址的访问都可以在一个周期内完成——只要不发生 bank conflict。
 
 <Diagram width={720} height={260} label="借道共享内存的转置">
-  <Matrix x={30} y={60} rows={4} cols={4} cell={34} values={[["a", "b", "c", "d"], ["e", "f", "g", "h"], ["i", "j", "k", "l"], ["m", "n", "o", "p"]]} highlight={[{ rows: [0], tone: 'accent' }]} title="输入 tile（HBM）" />
-  <Matrix x={290} y={60} rows={4} cols={4} cell={34} values={[["a", "b", "c", "d"], ["e", "f", "g", "h"], ["i", "j", "k", "l"], ["m", "n", "o", "p"]]} tone="info" highlight={[{ cols: [0], tone: 'accent2' }]} title="共享内存 tile" />
-  <Matrix x={550} y={60} rows={4} cols={4} cell={34} values={[["a", "e", "i", "m"], ["b", "f", "j", "n"], ["c", "g", "k", "o"], ["d", "h", "l", "p"]]} highlight={[{ rows: [0], tone: 'accent2' }]} title="输出 tile（HBM）" />
+  <Matrix x={30} y={60} rows={4} cols={4} cell={34} values={[["$a$", "$b$", "$c$", "$d$"], ["$e$", "$f$", "$g$", "$h$"], ["$i$", "$j$", "$k$", "$l$"], ["$m$", "$n$", "$o$", "$p$"]]} highlight={[{ rows: [0], tone: 'accent' }]} title="输入 tile（HBM）" />
+  <Matrix x={290} y={60} rows={4} cols={4} cell={34} values={[["$a$", "$b$", "$c$", "$d$"], ["$e$", "$f$", "$g$", "$h$"], ["$i$", "$j$", "$k$", "$l$"], ["$m$", "$n$", "$o$", "$p$"]]} tone="info" highlight={[{ cols: [0], tone: 'accent2' }]} title="共享内存 tile" />
+  <Matrix x={550} y={60} rows={4} cols={4} cell={34} values={[["$a$", "$e$", "$i$", "$m$"], ["$b$", "$f$", "$j$", "$n$"], ["$c$", "$g$", "$k$", "$o$"], ["$d$", "$h$", "$l$", "$p$"]]} highlight={[{ rows: [0], tone: 'accent2' }]} title="输出 tile（HBM）" />
   <Arrow from={[176, 128]} to={[284, 128]} label="按行读（合并）" />
   <Arrow from={[436, 128]} to={[544, 128]} label="按列取、按行写" />
   <Text x={360} y={226} label="__syncthreads()：整个 tile 写入共享内存后，才能开始按列读取" size="sm" tone="muted" />
@@ -154,8 +154,8 @@ $$
 固定 $c$、让 $r$ 取 0 到 31，得到 32 个不同的 bank，冲突消失。按行访问时 $(r+c) \bmod 32$ 对 $c$ 也互不相同，第一阶段同样无冲突。
 
 <Diagram width={660} height={250} label="tile[32][32] 与 tile[32][33] 的 bank 编号">
-  <Matrix x={60} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5]]} rowLabels={['r=0', 'r=1', 'r=2', 'r=3', 'r=4', 'r=5']} colLabels={['c=0', 'c=1', 'c=2', 'c=3', 'c=4', 'c=5']} highlight={[{ cols: [0], tone: 'accent2' }]} title="tile[32][32]：bank = c" />
-  <Matrix x={390} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9], [5, 6, 7, 8, 9, 10]]} rowLabels={['r=0', 'r=1', 'r=2', 'r=3', 'r=4', 'r=5']} colLabels={['c=0', 'c=1', 'c=2', 'c=3', 'c=4', 'c=5']} highlight={[{ cols: [0], tone: 'accent' }]} title="tile[32][33]：bank = (r + c) mod 32" />
+  <Matrix x={60} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5], [0, 1, 2, 3, 4, 5]]} rowLabels={['$r=0$', '$r=1$', '$r=2$', '$r=3$', '$r=4$', '$r=5$']} colLabels={['$c=0$', '$c=1$', '$c=2$', '$c=3$', '$c=4$', '$c=5$']} highlight={[{ cols: [0], tone: 'accent2' }]} title="tile[32][32]：$\mathrm{bank} = c$" />
+  <Matrix x={390} y={56} rows={6} cols={6} cell={[38, 26]} values={[[0, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 6], [2, 3, 4, 5, 6, 7], [3, 4, 5, 6, 7, 8], [4, 5, 6, 7, 8, 9], [5, 6, 7, 8, 9, 10]]} rowLabels={['$r=0$', '$r=1$', '$r=2$', '$r=3$', '$r=4$', '$r=5$']} colLabels={['$c=0$', '$c=1$', '$c=2$', '$c=3$', '$c=4$', '$c=5$']} highlight={[{ cols: [0], tone: 'accent' }]} title="tile[32][33]：$\mathrm{bank} = (r + c) \bmod 32$" />
   <Text x={180} y={230} label="一列全在 bank 0：32 路冲突" size="sm" tone="accent2" />
   <Text x={510} y={230} label="一列分散到 32 个 bank：无冲突" size="sm" tone="accent" />
   <Fragment slot="caption">只画出左上角 6×6。每个格子里的数字是该元素所在的 bank。按列读取（高亮列）时，未 padding 的 tile 每个元素都在同一个 bank；每行多出一个元素后，同一列的元素沿对角线分布到不同的 bank。</Fragment>
