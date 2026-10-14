@@ -117,6 +117,15 @@
   button:not(:disabled), summary { @apply cursor-pointer; }
 }
 
+/* Sidebar scrolling: a thin bar in the site colors, shown on hover or keyboard focus. The gutter is
+   always reserved, so the nav keeps one width whether or not this page's list overflows. */
+@utility scrollbar-quiet {
+  scrollbar-width: thin;
+  scrollbar-gutter: stable;
+  scrollbar-color: transparent transparent;
+  &:hover, &:focus-within { scrollbar-color: var(--color-rule-strong) transparent; }
+}
+
 /* Book prose: the typography plugin, fed by the site tokens. */
 @utility prose-book {
   --tw-prose-body: var(--color-ink);

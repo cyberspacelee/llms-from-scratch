@@ -57,6 +57,15 @@ function setNav(open: boolean) {
   if (open) sidebar.querySelector<HTMLElement>('[aria-current="page"]')?.focus()
 }
 
+// When the book nav overflows, open it scrolled to the current chapter. Only the sidebar scrolls, not the page.
+const currentChapter = sidebar?.querySelector<HTMLElement>('[aria-current="page"]')
+if (sidebar && currentChapter) {
+  const offset = currentChapter.getBoundingClientRect().top - sidebar.getBoundingClientRect().top
+  if (offset < 0 || offset + currentChapter.offsetHeight > sidebar.clientHeight) {
+    sidebar.scrollTop += offset - sidebar.clientHeight / 3
+  }
+}
+
 navToggle?.addEventListener('click', () => setNav(!sidebar?.hasAttribute('data-open')))
 scrim?.addEventListener('click', () => setNav(false))
 document.addEventListener('keydown', (event) => {
