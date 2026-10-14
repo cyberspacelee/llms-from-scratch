@@ -1,5 +1,6 @@
 ---
-/** Free text inside a diagram. Put the words in `label` (may contain "\n") or the slot. */
+/** Free text inside a diagram. Put the words in `label` (may contain "\n" and $…$ TeX) or the slot. */
+import Label from './Label.astro'
 import { lines, size as sizes, text as tones, type Size, type TextTone } from './tones'
 
 interface Props {
@@ -21,7 +22,7 @@ const transform = rotate ? `rotate(${rotate} ${x} ${y})` : undefined
 {label ? (
   <g transform={transform}>
     {lines(label, y, fontSize).map((line) => (
-      <text x={x} y={line.y} text-anchor={anchor} dominant-baseline="central" font-size={fontSize} font-weight={bold ? 600 : undefined} class:list={[tones[tone], mono && 'font-mono']}>{line.value}</text>
+      <Label x={x} y={line.y} label={line.value} anchor={anchor} baseline="central" fontSize={fontSize} bold={bold} tone={tones[tone]} mono={mono} />
     ))}
   </g>
 ) : (

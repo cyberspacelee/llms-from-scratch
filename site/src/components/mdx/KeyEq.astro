@@ -1,12 +1,13 @@
 ---
 /** Frames one of the few equations a chapter is built around. */
+import { texHtml } from '../diagram/tex'
 interface Props {
-  /** A short name for the result, shown above the equation. */
+  /** A short name for the result, shown above the equation; may contain $…$ TeX. */
   label?: string
 }
 const { label } = Astro.props
 ---
 <div class="my-6 rounded-lg border border-l-[3px] border-rule border-l-accent bg-raised px-4 py-2 [&_.katex-display]:my-2">
-  {label && <p class="m-0 pt-1 text-xs font-semibold text-muted">{label}</p>}
+  {label && <p class="m-0 pt-1 text-xs font-semibold text-muted" set:html={texHtml(label, 'html')} />}
   <slot />
 </div>

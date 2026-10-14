@@ -1,5 +1,7 @@
 ---
 /** A row of colour keys. */
+import Label from './Label.astro'
+import { labelWidth } from './tex'
 import { shape, size as sizes, type Tone } from './tones'
 
 interface Props {
@@ -11,12 +13,10 @@ interface Props {
   direction?: 'row' | 'column'
 }
 const { x, y, items, gap, direction = 'row' } = Astro.props
-// CJK glyphs are ~1em wide, Latin ~0.6em, at the 13-unit legend size.
-const width = (label: string) => [...label].reduce((sum, ch) => sum + (/[\u2E80-\uFFFF]/.test(ch) ? 13 : 7.8), 0)
 let cursor = 0
 const positions = items.map((item) => {
   const at = direction === 'column' ? { dx: 0, dy: cursor } : { dx: cursor, dy: 0 }
-  cursor += direction === 'column' ? (gap ?? 22) : (gap ?? 18 + width(item.label) + 22)
+  cursor += direction === 'column' ? (gap ?? 22) : (gap ?? 18 + labelWidth(item.label) + 22)
   return at
 })
 ---
@@ -24,7 +24,7 @@ const positions = items.map((item) => {
   {items.map((item, index) => (
     <g>
       <rect x={x + positions[index].dx} y={y + positions[index].dy - 6} width={12} height={12} rx={3} class:list={[shape[item.tone].box, 'stroke-[1.25]']} />
-      <text x={x + positions[index].dx + 18} y={y + positions[index].dy} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{item.label}</text>
+      <Label x={x + positions[index].dx + 18} y={y + positions[index].dy} label={item.label} baseline="central" fontSize={sizes.sm} tone="fill-muted" />
     </g>
   ))}
 </g>

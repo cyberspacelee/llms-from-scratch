@@ -42,7 +42,8 @@ const register = () => {
           const matrix = group.getScreenCTM()
           if (matrix) sizes.push(100 * Math.hypot(matrix.a, matrix.b))
         })
-        svg.querySelectorAll<HTMLElement>('foreignObject span').forEach(text => {
+        // Only the label's own span: KaTeX nests near-zero-size spacer spans inside it.
+        svg.querySelectorAll<HTMLElement>('foreignObject > div > span').forEach(text => {
           const object = text.closest('foreignObject') as SVGForeignObjectElement | null
           const matrix = object?.getScreenCTM()
           if (matrix) sizes.push(parseFloat(getComputedStyle(text).fontSize) * Math.hypot(matrix.a, matrix.b))

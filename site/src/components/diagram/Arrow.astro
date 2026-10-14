@@ -3,6 +3,7 @@
  * A straight or bent arrow through `from → via… → to`, with an optional label.
  * The head is drawn as a polygon, so no <marker> ids are needed.
  */
+import Label from './Label.astro'
 import { line as lineTones, size as sizes, text as textTones, type TextTone, type Tone } from './tones'
 
 type Point = [number, number]
@@ -67,18 +68,18 @@ for (let index = 1; index < points.length; index += 1) {
 const [p, q] = [points[best], points[best + 1]]
 const mid: Point = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]
 const offset = 9
-const place = {
+const place = ({
   above: { x: mid[0], y: mid[1] - offset, anchor: 'middle', baseline: 'auto' },
   below: { x: mid[0], y: mid[1] + offset, anchor: 'middle', baseline: 'hanging' },
   left: { x: mid[0] - offset, y: mid[1], anchor: 'end', baseline: 'central' },
   right: { x: mid[0] + offset, y: mid[1], anchor: 'start', baseline: 'central' },
-}[labelSide]
+} as const)[labelSide]
 ---
 <g>
   <path d={d} fill="none" stroke-width={width} stroke-linecap="round" stroke-linejoin="round" class:list={[colors.stroke, dashed && '[stroke-dasharray:5_4]']} />
   {(head === 'end' || head === 'both') && <polygon points={arrowhead(points.at(-1)!, points.at(-2)!)} class={colors.fill} />}
   {head === 'both' && <polygon points={arrowhead(points[0], points[1])} class={colors.fill} />}
   {label && (
-    <text x={place.x} y={place.y} text-anchor={place.anchor} dominant-baseline={place.baseline} font-size={sizes.sm} paint-order="stroke" stroke-width="4" stroke-linejoin="round" class:list={[textTones[labelTone], 'stroke-raised']}>{label}</text>
+    <Label x={place.x} y={place.y} label={label} anchor={place.anchor} baseline={place.baseline} fontSize={sizes.sm} tone={textTones[labelTone]} halo />
   )}
 </g>

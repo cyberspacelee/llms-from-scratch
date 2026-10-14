@@ -1,0 +1,67 @@
+---
+/**
+ * One line of diagram text. Plain labels are SVG <text>; labels with $…$ are typeset by KaTeX
+ * as MathML inside a <foreignObject> sized generously around the anchor point, so no width is measured.
+ */
+import { hasTex, texHtml } from './tex'
+
+interface Props {
+  x: number
+  y: number
+  label: string
+  fontSize: number
+  /** A fill-* colour class from tones.ts. */
+  tone: string
+  anchor?: 'start' | 'middle' | 'end'
+  /** SVG dominant-baseline; omitted means the alphabetic baseline sits on y. */
+  baseline?: 'central' | 'auto' | 'hanging'
+  mono?: boolean
+  bold?: boolean
+  /** Outline the text in the figure background so it reads over lines. */
+  halo?: boolean
+  transform?: string
+}
+const { x, y, label, fontSize, tone, anchor = 'start', baseline, mono = false, bold = false, halo = false, transform } = Astro.props
+
+// The same colours for HTML text; literal so Tailwind sees every class.
+const htmlTone: Record<string, string> = {
+  'fill-ink': 'text-ink', 'fill-muted': 'text-muted', 'fill-paper': 'text-paper',
+  'fill-accent': 'text-accent', 'fill-accent2': 'text-accent2', 'fill-info': 'text-info',
+}
+const tex = hasTex(label)
+const boxW = 1200, boxH = fontSize * 3
+const boxX = anchor === 'start' ? x : anchor === 'end' ? x - boxW : x - boxW / 2
+const boxY = baseline === 'central' ? y - boxH / 2 : baseline === 'hanging' ? y : y - boxH + fontSize * 0.3
+---
+{tex ? (
+  <foreignObject x={boxX} y={boxY} width={boxW} height={boxH} transform={transform} class="pointer-events-none overflow-visible">
+    <div
+      class:list={[
+        // .katex is position:relative, which WebKit paints off-place inside a scaled foreignObject.
+        'flex size-full leading-none whitespace-nowrap [&_.katex]:static [&_.katex]:text-[1.1em]',
+        anchor === 'start' ? 'justify-start' : anchor === 'end' ? 'justify-end' : 'justify-center',
+        baseline === 'central' ? 'items-center' : baseline === 'hanging' ? 'items-start' : 'items-end',
+      ]}
+      style={`font-size:${fontSize}px`}
+    >
+      <span
+        class:list={[htmlTone[tone], mono && 'font-mono', bold && 'font-semibold', halo && 'rounded-sm bg-raised px-0.5']}
+        set:html={texHtml(label)}
+      />
+    </div>
+  </foreignObject>
+) : (
+  <text
+    x={x}
+    y={y}
+    transform={transform}
+    text-anchor={anchor === 'start' ? undefined : anchor}
+    dominant-baseline={baseline}
+    font-size={fontSize}
+    font-weight={bold ? 600 : undefined}
+    paint-order={halo ? 'stroke' : undefined}
+    stroke-width={halo ? 4 : undefined}
+    stroke-linejoin={halo ? 'round' : undefined}
+    class:list={[tone, mono && 'font-mono', halo && 'stroke-raised']}
+  >{label}</text>
+)}

@@ -1,5 +1,6 @@
 ---
-/** A labelled rectangle: a tensor, a layer, a process, a memory. `label` may contain "\n". */
+/** A labelled rectangle: a tensor, a layer, a process, a memory. `label` may contain "\n" and $…$ TeX. */
+import Label from './Label.astro'
 import { lines, shape, size as sizes, type Size, type Tone } from './tones'
 
 interface Props {
@@ -28,12 +29,12 @@ const subY = (labelLines.at(-1)?.y ?? centre) + fontSize * 0.6 + subSize * 0.85
 <g>
   <rect x={x} y={y} width={w} height={h} rx={rx} class:list={[colors.box, 'stroke-[1.5]']} />
   {title ? (
-    label && <text x={x + 10} y={y + fontSize + 6} font-size={fontSize} font-weight="600" class={colors.text}>{label}</text>
+    label && <Label x={x + 10} y={y + fontSize + 6} label={label} fontSize={fontSize} bold tone={colors.text} />
   ) : (
     labelLines.map((line) => (
-      <text x={x + w / 2} y={line.y} text-anchor="middle" dominant-baseline="central" font-size={fontSize} font-weight="600" class:list={[colors.text, mono && 'font-mono']}>{line.value}</text>
+      <Label x={x + w / 2} y={line.y} label={line.value} anchor="middle" baseline="central" fontSize={fontSize} bold tone={colors.text} mono={mono} />
     ))
   )}
-  {sub && !title && <text x={x + w / 2} y={subY} text-anchor="middle" dominant-baseline="central" font-size={subSize} class:list={[colors.sub, 'font-mono']}>{sub}</text>}
+  {sub && !title && <Label x={x + w / 2} y={subY} label={sub} anchor="middle" baseline="central" fontSize={subSize} tone={colors.sub} mono />}
   <slot />
 </g>

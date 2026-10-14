@@ -6,6 +6,8 @@
  *         items={[{ label: 'FP32 + Adam', segments: [{ value: 28, label: '权重' }, { value: 56, label: '优化器' }] }]} />
  */
 import FigureShell from '../FigureShell.astro'
+import Label from './Label.astro'
+import { labelWidth, visible } from './tex'
 import { shape, size as sizes, type Tone } from './tones'
 
 type Segment = { value: number; label?: string; tone?: Tone }
@@ -23,11 +25,10 @@ const tones: Tone[] = ['accent', 'info', 'accent2', 'muted', 'neutral']
 const rows = items.map((item) => ({ ...item, segments: item.segments ?? [{ value: item.value ?? 0, tone: item.tone }] }))
 const total = (row: (typeof rows)[number]) => row.segments.reduce((sum, s) => sum + s.value, 0)
 const max = Astro.props.max ?? Math.max(...rows.map(total))
-const left = Math.max(80, Math.max(...items.map((item) => item.label.length)) * 13 + 20)
+const left = Math.max(80, Math.max(...items.map((item) => [...visible(item.label)].length)) * 13 + 20)
 const right = totals ? 90 : 16, barH = 26, gap = 14
 const segmentLabels = [...new Map(rows.flatMap((row) => row.segments.map((s, i) => [s.label, s.tone ?? tones[i % tones.length]] as const)).filter(([l]) => l)).entries()]
 const legendH = segmentLabels.length > 1 ? 30 : 0
-const labelWidth = (label: string) => [...label].reduce((sum, ch) => sum + (/[\u2E80-\uFFFF]/.test(ch) ? 13 : 7.8), 0)
 const legendX: number[] = []
 segmentLabels.reduce((cursor, [text]) => { legendX.push(cursor); return cursor + 18 + labelWidth(text ?? '') + 24 }, left)
 const height = legendH + rows.length * (barH + gap) + 6
@@ -38,13 +39,13 @@ const fmt = (v: number) => String(Number(v.toPrecision(4)))
   <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} font-size={sizes.sm} class="mx-auto block h-auto w-full font-sans" style={`min-width:${Math.round(width * 0.7)}px`}>
     {segmentLabels.length > 1 && segmentLabels.map(([text, tone], index) => <g>
       <rect x={legendX[index]} y={8} width={12} height={12} rx="3" class:list={[shape[tone].box, 'stroke-[1.25]']} />
-      <text x={legendX[index] + 18} y={14} dominant-baseline="central" font-size={sizes.sm} class="fill-muted">{text}</text>
+      <Label x={legendX[index] + 18} y={14} label={text ?? ''} baseline="central" fontSize={sizes.sm} tone="fill-muted" />
     </g>)}
     {rows.map((row, r) => {
       const y = legendH + r * (barH + gap) + 4
       let cursor = left
       return <g>
-        <text x={left - 10} y={y + barH / 2} text-anchor="end" dominant-baseline="central" font-size={sizes.sm} class="fill-ink">{row.label}</text>
+        <Label x={left - 10} y={y + barH / 2} label={row.label} anchor="end" baseline="central" fontSize={sizes.sm} tone="fill-ink" />
         {row.segments.map((s, i) => {
           const x = cursor, w = sx(s.value)
           cursor += w
