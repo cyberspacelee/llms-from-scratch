@@ -126,7 +126,7 @@ $$
 
 ZeRO（Zero Redundancy Optimizer，Rajbhandari 等，2020）的观察是：这些状态在 $N_d$ 个数据并行 rank 上被**完全复制**了 $N_d$ 份，而每份只在更新时被用到。既然更新是逐元素的（Adam 对每个参数独立计算），完全可以把参数切成 $N_d$ 段，每个 rank 只负责一段的更新，只保存这一段的状态。按切分的范围，ZeRO 分三个阶段：
 
-<KeyEq label="ZeRO 各阶段每卡模型状态（Ψ 个参数，N_d 个 rank，优化器 K 字节/参数）">
+<KeyEq label="ZeRO 各阶段每卡模型状态（$\Psi$ 个参数，$N_d$ 个 rank，优化器 $K$ 字节/参数）">
 
 $$
 \begin{aligned}

@@ -63,7 +63,7 @@ $$
   <Box x={20} y={170} w={70} h={44} label="b" sub="−0.5" tone="info" />
   <Box x={170} y={90} w={110} h={64} label="z = wx + b" sub="0.5" tone="accent" mono />
   <Box x={350} y={90} w={100} h={64} label="a = tanh z" sub="0.4621" tone="accent" mono />
-  <Box x={520} y={90} w={110} h={64} label="ℓ = ½(a−t)²" sub="0.1447" tone="strong" mono />
+  <Box x={520} y={90} w={110} h={64} label="$\ell = \tfrac{1}{2}(a-t)^2$" sub="0.1447" tone="strong" mono />
   <Arrow from={[90, 52]} to={[170, 108]} />
   <Arrow from={[90, 122]} to={[170, 122]} />
   <Arrow from={[90, 192]} to={[170, 138]} />
@@ -71,7 +71,7 @@ $$
   <Arrow from={[450, 122]} to={[520, 122]} />
   <Text x={485} y={185} label="∂ℓ/∂a = −0.538" size="sm" tone="accent2" />
   <Text x={315} y={185} label="∂ℓ/∂z = −0.423" size="sm" tone="accent2" />
-  <Text x={315} y={205} label="（× (1 − a²) = 0.786）" size="sm" tone="muted" />
+  <Text x={315} y={205} label="（$\times\, (1 - a^2) = 0.786$）" size="sm" tone="muted" />
   <Text x={130} y={30} label="∂ℓ/∂w = −0.846" size="sm" tone="accent2" anchor="start" />
   <Text x={130} y={230} label="∂ℓ/∂b = −0.423" size="sm" tone="accent2" anchor="start" />
   <Arrow from={[575, 154]} via={[[575, 166]]} to={[225, 166]} tone="accent2" dashed />
@@ -146,13 +146,13 @@ $$
 - **反向模式**（reverse mode）从左往右：先算 $g^\top J_L$，再算 $(g^\top J_L)J_{L-1}$……每一步都是“向量乘雅可比”（vector-Jacobian product，VJP）。它逆着前向计算的方向，追踪“每个中间变量对输出的某个组合 $g^\top y$ 有多重要”。一次反向传递得到 $g^\top J$，即**一个输出组合**对全部输入的梯度。
 
 <Diagram width={720} height={210} label="同一串雅可比乘积的两种计算顺序：前向模式从右乘起，反向模式从左乘起">
-  <Box x={130} y={70} w={90} h={50} label="J₃" sub="(m, d₂)" />
-  <Box x={250} y={70} w={90} h={50} label="J₂" sub="(d₂, d₁)" />
-  <Box x={370} y={70} w={90} h={50} label="J₁" sub="(d₁, n)" />
+  <Box x={130} y={70} w={90} h={50} label="$J_3$" sub="$(m, d_2)$" />
+  <Box x={250} y={70} w={90} h={50} label="$J_2$" sub="$(d_2, d_1)$" />
+  <Box x={370} y={70} w={90} h={50} label="$J_1$" sub="$(d_1, n)$" />
   <Box x={490} y={70} w={70} h={50} label="v" sub="(n, 1)" tone="info" />
-  <Box x={30} y={70} w={70} h={50} label="gᵀ" sub="(1, m)" tone="accent2" />
-  <Arrow from={[525, 140]} via={[[525, 160], [175, 160]]} to={[175, 140]} tone="info" label="前向模式：J₁v → J₂(J₁v) → …（JVP）" labelSide="below" />
-  <Arrow from={[65, 50]} via={[[65, 30], [415, 30]]} to={[415, 50]} tone="accent2" label="反向模式：gᵀJ₃ → (gᵀJ₃)J₂ → …（VJP）" />
+  <Box x={30} y={70} w={70} h={50} label="$g^\top$" sub="(1, m)" tone="accent2" />
+  <Arrow from={[525, 140]} via={[[525, 160], [175, 160]]} to={[175, 140]} tone="info" label="前向模式：$J_1 v \to J_2(J_1 v) \to \dots$（JVP）" labelSide="below" />
+  <Arrow from={[65, 50]} via={[[65, 30], [415, 30]]} to={[415, 50]} tone="accent2" label="反向模式：$g^\top J_3 \to (g^\top J_3) J_2 \to \dots$（VJP）" />
   <Text x={600} y={95} label="n 个输入" anchor="start" size="sm" tone="muted" />
   <Text x={600} y={117} label="m 个输出" anchor="start" size="sm" tone="muted" />
   <Fragment slot="caption">两种顺序得到的数学结果相同，但中间结果的形状不同：前向模式始终携带一个列向量（与输入同维），反向模式始终携带一个行向量（与输出同维）。都只做矩阵-向量乘，从不构造完整的雅可比矩阵。</Fragment>
@@ -243,16 +243,16 @@ $$
 
 <Diagram width={720} height={280} label="两层网络的前向值与反向梯度">
   <Box x={20} y={100} w={80} h={56} label="x" sub="(1, 2)" tone="info" />
-  <Box x={150} y={100} w={110} h={56} label="z = W₁x + b₁" sub="(−0.5, 1.5)" tone="accent" />
+  <Box x={150} y={100} w={110} h={56} label="$z = W_1 x + b_1$" sub="(−0.5, 1.5)" tone="accent" />
   <Box x={310} y={100} w={90} h={56} label="h = relu z" sub="(0, 1.5)" tone="accent" />
-  <Box x={450} y={100} w={110} h={56} label="y = w₂·h + b₂" sub="−1" tone="accent" />
+  <Box x={450} y={100} w={110} h={56} label="$y = w_2 \cdot h + b_2$" sub="−1" tone="accent" />
   <Box x={610} y={100} w={70} h={56} label="ℓ" sub="2" tone="strong" />
   <Arrow from={[100, 128]} to={[150, 128]} />
   <Arrow from={[260, 128]} to={[310, 128]} />
   <Arrow from={[400, 128]} to={[450, 128]} />
   <Arrow from={[560, 128]} to={[610, 128]} />
-  <Box x={150} y={20} w={110} h={44} label="W₁, b₁" tone="info" />
-  <Box x={450} y={20} w={110} h={44} label="w₂, b₂" tone="info" />
+  <Box x={150} y={20} w={110} h={44} label="$W_1, b_1$" tone="info" />
+  <Box x={450} y={20} w={110} h={44} label="$w_2, b_2$" tone="info" />
   <Arrow from={[205, 64]} to={[205, 100]} />
   <Arrow from={[505, 64]} to={[505, 100]} />
   <Text x={645} y={190} label="∂ℓ/∂y = −2" size="sm" tone="accent2" />
@@ -260,8 +260,8 @@ $$
   <Text x={355} y={190} label="∂ℓ/∂z = (0, 2)" size="sm" tone="accent2" />
   <Text x={205} y={190} label="∂ℓ/∂x = (1, 2)" size="sm" tone="accent2" />
   <Text x={355} y={215} label="relu 截断第 1 个分量" size="sm" tone="muted" />
-  <Text x={505} y={215} label="∂ℓ/∂w₂ = (0, −3)" size="sm" tone="accent2" />
-  <Text x={205} y={215} label="∂ℓ/∂W₁ = [[0,0],[2,4]]" size="sm" tone="accent2" />
+  <Text x={505} y={215} label="$\partial \ell / \partial w_2 = (0, -3)$" size="sm" tone="accent2" />
+  <Text x={205} y={215} label="$\partial \ell / \partial W_1 = [[0,0],[2,4]]$" size="sm" tone="accent2" />
   <Arrow from={[680, 245]} to={[40, 245]} tone="accent2" dashed label="反向传递" labelSide="below" />
   <Fragment slot="caption">框内小字是前向值，下方是反向传递得到的梯度。ReLU 在 $z_1 = -0.5 < 0$ 处导数为 0，所以与第一个隐藏单元相连的参数（$W_1$ 第一行、$b_1$ 第一个分量、$w_2$ 第一个分量）本步都得不到梯度。</Fragment>
 </Diagram>

@@ -40,7 +40,7 @@ $$
   <Arrow from={[154, 174]} to={[358, 270]} tone="accent" />
   <Arrow from={[576, 194]} to={[386, 270]} tone="accent" />
   <Text x={40} y={236} label="x[1, 2]：0 + 1·4 + 2·1 = 6" size="sm" anchor="start" mono />
-  <Text x={700} y={236} label="xᵀ[2, 1]：0 + 2·1 + 1·4 = 6" size="sm" anchor="end" mono />
+  <Text x={700} y={236} label="$x^\top[2, 1]$：$0 + 2 \cdot 1 + 1 \cdot 4 = 6$" size="sm" anchor="end" mono />
   <Text x={360} y={350} label="storage：一维连续内存（上方数字是位置）" size="sm" tone="muted" />
   <Fragment slot="caption">上方两个矩阵共享下方同一块存储。x 的第 1 行（浅色）与 xᵀ 的第 1 列是同样四个内存位置 4–7；深色格子 x[1, 2] 与 xᵀ[2, 1] 都按“偏移 + Σ 下标 × 步长”算到位置 6。转置没有搬动任何数据，只是交换了 shape 与 stride。</Fragment>
 </Diagram>

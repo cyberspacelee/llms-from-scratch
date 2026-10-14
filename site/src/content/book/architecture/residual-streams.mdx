@@ -45,15 +45,15 @@ $$
 嵌入层的输出被复制成 $n$ 份作为初始的 $X_0$，最后一层之后把 $n$ 条流相加，再交给最终的归一化和输出头。当 $n=1$ 且三组系数都取 1 时，公式退化为 $x_{l+1}=x_l+F_l(x_l)$，即普通残差；测试 `test_hc_with_one_stream_is_plain_residual` 检查的就是这一点。
 
 <Diagram width={700} height={280} label="扩展率 n = 4 的超连接：层从 4 条残差流读取、写回，流之间由 H_res 混合">
-  <Text x={30} y={30} label="Xₗ（4 条流）" size="sm" tone="muted" anchor="start" />
+  <Text x={30} y={30} label="$X_l$（4 条流）" size="sm" tone="muted" anchor="start" />
   <Box x={30} y={50} w={110} h={34} label="流 1" tone="info" />
   <Box x={30} y={94} w={110} h={34} label="流 2" tone="info" />
   <Box x={30} y={138} w={110} h={34} label="流 3" tone="info" />
   <Box x={30} y={182} w={110} h={34} label="流 4" tone="info" />
-  <Box x={200} y={20} w={120} h={40} label="H_pre（读）" tone="accent" />
-  <Box x={370} y={20} w={110} h={40} label="Fₗ" sub="注意力或 FFN" tone="strong" />
-  <Box x={530} y={20} w={130} h={40} label="H_post（写）" tone="accent" />
-  <Box x={250} y={110} w={180} h={80} label="H_res（混合）" sub="n × n" tone="accent2" />
+  <Box x={200} y={20} w={120} h={40} label="$H_{\text{pre}}$（读）" tone="accent" />
+  <Box x={370} y={20} w={110} h={40} label="$F_l$" sub="注意力或 FFN" tone="strong" />
+  <Box x={530} y={20} w={130} h={40} label="$H_{\text{post}}$（写）" tone="accent" />
+  <Box x={250} y={110} w={180} h={80} label="$H_{\text{res}}$（混合）" sub="n × n" tone="accent2" />
   <Box x={560} y={94} w={110} h={34} label="流 1′" tone="info" />
   <Box x={560} y={138} w={110} h={34} label="流 2′" tone="info" />
   <Box x={560} y={182} w={110} h={34} label="流 3′" tone="info" />
@@ -64,7 +64,7 @@ $$
   <Arrow from={[595, 60]} to={[595, 94]} tone="accent" />
   <Arrow from={[140, 155]} to={[250, 155]} tone="accent2" />
   <Arrow from={[430, 155]} to={[560, 155]} tone="accent2" />
-  <Text x={350} y={240} label="Xₗ₊₁ = H_res Xₗ + H_postᵀ Fₗ(H_pre Xₗ)" size="sm" mono />
+  <Text x={350} y={240} label="$X_{l+1} = H_{\text{res}} X_l + H_{\text{post}}^\top F_l(H_{\text{pre}} X_l)$" size="sm" mono />
   <Fragment slot="caption">层的计算 $F_l$ 只看到一个 $d$ 维输入，它由 $\mathcal H^{\text{pre}}$ 从 4 条流中混合得到；输出由 $\mathcal H^{\text{post}}$ 按不同权重写回 4 条流（图中只画出一个箭头）；与此同时 4 条流经 $\mathcal H^{\text{res}}$ 互相混合，取代了普通残差中的恒等映射。</Fragment>
 </Diagram>
 

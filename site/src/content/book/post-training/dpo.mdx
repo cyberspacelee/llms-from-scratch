@@ -57,10 +57,10 @@ $$
 
 <Bars label="不同 β 下的最优策略" max={1} totals={false}
   items={[
-    { label: 'π_ref', segments: [{ value: 0.5, label: 'y₁ (r = 1)' }, { value: 0.3, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.2, label: 'y₃ (r = 0)', tone: 'muted' }], note: '' },
-    { label: 'π* (β = 2)', segments: [{ value: 0.448, label: 'y₁ (r = 1)' }, { value: 0.443, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.109, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.058' },
-    { label: 'π* (β = 1)', segments: [{ value: 0.360, label: 'y₁ (r = 1)' }, { value: 0.587, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.053, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.205' },
-    { label: 'π* (β = 0.5)', segments: [{ value: 0.182, label: 'y₁ (r = 1)' }, { value: 0.808, label: 'y₂ (r = 2)', tone: 'accent2' }, { value: 0.010, label: 'y₃ (r = 0)', tone: 'muted' }], note: 'KL = 0.587' },
+    { label: '$\\pi_{\\text{ref}}$', segments: [{ value: 0.5, label: '$y_1$ ($r = 1$)' }, { value: 0.3, label: '$y_2$ ($r = 2$)', tone: 'accent2' }, { value: 0.2, label: '$y_3$ ($r = 0$)', tone: 'muted' }], note: '' },
+    { label: 'π* (β = 2)', segments: [{ value: 0.448, label: '$y_1$ ($r = 1$)' }, { value: 0.443, label: '$y_2$ ($r = 2$)', tone: 'accent2' }, { value: 0.109, label: '$y_3$ ($r = 0$)', tone: 'muted' }], note: 'KL = 0.058' },
+    { label: 'π* (β = 1)', segments: [{ value: 0.360, label: '$y_1$ ($r = 1$)' }, { value: 0.587, label: '$y_2$ ($r = 2$)', tone: 'accent2' }, { value: 0.053, label: '$y_3$ ($r = 0$)', tone: 'muted' }], note: 'KL = 0.205' },
+    { label: 'π* (β = 0.5)', segments: [{ value: 0.182, label: '$y_1$ ($r = 1$)' }, { value: 0.808, label: '$y_2$ ($r = 2$)', tone: 'accent2' }, { value: 0.010, label: '$y_3$ ($r = 0$)', tone: 'muted' }], note: 'KL = 0.587' },
   ]}>
   <Fragment slot="caption">每根条是一个概率分布（总长为 1）。β 越小，最优策略越集中到奖励最高的 y₂ 上，期望奖励从 1.335 升到 1.798，代价是与参考策略的 KL 从 0.058 增大到 0.587。β → 0 时退化为只选最高奖励，β → ∞ 时退化为参考策略本身。</Fragment>
 </Bars>
@@ -100,14 +100,14 @@ $$
 它的形式与奖励模型的损失完全相同，只是“奖励”换成了 $\hat r_\theta(x,y) = \beta\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)}$，称为**隐式奖励**（implicit reward）。训练语言模型就是在训练一个奖励模型，而这个奖励模型对应的最优策略就是语言模型本身。论文还证明，在 Bradley–Terry 假设下，每一类“只差一个提示相关常数”的奖励函数都可以用这种形式表示，所以这种参数化不损失一般性。
 
 <Diagram width={720} height={260} label="DPO 损失的计算图">
-  <Box x={10} y={40} w={110} h={50} label="(x, y_w)" tone="info" mono />
-  <Box x={10} y={170} w={110} h={50} label="(x, y_l)" tone="info" mono />
-  <Box x={180} y={20} w={150} h={44} label="π_θ（可训练）" tone="accent" />
-  <Box x={180} y={76} w={150} h={44} label="π_ref（冻结）" tone="muted" />
-  <Box x={180} y={140} w={150} h={44} label="π_θ（可训练）" tone="accent" />
-  <Box x={180} y={196} w={150} h={44} label="π_ref（冻结）" tone="muted" />
-  <Box x={375} y={45} w={160} h={50} label="r̂_w" sub="β·(log π_θ − log π_ref)" size="md" />
-  <Box x={375} y={165} w={160} h={50} label="r̂_l" sub="β·(log π_θ − log π_ref)" size="md" />
+  <Box x={10} y={40} w={110} h={50} label="$(x, y_w)$" tone="info" mono />
+  <Box x={10} y={170} w={110} h={50} label="$(x, y_l)$" tone="info" mono />
+  <Box x={180} y={20} w={150} h={44} label="$\pi_\theta$（可训练）" tone="accent" />
+  <Box x={180} y={76} w={150} h={44} label="$\pi_{\text{ref}}$（冻结）" tone="muted" />
+  <Box x={180} y={140} w={150} h={44} label="$\pi_\theta$（可训练）" tone="accent" />
+  <Box x={180} y={196} w={150} h={44} label="$\pi_{\text{ref}}$（冻结）" tone="muted" />
+  <Box x={375} y={45} w={160} h={50} label="$\hat r_w$" sub="$\beta\,(\log \pi_\theta - \log \pi_{\text{ref}})$" size="md" />
+  <Box x={375} y={165} w={160} h={50} label="$\hat r_l$" sub="$\beta\,(\log \pi_\theta - \log \pi_{\text{ref}})$" size="md" />
   <Box x={560} y={105} w={50} h={50} label="−" />
   <Box x={630} y={100} w={60} h={60} label="−log σ" size="sm" tone="strong" />
   <Arrow from={[120, 65]} via={[[150, 65], [150, 42]]} to={[180, 42]} />

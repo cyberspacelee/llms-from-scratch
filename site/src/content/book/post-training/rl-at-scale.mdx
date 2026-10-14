@@ -87,8 +87,8 @@ $$
 这项惩罚加在准确性奖励上。DAPO 中 $L_{\max} = 20480$、$L_{\text{cache}} = 4096$。
 
 <Plot label="DAPO 的软超长惩罚" x={[0, 24]} y={[-1.2, 0.2]} xLabel="回复长度（千 token，1k = 1024）" yLabel="长度惩罚" xTicks={[0, 4, 8, 12, 16, 20, 24]}
-  series={[{ fn: (t) => (t <= 16 ? 0 : t <= 20 ? (16 - t) / 4 : -1), label: 'L_max = 20k，L_cache = 4k', samples: 600 }]}
-  markers={[{ at: [16, 0], label: 'L_max − L_cache' }, { at: [20, -1], label: 'L_max' }]}>
+  series={[{ fn: (t) => (t <= 16 ? 0 : t <= 20 ? (16 - t) / 4 : -1), label: '$L_{\\max} = 20\\text{k}$，$L_{\\text{cache}} = 4\\text{k}$', samples: 600 }]}
+  markers={[{ at: [16, 0], label: '$L_{\\max} - L_{\\text{cache}}$' }, { at: [20, -1], label: '$L_{\\max}$' }]}>
   <Fragment slot="caption">长度不超过 16384 时不罚；在最后 4096 个 token 的缓冲区内惩罚从 0 线性降到 −1；超过最大长度一律 −1。它给模型一个平滑的“写短一点”的信号，而不是在截断处突然从可能得分变成 0 分。</Fragment>
 </Plot>
 

@@ -32,7 +32,7 @@ code:
   <Box x={380} y={186} w={30} h={26} label="+" size="sm" />
   <Box x={320} y={130} w={150} h={36} label="RMSNorm → FFN" tone="accent" size="sm" />
   <Box x={380} y={86} w={30} h={26} label="+" size="sm" />
-  <Text x={395} y={60} label="RoPE 旋转因子 [T, d_h/2]" size="xs" tone="muted" />
+  <Text x={395} y={60} label="RoPE 旋转因子 $[T, d_h/2]$" size="xs" tone="muted" />
   <Box x={520} y={140} w={80} h={50} label="final\nnorm" tone="info" size="sm" />
   <Box x={620} y={140} w={90} h={50} label="LM head" sub="[B, T, V]" tone="strong" />
   <Arrow from={[130, 165]} to={[160, 165]} />
@@ -42,7 +42,7 @@ code:
   <Arrow from={[395, 130]} to={[395, 112]} />
   <Arrow from={[395, 86]} via={[[395, 76], [505, 76], [505, 165]]} to={[520, 165]} />
   <Arrow from={[600, 165]} to={[620, 165]} />
-  <Arrow from={[665, 190]} via={[[665, 315], [215, 315]]} to={[215, 190]} tone="accent2" dashed head="both" label="权重绑定：W_out = E（可选）" labelSide="above" />
+  <Arrow from={[665, 190]} via={[[665, 315], [215, 315]]} to={[215, 190]} tone="accent2" dashed head="both" label="权重绑定：$W_{\text{out}} = E$（可选）" labelSide="above" />
   <Fragment slot="caption">数据从左到右流动：嵌入查表后进入 L 个相同结构的块（每块内部是上一章的 Pre-Norm 结构），经 final norm 后由 LM head 映射到词表。虚线表示输出层与嵌入层可以共享同一个矩阵。RoPE 不是参数，而是每层注意力共用的固定旋转因子。</Fragment>
 </Diagram>
 

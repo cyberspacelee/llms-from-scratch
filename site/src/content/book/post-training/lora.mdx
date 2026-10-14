@@ -44,10 +44,10 @@ $$
 $W_0$ 冻结，只训练 $A$ 与 $B$。计算时先算 $Ax$（降到 $r$ 维），再乘 $B$（升回 $d_{\text{out}}$ 维），不必物化 $d_{\text{out}}\times d_{\text{in}}$ 的 $\Delta W$。批量写法与 `nn.Linear` 一致：$Y = XW_0^\top + \frac{\alpha}{r}(XA^\top)B^\top$。
 
 <Diagram width={720} height={250} label="LoRA 的低秩旁路结构">
-  <Box x={20} y={100} w={80} h={50} label="x" sub="d_in" />
-  <Box x={200} y={30} w={220} h={56} label="W₀（冻结）" sub="d_out × d_in" tone="muted" />
-  <Box x={180} y={160} w={90} h={56} label="A" sub="r × d_in" tone="accent" />
-  <Box x={330} y={160} w={90} h={56} label="B" sub="d_out × r" tone="accent" />
+  <Box x={20} y={100} w={80} h={50} label="x" sub="$d_{\text{in}}$" />
+  <Box x={200} y={30} w={220} h={56} label="$W_0$（冻结）" sub="$d_{\text{out}} \times d_{\text{in}}$" tone="muted" />
+  <Box x={180} y={160} w={90} h={56} label="A" sub="$r \times d_{\text{in}}$" tone="accent" />
+  <Box x={330} y={160} w={90} h={56} label="B" sub="$d_{\text{out}} \times r$" tone="accent" />
   <Box x={470} y={160} w={70} h={56} label="× α/r" tone="neutral" />
   <Box x={590} y={95} w={50} h={60} label="+" tone="neutral" />
   <Box x={670} y={100} w={40} h={50} label="h" tone="strong" />

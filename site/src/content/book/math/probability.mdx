@@ -52,13 +52,13 @@ $$
 这个等式**不依赖任何假设**，对任何分布都精确成立。它把“给整个序列一个概率”这个不可能的任务，变成了“给定前文，预测下一个 token 的分布”这个可以学习的任务，每一步只需要输出一个长度为 $V$ 的类别分布。这就是**自回归语言模型**（autoregressive language model）：GPT 系列的模型 $P_\theta(x_t\mid x_{<t}) = \operatorname{softmax}(f_\theta(x_{<t}))_{x_t}$ 用一个神经网络 $f_\theta$ 把前文映射为 logits。生成时，从这个分布中采样一个 token，把它接到前文后面，再预测下一个——“自回归”就是“用自己的输出作为下一步的输入”。
 
 <Diagram width={720} height={200} label="自回归分解：每个位置在给定前文的条件下预测下一个 token">
-  <Box x={30} y={110} w={90} h={50} label="x₁" tone="info" />
-  <Box x={150} y={110} w={90} h={50} label="x₂" tone="info" />
-  <Box x={270} y={110} w={90} h={50} label="x₃" tone="info" />
-  <Box x={390} y={110} w={90} h={50} label="x₄" tone="info" />
-  <Box x={150} y={20} w={90} h={50} label="P(x₂ | x₁)" tone="accent" size="sm" />
-  <Box x={270} y={20} w={90} h={50} label="P(x₃ | x≤₂)" tone="accent" size="sm" />
-  <Box x={390} y={20} w={90} h={50} label="P(x₄ | x≤₃)" tone="accent" size="sm" />
+  <Box x={30} y={110} w={90} h={50} label="$x_1$" tone="info" />
+  <Box x={150} y={110} w={90} h={50} label="$x_2$" tone="info" />
+  <Box x={270} y={110} w={90} h={50} label="$x_3$" tone="info" />
+  <Box x={390} y={110} w={90} h={50} label="$x_4$" tone="info" />
+  <Box x={150} y={20} w={90} h={50} label="$P(x_2 \mid x_1)$" tone="accent" size="sm" />
+  <Box x={270} y={20} w={90} h={50} label="$P(x_3 \mid x_{\le 2})$" tone="accent" size="sm" />
+  <Box x={390} y={20} w={90} h={50} label="$P(x_4 \mid x_{\le 3})$" tone="accent" size="sm" />
   <Arrow from={[75, 110]} to={[180, 70]} />
   <Arrow from={[75, 110]} to={[290, 70]} />
   <Arrow from={[195, 110]} to={[305, 70]} />
@@ -244,9 +244,9 @@ $$
   xLabel="温度 τ"
   yLabel="概率"
   series={[
-    { label: 'p₁（z = 2）', fn: (t) => Math.exp(2 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
-    { label: 'p₂（z = 1）', fn: (t) => Math.exp(1 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
-    { label: 'p₃（z = 0）', fn: (t) => 1 / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: '$p_1$（$z = 2$）', fn: (t) => Math.exp(2 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: '$p_2$（$z = 1$）', fn: (t) => Math.exp(1 / t) / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
+    { label: '$p_3$（$z = 0$）', fn: (t) => 1 / (Math.exp(2 / t) + Math.exp(1 / t) + 1) },
     { label: '1/3', fn: () => 1 / 3, dashed: true, tone: 'muted' },
   ]}
 >

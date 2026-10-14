@@ -53,8 +53,8 @@ $$
 
 <Plot label="长时间无梯度之后 Adam 的单步更新大小" x={[1, 1000]} y={[0, 7]} logX xLabel="梯度恢复后的步数 j" yLabel="更新大小 / η"
   series={[
-    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.999 ** j), label: 'β₂ = 0.999', tone: 'accent2' },
-    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.95 ** j), label: 'β₂ = 0.95', tone: 'accent' },
+    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.999 ** j), label: '$\\beta_2 = 0.999$', tone: 'accent2' },
+    { fn: (j) => (1 - 0.9 ** j) / Math.sqrt(1 - 0.95 ** j), label: '$\\beta_2 = 0.95$', tone: 'accent' },
     { fn: () => 1, label: '正常更新', tone: 'muted', dashed: true },
   ]}>
   <Fragment slot="caption">某个坐标在长时间零梯度后连续收到相同的梯度。β₂ = 0.999 时，二阶矩需要上千步才能追上，期间每步的更新是正常的 3～6.5 倍；β₂ = 0.95 时窗口只有约 20 步，最大约为正常值的 1.1 倍。这是大模型普遍采用 β₂ = 0.95 的原因之一。</Fragment>
@@ -160,8 +160,8 @@ Kimi K2 取 $\tau=100$，把 Muon 与 QK-Clip 的组合称为 MuonClip。报告�
 
 <Diagram width={680} height={320} label="各种稳定性对策在前向计算中的位置">
   <Box x={10} y={40} w={90} h={48} label="x" sub="残差流" />
-  <Box x={130} y={10} w={110} h={44} label="W_Q x" mono tone="info" />
-  <Box x={130} y={74} w={110} h={44} label="W_K x" mono tone="info" />
+  <Box x={130} y={10} w={110} h={44} label="$W_Q x$" mono tone="info" />
+  <Box x={130} y={74} w={110} h={44} label="$W_K x$" mono tone="info" />
   <Box x={270} y={40} w={110} h={48} label="QK-Norm" tone="accent" />
   <Box x={410} y={40} w={110} h={48} label="q·k / √d" mono />
   <Box x={550} y={40} w={120} h={48} label="注意力软截断" tone="accent" size="sm" />
@@ -171,9 +171,9 @@ Kimi K2 取 $\tau=100$，把 Muon 与 QK-Clip 的组合称为 MuonClip。报告�
   <Arrow from={[240, 96]} to={[270, 72]} />
   <Arrow from={[380, 64]} to={[410, 64]} />
   <Arrow from={[520, 64]} to={[550, 64]} />
-  <Box x={130} y={150} w={250} h={40} label="QK-Clip：更新后按 √γ 缩小 W_Q、W_K" tone="accent2" size="sm" />
+  <Box x={130} y={150} w={250} h={40} label="QK-Clip：更新后按 $\sqrt{\gamma}$ 缩小 $W_Q$、$W_K$" tone="accent2" size="sm" />
   <Arrow from={[255, 150]} to={[185, 118]} tone="accent2" dashed />
-  <Text x={485} y={120} label="监控 S_max（按层、按头）" size="sm" tone="muted" />
+  <Text x={485} y={120} label="监控 $S_{\max}$（按层、按头）" size="sm" tone="muted" />
   <Arrow from={[465, 88]} to={[465, 106]} tone="muted" />
   <Box x={10} y={240} w={120} h={48} label="最后的 RMSNorm" size="sm" />
   <Box x={160} y={240} w={110} h={48} label="输出头" />

@@ -76,17 +76,17 @@ $[\cdot;\cdot]$ 是拼接，$M_k\in\mathbb R^{d\times2d}$ 把拼接后的向量�
 
 <Diagram width={700} height={300} label="DeepSeek-V3 的主模型与一个顺序 MTP 模块，以及它们在位置 i 上的输入与目标">
   <Region x={10} y={10} w={250} h={280} title="主模型" />
-  <Box x={40} y={240} w={190} h={36} label="Emb(tᵢ)" tone="neutral" />
+  <Box x={40} y={240} w={190} h={36} label="$\mathrm{Emb}(t_i)$" tone="neutral" />
   <Box x={40} y={150} w={190} h={60} label="L 个 Transformer 块" tone="accent" />
-  <Box x={40} y={50} w={190} h={40} label="OutHead → tᵢ₊₁" tone="strong" />
+  <Box x={40} y={50} w={190} h={40} label="OutHead → $t_{i+1}$" tone="strong" />
   <Arrow from={[135, 240]} to={[135, 210]} />
   <Arrow from={[135, 150]} to={[135, 90]} />
   <Region x={290} y={10} w={400} h={280} title="MTP 模块 1" />
-  <Box x={310} y={240} w={170} h={36} label="RMSNorm(hᵢ⁰)" tone="info" size="sm" />
-  <Box x={500} y={240} w={170} h={36} label="RMSNorm(Emb(tᵢ₊₁))" tone="info" size="sm" />
-  <Box x={400} y={170} w={180} h={40} label="M₁ [ · ; · ]" sub="2d → d" tone="neutral" />
-  <Box x={400} y={110} w={180} h={40} label="TRM₁（1 个块）" tone="accent" />
-  <Box x={400} y={50} w={180} h={40} label="OutHead → tᵢ₊₂" tone="strong" />
+  <Box x={310} y={240} w={170} h={36} label="$\mathrm{RMSNorm}(h_i^0)$" tone="info" size="sm" />
+  <Box x={500} y={240} w={170} h={36} label="$\mathrm{RMSNorm}(\mathrm{Emb}(t_{i+1}))$" tone="info" size="sm" />
+  <Box x={400} y={170} w={180} h={40} label="$M_1\,[\,\cdot\,;\,\cdot\,]$" sub="2d → d" tone="neutral" />
+  <Box x={400} y={110} w={180} h={40} label="$\mathrm{TRM}_1$（1 个块）" tone="accent" />
+  <Box x={400} y={50} w={180} h={40} label="OutHead → $t_{i+2}$" tone="strong" />
   <Arrow from={[230, 180]} via={[[270, 180], [270, 225], [395, 225]]} to={[395, 240]} tone="info" />
   <Arrow from={[395, 240]} via={[[395, 225], [460, 225]]} to={[460, 210]} />
   <Arrow from={[585, 240]} via={[[585, 225], [520, 225]]} to={[520, 210]} />

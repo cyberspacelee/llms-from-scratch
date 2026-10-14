@@ -233,7 +233,7 @@ $$
     { fn: (s) => 1 - Math.pow(1 - Math.pow(s, 16), 7), label: 'b=7, r=16', tone: 'accent2' },
     { fn: (s) => (s >= 0.75 ? 1 : 0), label: '理想阶跃', tone: 'muted', dashed: true, samples: 800 },
   ]}
-  markers={[{ at: [0.72, 0.63], label: '(1/b)^(1/r) ≈ 0.72' }]}>
+  markers={[{ at: [0.72, 0.63], label: '$(1/b)^{1/r} \\approx 0.72$' }]}>
   <Fragment slot="caption">三种总哈希数都是 112 的分段方式。r 越大（每段越长），曲线越靠右、越陡：要求越严，误报越少但漏报越多；b 越大（段越多），曲线越靠左。理想的去重器是阈值处的阶跃函数（虚线），增加哈希总数 k 可以让 S 曲线逼近它，代价是更多的计算与存储。</Fragment>
 </Plot>
 

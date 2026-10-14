@@ -164,7 +164,7 @@ $$
 
 高频对对相对距离非常敏感，相差几个位置就转过很大角度，适合表达精确的局部关系；低频对在很长的距离上几乎不转，接近“没有位置编码”，适合传递语义内容。Su 等人还指出 RoPE 具有某种**远程衰减**：若 $q$ 与 $k$ 在各对上同向，打分 $\sum_i \cos((m - n)\theta_i)$ 随着距离 $|m - n|$ 增大而整体变小（各对的余弦逐渐失去相位一致性）。
 
-<Plot label="同向查询与键在 RoPE 下的打分随相对距离的变化" x={[0, 400]} y={[-0.2, 1]} xLabel="相对距离 |m − n|" yLabel="平均 cos((m−n)θᵢ)" height={240} series={[{ fn: (t) => { let s = 0; for (let i = 0; i < 64; i++) s += Math.cos(t * Math.pow(10000, -i / 64)); return s / 64 }, label: 'd_h = 128，Θ = 10000' }]}>
+<Plot label="同向查询与键在 RoPE 下的打分随相对距离的变化" x={[0, 400]} y={[-0.2, 1]} xLabel="相对距离 |m − n|" yLabel="平均 $\cos((m-n)\theta_i)$" height={240} series={[{ fn: (t) => { let s = 0; for (let i = 0; i < 64; i++) s += Math.cos(t * Math.pow(10000, -i / 64)); return s / 64 }, label: '$d_h = 128$，$\\Theta = 10000$' }]}>
   <Fragment slot="caption">q = k 且每对分量相同时，归一化的内积就是 64 个余弦的平均。距离为 0 时为 1；随着距离增大，高频对迅速失去一致性，整体呈下降趋势并伴随振荡。这是一种归纳偏置：在其他条件相同时，近处的 token 得分更高。</Fragment>
 </Plot>
 

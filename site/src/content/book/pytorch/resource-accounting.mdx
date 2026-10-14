@@ -52,12 +52,12 @@ $$
 
 <Diagram width={720} height={250} label="线性层前向一次矩阵乘、反向两次矩阵乘">
   <Region x={10} y={10} w={220} h={230} title="前向：2mkn" tone="accent" />
-  <Box x={30} y={60} w={180} h={50} label="Y = X Wᵀ" sub="(m×k)(k×n)" tone="accent" mono />
+  <Box x={30} y={60} w={180} h={50} label="$Y = X W^\top$" sub="(m×k)(k×n)" tone="accent" mono />
   <Text x={120} y={150} label="每个 token 每个权重" size="sm" tone="muted" />
   <Text x={120} y={172} label="1 次乘 + 1 次加" size="sm" tone="muted" />
   <Region x={250} y={10} w={460} h={230} title="反向：4mkn" tone="accent2" />
   <Box x={270} y={60} w={200} h={50} label="dX = G W" sub="(m×n)(n×k)" tone="accent2" mono />
-  <Box x={490} y={60} w={200} h={50} label="dW = Gᵀ X" sub="(n×m)(m×k)" tone="accent2" mono />
+  <Box x={490} y={60} w={200} h={50} label="$dW = G^\top X$" sub="(n×m)(m×k)" tone="accent2" mono />
   <Text x={370} y={150} label="传给前一层" size="sm" tone="muted" />
   <Text x={590} y={150} label="交给优化器" size="sm" tone="muted" />
   <Arrow from={[370, 110]} to={[370, 135]} />

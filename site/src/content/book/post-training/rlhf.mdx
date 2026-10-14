@@ -21,13 +21,13 @@ code:
   <Region x={490} y={10} w={220} h={280} title="③ PPO 强化学习" tone="ghost" />
   <Box x={30} y={50} w={180} h={50} label="提示 + 人写示范" sub="约 1.3 万条提示" tone="info" />
   <Box x={30} y={140} w={180} h={50} label="SFT" sub="交叉熵" tone="accent" />
-  <Box x={30} y={225} w={180} h={50} label="π_SFT" tone="neutral" />
-  <Box x={270} y={50} w={180} h={50} label="π_SFT 采样 K 个回复" sub="K = 4…9" tone="info" />
+  <Box x={30} y={225} w={180} h={50} label="$\pi_{\text{SFT}}$" tone="neutral" />
+  <Box x={270} y={50} w={180} h={50} label="$\pi_{\text{SFT}}$ 采样 $K$ 个回复" sub="K = 4…9" tone="info" />
   <Box x={270} y={140} w={180} h={50} label="标注员排序" sub="约 3.3 万条提示" tone="info" />
-  <Box x={270} y={225} w={180} h={50} label="奖励模型 r_φ" sub="Bradley–Terry 损失" tone="accent" />
+  <Box x={270} y={225} w={180} h={50} label="奖励模型 $r_\phi$" sub="Bradley–Terry 损失" tone="accent" />
   <Box x={510} y={50} w={180} h={50} label="新提示，策略采样" sub="约 3.1 万条提示" tone="info" />
-  <Box x={510} y={140} w={180} h={50} label="r_φ 打分 − β·KL" tone="neutral" />
-  <Box x={510} y={225} w={180} h={50} label="PPO 更新 π_θ" tone="strong" />
+  <Box x={510} y={140} w={180} h={50} label="$r_\phi$ 打分 $-\ \beta \cdot \mathrm{KL}$" tone="neutral" />
+  <Box x={510} y={225} w={180} h={50} label="PPO 更新 $\pi_\theta$" tone="strong" />
   <Arrow from={[120, 100]} to={[120, 140]} />
   <Arrow from={[120, 190]} to={[120, 225]} />
   <Arrow from={[360, 100]} to={[360, 140]} />
@@ -79,7 +79,7 @@ $$
 
 对 $r_l$ 的导数则是它的相反数。梯度总是把选中回复的分数往上推、把被拒回复的分数往下压，推力的大小是“模型认为排错的概率” $\sigma(-\Delta)$：已经排对且间隔很大的样本几乎不再贡献梯度。
 
-<Plot label="Bradley–Terry 损失与梯度大小" x={[-6, 6]} y={[0, 6]} xLabel="分数差 Δ = r_w − r_l" yLabel="数值"
+<Plot label="Bradley–Terry 损失与梯度大小" x={[-6, 6]} y={[0, 6]} xLabel="分数差 $\Delta = r_w - r_l$" yLabel="数值"
   series={[{ fn: (t) => Math.log1p(Math.exp(-t)), label: '损失 −log σ(Δ)' }, { fn: (t) => 1 / (1 + Math.exp(t)), label: '梯度大小 σ(−Δ)', tone: 'accent2', dashed: true }]}
   markers={[{ at: [0, Math.log(2)], label: 'Δ = 0 时损失为 log 2' }]}>
   <Fragment slot="caption">Δ 越大，奖励模型越确信选中回复更好，损失趋于 0，梯度也趋于 0；Δ 为负（排错）时损失近似线性增长，梯度趋于 1。这与逻辑回归的交叉熵完全相同。</Fragment>

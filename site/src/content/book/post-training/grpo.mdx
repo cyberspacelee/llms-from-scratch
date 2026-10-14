@@ -59,24 +59,24 @@ $$
   <Region x={10} y={10} w={340} h={270} title="PPO" />
   <Region x={370} y={10} w={340} h={270} title="GRPO" />
   <Box x={30} y={50} w={80} h={44} label="q" tone="info" />
-  <Box x={140} y={50} w={110} h={44} label="策略 π_θ" tone="accent" />
+  <Box x={140} y={50} w={110} h={44} label="策略 $\pi_\theta$" tone="accent" />
   <Box x={270} y={50} w={60} h={44} label="o" />
-  <Box x={140} y={120} w={190} h={40} label="奖励模型 + KL → r_t" size="sm" />
-  <Box x={140} y={175} w={190} h={40} label="价值模型 V_ψ（同规模）" size="sm" tone="accent2" />
-  <Box x={140} y={230} w={190} h={40} label="GAE → 逐 token Â_t" size="sm" tone="strong" />
+  <Box x={140} y={120} w={190} h={40} label="奖励模型 + KL → $r_t$" size="sm" />
+  <Box x={140} y={175} w={190} h={40} label="价值模型 $V_\psi$（同规模）" size="sm" tone="accent2" />
+  <Box x={140} y={230} w={190} h={40} label="GAE → 逐 token $\hat A_t$" size="sm" tone="strong" />
   <Arrow from={[110, 72]} to={[140, 72]} />
   <Arrow from={[250, 72]} to={[270, 72]} />
   <Arrow from={[300, 94]} to={[300, 120]} />
   <Arrow from={[235, 160]} to={[235, 175]} />
   <Arrow from={[235, 215]} to={[235, 230]} />
   <Box x={390} y={50} w={60} h={44} label="q" tone="info" />
-  <Box x={470} y={50} w={110} h={44} label="策略 π_θ" tone="accent" />
-  <Box x={610} y={40} w={80} h={22} label="o₁" size="sm" />
-  <Box x={610} y={66} w={80} h={22} label="o₂" size="sm" />
-  <Box x={610} y={92} w={80} h={22} label="… o_G" size="sm" />
-  <Box x={470} y={130} w={220} h={40} label="规则奖励 r₁ … r_G" size="sm" />
+  <Box x={470} y={50} w={110} h={44} label="策略 $\pi_\theta$" tone="accent" />
+  <Box x={610} y={40} w={80} h={22} label="$o_1$" size="sm" />
+  <Box x={610} y={66} w={80} h={22} label="$o_2$" size="sm" />
+  <Box x={610} y={92} w={80} h={22} label="$\dots o_G$" size="sm" />
+  <Box x={470} y={130} w={220} h={40} label="规则奖励 $r_1 \dots r_G$" size="sm" />
   <Box x={470} y={185} w={220} h={40} label="组内标准化 (r − mean) / std" size="sm" tone="strong" />
-  <Box x={470} y={235} w={220} h={36} label="KL(π_θ ‖ π_ref) 直接进损失" size="sm" tone="muted" />
+  <Box x={470} y={235} w={220} h={36} label="$\mathrm{KL}(\pi_\theta \,\|\, \pi_{\text{ref}})$ 直接进损失" size="sm" tone="muted" />
   <Arrow from={[450, 72]} to={[470, 72]} />
   <Arrow from={[580, 72]} to={[610, 72]} />
   <Arrow from={[650, 114]} to={[650, 130]} />
@@ -120,7 +120,7 @@ $$
 
 所以 $\mathbb E[k_3] = \mathbb E[\rho] - 1 + \mathbb E[-\log\rho] = 0 + \mathrm{KL}(\pi_\theta\|\pi_{\text{ref}})$。非负性来自不等式 $\log\rho\le\rho-1$（对数函数在 $\rho=1$ 处的切线在曲线上方）。也可以这样理解：$k_3$ 是在无偏的 $k_1$ 上加了一个期望为零的控制变量 $\rho - 1$，它与 $-\log\rho$ 负相关，于是降低了方差。
 
-<Plot label="三种 KL 单样本估计随 ρ = π_ref/π_θ 的变化" x={[0.05, 4]} y={[-1.5, 3]} xLabel="ρ = π_ref(y) / π_θ(y)" yLabel="估计值"
+<Plot label="三种 KL 单样本估计随 ρ = π_ref/π_θ 的变化" x={[0.05, 4]} y={[-1.5, 3]} xLabel="$\rho = \pi_{\text{ref}}(y) / \pi_\theta(y)$" yLabel="估计值"
   series={[{ fn: (t) => -Math.log(t), label: 'k1 = −log ρ', tone: 'muted' }, { fn: (t) => 0.5 * Math.log(t) ** 2, label: 'k2', tone: 'info', dashed: true }, { fn: (t) => t - 1 - Math.log(t), label: 'k3 = ρ − 1 − log ρ', tone: 'accent' }]}
   markers={[{ at: [1, 0], label: 'ρ = 1：三者都为 0' }]}>
   <Fragment slot="caption">k1 在 ρ 大于 1 时为负，单个样本可能“奖励”偏离；k2 与 k3 恒非负。k3 在 ρ = 1 附近与 k2 一样平缓（都是二阶小量），但它在 π_θ 的采样下是无偏的。</Fragment>

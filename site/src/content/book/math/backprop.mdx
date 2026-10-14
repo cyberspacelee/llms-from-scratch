@@ -86,19 +86,19 @@ $$
 </KeyEq>
 
 <Diagram width={720} height={240} label="线性层反向传播的三个矩阵乘法及其形状">
-  <Box x={20} y={30} w={130} h={50} label="dY" sub="(N, d_out)" tone="accent2" />
-  <Box x={200} y={30} w={130} h={50} label="W" sub="(d_out, d_in)" tone="info" />
-  <Box x={470} y={30} w={130} h={50} label="dX = dY W" sub="(N, d_in)" tone="accent" />
-  <Box x={20} y={100} w={130} h={50} label="dYᵀ" sub="(d_out, N)" tone="accent2" />
-  <Box x={200} y={100} w={130} h={50} label="X" sub="(N, d_in)" tone="info" />
-  <Box x={470} y={100} w={130} h={50} label="dW = dYᵀ X" sub="(d_out, d_in)" tone="accent" />
-  <Box x={20} y={170} w={130} h={50} label="dY" sub="(N, d_out)" tone="accent2" />
+  <Box x={20} y={30} w={130} h={50} label="dY" sub="$(N, d_{\text{out}})$" tone="accent2" />
+  <Box x={200} y={30} w={130} h={50} label="W" sub="$(d_{\text{out}}, d_{\text{in}})$" tone="info" />
+  <Box x={470} y={30} w={130} h={50} label="dX = dY W" sub="$(N, d_{\text{in}})$" tone="accent" />
+  <Box x={20} y={100} w={130} h={50} label="$dY^\top$" sub="$(d_{\text{out}}, N)$" tone="accent2" />
+  <Box x={200} y={100} w={130} h={50} label="X" sub="$(N, d_{\text{in}})$" tone="info" />
+  <Box x={470} y={100} w={130} h={50} label="$dW = dY^\top X$" sub="$(d_{\text{out}}, d_{\text{in}})$" tone="accent" />
+  <Box x={20} y={170} w={130} h={50} label="dY" sub="$(N, d_{\text{out}})$" tone="accent2" />
   <Box x={200} y={170} w={130} h={50} label="沿 N 求和" />
-  <Box x={470} y={170} w={130} h={50} label="db" sub="(d_out,)" tone="accent" />
+  <Box x={470} y={170} w={130} h={50} label="db" sub="$(d_{\text{out}},)$" tone="accent" />
   <Text x={175} y={55} label="@" />
   <Text x={175} y={125} label="@" />
   <Arrow from={[150, 195]} to={[200, 195]} />
-  <Arrow from={[330, 55]} to={[470, 55]} label="内维 d_out 被消掉" />
+  <Arrow from={[330, 55]} to={[470, 55]} label="内维 $d_{\text{out}}$ 被消掉" />
   <Arrow from={[330, 125]} to={[470, 125]} label="内维 N 被消掉" />
   <Arrow from={[330, 195]} to={[470, 195]} />
   <Fragment slot="caption">每个梯度的形状都与对应变量相同。$\bar W$ 的内维是批大小 $N$：样本被求和消掉，因为所有样本共用一个 $W$。两个矩阵乘的 FLOPs 各为 $2N d_{\text{in}} d_{\text{out}}$，与前向相同，所以反向约是前向的两倍。</Fragment>

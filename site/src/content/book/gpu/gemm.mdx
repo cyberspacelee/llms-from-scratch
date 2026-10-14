@@ -106,10 +106,10 @@ $$
   <Matrix x={160} y={20} rows={1} cols={8} cell={[26, 20]} gap={2} tone="neutral" highlight={[{ cols: [0, 1, 2, 3], tone: 'info' }]} />
   <Text x={268} y={10} label="Bs[k, :]" size="sm" />
   <Matrix x={160} y={60} rows={8} cols={8} cell={[26, 20]} gap={2} tone="muted" highlight={[{ cells: [[4, 0], [4, 1], [4, 2], [4, 3], [5, 0], [5, 1], [5, 2], [5, 3], [6, 0], [6, 1], [6, 2], [6, 3], [7, 0], [7, 1], [7, 2], [7, 3]], tone: 'accent2' }]} />
-  <Text x={268} y={252} label="block 子块 B_M × B_N" size="sm" tone="muted" />
-  <Box x={440} y={50} w={250} h={56} label="读入寄存器：T_M + T_N 个值" sub="ra[0..3]、rb[0..3]" tone="info" />
-  <Box x={440} y={122} w={250} h={56} label="外积：T_M × T_N 次 FMA" sub="acc[i][j] += ra[i] * rb[j]" tone="accent" />
-  <Box x={440} y={194} w={250} h={44} label="每次 FMA 读 (T_M+T_N)/(T_M T_N) 次" size="sm" tone="strong" />
+  <Text x={268} y={252} label="block 子块 $B_M \times B_N$" size="sm" tone="muted" />
+  <Box x={440} y={50} w={250} h={56} label="读入寄存器：$T_M + T_N$ 个值" sub="ra[0..3]、rb[0..3]" tone="info" />
+  <Box x={440} y={122} w={250} h={56} label="外积：$T_M \times T_N$ 次 FMA" sub="acc[i][j] += ra[i] * rb[j]" tone="accent" />
+  <Box x={440} y={194} w={250} h={44} label="每次 FMA 读 $(T_M+T_N)/(T_M T_N)$ 次" size="sm" tone="strong" />
   <Arrow from={[565, 106]} to={[565, 122]} />
   <Arrow from={[565, 178]} to={[565, 194]} />
   <Fragment slot="caption">T_M = T_N = 4 的一个线程（橙色 4×4）。对每个 k，它从共享内存读 As 的一列中 4 个值、Bs 的一行中 4 个值，做 16 次乘加。每次乘加的共享内存读取从 2 次降到 0.5 次。</Fragment>
@@ -224,8 +224,8 @@ Blackwell（B200）的第五代 Tensor Core 再进一步：`tcgen05.mma` 的累�
 
 <Diagram width={700} height={250} label="GEMM 的分层分块">
   <Box x={15} y={40} w={150} h={70} label="设备级" sub="C：M × N" tone="neutral" />
-  <Box x={190} y={40} w={150} h={70} label="线程块 tile" sub="B_M × B_N · 共享内存" tone="info" />
-  <Box x={365} y={40} w={150} h={70} label="warp tile" sub="W_M × W_N · 寄存器" tone="accent" />
+  <Box x={190} y={40} w={150} h={70} label="线程块 tile" sub="$B_M \times B_N$ · 共享内存" tone="info" />
+  <Box x={365} y={40} w={150} h={70} label="warp tile" sub="$W_M \times W_N$ · 寄存器" tone="accent" />
   <Box x={540} y={40} w={145} h={70} label="MMA 指令" sub="如 16×8×16" tone="strong" />
   <Arrow from={[165, 75]} to={[190, 75]} />
   <Arrow from={[340, 75]} to={[365, 75]} />

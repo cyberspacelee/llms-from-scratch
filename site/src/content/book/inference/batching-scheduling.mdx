@@ -117,7 +117,7 @@ vLLM V1 把这个思路推到底。调度器源码（`vllm/v1/core/sched/schedul
 <Diagram width={720} height={260} label="调度器的数据结构与一步的流程">
   <Box x={20} y={40} w={170} h={60} label="WAITING 队列" sub="新请求 / 被抢占的请求" tone="muted" />
   <Box x={20} y={160} w={170} h={60} label="RUNNING 列表" sub="正在 prefill 或 decode" tone="accent" />
-  <Box x={270} y={100} w={190} h={60} label="schedule()" sub="token 预算 B_tok" tone="strong" />
+  <Box x={270} y={100} w={190} h={60} label="schedule()" sub="token 预算 $B_{\text{tok}}$" tone="strong" />
   <Box x={540} y={30} w={160} h={56} label="KVCacheManager" sub="命中 / 分配 / 释放" tone="info" />
   <Box x={540} y={110} w={160} h={44} label="ScheduledBatch" sub="{请求: token 数}" />
   <Box x={540} y={180} w={160} h={56} label="模型执行 + 采样" sub="update_from_output()" />

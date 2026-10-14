@@ -131,14 +131,14 @@ $\beta_t\in[0,1]$ 是写入强度，$k_t$ 经过 L2 归一化。这个更新恰�
 用一个三步的例子对比两种写入。键取单位向量：第 1 步写入 $(e_0, v=(1,0))$，第 2 步写入 $(e_1, v=(0,1))$，第 3 步再次写入 $(e_0, v=(5,5))$，然后用 $e_0$ 查询。线性注意力返回 $(1,0)+(5,5)=(6,5)$，两次写入叠加在一起；DeltaNet 第 3 步先读出旧值 $(1,0)$，误差为 $(4,5)$，写回后状态对 $e_0$ 的值变成 $(5,5)$，旧值被覆盖。这就是测试 `test_delta_rule_overwrites_instead_of_accumulating`。
 
 <Diagram width={700} height={230} label="线性注意力与 DeltaNet 的状态更新对比">
-  <Box x={20} y={90} w={100} h={50} label="Sₜ₋₁" sub="d_v × d_k" tone="info" />
+  <Box x={20} y={90} w={100} h={50} label="$S_{t-1}$" sub="$d_v \times d_k$" tone="info" />
   <Region x={150} y={10} w={250} h={100} title="线性注意力：累加" />
-  <Box x={170} y={45} w={210} h={44} label="Sₜ₋₁ + vₜ kₜᵀ" tone="accent2" />
+  <Box x={170} y={45} w={210} h={44} label="$S_{t-1} + v_t k_t^\top$" tone="accent2" />
   <Region x={150} y={120} w={250} h={100} title="门控 DeltaNet：衰减 + 纠错" />
-  <Box x={160} y={152} w={110} h={50} label="预测" sub="S k_t" tone="neutral" />
-  <Box x={280} y={152} w={110} h={50} label="写回误差" sub="β (v_t − S k_t)" tone="accent" />
-  <Box x={450} y={90} w={100} h={50} label="Sₜ" sub="d_v × d_k" tone="info" />
-  <Box x={590} y={90} w={90} h={50} label="oₜ = Sₜ qₜ" size="sm" tone="strong" />
+  <Box x={160} y={152} w={110} h={50} label="预测" sub="$S k_t$" tone="neutral" />
+  <Box x={280} y={152} w={110} h={50} label="写回误差" sub="$\beta\,(v_t - S k_t)$" tone="accent" />
+  <Box x={450} y={90} w={100} h={50} label="$S_t$" sub="$d_v \times d_k$" tone="info" />
+  <Box x={590} y={90} w={90} h={50} label="$o_t = S_t q_t$" size="sm" tone="strong" />
   <Arrow from={[120, 115]} via={[[140, 115], [140, 67]]} to={[170, 67]} />
   <Arrow from={[120, 115]} via={[[140, 115], [140, 177]]} to={[160, 177]} />
   <Arrow from={[270, 177]} to={[280, 177]} />

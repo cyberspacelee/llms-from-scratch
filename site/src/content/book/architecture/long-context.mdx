@@ -27,7 +27,7 @@ $$
 
 $b$ 是底数（base，原始 RoPE 取 10000）。$\theta_k$ 是第 $k$ 对维度每前进一个 token 转过的弧度，$\lambda_k$ 是转满一圈需要的 token 数，即这对维度的**波长**。$k=0$ 的波长是 $2\pi\approx6.3$，每个 token 转约 57°，它分辨的是相邻几个 token 之间的细微位置差；$k=d/2-1$ 的波长接近 $2\pi b\approx62832$，在几千个 token 的范围内只转了一个小角度，它编码的是粗粒度的“远近”。RoPE 的所有频率构成一个几何级数，像一组从秒针到时针的指针。
 
-<Plot label="RoPE 各维度对的波长（d = 128）" x={[0, 63]} y={[1, 1000000]} logY xLabel="维度对编号 k" yLabel="波长 λ_k（token）" series={[
+<Plot label="RoPE 各维度对的波长（d = 128）" x={[0, 63]} y={[1, 1000000]} logY xLabel="维度对编号 k" yLabel="波长 $\lambda_k$（token）" series={[
   { fn: (k) => 2 * Math.PI * Math.pow(10000, (2 * k) / 128), label: 'b = 10000' },
   { fn: (k) => 2 * Math.PI * Math.pow(500000, (2 * k) / 128), label: 'b = 500000', tone: 'info' },
   { fn: () => 4096, label: '训练长度 4096', tone: 'accent2', dashed: true },
@@ -130,7 +130,7 @@ YaRN 已成为开源模型的标准做法。DeepSeek-V3 在 4K 预训练之后�
   ]} />
   <Text x={158} y={16} label="键位置 j" size="sm" tone="muted" />
   <Text x={18} y={158} label="查询 i" size="sm" tone="muted" rotate={-90} />
-  <Legend x={20} y={300} items={[{ label: '窗口内（W = 4）', tone: 'accent' }, { label: '汇聚点（n_sink = 1）', tone: 'accent2' }, { label: '不可见', tone: 'muted' }]} gap={150} />
+  <Legend x={20} y={300} items={[{ label: '窗口内（W = 4）', tone: 'accent' }, { label: '汇聚点（$n_{\\text{sink}} = 1$）', tone: 'accent2' }, { label: '不可见', tone: 'muted' }]} gap={150} />
   <Text x={480} y={60} label="生成位置 9 时的缓存槽位" size="sm" bold />
   <Box x={330} y={90} w={52} h={44} label="0" sub="sink" tone="accent2" mono />
   <Box x={400} y={90} w={52} h={44} label="9" sub="槽 0" tone="accent" mono />

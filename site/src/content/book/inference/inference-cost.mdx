@@ -21,13 +21,13 @@ code:
 
 <Diagram width={720} height={230} label="prefill 与 decode 两个阶段">
   <Region x={10} y={20} w={250} h={190} title="prefill：一次前向" tone="accent" />
-  <Box x={30} y={60} w={210} h={44} label="提示 x₁ … x_T" sub="(T_p, d)" tone="accent" />
-  <Box x={30} y={140} w={210} h={44} label="写入 T_p 个位置的 K/V" tone="info" />
+  <Box x={30} y={60} w={210} h={44} label="提示 $x_1 \dots x_T$" sub="$(T_p, d)$" tone="accent" />
+  <Box x={30} y={140} w={210} h={44} label="写入 $T_p$ 个位置的 K/V" tone="info" />
   <Arrow from={[135, 104]} to={[135, 140]} />
   <Region x={290} y={20} w={420} h={190} title="decode：每步一个 token" tone="ghost" />
-  <Box x={310} y={60} w={110} h={44} label="y₁" sub="(1, d)" />
-  <Box x={450} y={60} w={110} h={44} label="y₂" sub="(1, d)" />
-  <Box x={590} y={60} w={100} h={44} label="y₃ …" sub="(1, d)" />
+  <Box x={310} y={60} w={110} h={44} label="$y_1$" sub="(1, d)" />
+  <Box x={450} y={60} w={110} h={44} label="$y_2$" sub="(1, d)" />
+  <Box x={590} y={60} w={100} h={44} label="$y_3 \dots$" sub="(1, d)" />
   <Box x={310} y={140} w={380} h={44} label="读全部历史 K/V，追加 1 个位置" tone="info" />
   <Arrow from={[240, 82]} to={[310, 82]} label="采样" />
   <Arrow from={[420, 82]} to={[450, 82]} />
@@ -165,11 +165,11 @@ TPOT 是 ITL 的平均。对流式聊天，TTFT 决定“多久开始出字”�
 <Diagram width={720} height={170} label="一个请求的时间线与延迟指标">
   <Box x={20} y={50} w={110} h={40} label="排队" tone="muted" />
   <Box x={130} y={50} w={150} h={40} label="prefill" tone="accent" />
-  <Box x={280} y={50} w={80} h={40} label="y₂" tone="info" />
-  <Box x={360} y={50} w={80} h={40} label="y₃" tone="info" />
-  <Box x={440} y={50} w={80} h={40} label="y₄" tone="info" />
+  <Box x={280} y={50} w={80} h={40} label="$y_2$" tone="info" />
+  <Box x={360} y={50} w={80} h={40} label="$y_3$" tone="info" />
+  <Box x={440} y={50} w={80} h={40} label="$y_4$" tone="info" />
   <Box x={520} y={50} w={80} h={40} label="…" tone="info" />
-  <Box x={600} y={50} w={100} h={40} label="y_T" tone="info" />
+  <Box x={600} y={50} w={100} h={40} label="$y_T$" tone="info" />
   <Arrow from={[20, 110]} to={[280, 110]} head="both" tone="accent" label="TTFT" labelSide="below" />
   <Arrow from={[280, 30]} to={[360, 30]} head="both" tone="accent2" label="ITL" />
   <Arrow from={[20, 150]} to={[700, 150]} head="both" label="端到端延迟" labelSide="above" />

@@ -32,14 +32,14 @@ $$
 <Diagram width={700} height={300} label="一个 top-2、8 专家的 MoE 层处理一个 token 的数据流">
   <Box x={20} y={120} w={80} h={50} label="x" sub="(d)" />
   <Box x={140} y={120} w={110} h={50} label="路由器" sub="E × d" tone="accent" />
-  <Box x={290} y={20} w={110} h={30} label="FFN₁" size="sm" tone="muted" />
-  <Box x={290} y={55} w={110} h={30} label="FFN₂  g = 0.62" size="sm" tone="accent" />
-  <Box x={290} y={90} w={110} h={30} label="FFN₃" size="sm" tone="muted" />
-  <Box x={290} y={125} w={110} h={30} label="FFN₄" size="sm" tone="muted" />
-  <Box x={290} y={160} w={110} h={30} label="FFN₅" size="sm" tone="muted" />
-  <Box x={290} y={195} w={110} h={30} label="FFN₆  g = 0.38" size="sm" tone="accent" />
-  <Box x={290} y={230} w={110} h={30} label="FFN₇" size="sm" tone="muted" />
-  <Box x={290} y={265} w={110} h={30} label="FFN₈" size="sm" tone="muted" />
+  <Box x={290} y={20} w={110} h={30} label="$\mathrm{FFN}_1$" size="sm" tone="muted" />
+  <Box x={290} y={55} w={110} h={30} label="$\mathrm{FFN}_2$  $g = 0.62$" size="sm" tone="accent" />
+  <Box x={290} y={90} w={110} h={30} label="$\mathrm{FFN}_3$" size="sm" tone="muted" />
+  <Box x={290} y={125} w={110} h={30} label="$\mathrm{FFN}_4$" size="sm" tone="muted" />
+  <Box x={290} y={160} w={110} h={30} label="$\mathrm{FFN}_5$" size="sm" tone="muted" />
+  <Box x={290} y={195} w={110} h={30} label="$\mathrm{FFN}_6$  $g = 0.38$" size="sm" tone="accent" />
+  <Box x={290} y={230} w={110} h={30} label="$\mathrm{FFN}_7$" size="sm" tone="muted" />
+  <Box x={290} y={265} w={110} h={30} label="$\mathrm{FFN}_8$" size="sm" tone="muted" />
   <Box x={460} y={120} w={100} h={50} label="加权求和" tone="info" />
   <Box x={600} y={120} w={80} h={50} label="y" sub="(d)" tone="strong" />
   <Arrow from={[100, 145]} to={[140, 145]} />
@@ -158,7 +158,7 @@ DeepSeekMoE 的第一个改动是**细粒度专家切分**：把每个专家的�
   <Box x={120} y={142} w={80} h={36} label="E8" tone="muted" />
   <Text x={115} y={208} label="组合数 C(8, 2) = 28" size="sm" />
   <Region x={240} y={10} w={210} h={220} title="细粒度：32 选 8" />
-  <Text x={345} y={208} label="组合数 C(32, 8) ≈ 1.1 × 10⁷" size="sm" />
+  <Text x={345} y={208} label="组合数 $C(32, 8) \approx 1.1 \times 10^7$" size="sm" />
   <Region x={470} y={10} w={220} h={220} title="+ 共享专家：31 选 7 + 1" />
   <Box x={490} y={46} w={180} h={30} label="共享专家（总是激活）" size="sm" tone="info" />
   <Text x={580} y={208} label="通用知识集中到共享专家" size="sm" />

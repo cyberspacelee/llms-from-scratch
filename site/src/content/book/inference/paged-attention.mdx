@@ -59,11 +59,11 @@ vLLM 论文对 FasterTransformer 与 Orca 的剖析显示，在这些系统中�
 
 <Diagram width={720} height={300} label="两个序列的逻辑块经块表映射到物理块">
   <Text x={110} y={22} label="逻辑块（每块 4 个 token）" size="sm" tone="muted" />
-  <Box x={20} y={40} w={180} h={34} label="A₀: 今 天 天 气" tone="accent" size="sm" />
-  <Box x={20} y={82} w={180} h={34} label="A₁: 很 好 ， 我" tone="accent" size="sm" />
-  <Box x={20} y={124} w={180} h={34} label="A₂: 们 去 · ·" tone="accent" size="sm" />
-  <Box x={20} y={190} w={180} h={34} label="B₀: 你 好 吗 ？" tone="info" size="sm" />
-  <Box x={20} y={232} w={180} h={34} label="B₁: 我 · · ·" tone="info" size="sm" />
+  <Box x={20} y={40} w={180} h={34} label="$A_0$: 今 天 天 气" tone="accent" size="sm" />
+  <Box x={20} y={82} w={180} h={34} label="$A_1$: 很 好 ， 我" tone="accent" size="sm" />
+  <Box x={20} y={124} w={180} h={34} label="$A_2$: 们 去 · ·" tone="accent" size="sm" />
+  <Box x={20} y={190} w={180} h={34} label="$B_0$: 你 好 吗 ？" tone="info" size="sm" />
+  <Box x={20} y={232} w={180} h={34} label="$B_1$: 我 · · ·" tone="info" size="sm" />
   <Text x={330} y={22} label="块表" size="sm" tone="muted" />
   <Matrix x={290} y={50} rows={1} cols={3} cell={[26, 28]} values={[[7, 1, 3]]} tone="accent" />
   <Matrix x={290} y={200} rows={1} cols={2} cell={[26, 28]} values={[[5, 2]]} tone="info" />
@@ -190,12 +190,12 @@ $$
 
 <Diagram width={720} height={240} label="前缀缓存的块池：哈希表与空闲队列">
   <Text x={20} y={24} label="请求的满块哈希链" anchor="start" size="sm" tone="muted" />
-  <Box x={20} y={40} w={120} h={40} label="h₀" sub="系统提示 0–15" tone="accent" mono />
-  <Box x={170} y={40} w={120} h={40} label="h₁" sub="系统提示 16–31" tone="accent" mono />
-  <Box x={320} y={40} w={120} h={40} label="h₂" sub="用户问题" tone="info" mono />
+  <Box x={20} y={40} w={120} h={40} label="$h_0$" sub="系统提示 0–15" tone="accent" mono />
+  <Box x={170} y={40} w={120} h={40} label="$h_1$" sub="系统提示 16–31" tone="accent" mono />
+  <Box x={320} y={40} w={120} h={40} label="$h_2$" sub="用户问题" tone="info" mono />
   <Arrow from={[140, 60]} to={[170, 60]} />
   <Arrow from={[290, 60]} to={[320, 60]} />
-  <Box x={500} y={40} w={200} h={90} label="cached: 哈希 → 块" sub="h₀→7, h₁→2, h₉→4" tone="info" />
+  <Box x={500} y={40} w={200} h={90} label="cached: 哈希 → 块" sub="$h_0 \to 7,\ h_1 \to 2,\ h_9 \to 4$" tone="info" />
   <Arrow from={[440, 60]} to={[500, 60]} dashed label="查表" />
   <Text x={20} y={150} label="空闲队列（队头先被复用）" anchor="start" size="sm" tone="muted" />
   <Matrix x={20} y={168} rows={1} cols={6} cell={[90, 34]} gap={6}

@@ -269,7 +269,7 @@ $$
   series={[
     { fn: (s) => { let x = s; for (let i = 0; i < 5; i++) x = 3.4445 * x - 4.775 * x ** 3 + 2.0315 * x ** 5; return x }, label: 'Muon 五次', samples: 600 },
     { fn: (s) => { let x = s; for (let i = 0; i < 5; i++) x = 1.5 * x - 0.5 * x ** 3; return x }, label: '经典三次', tone: 'accent2', samples: 600 },
-    { fn: () => 1, label: '理想 UVᵀ', tone: 'muted', dashed: true },
+    { fn: () => 1, label: '理想 $UV^\\top$', tone: 'muted', dashed: true },
   ]}>
   <Fragment slot="caption">横轴是迭代前（已除以 Frobenius 范数）的奇异值，纵轴是五步迭代后的值。经典三次迭代在 σ 接近 1 时精确收敛，但 σ < 0.1 的奇异值五步后几乎没有长大；Muon 的五次系数让 σ ≥ 0.01 的奇异值全部进入 0.68～1.13 的带状区域，代价是不再精确等于 1。</Fragment>
 </Plot>

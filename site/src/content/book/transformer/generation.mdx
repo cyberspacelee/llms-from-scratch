@@ -109,10 +109,10 @@ $$
   <Text x={380} y={40} label="一次处理整段提示（5 个 token）" anchor="start" size="sm" tone="muted" />
   <Text x={20} y={100} label="decode 1" anchor="start" size="sm" bold />
   <Matrix x={130} y={85} rows={1} cols={6} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆"]]} tone="info" highlight={[{ cells: [[0, 5]], tone: 'accent' }]} />
-  <Text x={420} y={100} label="q₆ 与 6 个键做注意力" anchor="start" size="sm" tone="muted" />
+  <Text x={420} y={100} label="$q_6$ 与 6 个键做注意力" anchor="start" size="sm" tone="muted" />
   <Text x={20} y={160} label="decode 2" anchor="start" size="sm" bold />
   <Matrix x={130} y={145} rows={1} cols={7} cell={[44, 30]} values={[["k₁v₁", "k₂v₂", "k₃v₃", "k₄v₄", "k₅v₅", "k₆v₆", "k₇v₇"]]} tone="info" highlight={[{ cells: [[0, 6]], tone: 'accent' }]} />
-  <Text x={460} y={160} label="q₇ 与 7 个键做注意力" anchor="start" size="sm" tone="muted" />
+  <Text x={460} y={160} label="$q_7$ 与 7 个键做注意力" anchor="start" size="sm" tone="muted" />
   <Matrix x={130} y={205} rows={1} cols={10} cell={[44, 30]} tone="ghost" />
   <Text x={20} y={220} label="预分配" anchor="start" size="sm" bold />
   <Legend x={130} y={255} items={[{ label: '本步新写入', tone: 'accent' }, { label: '读自缓存', tone: 'info' }, { label: '预分配未使用', tone: 'ghost' }]} gap={150} />

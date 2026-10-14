@@ -116,13 +116,13 @@ softmax 在块内逐维计算，$B$ 是块内位置的可学习偏置。V4 的�
   <Region x={10} y={74} w={340} h={206} title="CSA：每 4 个压成 1 个，再选 top-k" />
   <Matrix x={30} y={110} rows={1} cols={4} cell={[64, 30]} gap={10} values={[['c₀', 'c₁', 'c₂', 'c₃']]} tone="muted" highlight={[{ cols: [0, 2], tone: 'accent' }]} />
   <Text x={180} y={166} label="索引器从压缩条目中选 top-k（此处 k = 2）" size="sm" />
-  <Text x={180} y={196} label="+ 最近 n_win 个原始 token（滑窗）" size="sm" tone="accent2" />
-  <Text x={180} y={236} label="每查询读取 ≤ k + n_win 个条目" size="sm" bold />
+  <Text x={180} y={196} label="+ 最近 $n_{\text{win}}$ 个原始 token（滑窗）" size="sm" tone="accent2" />
+  <Text x={180} y={236} label="每查询读取 $\le k + n_{\text{win}}$ 个条目" size="sm" bold />
   <Region x={360} y={74} w={330} h={206} title="HCA：每 128 个压成 1 个，全部稠密" />
   <Matrix x={390} y={110} rows={1} cols={1} cell={[260, 30]} values={[['c₀（覆盖 128 个 token）']]} tone="accent" />
   <Text x={525} y={166} label="压缩条目全部参与注意力" size="sm" />
-  <Text x={525} y={196} label="+ 最近 n_win 个原始 token（滑窗）" size="sm" tone="accent2" />
-  <Text x={525} y={236} label="每查询读取 T / 128 + n_win 个条目" size="sm" bold />
+  <Text x={525} y={196} label="+ 最近 $n_{\text{win}}$ 个原始 token（滑窗）" size="sm" tone="accent2" />
+  <Text x={525} y={236} label="每查询读取 $T / 128 + n_{\text{win}}$ 个条目" size="sm" bold />
   <Fragment slot="caption">上排是原始序列，最右三格是滑动窗口内的原始 token（两种层都会读取）。CSA 的压缩率低（4 倍），配合索引器只读少数条目，适合精确检索；HCA 的压缩率高（128 倍），不做选择，用很少的条目提供完整的全局视野。V4 在网络中交替放置这两种层。</Fragment>
 </Diagram>
 

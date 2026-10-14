@@ -88,12 +88,12 @@ $M$ 是掩码矩阵，允许的位置为 $0$，禁止的位置为 $-\infty$（�
 
 <Diagram width={720} height={250} label="单头注意力的数据流与张量形状">
   <Box x={10} y={100} w={90} h={50} label="X" sub="(T, d)" />
-  <Box x={150} y={30} w={90} h={46} label="Q = XW_Q" sub="(T, dₖ)" tone="accent" size="sm" />
-  <Box x={150} y={102} w={90} h={46} label="K = XW_K" sub="(T, dₖ)" tone="accent" size="sm" />
-  <Box x={150} y={174} w={90} h={46} label="V = XW_V" sub="(T, dᵥ)" tone="info" size="sm" />
-  <Box x={290} y={60} w={110} h={50} label="QKᵀ / √dₖ" sub="(T, T)" tone="accent" size="sm" />
+  <Box x={150} y={30} w={90} h={46} label="$Q = XW_Q$" sub="$(T, d_k)$" tone="accent" size="sm" />
+  <Box x={150} y={102} w={90} h={46} label="$K = XW_K$" sub="$(T, d_k)$" tone="accent" size="sm" />
+  <Box x={150} y={174} w={90} h={46} label="$V = XW_V$" sub="$(T, d_v)$" tone="info" size="sm" />
+  <Box x={290} y={60} w={110} h={50} label="$QK^\top / \sqrt{d_k}$" sub="(T, T)" tone="accent" size="sm" />
   <Box x={440} y={60} w={110} h={50} label="+ M, softmax" sub="(T, T)" tone="accent" size="sm" />
-  <Box x={590} y={120} w={120} h={56} label="输出 AV" sub="(T, dᵥ)" tone="strong" />
+  <Box x={590} y={120} w={120} h={56} label="输出 AV" sub="$(T, d_v)$" tone="strong" />
   <Arrow from={[100, 125]} via={[[125, 125], [125, 53]]} to={[150, 53]} />
   <Arrow from={[100, 125]} to={[150, 125]} />
   <Arrow from={[100, 125]} via={[[125, 125], [125, 197]]} to={[150, 197]} />
@@ -142,7 +142,7 @@ $$
 
 当 $p$ 接近 one-hot（某个 $p_i \approx 1$，其余 $\approx 0$）时，每一项 $p_i(\delta_{ij} - p_j)$ 都接近 0：对 $i$ 是最大者，$p_i(1 - p_i) \approx 0$；对其他 $i$，$p_i \approx 0$。梯度几乎无法穿过 softmax 传回 $Q$ 与 $K$，模型学不会“该看哪里”。除以 $\sqrt{d_k}$ 让训练初期的注意力保持在一个较平滑、梯度健康的区域。
 
-<Plot label="不同维度下 softmax 的最大权重" x={[16, 1024]} y={[0, 1]} logX xLabel="键的维度 dₖ（对数刻度）" yLabel="最大注意力权重" height={260} series={[{ points: [[16, 0.69], [64, 0.844], [256, 0.925], [1024, 0.959]], label: '未缩放 QKᵀ' }, { points: [[16, 0.246], [64, 0.245], [256, 0.246], [1024, 0.246]], label: '除以 √dₖ', tone: 'info' }]}>
+<Plot label="不同维度下 softmax 的最大权重" x={[16, 1024]} y={[0, 1]} logX xLabel="键的维度 $d_k$（对数刻度）" yLabel="最大注意力权重" height={260} series={[{ points: [[16, 0.69], [64, 0.844], [256, 0.925], [1024, 0.959]], label: '未缩放 $QK^\\top$' }, { points: [[16, 0.246], [64, 0.245], [256, 0.246], [1024, 0.246]], label: '除以 $\\sqrt{d_k}$', tone: 'info' }]}>
   <Fragment slot="caption">16 个随机键时一行权重的最大值（2000 次采样的平均）。均匀分布对应 1/16 ≈ 0.06，one-hot 对应 1。缩放后的曲线是水平线：分数的统计性质与维度无关。</Fragment>
 </Plot>
 

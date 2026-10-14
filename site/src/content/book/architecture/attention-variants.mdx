@@ -213,15 +213,15 @@ $$
 于是每层每 token 的缓存是 $d_c + d_R = 512 + 64 = 576$ 个数。DeepSeek-V2 的论文把它表述为 $\frac{9}{2}d_h$，相当于只有 2.25 组的 GQA，但质量报告为优于 MHA。
 
 <Diagram width={700} height={270} label="MLA 的数据流：哪些量进入缓存，哪些在计算时由吸收消去">
-  <Box x={20} y={110} w={90} h={50} label="h_t" sub="(d)" />
+  <Box x={20} y={110} w={90} h={50} label="$h_t$" sub="(d)" />
   <Region x={140} y={20} w={190} h={230} title="" tone="info" />
-  <Box x={150} y={40} w={170} h={50} label="c_KV = W_DKV h" sub="(d_c = 512)" tone="info" />
-  <Box x={150} y={180} w={170} h={50} label="k_R = RoPE(W_KR h)" sub="(d_R = 64)" tone="info" />
+  <Box x={150} y={40} w={170} h={50} label="$c_{KV} = W_{DKV} h$" sub="$(d_c = 512)$" tone="info" />
+  <Box x={150} y={180} w={170} h={50} label="$k_R = \mathrm{RoPE}(W_{KR} h)$" sub="$(d_R = 64)$" tone="info" />
   <Text x={235} y={140} label="缓存：576 个数" size="sm" tone="info" bold />
-  <Box x={390} y={20} w={150} h={40} label="K_C = W_UK c" sub="每头 128 维" tone="ghost" />
-  <Box x={390} y={70} w={150} h={40} label="V = W_UV c" sub="每头 128 维" tone="ghost" />
-  <Box x={390} y={150} w={150} h={50} label="q̃ = W_UKᵀ q_C" sub="查询搬进潜空间" tone="accent" />
-  <Box x={580} y={110} w={120} h={60} label="注意力" sub="q̃·c + q_R·k_R" tone="strong" />
+  <Box x={390} y={20} w={150} h={40} label="$K_C = W_{UK} c$" sub="每头 128 维" tone="ghost" />
+  <Box x={390} y={70} w={150} h={40} label="$V = W_{UV} c$" sub="每头 128 维" tone="ghost" />
+  <Box x={390} y={150} w={150} h={50} label="$\tilde q = W_{UK}^\top q_C$" sub="查询搬进潜空间" tone="accent" />
+  <Box x={580} y={110} w={120} h={60} label="注意力" sub="$\tilde q \cdot c + q_R \cdot k_R$" tone="strong" />
   <Arrow from={[110, 125]} to={[150, 65]} />
   <Arrow from={[110, 145]} to={[150, 205]} />
   <Arrow from={[320, 60]} to={[390, 40]} dashed />

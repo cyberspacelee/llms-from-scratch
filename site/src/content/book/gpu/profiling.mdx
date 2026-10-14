@@ -51,7 +51,7 @@ $$
     { at: [1.2, 4.0], label: 'RMSNorm', tone: 'accent2' },
     { at: [64, 214], label: '标准注意力', tone: 'info' },
     { at: [295, 989.4], label: '脊点 295', tone: 'neutral' },
-    { at: [1365, 989.4], label: 'GEMM 4096³', tone: 'accent' },
+    { at: [1365, 989.4], label: 'GEMM $4096^3$', tone: 'accent' },
   ]}
 >
   <Fragment slot="caption">峰值与带宽取自 H100 数据手册；各点的强度按本部分的公式推导（BF16）：逐元素加法 1 FLOP / 6 字节，RMSNorm 约 1.2，标准注意力约 d/2 = 64（d = 128），4096³ 的 GEMM 约 1365。图中的纵坐标是屋顶给出的上限，不是实测值。虚线是不使用 Tensor Core 时的 FP32 屋顶，脊点只有 20 FLOP/byte。</Fragment>

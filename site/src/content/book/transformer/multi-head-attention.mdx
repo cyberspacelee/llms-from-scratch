@@ -60,7 +60,7 @@ $$
   <Matrix x={440} y={150} rows={3} cols={4} cell={[30, 26]} values={[[4, 5, 6, 7], [12, 13, 14, 15], [20, 21, 22, 23]]} tone="info" rowLabels={['t=0', 't=1', 't=2']} />
   <Text x={500} y={240} label="头 1" size="sm" tone="muted" />
   <Text x={60} y={190} label="数字是元素在内存中的偏移" anchor="start" size="sm" tone="muted" />
-  <Text x={60} y={212} label="结果的 stride 为 (h·T·d_h, d_h, d, 1) = (24, 4, 8, 1)" anchor="start" size="sm" tone="muted" mono />
+  <Text x={60} y={212} label="结果的 stride 为 $(h \cdot T \cdot d_h, d_h, d, 1) = (24, 4, 8, 1)$" anchor="start" size="sm" tone="muted" mono />
   <Fragment slot="caption">每个格子里的数字是该元素在原始存储中的偏移。头 0 取每一行的前 4 列，头 1 取后 4 列；两个头的数据在内存中交错存放。transpose 之后沿 T 维前进一步要跳过 8 个元素（整行），沿头维前进一步只跳过 4 个。</Fragment>
 </Diagram>
 
@@ -144,7 +144,7 @@ PyTorch 2.0 起提供 `F.scaled_dot_product_attention`，它在 GPU 上会自动
 
 显存问题更突出。朴素实现要把 `[B, h, T, T]` 的分数与权重矩阵都存下来（反向传播需要 softmax 的输出）。以 GPT-2 small 的配置（$h = 12$）为例，$B = 8$、$T = 2048$、FP32 时，**一层**的权重矩阵就有 $8 \times 12 \times 2048^2 \times 4$ 字节 $\approx 1.5$ GiB，12 层合计 18 GiB，远超模型参数本身（约 0.5 GiB）。序列长度翻倍，这部分显存变为 4 倍。
 
-<Plot label="注意力核心的 CPU 耗时随序列长度的变化" x={[256, 2048]} y={[1, 1000]} logX logY xLabel="序列长度 T（对数刻度）" yLabel="耗时 / ms（对数刻度）" height={260} series={[{ points: [[256, 26.3], [512, 46.8], [1024, 213.3], [2048, 750.8]], label: '逐步实现（显式 T×T 矩阵）' }, { points: [[256, 5.8], [512, 26.3], [1024, 63.3], [2048, 181.7]], label: 'F.scaled_dot_product_attention', tone: 'info' }, { fn: (t) => 750.8 * (t / 2048) ** 2, label: '∝ T²', tone: 'muted', dashed: true }]}>
+<Plot label="注意力核心的 CPU 耗时随序列长度的变化" x={[256, 2048]} y={[1, 1000]} logX logY xLabel="序列长度 T（对数刻度）" yLabel="耗时 / ms（对数刻度）" height={260} series={[{ points: [[256, 26.3], [512, 46.8], [1024, 213.3], [2048, 750.8]], label: '逐步实现（显式 T×T 矩阵）' }, { points: [[256, 5.8], [512, 26.3], [1024, 63.3], [2048, 181.7]], label: 'F.scaled_dot_product_attention', tone: 'info' }, { fn: (t) => 750.8 * (t / 2048) ** 2, label: '$\\propto T^2$', tone: 'muted', dashed: true }]}>
   <Fragment slot="caption">B = 1、h = 8、d_h = 64，在本书写作所用的共享 4 核 CPU 上用 2 个线程测得，绝对数值仅供参考，看的是斜率。两条实测曲线都接近虚线所示的平方增长；融合实现快约 3–4 倍，并且利用因果性跳过了一半的计算，但改变不了 T² 的增长阶数。</Fragment>
 </Plot>
 
